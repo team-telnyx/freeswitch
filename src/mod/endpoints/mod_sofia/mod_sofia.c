@@ -586,7 +586,7 @@ switch_status_t sofia_on_hangup(switch_core_session_t *session)
 
 				if (tech_pvt->respond_phrase) {
 					phrase = su_strdup(nua_handle_home(tech_pvt->nh), tech_pvt->respond_phrase);
-				} else if (sip_cause >= 400 && sip_cause < 700) {
+				} else if (sip_cause >= 300 && sip_cause < 700) {
 					phrase = sip_status_phrase(sip_cause);
 				} else {
 					phrase = sip_status_phrase(500);
