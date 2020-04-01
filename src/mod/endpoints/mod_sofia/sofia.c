@@ -709,7 +709,7 @@ void sofia_handle_sip_i_notify(switch_core_session_t *session, int status,
 		}
 		if (session) {
 			switch_channel_event_set_data(channel, s_event);
-			switch_event_add_header_string(s_event, SWITCH_STACK_BOTTOM, "Unique-ID", switch_core_session_get_uuid(session));
+			switch_event_add_header_string(s_event, SWITCH_STACK_BOTTOM, "UniqueID", switch_core_session_get_uuid(session));
 		}
 		switch_event_fire(&s_event);
 	}
