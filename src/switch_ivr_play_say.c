@@ -1161,7 +1161,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_release_file_handle(switch_core_sessi
 #define FILE_BLOCKSIZE 1024 * 8
 #define FILE_BUFSIZE 1024 * 64
 
-SWITCH_DECLARE(switch_status_t) switch_ivr_play_file_detailed(switch_core_session_t *session, switch_file_handle_t *fh, const char *file, switch_input_args_t *args, char **error)
+SWITCH_DECLARE(switch_status_t) switch_ivr_play_file_detailed(switch_core_session_t *session, switch_file_handle_t *fh, const char *file, switch_input_args_t *args, const char **error)
 {
 	switch_channel_t *channel = switch_core_session_get_channel(session);
 	int16_t *abuf = NULL;
@@ -2044,7 +2044,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_play_file_detailed(switch_core_sessio
 
 SWITCH_DECLARE(switch_status_t) switch_ivr_play_file(switch_core_session_t *session, switch_file_handle_t *fh, const char *file, switch_input_args_t *args)
 {
-	char *err = NULL;
+	const char *err = NULL;
 	return switch_ivr_play_file_detailed(session, fh, file, args, &err);
 }
 

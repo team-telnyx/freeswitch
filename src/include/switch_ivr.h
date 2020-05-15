@@ -416,7 +416,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_play_file(switch_core_session_t *sess
 													 switch_input_args_t *args);
 
 SWITCH_DECLARE(switch_status_t) switch_ivr_play_file_detailed(switch_core_session_t *session, switch_file_handle_t *fh, const char *file,
-													 switch_input_args_t *args, char **error);
+													 switch_input_args_t *args, const char **error);
 
 SWITCH_DECLARE(switch_status_t) switch_ivr_detect_audio(switch_core_session_t *session, uint32_t thresh, uint32_t audio_hits,
 															uint32_t timeout_ms, const char *file);

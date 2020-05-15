@@ -3096,7 +3096,7 @@ SWITCH_STANDARD_APP(playback_function)
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
 	switch_file_handle_t fh = { 0 };
 	char *p;
-	char *error = NULL;
+	const char *error = NULL;
 	const char *file = NULL;
 
 	if (data) {
@@ -3140,7 +3140,7 @@ SWITCH_STANDARD_APP(endless_playback_function)
 {
 	switch_channel_t *channel = switch_core_session_get_channel(session);
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
-	char *error = NULL;
+	const char *error = NULL;
 	const char *file = data;
 
 	while (switch_channel_ready(channel)) {
@@ -3170,7 +3170,7 @@ SWITCH_STANDARD_APP(loop_playback_function)
 {
 	switch_channel_t *channel = switch_core_session_get_channel(session);
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
-	char *error = NULL;
+	const char *error = NULL;
 	const char *file = data;
 	int loop = 1;
 
