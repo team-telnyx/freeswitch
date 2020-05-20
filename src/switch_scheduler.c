@@ -312,7 +312,7 @@ SWITCH_DECLARE(uint32_t) switch_scheduler_del_task_group_desc(const char *group,
 	switch_ssize_t hlen = -1;
 	unsigned long hash = 0;
 
-	if (zstr(group) || zstr(desc)) {
+	if (zstr(group)) {
 		return 0;
 	}
 
@@ -323,10 +323,10 @@ SWITCH_DECLARE(uint32_t) switch_scheduler_del_task_group_desc(const char *group,
 		if (tp->destroyed) {
 			continue;
 		}
-		if (hash == tp->task.hash && !strcmp(tp->task.group, group) && !strcmp(tp->desc, desc)) {
+		if (hash == tp->task.hash && !strcmp(tp->task.group, group) && (zstr(desc) || !strcmp(tp->desc, desc))) {
 			if (switch_test_flag(tp, SSHF_NO_DEL)) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Attempt made to delete undeletable task #%u (group %s)(desc %s)\n",
-								  tp->task.task_id, group, desc);
+								  tp->task.task_id, group, tp->desc);
 				continue;
 			}
 			if (tp->running) {
@@ -346,41 +346,7 @@ SWITCH_DECLARE(uint32_t) switch_scheduler_del_task_group_desc(const char *group,
 
 SWITCH_DECLARE(uint32_t) switch_scheduler_del_task_group(const char *group)
 {
-	switch_scheduler_task_container_t *tp;
-	uint32_t delcnt = 0;
-	switch_ssize_t hlen = -1;
-	unsigned long hash = 0;
-
-	if (zstr(group)) {
-		return 0;
-	}
-
-	hash = switch_ci_hashfunc_default(group, &hlen);
-
-	switch_mutex_lock(globals.task_mutex);
-	for (tp = globals.task_list; tp; tp = tp->next) {
-		if (tp->destroyed) {
-			continue;
-		}
-		if (hash == tp->task.hash && !strcmp(tp->task.group, group)) {
-			if (switch_test_flag(tp, SSHF_NO_DEL)) {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Attempt made to delete undeletable task #%u (group %s)\n",
-								  tp->task.task_id, group);
-				continue;
-			}
-			if (tp->running) {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Attempt made to delete running task #%u (group %s)\n",
-								  tp->task.task_id, tp->task.group);
-				tp->destroy_requested++;
-			} else {
-				tp->destroyed++;
-			}
-			delcnt++;
-		}
-	}
-	switch_mutex_unlock(globals.task_mutex);
-
-	return delcnt;
+	return switch_scheduler_del_task_group_desc(group, NULL);
 }
 
 switch_thread_t *task_thread_p = NULL;
