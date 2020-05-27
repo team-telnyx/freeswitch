@@ -1053,7 +1053,7 @@ void sofia_handle_sip_i_bye(switch_core_session_t *session, int status,
 		}
 	}
 
-	if (sip->sip_reason && sip->sip_reason->re_protocol && (!strcasecmp(sip->sip_reason->re_protocol, "Q.850")
+	if (!switch_channel_var_true(channel, "ignore_reason_hdr_in_bye") && sip->sip_reason && sip->sip_reason->re_protocol && (!strcasecmp(sip->sip_reason->re_protocol, "Q.850")
 															|| !strcasecmp(sip->sip_reason->re_protocol, "FreeSWITCH")
 															|| !strcasecmp(sip->sip_reason->re_protocol, profile->sdp_username)) && sip->sip_reason->re_cause) {
 		tech_pvt->q850_cause = atoi(sip->sip_reason->re_cause);
