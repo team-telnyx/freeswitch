@@ -3116,6 +3116,36 @@ SWITCH_STANDARD_APP(playback_function)
 
 	switch_channel_set_variable(channel, SWITCH_PLAYBACK_TERMINATOR_USED, "");
 
+	if (channel) {
+		const char* playback_wait_state = switch_channel_get_variable(channel, "next_playback_wait_state");
+		if (!zstr(playback_wait_state)) {
+			switch_channel_state_t wait_state = CS_NONE;
+			if (strcmp(playback_wait_state, "CS_PARK")) {
+				wait_state = CS_PARK;
+			} else if (strcmp(playback_wait_state, "CS_CONSUME_MEDIA")) {
+				wait_state = CS_CONSUME_MEDIA;
+			} else if (strcmp(playback_wait_state, "CS_EXCHANGE_MEDIA")) {
+				wait_state = CS_EXCHANGE_MEDIA;
+			} else if (strcmp(playback_wait_state, "CS_EXECUTE")) {
+				wait_state = CS_EXECUTE;
+			}
+			if (wait_state != CS_NONE) { 
+				if (!switch_channel_wait_for_state_timeout(channel, wait_state, 5000)) {
+					switch_channel_set_variable_printf(channel, SWITCH_CURRENT_APPLICATION_RESPONSE_VARIABLE, "PLAYBACK STATE TIMEOUT: %s", playback_wait_state);
+					return;
+				}
+			}
+			switch_channel_set_variable(channel, "next_playback_wait_state", "");
+		}
+		
+		if (switch_channel_wait_for_flag(channel, CF_MEDIA_WRITABLE_FIRED, SWITCH_TRUE, 5000, NULL) != SWITCH_STATUS_SUCCESS) {
+			switch_channel_set_variable(channel, SWITCH_CURRENT_APPLICATION_RESPONSE_VARIABLE, "CHANNEL MEDIA WRITABLE TIMEOUT");
+			return;
+		}
+	}
+
+	
+
 	status = switch_ivr_play_file_detailed(session, &fh, file, &args, &error);
 	switch_assert(!(fh.flags & SWITCH_FILE_OPEN));
 
