@@ -1373,6 +1373,7 @@ static void zrtp_event_callback(zrtp_stream_t *stream, unsigned event)
 	const char *type;
 
 	if (switch_core_session_read_lock(rtp_session->session) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Unable to acquire session lock!\n");
 		return;
 	}
 
@@ -1382,7 +1383,6 @@ static void zrtp_event_callback(zrtp_stream_t *stream, unsigned event)
 	switch (event) {
 	case ZRTP_EVENT_IS_SECURE:
 		{
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "ZRTP is secured!\n");
 			rtp_session->flags[SWITCH_ZRTP_FLAG_SECURE_SEND] = 1;
 			rtp_session->flags[SWITCH_ZRTP_FLAG_SECURE_RECV] = 1;
 			if (!rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
