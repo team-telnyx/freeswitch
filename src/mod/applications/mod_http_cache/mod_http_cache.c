@@ -949,27 +949,39 @@ static http_profile_t *url_cache_http_profile_find_by_fqdn(url_cache_t *cache, c
 static void find_extension(const char *url, const char **found_extension, size_t *found_extension_len)
 {
 	const char *ext;
-	const char *start;
+	char* buf = 0;
 	size_t ext_len = 0;
-
-	if((((start = strchr(url,'?')) != NULL)
-	  ||((start = strchr(url,'#')) != NULL))
-	  &&  start != url) {
-		start--;
-	} else {
-		start = &url[strlen(url) - 1];
-	}
+	int lookup = 1;
+	switch_file_interface_t *file_interface;
 
 	/* find extension on the end of URL */
-	for (ext = start; ext != url; ext--) {
+	for (ext = &url[strlen(url) - 1]; ext != url; ext--) {
 		if (*ext == '/' || *ext == '\\') {
 			break;
 		}
-		if (*ext == '.') {
+		if (*ext == '?' || *ext == '#' || *ext == '&') {
+			ext_len = 0;
+			lookup = 1;
+		} else if (*ext == '.' && lookup) {
 			/* found it */
 			*found_extension_len = ext_len;
-			*found_extension = ++ext;
-			break;
+			*found_extension = ext;
+
+			/* Remove dot */
+			(*found_extension)++;
+
+			/* Extract and validate if extension is supported */
+			buf = strndup(*found_extension, *found_extension_len);
+			file_interface = switch_loadable_module_get_file_interface(buf, NULL);
+			free(buf);
+
+			if(file_interface) {
+				UNPROTECT_INTERFACE(file_interface);
+				break;
+			} else {
+				ext_len = 0; // Not supported try to locate it in next param/query in url.
+				lookup = 0;				
+			}
 		} else {
 			/* Limit the file extension length */
 			if (ext_len < MAX_FILE_EXTENSION_SIZE) {
