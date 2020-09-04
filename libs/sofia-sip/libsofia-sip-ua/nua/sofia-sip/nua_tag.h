@@ -618,6 +618,13 @@ SOFIAPUBVAR tag_typedef_t nutag_auto_invite_100;
   nutag_auto_invite_100_ref, tag_bool_vr(&(x))
 SOFIAPUBVAR tag_typedef_t nutag_auto_invite_100_ref;
 
+#define NUTAG_ALWAYS_REGENERATE_OFFER(x) \
+  nutag_always_regenerate_offer, tag_bool_v(x)
+SOFIAPUBVAR tag_typedef_t nutag_always_regenerate_offer;
+#define NUTAG_ALWAYS_REGENERATE_OFFER_REF(x) \
+  nutag_always_regenerate_offer_ref, tag_bool_vr(&(x))
+SOFIAPUBVAR tag_typedef_t nutag_always_regenerate_offer_ref;
+
 /* Pass nua handle as tagged argument */
 #if SU_INLINE_TAG_CAST
 su_inline tag_value_t nutag_handle_v(nua_handle_t *v) { return (tag_value_t)v; }
