@@ -1772,7 +1772,7 @@ static void our_sofia_event_callback(nua_event_t event,
 						switch_core_media_proxy_remote_addr(tech_pvt->session, r_sdp);
 						sofia_set_flag(tech_pvt, TFLAG_3PCC_HAS_ACK);
 						sofia_clear_flag(tech_pvt, TFLAG_PASS_ACK);
-
+						switch_channel_clear_flag(channel, CF_3PCC_PROXY);
 					}
 
 				}
@@ -7987,6 +7987,7 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 					sofia_set_flag(tech_pvt, TFLAG_LATE_NEGOTIATION);
 					//Moves into CS_INIT so call moves forward into the dialplan
 					switch_channel_set_state(channel, CS_INIT);
+					switch_channel_set_flag(channel, CF_3PCC_PROXY);
 				} else {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "No SDP in INVITE and 3pcc not enabled, hanging up.\n");
 					switch_channel_set_variable(channel, SWITCH_ENDPOINT_DISPOSITION_VARIABLE, "3PCC DISABLED");
@@ -8537,6 +8538,7 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 					if (sofia_test_flag(tech_pvt, TFLAG_3PCC) && sofia_test_pflag(profile, PFLAG_3PCC_PROXY)) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC-PROXY, Got my ACK\n");
 						sofia_set_flag(tech_pvt, TFLAG_3PCC_HAS_ACK);
+						switch_channel_clear_flag(channel, CF_3PCC_PROXY);
 					} else {
 						switch_core_session_message_t *msg;
 
@@ -8647,6 +8649,7 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 					if (sofia_test_flag(tech_pvt, TFLAG_3PCC) && sofia_test_pflag(profile, PFLAG_3PCC_PROXY)) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC-PROXY, Got my ACK\n");
 						sofia_set_flag(tech_pvt, TFLAG_3PCC_HAS_ACK);
+						switch_channel_clear_flag(channel, CF_3PCC_PROXY);
 					}
 
 					goto done;
@@ -8675,6 +8678,7 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 								if (sofia_test_pflag(profile, PFLAG_3PCC_PROXY)) {
 									switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC-PROXY, Got my ACK\n");
 									sofia_set_flag(tech_pvt, TFLAG_3PCC_HAS_ACK);
+									switch_channel_clear_flag(channel, CF_3PCC_PROXY);
 								} else if (switch_channel_get_state(channel) == CS_HIBERNATE) {
 									sofia_set_flag_locked(tech_pvt, TFLAG_READY);
 									switch_channel_set_state(channel, CS_INIT);
