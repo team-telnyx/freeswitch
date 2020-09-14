@@ -898,15 +898,20 @@ static int nua_invite_client_preliminary(nua_client_request_t *cr,
       nua_dialog_store_peer_info(nh, nh->nh_ds, sip);
 
       /* Tag the INVITE request */
-      tagged = nta_outgoing_tagged(cr->cr_orq,
-				   nua_client_orq_response, cr,
-				   sip->sip_to->a_tag, sip->sip_rseq);
-      if (tagged) {
-	nta_outgoing_destroy(cr->cr_orq), cr->cr_orq = tagged;
-      }
-      else {
-	cr->cr_graceful = 1;
-	ss->ss_reason = "SIP;cause=500;text=\"Cannot Create Early Dialog\"";
+      if (nh->nh_prefs->nhp_tagged_on_prack) {
+        SU_DEBUG_5(("nua(%p): 100rel tagged request\n", (void *)nh));
+        tagged = nta_outgoing_tagged(cr->cr_orq,
+            nua_client_orq_response, cr,
+            sip->sip_to->a_tag, sip->sip_rseq);
+        if (tagged) {
+          nta_outgoing_destroy(cr->cr_orq), cr->cr_orq = tagged;
+        }
+        else {
+          cr->cr_graceful = 1;
+          ss->ss_reason = "SIP;cause=500;text=\"Cannot Create Early Dialog\"";
+        }
+      } else {
+        SU_DEBUG_5(("nua(%p): 100rel don't tagged request\n", (void *)nh));
       }
     }
 

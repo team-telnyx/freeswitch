@@ -3293,6 +3293,8 @@ void *SWITCH_THREAD_FUNC sofia_profile_thread_run(switch_thread_t *thread, void 
 								  NTATAG_TLS_RPORT(0),
 								  NUTAG_RETRY_AFTER_ENABLE(0),
 								  NUTAG_AUTO_INVITE_100(0),
+								  TAG_IF(sofia_test_pflag(profile, PFLAG_TAGGED_ON_PRACK),
+										 NUTAG_TAGGED_ON_PRACK(1)),
 								  TAG_IF(!strchr(profile->sipip, ':'),
 										 SOATAG_AF(SOA_AF_IP4_ONLY)),
 								  TAG_IF(strchr(profile->sipip, ':'),
@@ -6075,6 +6077,12 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 							sofia_set_pflag(profile, PFLAG_DISABLE_SIP_REPLACES);
 						} else {
 							sofia_clear_pflag(profile, PFLAG_DISABLE_SIP_REPLACES);
+						}
+					} else if (!strcasecmp(var, "tagged-on-prack")) {
+						if (switch_true(val)) {
+							sofia_set_pflag(profile, PFLAG_TAGGED_ON_PRACK);
+						} else {
+							sofia_clear_pflag(profile, PFLAG_TAGGED_ON_PRACK);
 						}
 					} else if (!strcasecmp(var, "proxy-notify-events")) {
 						profile->proxy_notify_events = switch_core_strdup(profile->pool, val);
