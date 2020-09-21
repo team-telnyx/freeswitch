@@ -894,12 +894,13 @@ static int nua_invite_client_preliminary(nua_client_request_t *cr,
     if (!nua_dialog_is_established(nh->nh_ds)) {
       nta_outgoing_t *tagged;
 
-      nua_dialog_uac_route(nh, nh->nh_ds, sip, 1, 1);
-      nua_dialog_store_peer_info(nh, nh->nh_ds, sip);
-
       /* Tag the INVITE request */
       if (nh->nh_prefs->nhp_tagged_on_prack) {
         SU_DEBUG_5(("nua(%p): 100rel tagged request\n", (void *)nh));
+        
+        nua_dialog_uac_route(nh, nh->nh_ds, sip, 1, 1);
+        nua_dialog_store_peer_info(nh, nh->nh_ds, sip);
+
         tagged = nta_outgoing_tagged(cr->cr_orq,
             nua_client_orq_response, cr,
             sip->sip_to->a_tag, sip->sip_rseq);
