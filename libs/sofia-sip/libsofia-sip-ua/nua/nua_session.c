@@ -883,6 +883,7 @@ static int nua_invite_client_preliminary(nua_client_request_t *cr,
   nua_handle_t *nh = cr->cr_owner;
   nua_dialog_usage_t *du = cr->cr_usage;
   nua_session_usage_t *ss = nua_dialog_usage_private(du);
+  int result = 0;
 
   assert(sip);
 
@@ -895,24 +896,24 @@ static int nua_invite_client_preliminary(nua_client_request_t *cr,
       nta_outgoing_t *tagged;
 
       /* Tag the INVITE request */
-      if (nh->nh_prefs->nhp_tagged_on_prack) {
-        SU_DEBUG_5(("nua(%p): 100rel tagged request\n", (void *)nh));
-        
-        nua_dialog_uac_route(nh, nh->nh_ds, sip, 1, 1);
-        nua_dialog_store_peer_info(nh, nh->nh_ds, sip);
+      SU_DEBUG_5(("nua(%p): 100rel tagged request\n", (void *)nh));
+      
+      nua_dialog_uac_route(nh, nh->nh_ds, sip, 1, 1);
+      nua_dialog_store_peer_info(nh, nh->nh_ds, sip);
 
-        tagged = nta_outgoing_tagged(cr->cr_orq,
-            nua_client_orq_response, cr,
-            sip->sip_to->a_tag, sip->sip_rseq);
-        if (tagged) {
+      tagged = nta_outgoing_tagged(cr->cr_orq,
+          nua_client_orq_response, cr,
+          sip->sip_to->a_tag, sip->sip_rseq);
+      if (tagged) {
+        if (nh->nh_prefs->nhp_tagged_on_prack) {
           nta_outgoing_destroy(cr->cr_orq), cr->cr_orq = tagged;
+        } else {
+          nta_outgoing_destroy(tagged);
         }
-        else {
-          cr->cr_graceful = 1;
-          ss->ss_reason = "SIP;cause=500;text=\"Cannot Create Early Dialog\"";
-        }
-      } else {
-        SU_DEBUG_5(("nua(%p): 100rel don't tagged request\n", (void *)nh));
+      }
+      else {
+        cr->cr_graceful = 1;
+        ss->ss_reason = "SIP;cause=500;text=\"Cannot Create Early Dialog\"";
       }
     }
 
@@ -933,7 +934,13 @@ static int nua_invite_client_preliminary(nua_client_request_t *cr,
     }
   }
 
-  return nua_session_client_response(cr, status, phrase, sip);
+  result = nua_session_client_response(cr, status, phrase, sip);
+  if (!nh->nh_prefs->nhp_tagged_on_prack) {
+    SU_DEBUG_5(("nua(%p): 100rel don't tagged request\n", (void *)nh));
+    /* Remove remote info in dialog */
+    nua_dialog_remote_zap(nh, nh->nh_ds);
+  }
+  return result;
 }
 
 /** Process response to a session request (INVITE, PRACK, UPDATE) */
