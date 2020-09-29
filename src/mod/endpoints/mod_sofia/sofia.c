@@ -7678,10 +7678,6 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 						}
 						switch_core_session_rwunlock(other_session);
 					}
-				} else {
-					if (r_sdp && switch_stristr("inactive", r_sdp) && switch_channel_direction(channel) == SWITCH_CALL_DIRECTION_OUTBOUND) {
-						sofia_set_flag_locked(tech_pvt, TFLAG_SIP_HOLD_OUTBOUND_INACTIVE);
-					}
 				}
 			}
 
@@ -8110,11 +8106,14 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 			uint8_t match = 0, is_ok = 1, is_t38 = 0, duplicate_sdp = 0, is_t38_only_offer = 0;
 			tech_pvt->mparams.hold_laps = 0;
 
-			if ((var = switch_channel_get_variable(channel, "sip_ignore_reinvites")) && switch_true(var)) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Ignoring Re-invite\n");
-				nua_respond(tech_pvt->nh, SIP_200_OK, TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)), TAG_END());
-				goto done;
-			}
+
+			tech_pvt->mparams.hold_laps = 0;
+
+				if ((var = switch_channel_get_variable(channel, "sip_ignore_reinvites")) && switch_true(var)) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Ignoring Re-invite\n");
+					nua_respond(tech_pvt->nh, SIP_200_OK, TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)), TAG_END());
+					goto done;
+				}
 
 			if (switch_stristr("m=image", r_sdp)) {
 				is_t38 = 1;
@@ -8493,13 +8492,6 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 					nua_respond(tech_pvt->nh, SIP_488_NOT_ACCEPTABLE,
 								TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)),
 								TAG_END());
-				}
-			} else {
-				if (switch_stristr("inactive", tech_pvt->mparams.prev_sdp_response) && sofia_test_flag(tech_pvt, TFLAG_SIP_HOLD_OUTBOUND_INACTIVE)) {
-					sofia_clear_flag_locked(tech_pvt, TFLAG_SIP_HOLD_OUTBOUND_INACTIVE);
-					switch_channel_set_flag(channel, CF_PROTO_HOLD);
-					switch_channel_set_flag(channel, CF_HOLD);
-					switch_core_media_toggle_hold(session, 0);
 				}
 			}
 		break;
