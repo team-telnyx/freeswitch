@@ -7911,6 +7911,7 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 					uint8_t match = 0;
 
 					if (tech_pvt->mparams.num_codecs) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Negotiating SDP media in ready state\n");
 						match = sofia_media_negotiate_sdp(session, r_sdp, SDP_TYPE_REQUEST);
 					}
 
@@ -8040,6 +8041,7 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 
 		} else if (tech_pvt && sofia_test_flag(tech_pvt, TFLAG_SDP) && !r_sdp) {
 			sofia_set_flag_locked(tech_pvt, TFLAG_NOSDP_REINVITE);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Processing  NOSDP Re-INVITE.\n");
 			if ((switch_channel_test_flag(channel, CF_PROXY_MODE) || switch_channel_test_flag(channel, CF_PROXY_MEDIA)) && sofia_test_pflag(profile, PFLAG_3PCC_PROXY)) {
 				sofia_set_flag_locked(tech_pvt, TFLAG_3PCC);
 				sofia_clear_flag(tech_pvt, TFLAG_ENABLE_SOA);
@@ -8101,6 +8103,7 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 			goto done;
 
 		} else {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Jumping to completed state\n");
 			ss_state = nua_callstate_completed;
 			goto state_process;
 		}
@@ -8334,6 +8337,8 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 				} else {
 					int hold_related = 0;
 
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Checking hold in completed state \n");
+
 					if (sofia_test_flag(tech_pvt, TFLAG_SIP_HOLD)) {
 						hold_related = 2;
 					} else if (switch_stristr("sendonly", r_sdp) || switch_stristr("0.0.0.0", r_sdp) || switch_stristr("inactive", r_sdp)) {
@@ -8451,6 +8456,7 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 					switch_channel_set_flag(tech_pvt->channel, CF_REINVITE);
 
 					if (tech_pvt->mparams.num_codecs) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Negotiating SDP media in completed state \n");
 						match = sofia_media_negotiate_sdp(session, r_sdp, SDP_TYPE_REQUEST);
 					}
 
@@ -8536,6 +8542,13 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 			uint8_t match = 0;
 
 			sofia_clear_flag(tech_pvt, TFLAG_NEW_SDP);
+
+			if(switch_channel_test_flag(tech_pvt->channel, CF_ANSWERED) && switch_channel_get_callstate(tech_pvt->channel) == CCS_HELD) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Ready Jumping to completed state\n");
+				ss_state = nua_callstate_completed;
+				goto state_process;
+			}
+
 			switch_channel_set_flag(tech_pvt->channel, CF_REINVITE);
 
 
@@ -8565,6 +8578,7 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 		}
 
 		if (r_sdp && sofia_test_flag(tech_pvt, TFLAG_NOSDP_REINVITE)) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Received SDP in ACK. NOSDP Re-INVITE process completion.\n");
 			sofia_clear_flag_locked(tech_pvt, TFLAG_NOSDP_REINVITE);
 			if (switch_channel_test_flag(channel, CF_PROXY_MODE) || switch_channel_test_flag(channel, CF_PROXY_MEDIA)) {
 				if (switch_channel_test_flag(channel, CF_PROXY_MEDIA)) {
@@ -8602,6 +8616,12 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 				int is_ok = 1;
 
 				if (!tech_pvt) goto done;
+
+				if(switch_channel_get_callstate(tech_pvt->channel) == CCS_HELD) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Jumping to completed state\n");
+					ss_state = nua_callstate_completed;
+					goto state_process;
+				}
 
 				if (tech_pvt->mparams.num_codecs) {
 					match = sofia_media_negotiate_sdp(session, r_sdp, SDP_TYPE_RESPONSE);
