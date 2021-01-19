@@ -389,6 +389,7 @@ void sofia_reg_check_gateway(sofia_profile_t *profile, time_t now)
 						TAG_IF(gateway_ptr->register_sticky_proxy, NUTAG_PROXY(gateway_ptr->register_sticky_proxy)),
 						TAG_IF(user_via, SIPTAG_VIA_STR(user_via)),
 						SIPTAG_TO_STR(gateway_ptr->options_to_uri), SIPTAG_FROM_STR(gateway_ptr->options_from_uri),
+						TAG_IF(gateway_ptr->contact_in_ping, SIPTAG_CONTACT_STR(gateway_ptr->register_contact)),
 						TAG_IF(gateway_ptr->options_user_agent, SIPTAG_USER_AGENT_STR(gateway_ptr->options_user_agent)),
 						TAG_END());
 
@@ -1936,17 +1937,17 @@ uint8_t sofia_reg_handle_register_token(nua_t *nua, sofia_profile_t *profile, nu
 			switch_mutex_unlock(profile->flag_mutex);
 
 			if (!hnh) {
-				if (!(sofia_private = su_alloc(nh->nh_home, sizeof(*sofia_private)))) {
+				if (!(sofia_private = su_alloc(nua_handle_get_home(nh), sizeof(*sofia_private)))) {
 					abort();
 				}
 
 				memset(sofia_private, 0, sizeof(*sofia_private));
-				sofia_private->call_id = su_strdup(nh->nh_home, call_id);
-				sofia_private->network_ip = su_strdup(nh->nh_home, network_ip);
-				sofia_private->network_port = su_strdup(nh->nh_home, network_port_c);
-				sofia_private->key = su_strdup(nh->nh_home, key);
-				sofia_private->user = su_strdup(nh->nh_home, to_user);
-				sofia_private->realm = su_strdup(nh->nh_home, reg_host);
+				sofia_private->call_id = su_strdup(nua_handle_get_home(nh), call_id);
+				sofia_private->network_ip = su_strdup(nua_handle_get_home(nh), network_ip);
+				sofia_private->network_port = su_strdup(nua_handle_get_home(nh), network_port_c);
+				sofia_private->key = su_strdup(nua_handle_get_home(nh), key);
+				sofia_private->user = su_strdup(nua_handle_get_home(nh), to_user);
+				sofia_private->realm = su_strdup(nua_handle_get_home(nh), reg_host);
 
 				sofia_private->is_static++;
 				*sofia_private_p = sofia_private;
@@ -2427,12 +2428,12 @@ void sofia_reg_handle_sip_r_register(int status,
 					char *full;
 
 					for (; contact; contact = contact->m_next) {
-						if ((full = sip_header_as_string(nh->nh_home, (void *) contact))) {
+						if ((full = sip_header_as_string(nua_handle_get_home(nh), (void *) contact))) {
 							if (switch_stristr(gateway->register_contact, full)) {
 								break;
 							}
 
-							su_free(nh->nh_home, full);
+							su_free(nua_handle_get_home(nh), full);
 						}
 					}
 				}
@@ -2626,9 +2627,8 @@ void sofia_reg_handle_sip_r_challenge(int status,
 						sip_auth_password = dup_pass;
 					}
 				}
-
-				switch_xml_free(x_user);
 			}
+			switch_xml_free(x_user);
 		}
 
 		switch_event_destroy(&locate_params);
@@ -2639,7 +2639,7 @@ void sofia_reg_handle_sip_r_challenge(int status,
 	} else if (gateway) {
 		switch_snprintf(authentication, sizeof(authentication), "%s:%s:%s:%s", scheme, realm, gateway->auth_username, gateway->register_password);
 	} else {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
 						  "Cannot locate any authentication credentials to complete an authentication request for realm '%s'\n", realm);
 		goto cancel;
 	}
@@ -2931,7 +2931,7 @@ auth_res_t sofia_reg_parse_auth(sofia_profile_t *profile,
 	if (switch_xml_locate_user_merged("id", zstr(username) ? "nobody" : username, domain_name, ip, &user, params) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Can't find user [%s@%s] from %s\n"
 						  "You must define a domain called '%s' in your directory and add a user with the id=\"%s\" attribute\n"
-						  "and you must configure your device to use the proper domain in it's authentication credentials.\n", username, domain_name,
+						  "and you must configure your device to use the proper domain in its authentication credentials.\n", username, domain_name,
 						  ip, domain_name, username);
 
 		ret = AUTH_FORBIDDEN;
@@ -2939,7 +2939,7 @@ auth_res_t sofia_reg_parse_auth(sofia_profile_t *profile,
 	} else {
 		const char *type = switch_xml_attr(user, "type");
 		if (type && !strcasecmp(type, "pointer")) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cant register a pointer.\n");
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Can't register a pointer.\n");
 			ret = AUTH_FORBIDDEN;
 			goto end;
 		}
