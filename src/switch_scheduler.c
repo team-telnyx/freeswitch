@@ -54,12 +54,10 @@ static struct {
 	int task_thread_running;
 	switch_queue_t *event_queue;
 	switch_memory_pool_t *memory_pool;
-<<<<<<< HEAD
+
 	uint32_t total_tasks;
-} globals;
-=======
 } globals = { 0 };
->>>>>>> v1.10.5
+
 
 static void switch_scheduler_execute(switch_scheduler_task_container_t *tp)
 {

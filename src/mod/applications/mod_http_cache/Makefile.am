@@ -5,13 +5,9 @@ noinst_LTLIBRARIES = libhttpcachemod.la
 libhttpcachemod_la_SOURCES  = mod_http_cache.c common.c aws.c azure.c
 
 mod_LTLIBRARIES = mod_http_cache.la
-<<<<<<< HEAD
-mod_http_cache_la_SOURCES  = mod_http_cache.c common.c aws.c azure.c
-mod_http_cache_la_CFLAGS   = $(AM_CFLAGS) -Wno-stringop-truncation
-=======
+
 mod_http_cache_la_SOURCES  = 
 mod_http_cache_la_CFLAGS   = $(AM_CFLAGS)
->>>>>>> v1.10.5
 mod_http_cache_la_CPPFLAGS = $(CURL_CFLAGS) $(AM_CPPFLAGS)
 mod_http_cache_la_LIBADD   = $(switch_builddir)/libfreeswitch.la libhttpcachemod.la
 mod_http_cache_la_LDFLAGS  = $(CURL_LIBS) -avoid-version -module -no-undefined -shared

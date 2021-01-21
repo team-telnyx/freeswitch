@@ -5480,23 +5480,10 @@ SWITCH_DECLARE(void) switch_rtp_clear_flag(switch_rtp_t *rtp_session, switch_rtp
 
 static void set_dtmf_delay(switch_rtp_t *rtp_session, uint32_t ms)
 {
-<<<<<<< HEAD
 	int upsamp = ms * (rtp_session->samples_per_second / 1000);
 	rtp_session->queue_delay =  ms * (rtp_session->samples_per_second / 1000);
 	rtp_session->next_dtmf_send_time = switch_micro_time_now() + (ms * 1000);
-=======
-	int upsamp, max_upsamp;
 
-
-	if (!max_ms) max_ms = ms;
-
-	upsamp = ms * (rtp_session->samples_per_second / 1000);
-	max_upsamp = max_ms * (rtp_session->samples_per_second / 1000);
-	
-	rtp_session->sending_dtmf = 0;
-	rtp_session->queue_delay = upsamp;
-
->>>>>>> v1.10.5
 	if (rtp_session->flags[SWITCH_RTP_FLAG_USE_TIMER]) {
 		rtp_session->last_write_ts += upsamp;
 	}

@@ -3039,17 +3039,11 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 					goto done;
 				}
 
-<<<<<<< HEAD
 				current_session_uuid = switch_core_session_get_uuid(new_session);
 				
-				originate_status[i].peer_channel = switch_core_session_get_channel(new_session);
-				originate_status[i].caller_profile = switch_channel_get_caller_profile(originate_status[i].peer_channel);
-				originate_status[i].peer_session = new_session;
-=======
 				oglobals.originate_status[i].peer_channel = switch_core_session_get_channel(new_session);
 				oglobals.originate_status[i].caller_profile = switch_channel_get_caller_profile(oglobals.originate_status[i].peer_channel);
 				oglobals.originate_status[i].peer_session = new_session;
->>>>>>> v1.10.5
 
 				switch_channel_set_flag(oglobals.originate_status[i].peer_channel, CF_ORIGINATING);
 
@@ -3108,14 +3102,9 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 
 				if (oglobals.originate_status[i].peer_channel) {
 					const char *vvar;
-<<<<<<< HEAD
-					if (switch_true(switch_channel_get_variable(originate_status[i].peer_channel, "leg_required"))) {
-						originate_status[i].tagged = 1;
-=======
 
 					if (switch_true(switch_channel_get_variable(oglobals.originate_status[i].peer_channel, "leg_required"))) {
 						oglobals.originate_status[i].tagged = 1;
->>>>>>> v1.10.5
 					}
 
 					if ((vvar = switch_channel_get_variable(oglobals.originate_status[i].peer_channel, "origination_channel_name"))) {
@@ -3191,16 +3180,15 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 						l_session = NULL;
 					}
 
-<<<<<<< HEAD
-					switch_channel_execute_on(originate_status[i].peer_channel, SWITCH_CHANNEL_EXECUTE_ON_ORIGINATE_VARIABLE);
-					switch_channel_api_on(originate_status[i].peer_channel, SWITCH_CHANNEL_API_ON_ORIGINATE_VARIABLE);
-					
+					switch_channel_execute_on(oglobals.originate_status[i].peer_channel, SWITCH_CHANNEL_EXECUTE_ON_ORIGINATE_VARIABLE);
+					switch_channel_api_on(oglobals.originate_status[i].peer_channel, SWITCH_CHANNEL_API_ON_ORIGINATE_VARIABLE);
+
 					if (!fire_post_originate_event) {
-						const char* telnyx_session_uuid = switch_channel_get_variable(originate_status[i].peer_channel, "telnyx_session_uuid");
-						const char* telnyx_uuid = switch_channel_get_variable(originate_status[i].peer_channel, "telnyx_uuid");
-						const char* logical_leg_uuid = switch_channel_get_variable(originate_status[i].peer_channel, "logical_leg_uuid");
-						const char* call_control = switch_channel_get_variable(originate_status[i].peer_channel, "call_control");
-						const char* telnyx_fax = switch_channel_get_variable(originate_status[i].peer_channel, "telnyx_fax");
+						const char* telnyx_session_uuid = switch_channel_get_variable(oglobals.originate_status[i].peer_channel, "telnyx_session_uuid");
+						const char* telnyx_uuid = switch_channel_get_variable(oglobals.originate_status[i].peer_channel, "telnyx_uuid");
+						const char* logical_leg_uuid = switch_channel_get_variable(oglobals.originate_status[i].peer_channel, "logical_leg_uuid");
+						const char* call_control = switch_channel_get_variable(oglobals.originate_status[i].peer_channel, "call_control");
+						const char* telnyx_fax = switch_channel_get_variable(oglobals.originate_status[i].peer_channel, "telnyx_fax");
 
 						if (!zstr(call_control)) {
 							switch_event_add_header_string(post_originate_event, SWITCH_STACK_BOTTOM, "call_control", call_control);
@@ -3220,10 +3208,6 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 							fire_post_originate_event = 1;
 						}
 					}
-=======
-					switch_channel_execute_on(oglobals.originate_status[i].peer_channel, SWITCH_CHANNEL_EXECUTE_ON_ORIGINATE_VARIABLE);
-					switch_channel_api_on(oglobals.originate_status[i].peer_channel, SWITCH_CHANNEL_API_ON_ORIGINATE_VARIABLE);
->>>>>>> v1.10.5
 				}
 
 				if (table) {
