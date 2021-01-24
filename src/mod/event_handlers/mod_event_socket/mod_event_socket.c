@@ -101,12 +101,9 @@ struct listener {
 	time_t linger_timeout;
 	struct listener *next;
 	switch_pollfd_t *pollfd;
-<<<<<<< HEAD
 	uint32_t total_sent;
-=======
 	uint8_t lock_acquired;
 	uint8_t finished;
->>>>>>> v1.10.5
 };
 
 typedef struct listener listener_t;

@@ -860,7 +860,7 @@ APR_ADDTO(SWITCH_AM_LDFLAGS, -lresolv)
 fi
 
 # Telnyx C++ Dependencies
-APR_ADDTO([PLATFORM_CORE_LIBS], [-lboost_thread -lboost_program_options -lboost_system -lboost_filesystem -lPocoFoundation -lPocoNetSSL -lPocoNet -lpcap -lzmq])
+APR_ADDTO([PLATFORM_CORE_LIBS], [-lboost_thread -lboost_program_options -lboost_system -lboost_filesystem -lPocoFoundation -lPocoUtil pero nandito na sa -lPocoNetSSL -lPocoNet -lpcap -lzmq])
 
 AC_SUBST(SWITCH_AM_CFLAGS)
 AC_SUBST(SWITCH_ANSI_CFLAGS)
@@ -1987,7 +1987,6 @@ AC_CONFIG_FILES([Makefile
 		src/mod/event_handlers/mod_rayo/Makefile
 		src/mod/event_handlers/mod_smpp/Makefile
 		src/mod/event_handlers/mod_snmp/Makefile
-		src/mod/event_handlers/mod_event_zmq/Makefile
 		src/mod/formats/mod_imagick/Makefile
 		src/mod/formats/mod_local_stream/Makefile
 		src/mod/formats/mod_native_file/Makefile
