@@ -3232,7 +3232,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 						goto notready;
 					}
 
-					if (global_elapsed > (time_t) request_timelimit_sec) {
+					if (request_timelimit_sec && global_elapsed > (time_t) request_timelimit_sec) {
 						to++;
 						oglobals.idx = IDX_TIMEOUT;
 						goto notready;
@@ -3309,7 +3309,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 					switch_ivr_parse_all_events(oglobals.session);
 				}
 
-				if (global_elapsed > (time_t) request_timelimit_sec) {
+				if (request_timelimit_sec && global_elapsed > (time_t) request_timelimit_sec) {
 					oglobals.idx = IDX_TIMEOUT;
 					if (force_reason == SWITCH_CAUSE_NONE) {
 						force_reason = SWITCH_CAUSE_PROGRESS_TIMEOUT;
