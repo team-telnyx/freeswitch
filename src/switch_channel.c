@@ -2696,6 +2696,7 @@ SWITCH_DECLARE(void) switch_channel_event_set_extended_data(switch_channel_t *ch
 	int global_verbose_events = -1;
 	const char* call_control = 0;
 	const char* telnyx_fax = 0;
+	const char* telnyx_rtc_client_state = 0;
 
 	switch_mutex_lock(channel->profile_mutex);
 
@@ -2703,8 +2704,10 @@ SWITCH_DECLARE(void) switch_channel_event_set_extended_data(switch_channel_t *ch
 	
 	call_control = switch_channel_get_variable_dup(channel, "call_control", SWITCH_FALSE, -1);
 	telnyx_fax = switch_channel_get_variable_dup(channel, "telnyx_fax", SWITCH_FALSE, -1);
+	telnyx_rtc_client_state = switch_channel_get_variable_dup(channel, "sip_h_X-Telnyx-Client-State", SWITCH_FALSE, -1);
 
-	if ((call_control && switch_true(call_control)) || 
+	if ((call_control && switch_true(call_control)) ||
+		(telnyx_rtc_client_state && !zstr(telnyx_rtc_client_state)) ||
 		(telnyx_fax && switch_true(telnyx_fax)) || global_verbose_events ||
 		switch_channel_test_flag(channel, CF_VERBOSE_EVENTS) ||
 		switch_event_get_header(event, "presence-data-cols") ||
@@ -2747,6 +2750,10 @@ SWITCH_DECLARE(void) switch_channel_event_set_extended_data(switch_channel_t *ch
 
 		if ((telnyx_fax && switch_true(telnyx_fax))) {
 			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "telnyx_fax", "true");
+		}
+
+		if ((telnyx_rtc_client_state && !zstr(telnyx_rtc_client_state))) {
+			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "client_state", telnyx_rtc_client_state);
 		}
 		/* Index Variables */
 
