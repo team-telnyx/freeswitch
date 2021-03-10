@@ -36,6 +36,7 @@
 #include <switch_curl.h>
 #include "aws.h"
 #include "azure.h"
+#include "prometheus_metrics.h"
 
 #include <stdlib.h>
 
@@ -91,10 +92,6 @@ SWITCH_STANDARD_API(http_cache_tryget);
 SWITCH_STANDARD_API(http_cache_clear);
 SWITCH_STANDARD_API(http_cache_remove);
 SWITCH_STANDARD_API(http_cache_prefetch);
-SWITCH_STANDARD_API(http_cache_stats_print_all);
-SWITCH_STANDARD_API(http_cache_stats_download_count_total);
-SWITCH_STANDARD_API(http_cache_stats_download_duration_total);
-SWITCH_STANDARD_API(http_cache_stats_download_failed_count_total);
 
 #define DOWNLOAD_NEEDED "download"
 #define DOWNLOAD 1
@@ -248,15 +245,6 @@ struct url_cache {
 	long max_retry;
 	/** Maximum retries delay in ms **/
 	long retry_delay_ms;
-
-	/** Synchronizes increase of stats **/
-	switch_mutex_t *stat_lock;
-	/** total download time(ms) **/
-	unsigned long stat_download_duration_total;
-	/** total download count **/
-	unsigned long stat_download_count_total;
-	/** total download failed count **/
-	unsigned long stat_download_failed_count_total;
 };
 static url_cache_t gcache;
 
@@ -785,32 +773,25 @@ static char *url_cache_get(url_cache_t *cache, http_profile_t *profile, switch_c
 		url_cache_unlock(cache, session);
 		clock_gettime(CLOCK_REALTIME, &before);
 		if (http_get(cache, profile, u, use_mime_ext, event, session) == SWITCH_STATUS_SUCCESS) {
+			unsigned int duration;
 			clock_gettime(CLOCK_REALTIME, &after);
+			duration = (after.tv_sec - before.tv_sec) * 1000 + lround((after.tv_nsec - before.tv_nsec) * 1.0e6);
+			prometheus_increment_download_duration(duration);
+			prometheus_increment_download_count();
 
 			/* Got the file, let the waiters know it is available */
 			url_cache_lock(cache, session);
 			u->status = CACHED_URL_AVAILABLE;
 			filename = switch_core_strdup(pool, u->filename);
 			cache->size += u->size;
-
-			/* calculate download duration */
-			switch_mutex_lock(gcache.stat_lock);
-			gcache.stat_download_duration_total += (after.tv_sec - before.tv_sec) * 1000 + lround((after.tv_nsec - before.tv_nsec) * 1.0e6);
-			gcache.stat_download_count_total++;
-			switch_mutex_unlock(gcache.stat_lock);
-
-
 		} else {
+			prometheus_increment_download_fail_count();
+
 			/* Did not get the file, flag for replacement */
 			url_cache_lock(cache, session);
 			url_cache_remove_soft(cache, session, u);
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Failed to download URL %s\n", url);
 			cache->errors++;
-
-			switch_mutex_lock(gcache.stat_lock);
-			gcache.stat_download_failed_count_total++;
-			switch_mutex_unlock(gcache.stat_lock);
-
 		}
 	} else if (!u || (u->status == CACHED_URL_RX_IN_PROGRESS && download != DOWNLOAD)) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Download URL %s is needed\n", url);
@@ -1623,56 +1604,6 @@ SWITCH_STANDARD_API(http_cache_remove)
 	return SWITCH_STATUS_SUCCESS;
 }
 
-#define HTTP_STATS_PRINT_ALL_SYNTAX ""
-/**
- * Print stats info
- */
-SWITCH_STANDARD_API(http_cache_stats_print_all)
-{
-	if (!zstr(cmd)) {
-		stream->write_function(stream, "USAGE: %s\n", HTTP_STATS_PRINT_ALL_SYNTAX);
-		return SWITCH_STATUS_SUCCESS;
-	}
-
-	switch_mutex_lock(gcache.stat_lock);
-
-	stream->write_function(stream, "Total download count: %lu\n", gcache.stat_download_count_total);
-	stream->write_function(stream, "Total download duration(ms): %lu\n", gcache.stat_download_duration_total);
-	stream->write_function(stream, "Total failed download count: %lu\n", gcache.stat_download_failed_count_total);
-
-	switch_mutex_unlock(gcache.stat_lock);
-
-	return SWITCH_STATUS_SUCCESS;
-}
-
-SWITCH_STANDARD_API(http_cache_stats_download_count_total)
-{
-	switch_mutex_lock(gcache.stat_lock);
-	stream->write_function(stream, "%lu", gcache.stat_download_count_total);
-	switch_mutex_unlock(gcache.stat_lock);
-
-	return SWITCH_STATUS_SUCCESS;
-}
-
-SWITCH_STANDARD_API(http_cache_stats_download_duration_total)
-{
-	switch_mutex_lock(gcache.stat_lock);
-	stream->write_function(stream, "%lu", gcache.stat_download_duration_total);
-	switch_mutex_unlock(gcache.stat_lock);
-
-	return SWITCH_STATUS_SUCCESS;
-}
-
-SWITCH_STANDARD_API(http_cache_stats_download_failed_count_total)
-{
-	switch_mutex_lock(gcache.stat_lock);
-	stream->write_function(stream, "%lu", gcache.stat_download_failed_count_total);
-	switch_mutex_unlock(gcache.stat_lock);
-
-	return SWITCH_STATUS_SUCCESS;
-}
-
-
 /**
  * Thread to prefetch URLs
  * @param thread the thread
@@ -2120,11 +2051,8 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_http_cache_load)
 	SWITCH_ADD_API(api, "http_clear_cache", "Clear the cache", http_cache_clear, HTTP_CACHE_CLEAR_SYNTAX);
 	SWITCH_ADD_API(api, "http_remove_cache", "Remove URL from cache", http_cache_remove, HTTP_CACHE_REMOVE_SYNTAX);
 	SWITCH_ADD_API(api, "http_prefetch", "Prefetch document in a background thread.  Use http_get to get the prefetched document", http_cache_prefetch, HTTP_PREFETCH_SYNTAX);
-	SWITCH_ADD_API(api, "http_stats_print_all", "Print current status of http_cache", http_cache_stats_print_all, HTTP_STATS_PRINT_ALL_SYNTAX);
-	SWITCH_ADD_API(api, "http_cache_stats_download_count_total", "http_cache_stats_download_count_total", http_cache_stats_download_count_total, "");
-	SWITCH_ADD_API(api, "http_cache_stats_download_duration_total", "http_cache_stats_download_duration_total", http_cache_stats_download_duration_total, "");
-	SWITCH_ADD_API(api, "http_cache_stats_download_failed_count_total", "http_cache_stats_download_failed_count_total", http_cache_stats_download_failed_count_total, "");
 
+	prometheus_init(module_interface, api, pool);
 
 	memset(&gcache, 0, sizeof(url_cache_t));
 	gcache.pool = pool;
@@ -2132,12 +2060,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_http_cache_load)
 	switch_core_hash_init(&gcache.profiles);
 	switch_core_hash_init_nocase(&gcache.fqdn_profiles);
 	switch_mutex_init(&gcache.mutex, SWITCH_MUTEX_UNNESTED, gcache.pool);
-	switch_mutex_init(&gcache.stat_lock, SWITCH_MUTEX_UNNESTED, gcache.pool);
 	switch_thread_rwlock_create(&gcache.shutdown_lock, gcache.pool);
-
-	gcache.stat_download_count_total = 0;
-	gcache.stat_download_duration_total = 0;
-	gcache.stat_download_failed_count_total = 0;
 
 	if (do_config(&gcache) != SWITCH_STATUS_SUCCESS) {
 		return SWITCH_STATUS_TERM;
