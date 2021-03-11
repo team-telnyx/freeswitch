@@ -46,12 +46,10 @@ public:
 	void increment_download_duration(unsigned int duration)
 	{
 		auto_lock lock(_mutex);
-		int i;
-
 		_download_bucket_sum += duration;
 		_download_bucket_count++;
 
-		for (i = 0; i < MAX_BUCKET_LEN; i++) {
+		for (int i = 0; i < MAX_BUCKET_LEN; i++) {
 			if (duration < _download_buckets[BUCKET_BOUND][i]) {
 				_download_buckets[BUCKET_COUNT][i]++;
 				break;
@@ -68,7 +66,6 @@ public:
 	void generate_metrics(switch_stream_handle_t *stream)
 	{
 		auto_lock lock(_mutex);
-		int i;
 
 		stream->write_function(stream, "# HELP mod_http_cache_download_fail_count\n");
 		stream->write_function(stream, "# TYPE mod_http_cache_download_fail_count counter\n");
@@ -76,7 +73,7 @@ public:
 
 		stream->write_function(stream, "# HELP mod_http_cache_download_duration\n");
 		stream->write_function(stream, "# TYPE mod_http_cache_download_duration histogram\n");
-		for (i = 0; i < MAX_BUCKET_LEN - 1; i++) {
+		for (int i = 0; i < MAX_BUCKET_LEN - 1; i++) {
 			stream->write_function(stream, "mod_http_cache_download_duration_bucket{le=\"%u\"} %u\n", _download_buckets[BUCKET_BOUND][i], _download_buckets[BUCKET_COUNT][i]);
 		}
 		stream->write_function(stream, "mod_http_cache_download_duration_bucket{le=\"+Inf\"} %u\n", _download_buckets[BUCKET_COUNT][MAX_BUCKET_LEN - 1]);

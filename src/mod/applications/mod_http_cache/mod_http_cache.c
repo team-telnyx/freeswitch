@@ -754,7 +754,7 @@ static char *url_cache_get(url_cache_t *cache, http_profile_t *profile, switch_c
 	}
 
 	if (!u && download) {
-		unsigned int before, after;
+		unsigned int timestamp;
 
 		/* URL is not cached, let's add it.*/
 		/* Set up URL entry and add to map to prevent simultaneous downloads */
@@ -771,11 +771,9 @@ static char *url_cache_get(url_cache_t *cache, http_profile_t *profile, switch_c
 
 		/* download the file */
 		url_cache_unlock(cache, session);
-		before = switch_time_now() / 1000;
+		timestamp = switch_time_now() / 1000;
 		if (http_get(cache, profile, u, use_mime_ext, event, session) == SWITCH_STATUS_SUCCESS) {
-			unsigned int duration;
-			after = switch_time_now() / 1000;
-			duration = after - before;
+			unsigned int duration = (switch_time_now() / 1000) - timestamp;
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Download duration: %u\n", duration);
 			prometheus_increment_download_duration(duration);
 
