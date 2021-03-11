@@ -52,17 +52,17 @@ public:
 
 		if (duration < 300) {
 			_download_bucket_0_300++;
-		} else if (300 <= duration && duration < 500) {
+		} else if (duration < 500) {
 			_download_bucket_300_500++;
-		} else if (500 <= duration && duration < 800) {
+		} else if (duration < 800) {
 			_download_bucket_500_800++;
-		} else if (800 <= duration && duration < 1300) {
+		} else if (duration < 1300) {
 			_download_bucket_800_1300++;
-		} else if (1300 <= duration && duration < 2100) {
+		} else if (duration < 2100) {
 			_download_bucket_1300_2100++;
-		} else if (2100 <= duration && duration < 3400) {
+		} else if (duration < 3400) {
 			_download_bucket_2100_3400++;
-		} else if (3400 <= duration && duration < 5500) {
+		} else if (duration < 5500) {
 			_download_bucket_3400_5500++;
 		} else {
 			_download_bucket_5500_inf++;
