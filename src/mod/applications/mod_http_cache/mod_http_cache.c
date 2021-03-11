@@ -775,9 +775,9 @@ static char *url_cache_get(url_cache_t *cache, http_profile_t *profile, switch_c
 		if (http_get(cache, profile, u, use_mime_ext, event, session) == SWITCH_STATUS_SUCCESS) {
 			unsigned int duration;
 			clock_gettime(CLOCK_REALTIME, &after);
-			duration = (after.tv_sec - before.tv_sec) * 1000 + lround((after.tv_nsec - before.tv_nsec) * 1.0e6);
+			duration = (after.tv_sec - before.tv_sec) * 1000 + (after.tv_nsec - before.tv_nsec) / 1000000;
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Download duration: %u\n", duration);
 			prometheus_increment_download_duration(duration);
-			prometheus_increment_download_count();
 
 			/* Got the file, let the waiters know it is available */
 			url_cache_lock(cache, session);
@@ -785,8 +785,6 @@ static char *url_cache_get(url_cache_t *cache, http_profile_t *profile, switch_c
 			filename = switch_core_strdup(pool, u->filename);
 			cache->size += u->size;
 		} else {
-			prometheus_increment_download_fail_count();
-
 			/* Did not get the file, flag for replacement */
 			url_cache_lock(cache, session);
 			url_cache_remove_soft(cache, session, u);
@@ -1226,6 +1224,7 @@ static switch_status_t http_get(url_cache_t *cache, http_profile_t *profile, cac
 			} else {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Received curl error %d (attempt:%d) trying to fetch %s\n", curl_status, i+1, url->url);
 				switch_sleep(cache->retry_delay_ms * 1000);
+				prometheus_increment_download_fail_count();
 			}
 		}
 
@@ -2143,6 +2142,7 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_http_cache_shutdown)
 	switch_core_hash_destroy(&gcache.profiles);
 	switch_core_hash_destroy(&gcache.fqdn_profiles);
 	switch_mutex_destroy(gcache.mutex);
+	prometheus_destroy();
 	return SWITCH_STATUS_SUCCESS;
 }
 
