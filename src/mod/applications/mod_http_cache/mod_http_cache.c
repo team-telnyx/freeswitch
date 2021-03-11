@@ -754,7 +754,7 @@ static char *url_cache_get(url_cache_t *cache, http_profile_t *profile, switch_c
 	}
 
 	if (!u && download) {
-		struct timespec before, after;
+		unsigned int before, after;
 
 		/* URL is not cached, let's add it.*/
 		/* Set up URL entry and add to map to prevent simultaneous downloads */
@@ -771,11 +771,11 @@ static char *url_cache_get(url_cache_t *cache, http_profile_t *profile, switch_c
 
 		/* download the file */
 		url_cache_unlock(cache, session);
-		clock_gettime(CLOCK_REALTIME, &before);
+		before = switch_time_now() / 1000;
 		if (http_get(cache, profile, u, use_mime_ext, event, session) == SWITCH_STATUS_SUCCESS) {
 			unsigned int duration;
-			clock_gettime(CLOCK_REALTIME, &after);
-			duration = (after.tv_sec - before.tv_sec) * 1000 + (after.tv_nsec - before.tv_nsec) / 1000000;
+			after = switch_time_now() / 1000;
+			duration = after - before;
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Download duration: %u\n", duration);
 			prometheus_increment_download_duration(duration);
 
@@ -785,6 +785,8 @@ static char *url_cache_get(url_cache_t *cache, http_profile_t *profile, switch_c
 			filename = switch_core_strdup(pool, u->filename);
 			cache->size += u->size;
 		} else {
+			prometheus_increment_download_fail_count();
+
 			/* Did not get the file, flag for replacement */
 			url_cache_lock(cache, session);
 			url_cache_remove_soft(cache, session, u);
@@ -1224,7 +1226,6 @@ static switch_status_t http_get(url_cache_t *cache, http_profile_t *profile, cac
 			} else {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Received curl error %d (attempt:%d) trying to fetch %s\n", curl_status, i+1, url->url);
 				switch_sleep(cache->retry_delay_ms * 1000);
-				prometheus_increment_download_fail_count();
 			}
 		}
 

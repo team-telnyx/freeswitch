@@ -2,6 +2,10 @@
 #include <string>
 #include "prometheus_metrics.h"
 
+#define MAX_BUCKET_LEN 8
+#define BUCKET_BOUND 0
+#define BUCKET_COUNT 1
+#define BUCKET_INFINITY UINT_MAX	// not perfect, but good enough
 
 class prometheus_metrics
 {
@@ -24,14 +28,10 @@ public:
 		_pool(pool),
 		_module_interface(module_interface),
 		_download_fail_count(0),
-		_download_bucket_0_300(0),
-		_download_bucket_300_500(0),
-		_download_bucket_500_800(0),
-		_download_bucket_800_1300(0),
-		_download_bucket_1300_2100(0),
-		_download_bucket_2100_3400(0),
-		_download_bucket_3400_5500(0),
-		_download_bucket_5500_inf(0),
+		_download_buckets{
+			{300, 500, 800, 1300, 2100, 3400, 5500, BUCKET_INFINITY},
+			{0,   0,   0,   0,    0,    0,    0,    0}
+		},
 		_download_bucket_sum(0),
 		_download_bucket_count(0)
 	{
@@ -46,27 +46,17 @@ public:
 	void increment_download_duration(unsigned int duration)
 	{
 		auto_lock lock(_mutex);
+		int i;
 
 		_download_bucket_sum += duration;
 		_download_bucket_count++;
 
-		if (duration < 300) {
-			_download_bucket_0_300++;
-		} else if (duration < 500) {
-			_download_bucket_300_500++;
-		} else if (duration < 800) {
-			_download_bucket_500_800++;
-		} else if (duration < 1300) {
-			_download_bucket_800_1300++;
-		} else if (duration < 2100) {
-			_download_bucket_1300_2100++;
-		} else if (duration < 3400) {
-			_download_bucket_2100_3400++;
-		} else if (duration < 5500) {
-			_download_bucket_3400_5500++;
-		} else {
-			_download_bucket_5500_inf++;
-		} 
+		for (i = 0; i < MAX_BUCKET_LEN; i++) {
+			if (duration < _download_buckets[BUCKET_BOUND][i]) {
+				_download_buckets[BUCKET_COUNT][i]++;
+				break;
+			}
+		}
 	}
 
 	void increment_download_fail_count(void)
@@ -78,20 +68,18 @@ public:
 	void generate_metrics(switch_stream_handle_t *stream)
 	{
 		auto_lock lock(_mutex);
+		int i;
+
 		stream->write_function(stream, "# HELP mod_http_cache_download_fail_count\n");
 		stream->write_function(stream, "# TYPE mod_http_cache_download_fail_count counter\n");
 		stream->write_function(stream, "mod_http_cache_download_fail_count %u\n", _download_fail_count);
 
 		stream->write_function(stream, "# HELP mod_http_cache_download_duration\n");
 		stream->write_function(stream, "# TYPE mod_http_cache_download_duration histogram\n");
-		stream->write_function(stream, "mod_http_cache_download_duration_bucket{le=\"300\"} %u\n", _download_bucket_0_300);
-		stream->write_function(stream, "mod_http_cache_download_duration_bucket{le=\"500\"} %u\n", _download_bucket_300_500);
-		stream->write_function(stream, "mod_http_cache_download_duration_bucket{le=\"800\"} %u\n", _download_bucket_500_800);
-		stream->write_function(stream, "mod_http_cache_download_duration_bucket{le=\"1300\"} %u\n", _download_bucket_800_1300);
-		stream->write_function(stream, "mod_http_cache_download_duration_bucket{le=\"2100\"} %u\n", _download_bucket_1300_2100);
-		stream->write_function(stream, "mod_http_cache_download_duration_bucket{le=\"3400\"} %u\n", _download_bucket_2100_3400);
-		stream->write_function(stream, "mod_http_cache_download_duration_bucket{le=\"5500\"} %u\n", _download_bucket_3400_5500);
-		stream->write_function(stream, "mod_http_cache_download_duration_bucket{le=\"+Inf\"} %u\n", _download_bucket_5500_inf);
+		for (i = 0; i < MAX_BUCKET_LEN - 1; i++) {
+			stream->write_function(stream, "mod_http_cache_download_duration_bucket{le=\"%u\"} %u\n", _download_buckets[BUCKET_BOUND][i], _download_buckets[BUCKET_COUNT][i]);
+		}
+		stream->write_function(stream, "mod_http_cache_download_duration_bucket{le=\"+Inf\"} %u\n", _download_buckets[BUCKET_COUNT][MAX_BUCKET_LEN - 1]);
 		stream->write_function(stream, "mod_http_cache_download_duration_sum %llu\n", _download_bucket_sum);
 		stream->write_function(stream, "mod_http_cache_download_duration_count %lu\n", _download_bucket_count);
 	}
@@ -103,16 +91,7 @@ private:
 	switch_mutex_t* _mutex;
 
 	unsigned int _download_fail_count;
-
-	// counters for download duration
-	unsigned int _download_bucket_0_300;		// counter for 0 ~ 299 ms
-	unsigned int _download_bucket_300_500;		// counter for 300 ~ 499 ms
-	unsigned int _download_bucket_500_800;		// counter for 500 ~ 799 ms
-	unsigned int _download_bucket_800_1300;		// counter for 800 ~ 1299 ms
-	unsigned int _download_bucket_1300_2100;	// counter for 1300 ~ 2099 ms
-	unsigned int _download_bucket_2100_3400;	// counter for 2100 ~ 3399 ms
-	unsigned int _download_bucket_3400_5500;	// counter for 3400 ~ 5499 ms
-	unsigned int _download_bucket_5500_inf;		// counter for 5500 ~ inf
+	unsigned int _download_buckets[2][MAX_BUCKET_LEN];
 	unsigned long long int _download_bucket_sum;
 	unsigned long int _download_bucket_count;
 };
