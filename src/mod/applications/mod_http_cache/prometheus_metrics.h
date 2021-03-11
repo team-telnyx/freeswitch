@@ -9,7 +9,6 @@ void prometheus_init(switch_loadable_module_interface_t **module_interface, swit
 void prometheus_destroy();
 
 void prometheus_increment_download_duration(unsigned int duration);
-void prometheus_increment_download_count();
 void prometheus_increment_download_fail_count();
 
 SWITCH_END_EXTERN_C
