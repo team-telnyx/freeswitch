@@ -93,7 +93,7 @@ public:
 		stream->write_function(stream, "mod_http_cache_download_duration_bucket{le=\"5500\"} %u\n", _download_bucket_3400_5500);
 		stream->write_function(stream, "mod_http_cache_download_duration_bucket{le=\"+Inf\"} %u\n", _download_bucket_5500_inf);
 		stream->write_function(stream, "mod_http_cache_download_duration_sum %llu\n", _download_bucket_sum);
-		stream->write_function(stream, "mod_http_cache_download_duration_count %u\n", _download_bucket_count);
+		stream->write_function(stream, "mod_http_cache_download_duration_count %lu\n", _download_bucket_count);
 	}
 	
 
