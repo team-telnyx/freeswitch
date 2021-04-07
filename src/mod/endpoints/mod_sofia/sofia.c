@@ -8078,7 +8078,7 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 				goto done;
 			}
 
-			if (sofia_test_pflag(profile, PFLAG_ALWAYS_REGENERATE_OFFER)) {
+			if (sofia_test_pflag(profile, PFLAG_ALWAYS_REGENERATE_OFFER) || switch_channel_var_true(channel, "3pcc_always_regenerate_offer")) {
 				switch_channel_set_variable(channel, "sdp_clear_previous_negotiation", "true");
 				sofia_clear_flag(tech_pvt, TFLAG_ENABLE_SOA);
 				switch_core_media_set_local_sdp(session, NULL, SWITCH_FALSE);
