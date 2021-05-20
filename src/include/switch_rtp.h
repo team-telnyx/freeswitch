@@ -192,7 +192,7 @@ typedef enum { /* FMT Values for PSFB Payload Types http://www.iana.org/assignme
 
 
 SWITCH_DECLARE(switch_status_t) switch_rtp_add_crypto_key(switch_rtp_t *rtp_session, switch_rtp_crypto_direction_t direction, uint32_t index, switch_secure_settings_t *ssec);
-typedef void (*rtcp_probe_func)(switch_rtp_t *, rtcp_pt_t, switch_bool_t, struct switch_rtcp_report_block*, struct switch_rtcp_sender_info*);
+typedef void (*rtcp_probe_func)(switch_channel_t*, switch_rtp_t *, rtcp_pt_t, switch_bool_t, struct switch_rtcp_report_block*, struct switch_rtcp_sender_info*);
 typedef void (*rtp_create_probe_func)(switch_rtp_t *, switch_channel_t*);
 
 SWITCH_DECLARE(void) switch_rtp_set_rtcp_probe(switch_rtp_t * rtp_session, rtcp_probe_func probe);
