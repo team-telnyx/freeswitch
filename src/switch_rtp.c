@@ -3012,6 +3012,11 @@ SWITCH_DECLARE(switch_port_t) switch_rtp_get_remote_port(switch_rtp_t *rtp_sessi
 	return rtp_session->remote_port;
 }
 
+SWITCH_DECLARE(char *) switch_rtp_get_eff_remote_host(switch_rtp_t *rtp_session)
+{
+	return zstr(rtp_session->eff_remote_host_str) ? "0.0.0.0" : rtp_session->eff_remote_host_str;
+}
+
 SWITCH_DECLARE(char *) switch_rtp_get_local_host(switch_rtp_t *rtp_session)
 {
 	return zstr(rtp_session->local_host_str) ? "0.0.0.0" : rtp_session->local_host_str;
@@ -3020,6 +3025,16 @@ SWITCH_DECLARE(char *) switch_rtp_get_local_host(switch_rtp_t *rtp_session)
 SWITCH_DECLARE(switch_port_t) switch_rtp_get_local_port(switch_rtp_t *rtp_session)
 {
 	return rtp_session->local_port;
+}
+
+SWITCH_DECLARE(switch_port_t) switch_rtp_get_eff_remote_port(switch_rtp_t *rtp_session)
+{
+	return rtp_session->eff_remote_port;
+}
+
+SWITCH_DECLARE(switch_port_t) switch_rtcp_get_remote_port(switch_rtp_t *rtp_session)
+{
+	return rtp_session->remote_rtcp_port;
 }
 
 static void ping_socket(switch_rtp_t *rtp_session)
