@@ -4665,9 +4665,7 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 					profile->sip_expires_late_margin = 60;
 					profile->sip_subscription_max_deviation = 0;
 					profile->tls_ciphers = "ALL:!ADH:!LOW:!EXP:!MD5:@STRENGTH";
-					profile->tls_version = SOFIA_TLS_VERSION_TLSv1;
-					profile->tls_version |= SOFIA_TLS_VERSION_TLSv1_1;
-					profile->tls_version |= SOFIA_TLS_VERSION_TLSv1_2;
+					profile->tls_version = SOFIA_TLS_VERSION_TLSv1_2;
 					profile->tls_timeout = 300;
 					profile->mflags = MFLAG_REFER | MFLAG_REGISTER;
 					profile->server_rport_level = 1;
@@ -5893,27 +5891,11 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 					} else if (!strcasecmp(var, "tls-ciphers") && !zstr(val)) {
 						profile->tls_ciphers = switch_core_strdup(profile->pool, val);
 					} else if (!strcasecmp(var, "tls-version") && !zstr(val)) {
-						char *ps = val, *pe = val;
-						profile->tls_version = 0;
-						while (ps && *pe) {
-							int n;
-							pe = strchr(ps,',');
-							if (!pe && !(pe = memchr(ps,0,1024))) break;
-							n = (int)(pe-ps);
-							if (n==5 && !strncasecmp(ps, "sslv2", n))
-								profile->tls_version |= SOFIA_TLS_VERSION_SSLv2;
-							if (n==5 && !strncasecmp(ps, "sslv3", n))
-								profile->tls_version |= SOFIA_TLS_VERSION_SSLv3;
-							if (n==6 && !strncasecmp(ps, "sslv23", n))
-								profile->tls_version |= SOFIA_TLS_VERSION_SSLv2 | SOFIA_TLS_VERSION_SSLv3;
-							if (n==5 && !strncasecmp(ps, "tlsv1", n))
-								profile->tls_version |= SOFIA_TLS_VERSION_TLSv1;
-							if (n==7 && !strncasecmp(ps, "tlsv1.1", n))
-								profile->tls_version |= SOFIA_TLS_VERSION_TLSv1_1;
-							if (n==7 && !strncasecmp(ps, "tlsv1.2", n))
-								profile->tls_version |= SOFIA_TLS_VERSION_TLSv1_2;
-							ps=pe+1;
+						if (strcasecmp(val, "tlsv1.2")) {
+							switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Rejecting requested TLS version %s in favour of v1.2 - only TLSv1.2 is supported\n", val);
 						}
+						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Using TLS version 1.2\n");
+						profile->tls_version = SOFIA_TLS_VERSION_TLSv1_2;
 					} else if (!strcasecmp(var, "tls-timeout") && !zstr(val)) {
 						int v = atoi(val);
 						profile->tls_timeout = v > 0 ? (unsigned int)v : 300;
