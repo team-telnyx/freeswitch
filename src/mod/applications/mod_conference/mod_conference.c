@@ -1347,16 +1347,12 @@ void conference_xlist(conference_obj_t *conference, switch_xml_t x_conference, i
 		add_x_tag(x_member, "output-volume", tmp, toff++);
 
 		// relationships
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Adding relationship info.\n");
 		x_relationships = switch_xml_add_child_d(x_member, "relationships", toff++);
 		switch_assert(x_relationships);
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "111111. conference[%p]\n", (void*)member->relationships);
 
 		for (rel = member->relationships, roff = 0; rel; rel = rel->next, roff++) {
 			uint32_t count = 0;
 			char id[30] = "";
-
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "2222222.\n");
 
 			if (rel->id == member->id) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Same target.\n");
