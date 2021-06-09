@@ -1348,34 +1348,39 @@ void conference_xlist(conference_obj_t *conference, switch_xml_t x_conference, i
 
 		// relationships
 		x_relationships = switch_xml_add_child_d(x_member, "relationships", toff++);
-		switch_assert(x_relationships);
+		if (x_relationships == NULL) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Could not create relationships.\n");
+		} else {
+			for (rel = member->relationships, roff = 0; rel; rel = rel->next, roff++) {
+				uint32_t count = 0;
+				char id[30] = "";
 
-		for (rel = member->relationships, roff = 0; rel; rel = rel->next, roff++) {
-			uint32_t count = 0;
-			char id[30] = "";
+				if (rel->id == member->id) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Same target.\n");
+					continue;
+				}
 
-			if (rel->id == member->id) {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Same target.\n");
-				continue;
+				x_relationship = switch_xml_add_child_d(x_relationships, "relationship", roff);
+				if (x_relationship == NULL) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Could not create relationship.\n");
+					continue;
+				}
+
+				switch_snprintf(id, sizeof(id), "%d", rel->id);
+				add_x_tag(x_relationship, "id", id, 0);
+
+				// can speak
+				x_tag = switch_xml_add_child_d(x_relationship, "can_speak", count++);
+				switch_xml_set_txt_d(x_tag, switch_test_flag(rel, RFLAG_CAN_SPEAK) ? "true" : "false");
+
+				// can hear
+				x_tag = switch_xml_add_child_d(x_relationship, "can_hear", count++);
+				switch_xml_set_txt_d(x_tag, switch_test_flag(rel, RFLAG_CAN_HEAR) ? "true" : "false");
+
+				// can send video
+				x_tag = switch_xml_add_child_d(x_relationship, "can_send_video", count++);
+				switch_xml_set_txt_d(x_tag, switch_test_flag(rel, RFLAG_CAN_SEND_VIDEO) ? "true" : "false");
 			}
-
-			x_relationship = switch_xml_add_child_d(x_relationships, "relationship", roff);
-			switch_assert(x_relationship);
-
-			switch_snprintf(id, sizeof(id), "%d", rel->id);
-			add_x_tag(x_relationship, "id", id, 0);
-
-			// can speak
-			x_tag = switch_xml_add_child_d(x_relationship, "can_speak", count++);
-			switch_xml_set_txt_d(x_tag, switch_test_flag(rel, RFLAG_CAN_SPEAK) ? "true" : "false");
-
-			// can hear
-			x_tag = switch_xml_add_child_d(x_relationship, "can_hear", count++);
-			switch_xml_set_txt_d(x_tag, switch_test_flag(rel, RFLAG_CAN_HEAR) ? "true" : "false");
-
-			// can send video
-			x_tag = switch_xml_add_child_d(x_relationship, "can_send_video", count++);
-			switch_xml_set_txt_d(x_tag, switch_test_flag(rel, RFLAG_CAN_SEND_VIDEO) ? "true" : "false");
 		}
 	}
 
