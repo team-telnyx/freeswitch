@@ -1362,7 +1362,7 @@ void conference_xlist(conference_obj_t *conference, switch_xml_t x_conference, i
 			x_relationship = switch_xml_add_child_d(x_relationships, "relationship", roff);
 			switch_assert(x_relationship);
 
-			switch_snprintf(id, sizeof(id), "%d", member->id);
+			switch_snprintf(id, sizeof(id), "%d", rel->id);
 			add_x_tag(x_relationship, "id", id, 0);
 
 			// can speak
