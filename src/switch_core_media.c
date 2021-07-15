@@ -1923,6 +1923,7 @@ SWITCH_DECLARE(int) switch_core_session_check_incoming_crypto(switch_core_sessio
 				}
 				switch_channel_set_variable(session->channel, varname, vval);
 
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "CRYPTO: build crypto for tag %d\n", crypto_tag);
 				switch_core_media_build_crypto(session->media_handle, type, crypto_tag, ctype, SWITCH_RTP_CRYPTO_SEND, 1, use_alias);
 				switch_rtp_add_crypto_key(engine->rtp_session, SWITCH_RTP_CRYPTO_SEND, atoi(crypto), &engine->ssec[engine->crypto_type]);
 			}
@@ -1988,6 +1989,7 @@ SWITCH_DECLARE(int) switch_core_session_check_incoming_crypto(switch_core_sessio
 		switch_channel_set_flag(smh->session->channel, CF_SECURE);
 
 		if (zstr(engine->ssec[engine->crypto_type].local_crypto_key)) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "CRYPTO: build crypto for tag %d\n", crypto_tag);
 			switch_core_media_build_crypto(session->media_handle, type, crypto_tag, ctype, SWITCH_RTP_CRYPTO_SEND, 1, use_alias);
 		}
 	}
@@ -4957,6 +4959,7 @@ static void check_stream_changes(switch_core_session_t *session, const char *r_s
 
 			if (switch_channel_test_flag(session->channel, CF_SECURE)) {
 				other_session->media_handle->crypto_mode = session->media_handle->crypto_mode;
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "CRYPTO: CHECK OUTGOING\n");
 				switch_core_session_check_outgoing_crypto(other_session);
 			}
 
@@ -11049,6 +11052,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 	if (switch_channel_test_flag(session->channel, CF_PROXY_OFF) && (tmp = switch_channel_get_variable(smh->session->channel, "uuid_media_secure_media"))) {
 		switch_channel_set_variable(smh->session->channel, "rtp_secure_media", tmp);
 		switch_core_session_parse_crypto_prefs(session);
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "CRYPTO: CHECK OUTGOING\n");
 		switch_core_session_check_outgoing_crypto(session);
 	}
 
@@ -11076,6 +11080,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 			}
 		}
 		switch_core_session_parse_crypto_prefs(session);
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "CRYPTO: CHECK OUTGOING\n");
 		switch_core_session_check_outgoing_crypto(session);
 	}
 
