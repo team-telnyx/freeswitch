@@ -4759,9 +4759,7 @@ static void *SWITCH_THREAD_FUNC speech_thread(switch_thread_t *thread, void *obj
 						switch_event_fire(&dup);
 					}
 
-				}
-
-				if (switch_core_session_queue_event(sth->session, &event) != SWITCH_STATUS_SUCCESS) {
+				} else if (switch_core_session_queue_event(sth->session, &event) != SWITCH_STATUS_SUCCESS) {
 					switch_log_printf(SWITCH_CHANNEL_CHANNEL_LOG(channel), SWITCH_LOG_ERROR, "Event queue failed!\n");
 					switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "delivery-failure", "true");
 					switch_event_fire(&event);
@@ -4786,10 +4784,7 @@ static void *SWITCH_THREAD_FUNC speech_thread(switch_thread_t *thread, void *obj
 				switch_channel_event_set_data(channel, dup);
 				switch_event_fire(&dup);
 			}
-
-		}
-
-		if (switch_core_session_queue_event(sth->session, &event) != SWITCH_STATUS_SUCCESS) {
+		} else if (switch_core_session_queue_event(sth->session, &event) != SWITCH_STATUS_SUCCESS) {
 			switch_log_printf(SWITCH_CHANNEL_CHANNEL_LOG(channel), SWITCH_LOG_ERROR, "Event queue failed!\n");
 			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "delivery-failure", "true");
 			switch_event_fire(&event);
