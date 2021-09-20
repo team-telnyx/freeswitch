@@ -865,6 +865,12 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_thread_pool_launch(switch_co
   \return a pointer to the channel object
 */
 	 _Ret_ SWITCH_DECLARE(switch_channel_t *) switch_core_session_get_channel(_In_ switch_core_session_t *session);
+/*!
+  \brief Retrieve a pointer to the channel object associated with a given session
+  \param session the session to retrieve from
+  \return a pointer to the channel object
+*/
+	 _Ret_ SWITCH_DECLARE(switch_channel_t *) switch_core_session_get_channel_unsafe(_In_ switch_core_session_t *session);
 
 /*!
   \brief Signal a session's state machine thread that a state change has occured
