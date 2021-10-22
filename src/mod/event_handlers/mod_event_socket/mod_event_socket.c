@@ -2772,7 +2772,7 @@ static void *SWITCH_THREAD_FUNC listener_run(switch_thread_t *thread, void *obj)
 	switch_socket_opt_set(listener->sock, SWITCH_SO_TCP_NODELAY, TRUE);
 	switch_socket_opt_set(listener->sock, SWITCH_SO_NONBLOCK, TRUE);
 
-	if (prefs.acl_count && listener->sa && !zstr(listener->remote_ip)) {
+	if (0 && prefs.acl_count && listener->sa && !zstr(listener->remote_ip)) {
 		uint32_t x = 0;
 
 		for (x = 0; x < prefs.acl_count; x++) {

@@ -369,6 +369,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_file(switch_core_session_t *se
 	const char *vval;
 	time_t start = 0;
 	uint32_t org_silence_hits = 0;
+	uint8_t check_silence = 1;
 	int asis = 0;
 	int32_t sample_start = 0;
 	int waste_resources = 1400, fill_cng = 0;
@@ -554,6 +555,12 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_file(switch_core_session_t *se
 		}
 	}
 
+	if ((p = switch_channel_get_variable(channel, "record_check_silence"))) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "Got check silence set to %s\n", p);
+		check_silence = switch_true(p);
+	}
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "Recording with check silence %u\n", check_silence);
+
 	if (fill_cng || waste_resources) {
 		if (switch_core_codec_init(&write_codec,
 								   "L16",
@@ -705,7 +712,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_file(switch_core_session_t *se
 		start = switch_epoch_time_now(NULL);
 	}
 
-	if (fh->thresh) {
+	if (fh->thresh && check_silence) {
 		if (asis) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Can't detect silence on a native recording.\n");
 		} else {
@@ -845,7 +852,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_file(switch_core_session_t *se
 
 		}
 
-		if (!asis && fh->thresh) {
+		if (!asis && fh->thresh && check_silence) {
 			int16_t *fdata = (int16_t *) read_frame->data;
 			uint32_t samples = read_frame->datalen / sizeof(*fdata);
 			uint32_t score, count = 0, j = 0;
@@ -861,6 +868,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_file(switch_core_session_t *se
 			if (score < fh->thresh) {
 				if (!--fh->silence_hits) {
 					switch_channel_set_variable(channel, "silence_hits_exhausted", "true");
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Silence exhausted\n");
 					break;
 				}
 			} else {
@@ -2878,7 +2886,9 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_speak_text_handle(switch_core_session
 				}
 			} else {
 				switch_frame_t *read_frame;
-				switch_status_t tstatus = switch_core_session_read_frame(session, &read_frame, SWITCH_IO_FLAG_NONE, 0);
+				switch_status_t tstatus = 0;
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG1, "READ 1\n");
+				tstatus = switch_core_session_read_frame(session, &read_frame, SWITCH_IO_FLAG_NONE, 0);
 
 				while (switch_channel_ready(channel) && switch_channel_test_flag(channel, CF_HOLD)) {
 					switch_ivr_parse_all_messages(session);
@@ -2909,6 +2919,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_speak_text_handle(switch_core_session
 		status = switch_core_speech_read_tts(sh, abuf, &ilen, &flags);
 
 		if (status != SWITCH_STATUS_SUCCESS) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG1, "Oops\n");
 			if (status == SWITCH_STATUS_BREAK) {
 				status = SWITCH_STATUS_SUCCESS;
 			}
@@ -2920,6 +2931,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_speak_text_handle(switch_core_session
 		if (timer) {
 			write_frame.timestamp = timer->samplecount;
 		}
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG1, "WRITE %d samples, ts: %u\n", write_frame.samples, write_frame.timestamp);
 		if (switch_core_session_write_frame(session, &write_frame, SWITCH_IO_FLAG_NONE, 0) != SWITCH_STATUS_SUCCESS) {
 			break;
 		}
@@ -2930,7 +2942,9 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_speak_text_handle(switch_core_session
 			}
 		} else {				/* time off the channel (if you must) */
 			switch_frame_t *read_frame;
-			switch_status_t tstatus = switch_core_session_read_frame(session, &read_frame, SWITCH_IO_FLAG_NONE, 0);
+			switch_status_t tstatus = 0;
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG1, "READ 2\n");
+			tstatus = switch_core_session_read_frame(session, &read_frame, SWITCH_IO_FLAG_NONE, 0);
 
 			while (switch_channel_ready(channel) && switch_channel_test_flag(channel, CF_HOLD)) {
 				switch_ivr_parse_all_messages(session);
@@ -2957,7 +2971,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_speak_text_handle(switch_core_session
 
  done:
 
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "done speaking text\n");
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG1, "done speaking text\n");
 	flags = 0;
 	switch_core_speech_flush_tts(sh);
 
