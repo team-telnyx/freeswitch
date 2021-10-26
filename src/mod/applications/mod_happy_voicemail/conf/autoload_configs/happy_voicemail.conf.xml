@@ -1,9 +1,13 @@
 <configuration name="happy_voicemail.conf" description="Happy Voicemail Configuration file">
 	<settings>
-		<param name="tone-spec" value="%(1000, 0, 640)"/>
+		<param name="tone-spec" value="%(1300, 0, 640)"/>
 		<param name="record-silence-threshold" value="0"/>
-		<param name="record-silence-hits" value="2"/>
-		<!--param name="record-sample-rate" value="0"/-->
+		<param name="record-silence-hits" value="0"/>
+		<param name="record-check-silence" value="false"/>
 		<param name="max-record-len" value="600"/>
+		<param name="s3-url" value="http://happy-voicemail.s3.amazonaws.com"/>
+		<param name="file-system-folder" value="/tmp/voicemails"/>
+		<param name="dump-events" value="false"/>
+		<param name="recording-file-ext" value="wav"/>
 	</settings>
 </configuration> 

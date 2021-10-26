@@ -1,0 +1,1 @@
+cp conf/autoload_configs/happy_voicemail.conf.xml /usr/local/freeswitch/conf/autoload_configs/ && make && cp .libs/mod_happy_voicemail.so /usr/local/freeswitch/mod/
