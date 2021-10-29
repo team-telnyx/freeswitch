@@ -51,9 +51,9 @@ SWITCH_DECLARE(switch_status_t) hv_json_vm_state_add_new_voicemail(cJSON *v, con
 		}
 
 		snprintf(timestamp, sizeof(timestamp), "%zu", ts);
-        cJSON_AddStringToObject(vm, "name", name);
-        cJSON_AddStringToObject(vm, "timestamp", timestamp);
-        cJSON_AddItemToArray(vms, vm);
+		cJSON_AddStringToObject(vm, HV_JSON_KEY_VOICEMAIL_NAME, name);
+		cJSON_AddStringToObject(vm, HV_JSON_KEY_VOICEMAIL_TIMESTAMP, timestamp);
+		cJSON_AddItemToArray(vms, vm);
 
 		s = cJSON_Print(vm);
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "JSON: added new voicemail:\n%s\n", s);

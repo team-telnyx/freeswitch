@@ -45,9 +45,12 @@ static switch_status_t hv_load_config(void)
 				} else if (!strcasecmp(var, "s3-url")) {
 					strncpy(settings.s3_url, val, sizeof(settings.s3_url));
 					settings.s3_url[HV_BUFLEN-1] = '\0';
-				} else if (!strcasecmp(var, "file-system-folder")) {
-					strncpy(settings.file_system_folder, val, sizeof(settings.file_system_folder));
-					settings.file_system_folder[HV_BUFLEN-1] = '\0';
+				} else if (!strcasecmp(var, "file-system-folder-in")) {
+					strncpy(settings.file_system_folder_in, val, sizeof(settings.file_system_folder_in));
+					settings.file_system_folder_in[HV_BUFLEN-1] = '\0';
+				} else if (!strcasecmp(var, "file-system-folder-out")) {
+					strncpy(settings.file_system_folder_out, val, sizeof(settings.file_system_folder_out));
+					settings.file_system_folder_out[HV_BUFLEN-1] = '\0';
 				} else if (!strcasecmp(var, "dump-events")) {
 					settings.dump_events = switch_true(val);
 				} else if (!strcasecmp(var, "recording-file-ext")) {
@@ -93,10 +96,16 @@ static switch_status_t hv_check_settings(hv_settings_t *settings)
 		return SWITCH_STATUS_FALSE;
 	}
 
-	if (zstr(settings->file_system_folder)) {
-		strncpy(settings->file_system_folder, HV_DEFAULT_FILE_SYSTEM_FOLDER, sizeof(settings->file_system_folder));
-		settings->file_system_folder[HV_BUFLEN-1] = '\0';
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: file-system-folder (using default %s)\n", HV_DEFAULT_FILE_SYSTEM_FOLDER);
+	if (zstr(settings->file_system_folder_in)) {
+		strncpy(settings->file_system_folder_in, HV_DEFAULT_FILE_SYSTEM_FOLDER_IN, sizeof(settings->file_system_folder_in));
+		settings->file_system_folder_in[HV_BUFLEN-1] = '\0';
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: file-system-folder-in (using default %s)\n", HV_DEFAULT_FILE_SYSTEM_FOLDER_IN);
+	}
+
+	if (zstr(settings->file_system_folder_out)) {
+		strncpy(settings->file_system_folder_out, HV_DEFAULT_FILE_SYSTEM_FOLDER_OUT, sizeof(settings->file_system_folder_out));
+		settings->file_system_folder_out[HV_BUFLEN-1] = '\0';
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: file-system-folder-out (using default %s)\n", HV_DEFAULT_FILE_SYSTEM_FOLDER_OUT);
 	}
 
 	if (zstr(settings->recording_file_ext)) {
@@ -135,13 +144,13 @@ SWITCH_DECLARE(switch_status_t) hv_ext_to_s3_vm_state_url(const char *ext, char 
 SWITCH_DECLARE(void) hv_get_uuid(char *buf, uint32_t len)
 {
 	uuid_t binuuid;
-    uuid_generate_random(binuuid);
+	uuid_generate_random(binuuid);
 
-    if (len < 37) {
+	if (len < 37) {
 		return;
 	}
 
-    uuid_unparse_lower(binuuid, buf);
+	uuid_unparse_lower(binuuid, buf);
 	buf[36] = '\0';
 }
 
@@ -184,11 +193,11 @@ SWITCH_STANDARD_APP(hv_deposit_app)
 
 	switch_channel_set_variable(channel, "hv_voicemail_name", voicemail_name);
 
-	snprintf(voicemail_path, sizeof(voicemail_path), "%s/%s", settings.file_system_folder, voicemail_name);
+	snprintf(voicemail_path, sizeof(voicemail_path), "%s/%s", settings.file_system_folder_out, voicemail_name);
 	switch_channel_set_variable(channel, "hv_voicemail_path", voicemail_path);
 
 	switch_mutex_lock(globals.mutex);
-	switch_dir_make_recursive(settings.file_system_folder, SWITCH_DEFAULT_DIR_PERMS, globals.pool);
+	switch_dir_make_recursive(settings.file_system_folder_out, SWITCH_DEFAULT_DIR_PERMS, globals.pool);
 	switch_mutex_unlock(globals.mutex);
 
 	hv_deposit_app_exec(session, voicemail_path, &settings);
@@ -202,7 +211,11 @@ SWITCH_STANDARD_APP(hv_retrieval_app)
 	memcpy(&settings, &globals.settings, sizeof(settings));
 	switch_mutex_unlock(globals.mutex);
 
-	hv_retrieval_app_exec(session, "/tmp/vm.wav", &settings);
+	switch_mutex_lock(globals.mutex);
+	switch_dir_make_recursive(settings.file_system_folder_in, SWITCH_DEFAULT_DIR_PERMS, globals.pool);
+	switch_mutex_unlock(globals.mutex);
+
+	hv_retrieval_app_exec(session, NULL, &settings);
 }
 
 SWITCH_STANDARD_API(hv_deposit_api)
@@ -213,7 +226,9 @@ SWITCH_STANDARD_API(hv_deposit_api)
 	memcpy(&settings, &globals.settings, sizeof(settings));
 	switch_mutex_unlock(globals.mutex);
 
-	switch_api_execute("info", "", session, stream);
+	switch_mutex_lock(globals.mutex);
+	switch_dir_make_recursive(settings.file_system_folder_in, SWITCH_DEFAULT_DIR_PERMS, globals.pool);
+	switch_mutex_unlock(globals.mutex);
 
 	return hv_deposit_api_exec(NULL, session, stream, &settings);
 }
@@ -237,7 +252,13 @@ SWITCH_STANDARD_API(hv_http_upload_api)
 	memcpy(&settings, &globals.settings, sizeof(settings));
 	switch_mutex_unlock(globals.mutex);
 
-	return hv_http_upload_api_exec(NULL, session, stream, &settings);
+	if (SWITCH_STATUS_SUCCESS == hv_http_upload_api_exec(NULL, session, stream, &settings)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Voicemail deposit OK\n");
+		return SWITCH_STATUS_SUCCESS;
+	} else {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Voicemail deposit failed\n");
+		return SWITCH_STATUS_FALSE;
+	}
 }
 
 SWITCH_MODULE_LOAD_FUNCTION(mod_happy_voicemail_load)
@@ -260,7 +281,8 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_happy_voicemail_load)
 		return SWITCH_STATUS_FALSE;
 	}
 
-	switch_dir_make_recursive(globals.settings.file_system_folder, SWITCH_DEFAULT_DIR_PERMS, globals.pool);
+	switch_dir_make_recursive(globals.settings.file_system_folder_in, SWITCH_DEFAULT_DIR_PERMS, globals.pool);
+	switch_dir_make_recursive(globals.settings.file_system_folder_out, SWITCH_DEFAULT_DIR_PERMS, globals.pool);
 
 	*module_interface = switch_loadable_module_create_module_interface(pool, modname);
 

@@ -4,73 +4,183 @@
 #include <curl/curl.h>
 #include <sys/stat.h>
 #include <fcntl.h>
- 
+
 SWITCH_DECLARE(switch_status_t) hv_http_upload_from_disk(const char *file_name, const char *url)
 {
-  CURL *curl = NULL;
-  CURLcode res = 0;
-  struct stat file_info = { 0 };
-  curl_off_t speed_upload = 0, total_time = 0;
-  FILE *fd = NULL;
+	CURL *curl = NULL;
+	CURLcode res = 0;
+	struct stat file_info = { 0 };
+	curl_off_t speed_upload = 0, total_time = 0;
+	FILE *fd = NULL;
+	long http_code = 0;
 
-  if (zstr(file_name)) {
-	  goto fail;
-  }
+	if (zstr(file_name)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "PUT: file name missing\n");
+		goto fail;
+	}
 
-  if (zstr(url)) {
-	  goto fail;
-  }
+	if (zstr(url)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "PUT: url missing\n");
+		goto fail;
+	}
 
-  fd = fopen(file_name, "rb");
-  if (!fd) {
-    goto fail;
-  }
- 
-  if (fstat(fileno(fd), &file_info) != 0) {
-	  goto fail;
-  }
- 
-  curl = curl_easy_init();
-  if (!curl) {
-	  goto fail;
-  }
+	fd = fopen(file_name, "rb");
+	if (!fd) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "PUT: cannot open %s\n", file_name);
+		goto fail;
+	}
 
-  curl_easy_setopt(curl, CURLOPT_URL, url);
-  curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
-  curl_easy_setopt(curl, CURLOPT_READDATA, fd);
-  curl_easy_setopt(curl, CURLOPT_INFILESIZE_LARGE, (curl_off_t) file_info.st_size);
-  curl_easy_setopt(curl, CURLOPT_VERBOSE, 0);
+	if (fstat(fileno(fd), &file_info) != 0) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "PUT: fstat failed\n");
+		goto fail;
+	}
 
-  switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Uploading %s to %s\n", file_name, url);
+	res = curl_global_init(CURL_GLOBAL_ALL);
+	if (res != CURLE_OK) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "curl_global_init() failed: %s\n", curl_easy_strerror(res));
+		goto fail;
+	}
 
-  res = curl_easy_perform(curl);
-  if (res != CURLE_OK) {
-	  switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
-	  goto fail;
-  }
+	curl = curl_easy_init();
+	if (!curl) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "PUT: cannot init CURL\n");
+		goto fail;
+	}
+	curl = curl_easy_init();
+	if (!curl) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "PUT: cannot init CURL\n");
+		goto fail;
+	}
 
-  curl_easy_getinfo(curl, CURLINFO_SPEED_UPLOAD_T, &speed_upload);
-  curl_easy_getinfo(curl, CURLINFO_TOTAL_TIME_T, &total_time);
-  switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Done. Upload speed: %" CURL_FORMAT_CURL_OFF_T " bytes/sec during %" CURL_FORMAT_CURL_OFF_T ".%06ld seconds\n", speed_upload, (total_time / 1000000), (long)(total_time % 1000000));
+	curl_easy_setopt(curl, CURLOPT_URL, url);
+	curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
+	curl_easy_setopt(curl, CURLOPT_READDATA, fd);
+	curl_easy_setopt(curl, CURLOPT_INFILESIZE_LARGE, (curl_off_t) file_info.st_size);
+	curl_easy_setopt(curl, CURLOPT_VERBOSE, 0);
 
-  curl_easy_cleanup(curl);
-  fclose(fd);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "-> PUT (%s) to (%s)\n", file_name, url);
 
-  return SWITCH_STATUS_SUCCESS;
+	res = curl_easy_perform(curl);
+	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+	if (res != CURLE_OK) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "PUT (%s): curl_easy_perform() failed, HTTP code: %lu (%s)\n", url, http_code, curl_easy_strerror(res));
+		goto fail;
+	}
+
+	if (http_code != 200) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "PUT (%s): failed, HTTP code: %lu (%s)\n", url, http_code, curl_easy_strerror(res));
+		goto fail;
+	}
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "-> PUT (%s): resulted with HTTP code %lu\n", url, http_code);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "-> PUT (%s): %lu bytes uploaded\n", url, (unsigned long) file_info.st_size);
+
+	curl_easy_getinfo(curl, CURLINFO_SPEED_UPLOAD_T, &speed_upload);
+	curl_easy_getinfo(curl, CURLINFO_TOTAL_TIME_T, &total_time);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Done. Upload speed: %" CURL_FORMAT_CURL_OFF_T " bytes/sec during %" CURL_FORMAT_CURL_OFF_T ".%06ld seconds\n", speed_upload, (total_time / 1000000), (long)(total_time % 1000000));
+
+	curl_easy_cleanup(curl);
+	curl_global_cleanup();
+	fclose(fd);
+
+	return SWITCH_STATUS_SUCCESS;
 
 fail:
 
-  switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Upload failed (%s to %s)\n", file_name, url);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Upload failed (%s to %s)\n", file_name, url);
 
-  if (fd) {
-	  fclose(fd);
-  }
+	if (fd) {
+		fclose(fd);
+	}
 
-  if (curl) {
-	  curl_easy_cleanup(curl);
-  }
+	if (curl) {
+		curl_easy_cleanup(curl);
+	}
 
-  return SWITCH_STATUS_FALSE;
+	return SWITCH_STATUS_FALSE;
+}
+
+static size_t hv_http_read_memory_callback(void *ptr, size_t size, size_t nmemb, void *userp)
+{
+	hv_http_req_t *upload = (hv_http_req_t *) userp;
+	size_t max = size*nmemb;
+
+	if (max < 1)
+		return 0;
+
+	if (upload->sizeleft) {
+		size_t copylen = max;
+		if (copylen > upload->sizeleft) {
+			copylen = upload->sizeleft;
+		}
+		memcpy(ptr, upload->memory, copylen);
+		upload->memory += copylen;
+		upload->sizeleft -= copylen;
+		return copylen;
+	}
+
+	return 0;
+}
+
+SWITCH_DECLARE(switch_status_t) hv_http_upload_from_mem(hv_http_req_t *upload)
+{
+	CURLcode res = 0;
+	CURL *curl = NULL;
+	curl_off_t speed_upload = 0, total_time = 0;
+	long http_code = 0;
+	uint32_t sz = 0;
+
+	if (!upload || zstr(upload->url) || !upload->sizeleft) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "PUT: bad params\n");
+		goto fail;
+	}
+
+	sz = upload->sizeleft;
+
+	res = curl_global_init(CURL_GLOBAL_DEFAULT);
+	if (res != CURLE_OK) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "curl_global_init() failed: %s\n", curl_easy_strerror(res));
+		return SWITCH_STATUS_FALSE;
+	}
+
+	curl = curl_easy_init();
+	if (!curl) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "PUT: cannot init CURL\n");
+		goto fail;
+	}
+
+	curl_easy_setopt(curl, CURLOPT_URL, upload->url);
+	curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
+	curl_easy_setopt(curl, CURLOPT_READFUNCTION, hv_http_read_memory_callback);
+	curl_easy_setopt(curl, CURLOPT_READDATA, upload);
+	curl_easy_setopt(curl, CURLOPT_VERBOSE, 0);
+	curl_easy_setopt(curl, CURLOPT_INFILESIZE_LARGE, (curl_off_t) upload->sizeleft);
+
+	res = curl_easy_perform(curl);
+	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+	if (res != CURLE_OK) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "PUT (%s): curl_easy_perform() failed, HTTP code: %lu (%s)\n", upload->url, http_code, curl_easy_strerror(res));
+		goto fail;
+	}
+
+	if (http_code != 200) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "PUT (%s): failed, HTTP code: %lu (%s)\n", upload->url, http_code, curl_easy_strerror(res));
+		goto fail;
+	}
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "-> PUT (%s): resulted with HTTP code %lu\n", upload->url, http_code);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "-> PUT (%s): %u bytes uploaded\n", upload->url, sz);
+
+	curl_easy_getinfo(curl, CURLINFO_SPEED_UPLOAD_T, &speed_upload);
+	curl_easy_getinfo(curl, CURLINFO_TOTAL_TIME_T, &total_time);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Done. Upload speed: %" CURL_FORMAT_CURL_OFF_T " bytes/sec during %" CURL_FORMAT_CURL_OFF_T ".%06ld seconds\n", speed_upload, (total_time / 1000000), (long)(total_time % 1000000));
+
+	curl_easy_cleanup(curl);
+	curl_global_cleanup();
+	return SWITCH_STATUS_SUCCESS;
+
+fail:
+	return SWITCH_STATUS_FALSE;
 }
 
 SWITCH_DECLARE(void) hv_http_req_destroy(hv_http_req_t *req)
@@ -86,65 +196,106 @@ SWITCH_DECLARE(void) hv_http_req_destroy(hv_http_req_t *req)
 
 static size_t hv_http_write_memory_callback(void *contents, size_t size, size_t nmemb, void *userp)
 {
-  size_t realsize = size * nmemb;
-  hv_http_req_t *req = (hv_http_req_t *) userp;
+	size_t realsize = size * nmemb;
+	hv_http_req_t *req = (hv_http_req_t *) userp;
 
-  char *ptr = realloc(req->memory, req->size + realsize + 1);
-  if(!ptr) {
-    printf("not enough memory (realloc returned NULL)\n");
-    return 0;
-  }
+	char *ptr = realloc(req->memory, req->size + realsize + 1);
+	if(!ptr) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "MEM\n");
+		return 0;
+	}
 
-  req->memory = ptr;
-  memcpy(&(req->memory[req->size]), contents, realsize);
-  req->size += realsize;
-  req->memory[req->size] = 0;
+	req->memory = ptr;
+	memcpy(&(req->memory[req->size]), contents, realsize);
+	req->size += realsize;
+	req->memory[req->size] = 0;
 
-  return realsize;
+	return realsize;
 }
 
 SWITCH_DECLARE(switch_status_t) hv_http_get_to_mem(hv_http_req_t *req)
 {
-  CURL *curl_handle;
-  CURLcode res;
+	CURL *curl_handle;
+	CURLcode res;
+	long http_code = 0;
 
-  if (!req) {
-	  goto fail;
-  }
+	if (!req) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "GET: bad params\n");
+		goto fail;
+	}
 
-  req->memory = malloc(1);  /* will be grown as needed by the realloc above */
-  req->size = 0;    /* no data at this point */
+	if (zstr(req->url)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "GET: empty URL\n");
+		goto fail;
+	}
 
-  curl_global_init(CURL_GLOBAL_ALL);
-  curl_handle = curl_easy_init();
+	req->memory = malloc(1);  /* will be grown as needed by the realloc above */
+	req->size = 0;    /* no data at this point */
 
-  curl_easy_setopt(curl_handle, CURLOPT_URL, "http://happy-voicemail.s3.amazonaws.com/111112/1e1d56b9-ab8f-4240-9542-d4fb96aa87c0.wav");
-  curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, hv_http_write_memory_callback);
-  curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *) req);
-  curl_easy_setopt(curl_handle, CURLOPT_USERAGENT, "libcurl-agent/1.0");
+	curl_global_init(CURL_GLOBAL_ALL);
+	curl_handle = curl_easy_init();
+	if (!curl_handle) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "GET: cannot init CURL\n");
+		goto fail;
+	}
 
-  res = curl_easy_perform(curl_handle);
+	curl_easy_setopt(curl_handle, CURLOPT_URL, req->url);
+	curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, hv_http_write_memory_callback);
+	curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *) req);
+	curl_easy_setopt(curl_handle, CURLOPT_USERAGENT, "libcurl-agent/1.0");
 
-  if(res != CURLE_OK) {
-    fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
-	goto fail;
-  }
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "-> GET (%s) to mem\n", req->url);
+	res = curl_easy_perform(curl_handle);
 
-    /*
-     * Now, our chunk.memory points to a memory block that is chunk.size
-     * bytes big and contains the remote file.
-     *
-     * Do something nice with it!
-     */
+	curl_easy_getinfo(curl_handle, CURLINFO_RESPONSE_CODE, &http_code);
+	req->http_code = http_code;
+	if (res != CURLE_OK) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "GET (%s): curl_easy_perform() failed, HTTP code: %lu (%s)\n", req->url, http_code, curl_easy_strerror(res));
+		goto fail;
+	}
 
-    printf("%lu bytes retrieved\n", (unsigned long) req->size);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "-> GET (%s): resulted with HTTP code %lu\n", req->url, http_code);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "-> GET (%s): %lu bytes retrieved\n", req->url, (unsigned long) req->size);
 
+	curl_easy_cleanup(curl_handle);
+	curl_global_cleanup();
 
-  curl_easy_cleanup(curl_handle);
-  curl_global_cleanup();
-
-  return SWITCH_STATUS_SUCCESS;
+	return SWITCH_STATUS_SUCCESS;
 
 fail:
-  return SWITCH_STATUS_FALSE;
+	if (curl_handle) {
+		curl_easy_cleanup(curl_handle);
+		curl_global_cleanup();
+	}
+	return SWITCH_STATUS_FALSE;
+}
+
+SWITCH_DECLARE(switch_status_t) hv_http_get_to_disk(hv_http_req_t *req, const char *file_name)
+{
+	FILE *f = NULL;
+
+	if (!req || zstr(file_name)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "GET: bad params\n");
+		return SWITCH_STATUS_FALSE;
+	}
+
+	if (SWITCH_STATUS_SUCCESS != hv_http_get_to_mem(req)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "GET: failed to download (%s)\n", req->url);
+		return SWITCH_STATUS_FALSE;
+	}
+
+	f = fopen(file_name,"w+b");
+	if (!f) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "GET: failed to open file for writing (%s)\n", file_name);
+		return SWITCH_STATUS_FALSE;
+	}
+
+	if (req->size != fwrite(req->memory, 1, req->size, f)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "GET: failed to write into file (%s)\n", file_name);
+		return SWITCH_STATUS_FALSE;
+	}
+
+	fclose(f);
+	fflush(f);
+	return SWITCH_STATUS_SUCCESS;
 }

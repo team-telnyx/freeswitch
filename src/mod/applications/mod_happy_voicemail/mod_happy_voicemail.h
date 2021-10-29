@@ -10,7 +10,8 @@
 
 #define HV_DEFAULT_BEEP "%(1300, 0, 640)"
 #define HV_DEFAULT_MAX_RECORD_LEN_S 600
-#define HV_DEFAULT_FILE_SYSTEM_FOLDER "/tmp/voicemails"
+#define HV_DEFAULT_FILE_SYSTEM_FOLDER_IN	"/tmp/in/voicemails"
+#define HV_DEFAULT_FILE_SYSTEM_FOLDER_OUT	"/tmp/out/voicemails"
 #define HV_DEFAULT_RECORDING_FILE_EXT "wav"
 #define HV_DEFAULT_RECORD_CHECK_SILENCE "false"
 
@@ -18,6 +19,8 @@
 
 #define HV_JSON_NEW_VOICEMAILS_ARRAY_NAME "new_voicemails"
 #define HV_JSON_S3_NAME "vms.json"
+#define HV_JSON_KEY_VOICEMAIL_NAME "name"
+#define HV_JSON_KEY_VOICEMAIL_TIMESTAMP "timestamp"
 
 struct hv_settings_s {
 	char tone_spec[HV_BUFLEN];
@@ -27,7 +30,8 @@ struct hv_settings_s {
 	uint8_t record_check_silence;
 	uint32_t max_record_len;
 	char s3_url[HV_BUFLEN];
-	char file_system_folder[HV_BUFLEN];
+	char file_system_folder_in[HV_BUFLEN];
+	char file_system_folder_out[HV_BUFLEN];
 	uint8_t dump_events;
 	char recording_file_ext[HV_BUFLEN];
 };
@@ -46,6 +50,8 @@ struct hv_http_req_s {
 	char url[HV_BUFLEN];
 	char *memory;
 	size_t size;
+	size_t sizeleft;
+	long http_code;
 };
 typedef struct hv_http_req_s hv_http_req_t;
 
@@ -53,10 +59,22 @@ SWITCH_DECLARE(switch_status_t) hv_file_name_to_s3_url(const char *name, const c
 SWITCH_DECLARE(switch_status_t) hv_ext_to_s3_vm_state_url(const char *ext, char *url, uint32_t len, hv_settings_t *settings);
 SWITCH_DECLARE(void) hv_get_uuid(char *buf, uint32_t len);
 SWITCH_DECLARE(switch_status_t) hv_http_upload_from_disk(const char *file_name, const char *url);
+SWITCH_DECLARE(switch_status_t) hv_http_upload_from_mem(hv_http_req_t *upload);
 SWITCH_DECLARE(void) hv_http_req_destroy(hv_http_req_t *req);
 SWITCH_DECLARE(switch_status_t) hv_http_get_to_mem(hv_http_req_t *req);
+SWITCH_DECLARE(switch_status_t) hv_http_get_to_disk(hv_http_req_t *req, const char *file_name);
 
 SWITCH_DECLARE(cJSON*) hv_json_vm_state_create(void);
 SWITCH_DECLARE(switch_status_t) hv_json_vm_state_add_new_voicemail(cJSON *v, const char *name);
+
+SWITCH_DECLARE(switch_status_t) hv_vm_state_get_from_s3_to_mem(hv_http_req_t *req, const char *cld, hv_settings_t *settings);
+SWITCH_DECLARE(switch_status_t) hv_vm_state_update(const char *cld, const char *voicemail_name, hv_settings_t *settings);
+
+struct call_control_s {
+	switch_file_handle_t *fh;
+	char buf[4];
+	int noexit;
+};
+typedef struct call_control_s switch_cc_t;
 
 #endif // MOD_HAPPY_VOICEMAIL_H

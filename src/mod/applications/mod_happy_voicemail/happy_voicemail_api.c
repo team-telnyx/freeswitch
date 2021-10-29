@@ -69,9 +69,9 @@ switch_status_t hv_http_upload_api_exec(_In_opt_z_ const char *cmd, _In_opt_ swi
 		cld = strdup(switch_event_get_header(event, "variable_telnyx_dialed_extension"));
 		switch_event_destroy(&event);
 	}
-	
+
 	if (zstr(cld)) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Cannot get destination (callee) number\n");
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Missing destination (callee) number\n");
 		return SWITCH_STATUS_FALSE;
 	}
 
@@ -92,58 +92,9 @@ switch_status_t hv_http_upload_api_exec(_In_opt_z_ const char *cmd, _In_opt_ swi
 
 	unlink(voicemail_path);
 
-	{
-		cJSON *vms = NULL;
-		hv_http_req_t req = { 0 };
-		char *s = NULL;
-
-		if (SWITCH_STATUS_SUCCESS != hv_ext_to_s3_vm_state_url(cld, req.url, sizeof(req.url), settings)) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to create S3 resource URL (for %s)\n", cld);
-			goto fail;
-		}
-
-		if (SWITCH_STATUS_SUCCESS != hv_http_get_to_mem(&req)) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "Failed to GET vm JSON state from S3 (for %s), will get overwritten with updated state\n", cld);
-		} else {
-			if (req.size > 0) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "Got vm JSON state from S3 (for %s), will be updated\n", cld);
-			} else {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "No JSON state on S3 (for %s), will get created\n", cld);
-			}
-			vms = cJSON_Parse(req.memory);
-			if (!vms) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "Failed to parse vm JSON state from S3 into JSON, will get overwritten with updated state (for %s)\n", cld);
-			}
-		}
-
-		hv_http_req_destroy(&req);
-
-		if (!vms) {
-			vms = hv_json_vm_state_create();
-			if (!vms) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to create JSON state (for %s)\n", cld);
-			}
-		}
-
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "Adding new voicemail to JSON state (for %s)\n", cld);
-
-		if (SWITCH_STATUS_SUCCESS != hv_json_vm_state_add_new_voicemail(vms, voicemail_name)) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed add voicemail to JSON state (for %s)\n", cld);
-		}
-
-		hv_http_req_destroy(&req);
-
-		// upload state
-		s = cJSON_Print(vms);
-
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "Uploading JSON state (for %s):\n%s\n", cld, s);
-		
-		if (s) {
-			free(s);
-			s = NULL;
-		}
-
-		cJSON_Delete(vms);
+	if (SWITCH_STATUS_SUCCESS != hv_vm_state_update(cld, voicemail_name, settings)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to update vm JSON state on S3 (for %s)\n", cld);
+		goto fail;
 	}
 
 	free(cld);
