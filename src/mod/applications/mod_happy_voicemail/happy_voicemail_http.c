@@ -46,11 +46,6 @@ SWITCH_DECLARE(switch_status_t) hv_http_upload_from_disk(const char *file_name, 
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "PUT: cannot init CURL\n");
 		goto fail;
 	}
-	curl = curl_easy_init();
-	if (!curl) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "PUT: cannot init CURL\n");
-		goto fail;
-	}
 
 	curl_easy_setopt(curl, CURLOPT_URL, url);
 	curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);

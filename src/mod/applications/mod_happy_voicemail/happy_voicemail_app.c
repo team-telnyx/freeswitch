@@ -36,7 +36,7 @@ void hv_deposit_app_exec(switch_core_session_t *session, const char *file_path, 
 
 	switch_channel_set_variable(channel, "record_post_process_exec_api", "happy_voicemail_upload");
 	switch_channel_set_variable(channel, "record_check_silence", settings->record_check_silence ? "true" : "false");
-	switch_ivr_record_file(session, &fh, file_path, &args, settings->max_record_len);
+	switch_ivr_record_file(session, &fh, file_path, &args, settings->record_max_len);
 }
 
 void hv_retrieval_app_exec(switch_core_session_t *session, const char *data, hv_settings_t *settings)
@@ -148,6 +148,7 @@ void hv_retrieval_app_exec(switch_core_session_t *session, const char *data, hv_
 			}
 
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "VM: %s saved to disk (%s) (for %s)\n", name->valuestring, voicemail_path, cli);
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "VM: playback start %s (for %s)\n", name->valuestring, cli);
 
 
 			
@@ -165,6 +166,12 @@ void hv_retrieval_app_exec(switch_core_session_t *session, const char *data, hv_
 				cc.noexit = 1;
 				args.buf = &cc;
 				switch_ivr_play_file(session, &fh, voicemail_path, &args);
+			}
+
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "VM: playback end %s (for %s)\n", name->valuestring, cli);
+	
+			if (!settings->cache_enabled) {
+				unlink(voicemail_path);
 			}
 		}
 	}

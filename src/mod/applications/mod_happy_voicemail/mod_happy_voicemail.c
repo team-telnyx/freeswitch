@@ -32,30 +32,44 @@ static switch_status_t hv_load_config(void)
 				if (!strcasecmp(var, "tone-spec")) {
 					strncpy(settings.tone_spec, val, sizeof(settings.tone_spec));
 					settings.tone_spec[HV_BUFLEN-1] = '\0';
+					settings.configured.tone_spec = 1;
 				} else if (!strcasecmp(var, "record-silence-threshold")) {
 					settings.record_silence_threshold = atoi(val);
+					settings.configured.record_silence_threshold = 1;
 				} else if (!strcasecmp(var, "record-silence-hits")) {
 					settings.record_silence_hits = atoi(val);
+					settings.configured.record_silence_hits = 1;
 				} else if (!strcasecmp(var, "record-sample-rate")) {
 					settings.record_sample_rate = atoi(val);
-				} else if (!strcasecmp(var, "max-record-len")) {
-					settings.max_record_len = atoi(val);
+					settings.configured.record_sample_rate = 1;
+				} else if (!strcasecmp(var, "record-max-len")) {
+					settings.record_max_len = atoi(val);
+					settings.configured.record_max_len = 1;
 				} else if (!strcasecmp(var, "record-check-silence")) {
 					settings.record_check_silence = atoi(val);
+					settings.configured.record_check_silence = 1;
 				} else if (!strcasecmp(var, "s3-url")) {
 					strncpy(settings.s3_url, val, sizeof(settings.s3_url));
 					settings.s3_url[HV_BUFLEN-1] = '\0';
+					settings.configured.s3_url = 1;
 				} else if (!strcasecmp(var, "file-system-folder-in")) {
 					strncpy(settings.file_system_folder_in, val, sizeof(settings.file_system_folder_in));
 					settings.file_system_folder_in[HV_BUFLEN-1] = '\0';
+					settings.configured.file_system_folder_in = 1;
 				} else if (!strcasecmp(var, "file-system-folder-out")) {
 					strncpy(settings.file_system_folder_out, val, sizeof(settings.file_system_folder_out));
 					settings.file_system_folder_out[HV_BUFLEN-1] = '\0';
+					settings.configured.file_system_folder_out = 1;
 				} else if (!strcasecmp(var, "dump-events")) {
 					settings.dump_events = switch_true(val);
-				} else if (!strcasecmp(var, "recording-file-ext")) {
-					strncpy(settings.recording_file_ext, val, sizeof(settings.recording_file_ext));
-					settings.recording_file_ext[HV_BUFLEN-1] = '\0';
+					settings.configured.dump_events = 1;
+				} else if (!strcasecmp(var, "record-file-ext")) {
+					strncpy(settings.record_file_ext, val, sizeof(settings.record_file_ext));
+					settings.record_file_ext[HV_BUFLEN-1] = '\0';
+					settings.configured.record_file_ext = 1;
+				} else if (!strcasecmp(var, "cache-enabled")) {
+					settings.cache_enabled = switch_true(val);
+					settings.configured.cache_enabled = 1;
 				}
 			}
 		}
@@ -75,43 +89,48 @@ static switch_status_t hv_check_settings(hv_settings_t *settings)
 		return SWITCH_STATUS_FALSE;
 	}
 
-	if (zstr(settings->tone_spec)) {
+	if (!settings->configured.tone_spec) {
 		strncpy(settings->tone_spec, HV_DEFAULT_BEEP, sizeof(settings->tone_spec));
 		settings->tone_spec[HV_BUFLEN-1] = '\0';
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: tone-spec (using default %s)\n", HV_DEFAULT_BEEP);
 	}
 
-	if (!settings->max_record_len) {
-		settings->max_record_len = HV_DEFAULT_MAX_RECORD_LEN_S;
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: max-record-len (using default %u seconds)\n", HV_DEFAULT_MAX_RECORD_LEN_S);
+	if (!settings->configured.record_max_len) {
+		settings->record_max_len = HV_DEFAULT_RECORD_MAX_LEN_S;
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: record-max-len (using default %u seconds)\n", HV_DEFAULT_RECORD_MAX_LEN_S);
 	}
 
-	if (!settings->record_check_silence) {
+	if (!settings->configured.record_check_silence) {
 		settings->record_check_silence = switch_true(HV_DEFAULT_RECORD_CHECK_SILENCE);
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: record-check-silence (using default %s)\n", HV_DEFAULT_RECORD_CHECK_SILENCE);
 	}
 
-	if (zstr(settings->s3_url)) {
+	if (!settings->configured.s3_url) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Settings missing: S3 url\n");
 		return SWITCH_STATUS_FALSE;
 	}
 
-	if (zstr(settings->file_system_folder_in)) {
+	if (!settings->configured.file_system_folder_in) {
 		strncpy(settings->file_system_folder_in, HV_DEFAULT_FILE_SYSTEM_FOLDER_IN, sizeof(settings->file_system_folder_in));
 		settings->file_system_folder_in[HV_BUFLEN-1] = '\0';
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: file-system-folder-in (using default %s)\n", HV_DEFAULT_FILE_SYSTEM_FOLDER_IN);
 	}
 
-	if (zstr(settings->file_system_folder_out)) {
+	if (!settings->configured.file_system_folder_out) {
 		strncpy(settings->file_system_folder_out, HV_DEFAULT_FILE_SYSTEM_FOLDER_OUT, sizeof(settings->file_system_folder_out));
 		settings->file_system_folder_out[HV_BUFLEN-1] = '\0';
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: file-system-folder-out (using default %s)\n", HV_DEFAULT_FILE_SYSTEM_FOLDER_OUT);
 	}
 
-	if (zstr(settings->recording_file_ext)) {
-		strncpy(settings->recording_file_ext, HV_DEFAULT_RECORDING_FILE_EXT, sizeof(settings->recording_file_ext));
-		settings->recording_file_ext[HV_BUFLEN-1] = '\0';
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: recording-file-ext (using default %s)\n", HV_DEFAULT_RECORDING_FILE_EXT);
+	if (!settings->configured.record_file_ext) {
+		strncpy(settings->record_file_ext, HV_DEFAULT_RECORD_FILE_EXT, sizeof(settings->record_file_ext));
+		settings->record_file_ext[HV_BUFLEN-1] = '\0';
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: record-file-ext (using default %s)\n", HV_DEFAULT_RECORD_FILE_EXT);
+	}
+
+	if (!settings->configured.cache_enabled) {
+		settings->cache_enabled = switch_true(HV_DEFAULT_CACHE_ENABLED);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: cache-enabled (using default %s)\n", HV_DEFAULT_CACHE_ENABLED);
 	}
 
 	return SWITCH_STATUS_SUCCESS;
@@ -164,7 +183,7 @@ SWITCH_DECLARE(switch_status_t) hv_get_new_voicemail_name(char *buf, uint32_t le
 	}
 
 	hv_get_uuid(uuid, sizeof(uuid));
-	snprintf(buf, len, "%s.%s", uuid, settings->recording_file_ext);
+	snprintf(buf, len, "%s.%s", uuid, settings->record_file_ext);
 	buf[len-1] = '\0';
 	return SWITCH_STATUS_SUCCESS;
 }

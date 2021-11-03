@@ -9,11 +9,12 @@
 #define HV_NAME "Happy Voicemail"
 
 #define HV_DEFAULT_BEEP "%(1300, 0, 640)"
-#define HV_DEFAULT_MAX_RECORD_LEN_S 600
+#define HV_DEFAULT_RECORD_MAX_LEN_S 600
 #define HV_DEFAULT_FILE_SYSTEM_FOLDER_IN	"/tmp/in/voicemails"
 #define HV_DEFAULT_FILE_SYSTEM_FOLDER_OUT	"/tmp/out/voicemails"
-#define HV_DEFAULT_RECORDING_FILE_EXT "wav"
+#define HV_DEFAULT_RECORD_FILE_EXT "wav"
 #define HV_DEFAULT_RECORD_CHECK_SILENCE "false"
+#define HV_DEFAULT_CACHE_ENABLED "false"
 
 #define HV_BUFLEN 1000
 
@@ -28,12 +29,28 @@ struct hv_settings_s {
 	uint32_t record_silence_hits;
 	uint32_t record_sample_rate;
 	uint8_t record_check_silence;
-	uint32_t max_record_len;
+	uint32_t record_max_len;
+	char record_file_ext[HV_BUFLEN];
 	char s3_url[HV_BUFLEN];
 	char file_system_folder_in[HV_BUFLEN];
 	char file_system_folder_out[HV_BUFLEN];
 	uint8_t dump_events;
-	char recording_file_ext[HV_BUFLEN];
+	uint8_t cache_enabled;
+
+	struct configured {
+		uint8_t tone_spec;
+		uint8_t record_silence_threshold;
+		uint8_t record_silence_hits;
+		uint8_t record_sample_rate;
+		uint8_t record_check_silence;
+		uint8_t record_max_len;
+		uint8_t record_file_ext;
+		uint8_t s3_url;
+		uint8_t file_system_folder_in;
+		uint8_t file_system_folder_out;
+		uint8_t dump_events;
+		uint8_t cache_enabled;
+	} configured;
 };
 typedef struct hv_settings_s hv_settings_t;
 
