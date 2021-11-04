@@ -45,7 +45,7 @@
 #include "prometheus_metrics.h"
 #include "switch_telnyx.h"
 
-#define DEBUG_RTP 0
+#define DEBUG_RTP 1
 
 SWITCH_MODULE_LOAD_FUNCTION(mod_sofia_load);
 SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_sofia_shutdown);
