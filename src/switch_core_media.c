@@ -9774,6 +9774,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 		//	smh->mparams->manual_rtp_bugs = RTP_BUG_SEND_LINEAR_TIMESTAMPS;
 		//}
 
+#if DEBUG_RTP
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "Activating audio RTP with LINEAR timestamp (RTP_BUG_SEND_LINEAR_TIMESTAMPS) %p/%p\n", (void*)session, (void*)a_engine->rtp_session);
+		smh->mparams->manual_rtp_bugs = RTP_BUG_SEND_LINEAR_TIMESTAMPS;
+#endif
+
 		switch_rtp_intentional_bugs(a_engine->rtp_session, a_engine->rtp_bugs | smh->mparams->manual_rtp_bugs);
 
 		if ((vad_in && inb) || (vad_out && !inb)) {

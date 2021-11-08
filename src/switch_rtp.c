@@ -1571,6 +1571,11 @@ static uint8_t get_next_write_ts(switch_rtp_t *rtp_session, uint32_t timestamp)
 {
 	uint8_t m = 0, changed = 0;
 
+#if DEBUG_RTP
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "RTP: get_next_write_ts, timestamp: %u, -> ts: %u , LIN:%d TIMER:%d %p/%p\n", 
+			timestamp, rtp_session->ts, rtp_session->rtp_bugs & RTP_BUG_SEND_LINEAR_TIMESTAMPS, switch_rtp_test_flag(rtp_session, SWITCH_RTP_FLAG_USE_TIMER), (void*)rtp_session->session, (void*)rtp_session);
+#endif
+
 	if (!(rtp_session->rtp_bugs & RTP_BUG_SEND_LINEAR_TIMESTAMPS)) {
 		if (timestamp) {
 			rtp_session->ts = (uint32_t) timestamp;
@@ -1591,6 +1596,9 @@ static uint8_t get_next_write_ts(switch_rtp_t *rtp_session, uint32_t timestamp)
 			m++;
 		}
 	}
+#if DEBUG_RTP
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "RTP: get_next_write_ts, timestamp: %u, -> ts: %u %p/%p\n", timestamp, rtp_session->ts, (void*)rtp_session->session, (void*)rtp_session);
+#endif
 
 	return m;
 }
