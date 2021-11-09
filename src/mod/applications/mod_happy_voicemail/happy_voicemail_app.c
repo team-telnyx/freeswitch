@@ -113,11 +113,22 @@ void hv_retrieval_app_exec(switch_core_session_t *session, const char *data, hv_
 		cJSON *vms = NULL, *vm = NULL;
 		hv_http_req_t req = { 0 };
 		char voicemail_path[2*HV_BUFLEN] = { 0 };
+		char prompt[4*HV_BUFLEN] = { 0 };
+		int vms_n = 0;
 
 		vms = cJSON_GetObjectItemCaseSensitive(json, HV_JSON_NEW_VOICEMAILS_ARRAY_NAME);
 		if (!vms || !cJSON_IsArray(vms)) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Error parsing JSON (for %s), %s missing\n", cli, HV_JSON_NEW_VOICEMAILS_ARRAY_NAME);
 			goto fail;
+		}
+
+		vms_n = cJSON_GetArraySize(vms);
+		if (vms_n > 0) {
+			snprintf(prompt, sizeof(prompt), "You have %d messages\n", vms_n);
+			switch_ivr_speak_text(session, "flite", settings->voice, prompt, NULL);
+		} else {
+			snprintf(prompt, sizeof(prompt), "You have no messages\n");
+			switch_ivr_speak_text(session, "flite", settings->voice, prompt, NULL);
 		}
 
 		cJSON_ArrayForEach(vm, vms) {
@@ -130,6 +141,9 @@ void hv_retrieval_app_exec(switch_core_session_t *session, const char *data, hv_
 				err = 1;
 				continue;
 			}
+
+			snprintf(prompt, sizeof(prompt), "New message.\n");
+			switch_ivr_speak_text(session, "flite", settings->voice, prompt, NULL);
 
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "VM: processing %s (for %s)\n", name->valuestring, cli);
 

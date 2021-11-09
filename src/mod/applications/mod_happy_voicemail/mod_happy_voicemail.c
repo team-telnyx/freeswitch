@@ -70,6 +70,10 @@ static switch_status_t hv_load_config(void)
 				} else if (!strcasecmp(var, "cache-enabled")) {
 					settings.cache_enabled = switch_true(val);
 					settings.configured.cache_enabled = 1;
+				} else if (!strcasecmp(var, "voice")) {
+					strncpy(settings.voice, val, sizeof(settings.voice));
+					settings.voice[HV_BUFLEN-1] = '\0';
+					settings.configured.voice = 1;
 				}
 			}
 		}
@@ -131,6 +135,12 @@ static switch_status_t hv_check_settings(hv_settings_t *settings)
 	if (!settings->configured.cache_enabled) {
 		settings->cache_enabled = switch_true(HV_DEFAULT_CACHE_ENABLED);
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: cache-enabled (using default %s)\n", HV_DEFAULT_CACHE_ENABLED);
+	}
+
+	if (!settings->configured.voice) {
+		strncpy(settings->voice, HV_DEFAULT_VOICE, sizeof(settings->voice));
+		settings->voice[HV_BUFLEN-1] = '\0';
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: voice (using default %s)\n", HV_DEFAULT_VOICE);
 	}
 
 	return SWITCH_STATUS_SUCCESS;

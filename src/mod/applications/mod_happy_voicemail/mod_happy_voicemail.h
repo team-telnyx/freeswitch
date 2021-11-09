@@ -15,6 +15,7 @@
 #define HV_DEFAULT_RECORD_FILE_EXT "wav"
 #define HV_DEFAULT_RECORD_CHECK_SILENCE "false"
 #define HV_DEFAULT_CACHE_ENABLED "false"
+#define HV_DEFAULT_VOICE "slt"
 
 #define HV_BUFLEN 1000
 
@@ -36,6 +37,7 @@ struct hv_settings_s {
 	char file_system_folder_out[HV_BUFLEN];
 	uint8_t dump_events;
 	uint8_t cache_enabled;
+	char voice[HV_BUFLEN];
 
 	struct configured {
 		uint8_t tone_spec;
@@ -50,6 +52,7 @@ struct hv_settings_s {
 		uint8_t file_system_folder_out;
 		uint8_t dump_events;
 		uint8_t cache_enabled;
+		uint8_t voice;
 	} configured;
 };
 typedef struct hv_settings_s hv_settings_t;

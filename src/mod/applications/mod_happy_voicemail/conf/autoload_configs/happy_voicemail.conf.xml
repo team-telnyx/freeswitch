@@ -11,5 +11,8 @@
 		<param name="dump-events" value="false"/>
 		<param name="recording-file-ext" value="wav"/>
 		<param name="cache_enabled" value="no"/>
+
+		<!-- slt|kal|awb|rms -->
+		<param name="voice" value="slt"/>
 	</settings>
 </configuration> 
