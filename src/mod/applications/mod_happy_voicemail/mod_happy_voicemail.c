@@ -285,6 +285,9 @@ SWITCH_STANDARD_API(hv_http_upload_api)
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Voicemail deposit OK\n");
 		return SWITCH_STATUS_SUCCESS;
 	} else {
+		char prompt[2*HV_BUFLEN] = { 0 };
+		snprintf(prompt, sizeof(prompt), "Service temporarily unavailable. Message could not be saved.");
+		hv_ivr_speak_text(prompt, session, &settings);
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Voicemail deposit failed\n");
 		return SWITCH_STATUS_FALSE;
 	}

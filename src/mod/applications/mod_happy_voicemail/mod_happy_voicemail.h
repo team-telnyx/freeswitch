@@ -24,6 +24,8 @@
 #define HV_JSON_KEY_VOICEMAIL_NAME "name"
 #define HV_JSON_KEY_VOICEMAIL_TIMESTAMP "timestamp"
 
+#define HV_MENU_LOOPS_MAX_N 5
+
 struct hv_settings_s {
 	char tone_spec[HV_BUFLEN];
 	uint32_t record_silence_threshold;
@@ -96,5 +98,8 @@ struct call_control_s {
 	int noexit;
 };
 typedef struct call_control_s switch_cc_t;
+
+SWITCH_DECLARE(void) hv_ivr_speak_text(const char *text, switch_core_session_t *session, hv_settings_t *settings);
+SWITCH_DECLARE(void) hv_ivr_run(switch_core_session_t *session, cJSON *vm_state, char *cli, hv_settings_t *settings);
 
 #endif // MOD_HAPPY_VOICEMAIL_H
