@@ -47,7 +47,7 @@ void hv_deposit_app_exec(switch_core_session_t *session, const char *file_path, 
 	}
 
 	snprintf(prompt, sizeof(prompt), "This is a voicemail service for %s. Please leave your message after the tone.", cld);
-	hv_ivr_speak_text(prompt, session, settings);
+	hv_ivr_speak_text(prompt, session, settings, NULL);
 
 	switch_core_session_get_read_impl(session, &read_impl);
 	switch_ivr_gentones(session, settings->tone_spec, 0, NULL);
@@ -71,7 +71,7 @@ void hv_deposit_app_exec(switch_core_session_t *session, const char *file_path, 
 
 fail:
 	snprintf(prompt, sizeof(prompt), "Service temporarily unavailable.");
-	hv_ivr_speak_text(prompt, session, settings);
+	hv_ivr_speak_text(prompt, session, settings, NULL);
 }
 
 void hv_retrieval_app_exec(switch_core_session_t *session, const char *data, hv_settings_t *settings)
@@ -144,7 +144,7 @@ void hv_retrieval_app_exec(switch_core_session_t *session, const char *data, hv_
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Handling JSON state (for %s):\n%s\n", cli, s);
 
 	snprintf(prompt, sizeof(prompt), "This is a voicemail service for %s.", cli);
-	hv_ivr_speak_text(prompt, session, settings);
+	hv_ivr_speak_text(prompt, session, settings, NULL);
 
 	hv_ivr_run(session, json, cli, settings);
 
@@ -158,7 +158,7 @@ void hv_retrieval_app_exec(switch_core_session_t *session, const char *data, hv_
 	return;
 
 fail:
-	hv_ivr_speak_text("Service temporarily not available", session, settings);
+	hv_ivr_speak_text("Service temporarily not available", session, settings, NULL);
 	if (s) {
 		free(s);
 		s = NULL;
@@ -168,7 +168,7 @@ fail:
 	return;
 
 voicemail_not_enabled:
-	hv_ivr_speak_text("You do not have voicemail enabled", session, settings);
+	hv_ivr_speak_text("You do not have voicemail enabled", session, settings, NULL);
 	if (s) {
 		free(s);
 		s = NULL;

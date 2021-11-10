@@ -99,7 +99,15 @@ struct call_control_s {
 };
 typedef struct call_control_s switch_cc_t;
 
-SWITCH_DECLARE(void) hv_ivr_speak_text(const char *text, switch_core_session_t *session, hv_settings_t *settings);
+typedef struct hv_ivr_timeout_s {
+	switch_time_t start_ms;
+	switch_time_t timeout_ms;
+} hv_ivr_timeout_t;
+
+SWITCH_DECLARE(void) hv_ivr_timeout_set_ms(hv_ivr_timeout_t *t, switch_time_t ms);
+SWITCH_DECLARE(uint8_t) hv_ivr_timeout_expired(hv_ivr_timeout_t *t);
+
+SWITCH_DECLARE(void) hv_ivr_speak_text(const char *text, switch_core_session_t *session, hv_settings_t *settings, switch_input_args_t *args);
 SWITCH_DECLARE(void) hv_ivr_run(switch_core_session_t *session, cJSON *vm_state, char *cli, hv_settings_t *settings);
 
 #endif // MOD_HAPPY_VOICEMAIL_H
