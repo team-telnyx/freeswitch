@@ -77,11 +77,13 @@ fail:
 void hv_retrieval_app_exec(switch_core_session_t *session, const char *data, hv_settings_t *settings)
 {
 	char *cli = NULL;
+	const char *pin_var = NULL;
 	cJSON *json = NULL;
 	hv_http_req_t req = { 0 }; //upload = { 0 };
 	char *s = NULL;
 	switch_channel_t *channel = NULL;
 	char prompt[4*HV_BUFLEN] = { 0 };
+	uint64_t pin = 0;
 
 	if (!session || !settings) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Bad params\n");
@@ -111,12 +113,27 @@ void hv_retrieval_app_exec(switch_core_session_t *session, const char *data, hv_
 		}
 
 		cli = strdup(switch_event_get_header(event, "variable_telnyx_dialed_extension"));
+		pin_var = strdup(switch_event_get_header(event, "variable_telnyx_user_pin"));
+
 		switch_event_destroy(&event);
 	}
 
 	if (zstr(cli)) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Missing origination (caller) number\n");
 		return;
+	} else {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "Got origination (caller) number: %s\n", cli);
+	}
+
+	if (zstr(pin_var)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "Missing PIN number\n");
+		if (settings->pin_check) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Missing PIN number, but it is required\n");
+			return;
+		}
+	} else {
+		pin = strtoull(pin_var, NULL, 10);
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "Got PIN number: %s (%zu)\n", pin_var, pin);
 	}
 
 	if (SWITCH_STATUS_SUCCESS != hv_vm_state_get_from_s3_to_mem(&req, cli, settings)) {
@@ -146,7 +163,7 @@ void hv_retrieval_app_exec(switch_core_session_t *session, const char *data, hv_
 	snprintf(prompt, sizeof(prompt), "This is a voicemail service for %s.", cli);
 	hv_ivr_speak_text(prompt, session, settings, NULL);
 
-	hv_ivr_run(session, json, cli, settings);
+	hv_ivr_run(session, json, cli, pin, settings);
 
 	if (s) {
 		free(s);

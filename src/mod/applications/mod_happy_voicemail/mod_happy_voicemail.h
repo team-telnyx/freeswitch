@@ -16,6 +16,7 @@
 #define HV_DEFAULT_RECORD_CHECK_SILENCE "false"
 #define HV_DEFAULT_CACHE_ENABLED "false"
 #define HV_DEFAULT_VOICE "slt"
+#define HV_DEFAULT_PIN_CHECK "yes"
 
 #define HV_BUFLEN 1000
 
@@ -25,6 +26,13 @@
 #define HV_JSON_KEY_VOICEMAIL_TIMESTAMP "timestamp"
 
 #define HV_MENU_LOOPS_MAX_N 5
+#define HV_IVR_PIN_TERMINATOR_CHAR '#'
+#define HV_IVR_PIN_TERMINATOR_CHAR_NAME "hash"
+#define HV_IVR_TIMEOUT_SINGLE_DIGIT_MS 30000
+#define HV_IVR_TIMEOUT_TOTAL_MS 90000
+#define HV_IVR_LOOPS_MAX_PIN_CHECK 3
+#define HV_IVR_LOOPS_MAX_MAIN_MENU 3
+#define HV_IVR_LOOPS_MAX_SUB_MENU 3
 
 struct hv_settings_s {
 	char tone_spec[HV_BUFLEN];
@@ -40,6 +48,7 @@ struct hv_settings_s {
 	uint8_t dump_events;
 	uint8_t cache_enabled;
 	char voice[HV_BUFLEN];
+	uint8_t pin_check;
 
 	struct configured {
 		uint8_t tone_spec;
@@ -55,6 +64,7 @@ struct hv_settings_s {
 		uint8_t dump_events;
 		uint8_t cache_enabled;
 		uint8_t voice;
+		uint8_t pin_check;
 	} configured;
 };
 typedef struct hv_settings_s hv_settings_t;
@@ -92,13 +102,6 @@ SWITCH_DECLARE(switch_status_t) hv_json_vm_state_add_new_voicemail(cJSON *v, con
 SWITCH_DECLARE(switch_status_t) hv_vm_state_get_from_s3_to_mem(hv_http_req_t *req, const char *cld, hv_settings_t *settings);
 SWITCH_DECLARE(switch_status_t) hv_vm_state_update(const char *cld, const char *voicemail_name, hv_settings_t *settings);
 
-struct call_control_s {
-	switch_file_handle_t *fh;
-	char buf[4];
-	int noexit;
-};
-typedef struct call_control_s switch_cc_t;
-
 typedef struct hv_ivr_timeout_s {
 	switch_time_t start_ms;
 	switch_time_t timeout_ms;
@@ -108,6 +111,7 @@ SWITCH_DECLARE(void) hv_ivr_timeout_set_ms(hv_ivr_timeout_t *t, switch_time_t ms
 SWITCH_DECLARE(uint8_t) hv_ivr_timeout_expired(hv_ivr_timeout_t *t);
 
 SWITCH_DECLARE(void) hv_ivr_speak_text(const char *text, switch_core_session_t *session, hv_settings_t *settings, switch_input_args_t *args);
-SWITCH_DECLARE(void) hv_ivr_run(switch_core_session_t *session, cJSON *vm_state, char *cli, hv_settings_t *settings);
+SWITCH_DECLARE(switch_status_t) hv_ivr_pin_check(switch_core_session_t *session, uint64_t pin, hv_settings_t *settings);
+SWITCH_DECLARE(void) hv_ivr_run(switch_core_session_t *session, cJSON *vm_state, char *cli, uint64_t pin, hv_settings_t *settings);
 
 #endif // MOD_HAPPY_VOICEMAIL_H

@@ -10,7 +10,8 @@
 		<param name="file-system-folder-out" value="/tmp/voicemails/out"/>
 		<param name="dump-events" value="false"/>
 		<param name="recording-file-ext" value="wav"/>
-		<param name="cache_enabled" value="no"/>
+		<param name="cache-enabled" value="no"/>
+		<param name="pin-check" value="yes"/>
 
 		<!-- slt|kal|awb|rms -->
 		<param name="voice" value="slt"/>

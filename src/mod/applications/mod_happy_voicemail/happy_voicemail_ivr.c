@@ -99,6 +99,84 @@ static const char* hv_ivr_int_to_cardinal(int i)
 	}
 }
 
+SWITCH_DECLARE(switch_status_t) hv_ivr_pin_check(switch_core_session_t *session, uint64_t pin, hv_settings_t *settings)
+{
+	char digits[65] = { 0 };
+	char pressed = 0;
+	int digits_n = 0;
+	switch_channel_t *channel = NULL;
+	hv_ivr_timeout_t total_timeout = { 0 };
+	hv_ivr_timeout_t single_digit_timeout = { 0 };
+	char prompt[4*HV_BUFLEN] = { 0 };
+	uint64_t pin_collected = 0;
+
+	channel = switch_core_session_get_channel(session);
+	if (!channel) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel missing\n");
+		goto fail;
+	}
+
+	switch_channel_flush_dtmf(channel);
+	hv_ivr_timeout_set_ms(&single_digit_timeout, HV_IVR_TIMEOUT_SINGLE_DIGIT_MS);
+	hv_ivr_timeout_set_ms(&total_timeout, HV_IVR_TIMEOUT_TOTAL_MS);
+
+	while (!hv_ivr_timeout_expired(&total_timeout) && switch_channel_ready(channel)) {
+
+		switch_channel_flush_dtmf(channel);
+		hv_ivr_timeout_set_ms(&single_digit_timeout, HV_IVR_TIMEOUT_SINGLE_DIGIT_MS);
+		pressed = 0;
+
+		while (!hv_ivr_timeout_expired(&single_digit_timeout) && switch_channel_ready(channel)) {
+
+			if (switch_channel_has_dtmf(channel)) {
+				switch_dtmf_t d = { 0 };
+				switch_channel_dequeue_dtmf(channel, &d);
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "DTMF: PIN: %c\n", d.digit);
+
+				pressed = d.digit;
+				digits[digits_n] = pressed;
+				if (pressed == HV_IVR_PIN_TERMINATOR_CHAR || digits_n == 64) {
+					digits[digits_n] = 0;
+					pin_collected = strtoull(digits, NULL, 10);
+					if (pin == pin_collected) {
+						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "DTMF: PIN: correct (%s)\n", digits);
+						return SWITCH_STATUS_SUCCESS;
+					} else {
+						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "DTMF: PIN: invalid (%s)\n", digits);
+						return SWITCH_STATUS_FALSE;
+					}
+				}
+
+				digits[digits_n] = pressed;
+				digits_n++;
+				break;
+			}
+		}
+
+		if (!switch_channel_ready(channel)) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed\n");
+			return SWITCH_STATUS_BREAK;
+		}
+
+		if (!pressed) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "DTMF: PIN: single digit timeout\n");
+			break;
+		}
+	}
+
+	if (!switch_channel_ready(channel)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed\n");
+		return SWITCH_STATUS_BREAK;
+	}
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "DTMF: PIN: timeout\n");
+	snprintf(prompt, sizeof(prompt), "Time out.");
+	hv_ivr_speak_text(prompt, session, settings, NULL);
+
+fail:
+	return SWITCH_STATUS_FALSE;
+}
+
 SWITCH_DECLARE(switch_status_t) hv_ivr_on_dtmf(switch_core_session_t *session, void *input, switch_input_type_t itype, void *buf, unsigned int buflen)
 {
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Input callback: called for reason %d\n", itype);
@@ -149,7 +227,7 @@ static void hv_ivr_play_message_desc(int i, char *ts, switch_core_session_t *ses
 	hv_ivr_speak_text(prompt, session, settings, args);
 }
 
-SWITCH_DECLARE(void) hv_ivr_run(switch_core_session_t *session, cJSON *vm_state, char *cli, hv_settings_t *settings)
+SWITCH_DECLARE(void) hv_ivr_run(switch_core_session_t *session, cJSON *vm_state, char *cli, uint64_t pin, hv_settings_t *settings)
 {
 	cJSON *vms = NULL, *vm = NULL;
 	hv_http_req_t req = { 0 };
@@ -160,6 +238,7 @@ SWITCH_DECLARE(void) hv_ivr_run(switch_core_session_t *session, cJSON *vm_state,
 	int loops = 0;
 	int main_menu_loops = 0;
 	int sub_menu_loops = 0;
+	int pin_check_loops = 0;
 	char dtmf = 0;
 	hv_ivr_timeout_t timeout = { 0 };
 	switch_channel_t *channel = NULL;
@@ -183,6 +262,37 @@ SWITCH_DECLARE(void) hv_ivr_run(switch_core_session_t *session, cJSON *vm_state,
 		goto fail;
 	}
 
+	// Check PIN
+	if (settings->pin_check) {
+		snprintf(prompt, sizeof(prompt), "Please enter your PIN, followed by the %s.", HV_IVR_PIN_TERMINATOR_CHAR_NAME);
+		hv_ivr_speak_text(prompt, session, settings, NULL);
+		while (switch_channel_ready(channel) && (SWITCH_STATUS_SUCCESS != hv_ivr_pin_check(session, pin, settings))) {
+			if (!switch_channel_ready(channel)) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
+				goto end;
+			}
+			pin_check_loops++;
+			if (pin_check_loops < HV_IVR_LOOPS_MAX_PIN_CHECK) {
+				snprintf(prompt, sizeof(prompt), "PIN is invalid.");
+				hv_ivr_speak_text(prompt, session, settings, NULL);
+				snprintf(prompt, sizeof(prompt), "Please try again.");
+				hv_ivr_speak_text(prompt, session, settings, NULL);
+			} else {
+				snprintf(prompt, sizeof(prompt), "You've reached maximum number of failures, please dial again.");
+				hv_ivr_speak_text(prompt, session, settings, NULL);
+				goto end;
+			}
+		}
+
+		snprintf(prompt, sizeof(prompt), "PIN correct.");
+		hv_ivr_speak_text(prompt, session, settings, NULL);
+	}
+
+	if (!switch_channel_ready(channel)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
+		goto end;
+	}
+
 	// Prompt
 	vms_n = cJSON_GetArraySize(vms);
 	if (vms_n > 0) {
@@ -194,12 +304,13 @@ SWITCH_DECLARE(void) hv_ivr_run(switch_core_session_t *session, cJSON *vm_state,
 		goto end;
 	}
 
-	if (!switch_channel_ready(switch_core_session_get_channel(session))) {
+menu_main:
+
+	if (!switch_channel_ready(channel)) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
 		goto end;
 	}
 
-menu_main:
 	i = 0;
 	loops++;
 	main_menu_loops++;
@@ -223,9 +334,14 @@ menu_main:
 		}
 	}
 
-	hv_ivr_timeout_set_ms(&timeout, 5000);
+	if (!switch_channel_ready(channel)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
+		goto end;
+	}
 
-	while (!dtmf) {
+	hv_ivr_timeout_set_ms(&timeout, 10000);
+
+	while (!dtmf && switch_channel_ready(channel)) {
 		if (channel) {
 			if (switch_channel_has_dtmf(channel)) {
 				switch_dtmf_t d = { 0 };
@@ -240,7 +356,7 @@ menu_main:
 		}
 	}
 
-	if (!switch_channel_ready(switch_core_session_get_channel(session))) {
+	if (!switch_channel_ready(channel)) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
 		goto end;
 	}
@@ -261,9 +377,9 @@ menu_main:
 			goto end;
 		} else if (dtmf == '3') {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Sub menu: BAD ENTRY (for %s)\n", cli);
-			if (main_menu_loops < 3) {
+			if (main_menu_loops < HV_IVR_LOOPS_MAX_MAIN_MENU) {
 				snprintf(prompt, sizeof(prompt), "Please press 1, 2, or hangup.");
-				hv_ivr_speak_text(prompt, session, settings, NULL);
+				hv_ivr_speak_text(prompt, session, settings, &dtmf_args);
 				goto menu_main;
 			} else {
 				snprintf(prompt, sizeof(prompt), "You've reached maximum number of failures, please dial again.");
@@ -272,9 +388,9 @@ menu_main:
 			}
 		}
 	} else {
-		if (main_menu_loops < 3) {
+		if (main_menu_loops < HV_IVR_LOOPS_MAX_MAIN_MENU) {
 			snprintf(prompt, sizeof(prompt), "Please try again.");
-			hv_ivr_speak_text(prompt, session, settings, NULL);
+			hv_ivr_speak_text(prompt, session, settings, &dtmf_args);
 			goto menu_main;
 		} else {
 			snprintf(prompt, sizeof(prompt), "You've reached maximum number of failures, please dial again.");
@@ -283,10 +399,20 @@ menu_main:
 		}
 	}
 
+	if (!switch_channel_ready(channel)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
+		goto end;
+	}
+
 	cJSON_ArrayForEach(vm, vms) {
 
 		cJSON *name = cJSON_GetObjectItemCaseSensitive(vm, HV_JSON_KEY_VOICEMAIL_NAME);
 		cJSON *timestamp = cJSON_GetObjectItemCaseSensitive(vm, HV_JSON_KEY_VOICEMAIL_TIMESTAMP);
+		
+		if (!switch_channel_ready(channel)) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
+			goto cleanup;
+		}
 
 		if (!name || !timestamp || !cJSON_IsString(name) || !cJSON_IsString(timestamp)) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Error parsing JSON (for %s)\n", cli);
@@ -294,22 +420,24 @@ menu_main:
 			continue;
 		}
 
-		if (!switch_channel_ready(switch_core_session_get_channel(session))) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
-			goto cleanup;
-		}
-
 		switch_channel_flush_dtmf(channel);
 		dtmf = 0;
 
 		i++;
 
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "VM: processing %s (for %s)\n", name->valuestring, cli);
+		snprintf(voicemail_path, sizeof(voicemail_path), "%s/%s", settings->file_system_folder_in, name->valuestring);
+
 		// Message description
 		hv_ivr_play_message_desc(i, timestamp->valuestring, session, settings, &dtmf_args);
+		if (dtmf) {
+			goto process_playback_dtmf;
+		}
 
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "VM: processing %s (for %s)\n", name->valuestring, cli);
-
-		snprintf(voicemail_path, sizeof(voicemail_path), "%s/%s", settings->file_system_folder_in, name->valuestring);
+		if (!switch_channel_ready(channel)) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
+			goto cleanup;
+		}
 
 		if (SWITCH_STATUS_SUCCESS != switch_file_exists(voicemail_path, switch_core_session_get_pool(session))) {
 
@@ -345,14 +473,25 @@ menu_main:
 
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "VM: playback end %s (for %s)\n", name->valuestring, cli);
 
+		if (!switch_channel_ready(channel)) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
+			goto cleanup;
+		}	
+
 menu_sub:
-	sub_menu_loops++;
 
 		// SUBMENU
+		sub_menu_loops++;
+
+		if (!switch_channel_ready(channel)) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
+			goto cleanup;
+		}
 
 		if (dtmf) {
 			goto process_playback_dtmf;
 		}
+
 		snprintf(prompt, sizeof(prompt), "To listen to next message: ");
 		hv_ivr_speak_text(prompt, session, settings, &dtmf_args);
 		if (!dtmf) {
@@ -376,9 +515,14 @@ menu_sub:
 			}
 		}
 
+		if (!switch_channel_ready(channel)) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
+			goto cleanup;
+		}
+
 		hv_ivr_timeout_set_ms(&timeout, 5000);
 
-		while (!dtmf) {
+		while (!dtmf && switch_channel_ready(channel)) {
 			if (channel) {
 				if (switch_channel_has_dtmf(channel)) {
 					switch_dtmf_t d = { 0 };
@@ -392,7 +536,14 @@ menu_sub:
 				break;
 			}
 		}
+
+		if (!switch_channel_ready(channel)) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
+			goto cleanup;
+		}
+
 process_playback_dtmf:
+
 		if (dtmf) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Sub menu: DTMF %c pressed (for %s)\n", dtmf, cli);
 			if (dtmf == '1') {
@@ -403,7 +554,7 @@ process_playback_dtmf:
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Sub menu: HANGUP (for %s)\n", cli);
 				goto end;
 			} else {
-				if (sub_menu_loops < 3) {
+				if (sub_menu_loops < HV_IVR_LOOPS_MAX_SUB_MENU) {
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Sub menu: BAD ENTRY (for %s)\n", cli);
 					snprintf(prompt, sizeof(prompt), "Please press 1, 2, 3, or hangup.");
 					hv_ivr_speak_text(prompt, session, settings, NULL);
@@ -416,7 +567,7 @@ process_playback_dtmf:
 			}
 		} else {
 
-			if (sub_menu_loops < 3) {
+			if (sub_menu_loops < HV_IVR_LOOPS_MAX_SUB_MENU) {
 				snprintf(prompt, sizeof(prompt), "Please try again.");
 				hv_ivr_speak_text(prompt, session, settings, NULL);
 				goto menu_sub;

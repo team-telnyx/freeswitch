@@ -74,6 +74,9 @@ static switch_status_t hv_load_config(void)
 					strncpy(settings.voice, val, sizeof(settings.voice));
 					settings.voice[HV_BUFLEN-1] = '\0';
 					settings.configured.voice = 1;
+				} else if (!strcasecmp(var, "pin-check")) {
+					settings.pin_check = switch_true(val);
+					settings.configured.pin_check = 1;
 				}
 			}
 		}
@@ -96,17 +99,17 @@ static switch_status_t hv_check_settings(hv_settings_t *settings)
 	if (!settings->configured.tone_spec) {
 		strncpy(settings->tone_spec, HV_DEFAULT_BEEP, sizeof(settings->tone_spec));
 		settings->tone_spec[HV_BUFLEN-1] = '\0';
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: tone-spec (using default %s)\n", HV_DEFAULT_BEEP);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: tone-spec (using default value: %s)\n", HV_DEFAULT_BEEP);
 	}
 
 	if (!settings->configured.record_max_len) {
 		settings->record_max_len = HV_DEFAULT_RECORD_MAX_LEN_S;
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: record-max-len (using default %u seconds)\n", HV_DEFAULT_RECORD_MAX_LEN_S);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: record-max-len (using default value: %u seconds)\n", HV_DEFAULT_RECORD_MAX_LEN_S);
 	}
 
 	if (!settings->configured.record_check_silence) {
 		settings->record_check_silence = switch_true(HV_DEFAULT_RECORD_CHECK_SILENCE);
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: record-check-silence (using default %s)\n", HV_DEFAULT_RECORD_CHECK_SILENCE);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: record-check-silence (using default value: %s)\n", HV_DEFAULT_RECORD_CHECK_SILENCE);
 	}
 
 	if (!settings->configured.s3_url) {
@@ -117,30 +120,35 @@ static switch_status_t hv_check_settings(hv_settings_t *settings)
 	if (!settings->configured.file_system_folder_in) {
 		strncpy(settings->file_system_folder_in, HV_DEFAULT_FILE_SYSTEM_FOLDER_IN, sizeof(settings->file_system_folder_in));
 		settings->file_system_folder_in[HV_BUFLEN-1] = '\0';
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: file-system-folder-in (using default %s)\n", HV_DEFAULT_FILE_SYSTEM_FOLDER_IN);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: file-system-folder-in (using default value: %s)\n", HV_DEFAULT_FILE_SYSTEM_FOLDER_IN);
 	}
 
 	if (!settings->configured.file_system_folder_out) {
 		strncpy(settings->file_system_folder_out, HV_DEFAULT_FILE_SYSTEM_FOLDER_OUT, sizeof(settings->file_system_folder_out));
 		settings->file_system_folder_out[HV_BUFLEN-1] = '\0';
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: file-system-folder-out (using default %s)\n", HV_DEFAULT_FILE_SYSTEM_FOLDER_OUT);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: file-system-folder-out (using default value: %s)\n", HV_DEFAULT_FILE_SYSTEM_FOLDER_OUT);
 	}
 
 	if (!settings->configured.record_file_ext) {
 		strncpy(settings->record_file_ext, HV_DEFAULT_RECORD_FILE_EXT, sizeof(settings->record_file_ext));
 		settings->record_file_ext[HV_BUFLEN-1] = '\0';
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: record-file-ext (using default %s)\n", HV_DEFAULT_RECORD_FILE_EXT);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: record-file-ext (using default value: %s)\n", HV_DEFAULT_RECORD_FILE_EXT);
 	}
 
 	if (!settings->configured.cache_enabled) {
 		settings->cache_enabled = switch_true(HV_DEFAULT_CACHE_ENABLED);
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: cache-enabled (using default %s)\n", HV_DEFAULT_CACHE_ENABLED);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: cache-enabled (using default value: %s)\n", HV_DEFAULT_CACHE_ENABLED);
 	}
 
 	if (!settings->configured.voice) {
 		strncpy(settings->voice, HV_DEFAULT_VOICE, sizeof(settings->voice));
 		settings->voice[HV_BUFLEN-1] = '\0';
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: voice (using default %s)\n", HV_DEFAULT_VOICE);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: voice (using default value: %s)\n", HV_DEFAULT_VOICE);
+	}
+
+	if (!settings->configured.pin_check) {
+		settings->pin_check = switch_true(HV_DEFAULT_PIN_CHECK);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: pin-check (using default value: %s)\n", HV_DEFAULT_PIN_CHECK);
 	}
 
 	return SWITCH_STATUS_SUCCESS;
