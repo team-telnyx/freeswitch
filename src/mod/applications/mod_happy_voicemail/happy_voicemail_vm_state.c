@@ -1,26 +1,68 @@
 #include <mod_happy_voicemail.h>
 
 
-SWITCH_DECLARE(switch_status_t) hv_vm_state_get_from_s3_to_mem(hv_http_req_t *req, const char *cld, hv_settings_t *settings)
+SWITCH_DECLARE(switch_status_t) hv_vm_state_get_from_s3_to_mem(hv_http_req_t *req, const char *ext, hv_settings_t *settings)
 {
-	if (!req || zstr(cld) || !settings) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Bad params (for %s)\n", cld);
+	if (!req || zstr(ext) || !settings) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Bad params (for %s)\n", ext);
 		return SWITCH_STATUS_FALSE;
 	}
 
-	if (SWITCH_STATUS_SUCCESS != hv_ext_to_s3_vm_state_url(cld, req->url, sizeof(req->url), settings)) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to create S3 resource URL (for %s)\n", cld);
+	if (SWITCH_STATUS_SUCCESS != hv_ext_to_s3_vm_state_url(ext, req->url, sizeof(req->url), settings)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to create S3 resource URL (for %s)\n", ext);
 		return SWITCH_STATUS_FALSE;
 	}
 
 	return hv_http_get_to_mem(req);
 }
 
+SWITCH_DECLARE(switch_status_t) hv_vm_state_upload(const char *ext, cJSON *vms, hv_settings_t *settings)
+{
+	hv_http_req_t upload = { 0 };
+	char *s = NULL;
+
+	if (!vms || zstr(ext) || !settings) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Bad params (for %s)\n", ext);
+		return SWITCH_STATUS_FALSE;
+	}
+
+	if (SWITCH_STATUS_SUCCESS != hv_ext_to_s3_vm_state_url(ext, upload.url, sizeof(upload.url), settings)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to create S3 resource URL (for %s)\n", ext);
+		return SWITCH_STATUS_FALSE;
+	}
+
+	s = cJSON_Print(vms);
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Uploading JSON state (for %s):\n%s\n", ext, s);
+
+	upload.memory = s;
+	upload.sizeleft = strlen(s);
+	if (SWITCH_STATUS_SUCCESS != hv_http_upload_from_mem(&upload)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to upload JSON state to S3 (for %s)\n", ext);
+		goto fail;
+	}
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Upload OK (for %s)\n", ext);
+
+	if (s) {
+		free(s);
+		s = NULL;
+	}
+
+	return SWITCH_STATUS_SUCCESS;
+
+fail:
+	if (s) {
+		free(s);
+		s = NULL;
+	}
+	return SWITCH_STATUS_FALSE;
+}
+
 SWITCH_DECLARE(switch_status_t) hv_vm_state_update(const char *cld, const char *voicemail_name, hv_settings_t *settings)
 {
 	cJSON *vms = NULL;
-	hv_http_req_t req = { 0 }, upload = { 0 };
-	char *s = NULL;
+	hv_http_req_t req = { 0 };
 
 	if (zstr(cld) || zstr(voicemail_name) || !settings) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Bad params (for %s)\n", cld);
@@ -58,34 +100,20 @@ SWITCH_DECLARE(switch_status_t) hv_vm_state_update(const char *cld, const char *
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to add voicemail to JSON state (for %s)\n", cld);
 	}
 
-	s = cJSON_Print(vms);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Updating remote JSON state (for %s)\n", cld);
 
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Uploading JSON state (for %s):\n%s\n", cld, s);
-
-	upload.memory = s;
-	upload.sizeleft = strlen(s);
-	strncpy(upload.url, req.url, sizeof(upload.url));
-	if (SWITCH_STATUS_SUCCESS != hv_http_upload_from_mem(&upload)) {
+	if (SWITCH_STATUS_SUCCESS != hv_vm_state_upload(cld, vms, settings)) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to upload JSON state to S3 (for %s)\n", cld);
 		goto fail;
 	}
 
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "All good (for %s)\n", cld);
-
-	if (s) {
-		free(s);
-		s = NULL;
-	}
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Done (for %s)\n", cld);
 
 	hv_http_req_destroy(&req);
 	cJSON_Delete(vms);
 	return SWITCH_STATUS_SUCCESS;
 
 fail:
-	if (s) {
-		free(s);
-		s = NULL;
-	}
 	hv_http_req_destroy(&req);
 	if (vms) cJSON_Delete(vms);
 	return SWITCH_STATUS_FALSE;

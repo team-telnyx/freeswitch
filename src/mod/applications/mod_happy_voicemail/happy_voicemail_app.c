@@ -37,7 +37,7 @@ void hv_deposit_app_exec(switch_core_session_t *session, const char *file_path, 
 			free(buf);
 		}
 
-		cld = strdup(switch_event_get_header(event, "variable_telnyx_dialed_extension"));
+		cld = strdup(switch_event_get_header(event, HV_VARIABLE_DIALED_EXTENSION));
 		switch_event_destroy(&event);
 	}
 
@@ -112,8 +112,8 @@ void hv_retrieval_app_exec(switch_core_session_t *session, const char *data, hv_
 			free(buf);
 		}
 
-		cli = strdup(switch_event_get_header(event, "variable_telnyx_dialed_extension"));
-		pin_var = strdup(switch_event_get_header(event, "variable_telnyx_user_pin"));
+		cli = strdup(switch_event_get_header(event, HV_VARIABLE_DIALED_EXTENSION));
+		pin_var = strdup(switch_event_get_header(event, HV_VARIABLE_PIN_NAME));
 
 		switch_event_destroy(&event);
 	}

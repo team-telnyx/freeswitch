@@ -294,3 +294,55 @@ SWITCH_DECLARE(switch_status_t) hv_http_get_to_disk(hv_http_req_t *req, const ch
 	fflush(f);
 	return SWITCH_STATUS_SUCCESS;
 }
+
+SWITCH_DECLARE(switch_status_t) hv_http_delete(hv_http_req_t *req)
+{
+	CURL *curl_handle = NULL;
+	CURLcode res = 0;
+	long http_code = 0;
+
+	if (!req) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "GET: bad params\n");
+		return SWITCH_STATUS_FALSE;
+	}
+
+	if (zstr(req->url)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "GET: empty URL\n");
+		return SWITCH_STATUS_FALSE;
+	}
+
+	curl_global_init(CURL_GLOBAL_ALL);
+	curl_handle = curl_easy_init();
+	if (!curl_handle) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "GET: cannot init CURL\n");
+		return SWITCH_STATUS_FALSE;
+	}
+
+	curl_easy_setopt(curl_handle, CURLOPT_URL, req->url);
+	curl_easy_setopt(curl_handle, CURLOPT_CUSTOMREQUEST, "DELETE");
+	curl_easy_setopt(curl_handle, CURLOPT_USERAGENT, "libcurl-agent/1.0");
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "-> DELETE (%s)\n", req->url);
+	res = curl_easy_perform(curl_handle);
+
+	curl_easy_getinfo(curl_handle, CURLINFO_RESPONSE_CODE, &http_code);
+	req->http_code = http_code;
+	if (res != CURLE_OK) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "GET (%s): curl_easy_perform() failed, HTTP code: %lu (%s)\n", req->url, http_code, curl_easy_strerror(res));
+		goto fail;
+	}
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "-> DELETE (%s): resulted with HTTP code %lu\n", req->url, http_code);
+
+	curl_easy_cleanup(curl_handle);
+	curl_global_cleanup();
+
+	return SWITCH_STATUS_SUCCESS;
+
+fail:
+	if (curl_handle) {
+		curl_easy_cleanup(curl_handle);
+		curl_global_cleanup();
+	}
+	return SWITCH_STATUS_FALSE;
+}

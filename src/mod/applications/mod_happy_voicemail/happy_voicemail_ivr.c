@@ -229,7 +229,7 @@ static void hv_ivr_play_message_desc(int i, char *ts, switch_core_session_t *ses
 
 SWITCH_DECLARE(void) hv_ivr_run(switch_core_session_t *session, cJSON *vm_state, char *cli, uint64_t pin, hv_settings_t *settings)
 {
-	cJSON *vms = NULL, *vm = NULL;
+	cJSON *vms = NULL, *vms_original = NULL, *vm = NULL;
 	hv_http_req_t req = { 0 };
 	char voicemail_path[2*HV_BUFLEN] = { 0 };
 	char prompt[4*HV_BUFLEN] = { 0 };
@@ -259,6 +259,12 @@ SWITCH_DECLARE(void) hv_ivr_run(switch_core_session_t *session, cJSON *vm_state,
 	vms = cJSON_GetObjectItemCaseSensitive(vm_state, HV_JSON_NEW_VOICEMAILS_ARRAY_NAME);
 	if (!vms || !cJSON_IsArray(vms)) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Error parsing JSON (for %s), %s missing\n", cli, HV_JSON_NEW_VOICEMAILS_ARRAY_NAME);
+		goto fail;
+	}
+
+	vms_original = cJSON_Duplicate(vms, 1);
+	if (!vms_original || !cJSON_IsArray(vms_original)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Error parsing JSON (for %s)\n", cli);
 		goto fail;
 	}
 
@@ -308,7 +314,7 @@ menu_main:
 
 	if (!switch_channel_ready(channel)) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
-		goto end;
+		goto cleanup;
 	}
 
 	i = 0;
@@ -336,7 +342,7 @@ menu_main:
 
 	if (!switch_channel_ready(channel)) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
-		goto end;
+		goto cleanup;
 	}
 
 	hv_ivr_timeout_set_ms(&timeout, 10000);
@@ -358,7 +364,7 @@ menu_main:
 
 	if (!switch_channel_ready(channel)) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
-		goto end;
+		goto cleanup;
 	}
 
 	if (switch_channel_has_dtmf(channel)) {
@@ -374,7 +380,7 @@ menu_main:
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Sub menu: LISTEN (for %s)\n", cli);
 		} else if (dtmf == '2') {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Sub menu: HANGUP (for %s)\n", cli);
-			goto end;
+			goto cleanup;
 		} else if (dtmf == '3') {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Sub menu: BAD ENTRY (for %s)\n", cli);
 			if (main_menu_loops < HV_IVR_LOOPS_MAX_MAIN_MENU) {
@@ -384,7 +390,7 @@ menu_main:
 			} else {
 				snprintf(prompt, sizeof(prompt), "You've reached maximum number of failures, please dial again.");
 				hv_ivr_speak_text(prompt, session, settings, NULL);
-				goto end;
+				goto cleanup;
 			}
 		}
 	} else {
@@ -395,15 +401,16 @@ menu_main:
 		} else {
 			snprintf(prompt, sizeof(prompt), "You've reached maximum number of failures, please dial again.");
 			hv_ivr_speak_text(prompt, session, settings, NULL);
-			goto end;
+			goto cleanup;
 		}
 	}
 
 	if (!switch_channel_ready(channel)) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
-		goto end;
+		goto cleanup;
 	}
 
+iterate_messages:
 	cJSON_ArrayForEach(vm, vms) {
 
 		cJSON *name = cJSON_GetObjectItemCaseSensitive(vm, HV_JSON_KEY_VOICEMAIL_NAME);
@@ -425,10 +432,9 @@ menu_main:
 
 		i++;
 
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "VM: processing %s (for %s)\n", name->valuestring, cli);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Processing %s (for %s)\n", name->valuestring, cli);
 		snprintf(voicemail_path, sizeof(voicemail_path), "%s/%s", settings->file_system_folder_in, name->valuestring);
 
-		// Message description
 		hv_ivr_play_message_desc(i, timestamp->valuestring, session, settings, &dtmf_args);
 		if (dtmf) {
 			goto process_playback_dtmf;
@@ -446,7 +452,7 @@ menu_main:
 				goto cleanup;
 			}
 
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "VM: need to download %s (for %s)\n", name->valuestring, cli);
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Need to download %s (for %s)\n", name->valuestring, cli);
 
 			if (SWITCH_STATUS_SUCCESS != hv_file_name_to_s3_url(name->valuestring, cli, req.url, sizeof(req.url), settings)) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to create S3 resource URL\n");
@@ -455,23 +461,31 @@ menu_main:
 			}
 
 			if (SWITCH_STATUS_SUCCESS != hv_http_get_to_disk(&req, voicemail_path)) {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to save voicemail to disk at %s (for %s)\n", voicemail_path, cli);
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to GET voicemail to disk (%s) (for %s)\n", voicemail_path, cli);
+				hv_http_req_destroy(&req);
 				err = 1;
 				continue;
+			} else {
+				if (((req.http_code != 200 && req.http_code != 201)) || req.size == 0) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Did not download voicemail file (to %s) (for %s)\n", voicemail_path, cli);
+					hv_http_req_destroy(&req);
+					err = 1;
+					continue;
+				}
 			}
 
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "VM: %s saved to disk (%s) (for %s)\n", name->valuestring, voicemail_path, cli);
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "%s saved to disk (%s) (for %s)\n", name->valuestring, voicemail_path, cli);
 		} else {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "VM: playback %s from disk (for %s)\n", name->valuestring, cli);
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Playback %s from disk (for %s)\n", name->valuestring, cli);
 		}
 
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "VM: playback start %s (for %s)\n", name->valuestring, cli);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Playback start %s (for %s)\n", name->valuestring, cli);
 
 		{
 			switch_ivr_play_file(session, NULL, voicemail_path, &dtmf_args);
 		}
 
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "VM: playback end %s (for %s)\n", name->valuestring, cli);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Playback end %s (for %s)\n", name->valuestring, cli);
 
 		if (!switch_channel_ready(channel)) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
@@ -480,7 +494,6 @@ menu_main:
 
 menu_sub:
 
-		// SUBMENU
 		sub_menu_loops++;
 
 		if (!switch_channel_ready(channel)) {
@@ -549,10 +562,42 @@ process_playback_dtmf:
 			if (dtmf == '1') {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Sub menu: NEXT (for %s)\n", cli);
 			} else if (dtmf == '2') {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Sub menu: DELETE X (for %s)\n", cli);
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Sub menu: DELETE (for %s)\n", cli);
+				{
+					cJSON *prev = vm->prev;
+					int first = 0;
+					hv_http_req_t r = { 0 };
+
+					if (vm == vms->child) {
+						first = 1;
+					}
+
+					cJSON_DetachItemViaPointer(vms, vm);
+
+					if (SWITCH_STATUS_SUCCESS != hv_file_name_to_s3_url(name->valuestring, cli, r.url, sizeof(r.url), settings)) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to create S3 resource URL\n");
+						err = 1;
+					} else {
+						if (SWITCH_STATUS_SUCCESS !=  hv_http_delete(&r)) {
+							switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to DELETE voicemail %s from S3 (for %s)\n", name->valuestring, cli);
+							err = 1;
+						}
+						snprintf(prompt, sizeof(prompt), "Deleted.");
+						hv_ivr_speak_text(prompt, session, settings, NULL);
+					}
+
+					hv_http_req_destroy(&r);
+
+					if (!first) {
+						vm = prev;
+					} else {
+						vm = NULL;
+						goto iterate_messages;
+					}
+				}
 			} else if (dtmf == '3') {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Sub menu: HANGUP (for %s)\n", cli);
-				goto end;
+				goto cleanup;
 			} else {
 				if (sub_menu_loops < HV_IVR_LOOPS_MAX_SUB_MENU) {
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Sub menu: BAD ENTRY (for %s)\n", cli);
@@ -562,7 +607,7 @@ process_playback_dtmf:
 				} else {
 					snprintf(prompt, sizeof(prompt), "You've reached maximum number of failures, please dial again.");
 					hv_ivr_speak_text(prompt, session, settings, NULL);
-					goto end;
+					goto cleanup;
 				}
 			}
 		} else {
@@ -574,13 +619,15 @@ process_playback_dtmf:
 			} else {
 				snprintf(prompt, sizeof(prompt), "You've reached maximum number of failures, please dial again.");
 				hv_ivr_speak_text(prompt, session, settings, NULL);
-				goto end;
+				goto cleanup;
 			}
 		}
 
 		// We've reached end of menu, honour the user by resetting the counters
 		main_menu_loops = 0;
 		sub_menu_loops = 0;
+
+		hv_http_req_destroy(&req);
 	}
 
 	snprintf(prompt, sizeof(prompt), "End of messages.");
@@ -592,30 +639,42 @@ process_playback_dtmf:
 cleanup:
 
 	if (!settings->cache_enabled) {
-
-		// Remove messages from local storage
-
-		cJSON_ArrayForEach(vm, vms) {
-
+		cJSON_ArrayForEach(vm, vms_original) {
 			cJSON *name = cJSON_GetObjectItemCaseSensitive(vm, HV_JSON_KEY_VOICEMAIL_NAME);
-
 			snprintf(voicemail_path, sizeof(voicemail_path), "%s/%s", settings->file_system_folder_in, name->valuestring);
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "VM: removing %s from local storage %s (for %s)\n", name->valuestring, voicemail_path, cli);
-
 			unlink(voicemail_path);
 		}
 	}
 
+	{
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Updating JSON state (for %s)\n", cli);
+
+		if (SWITCH_STATUS_SUCCESS != hv_vm_state_upload(cli, vm_state, settings)) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to upload JSON state to S3 (for %s)\n", cli);
+			goto fail;
+		}
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Updated JSON state uploaded (for %s)\n", cli);
+	}
+
 end:
 
+	hv_http_req_destroy(&req);
 	if (err) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Voicemail retrieval failed (for %s)\n", cli);
 	} else {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Voicemail retrieval OK (for %s)\n", cli);
 	}
 
+	if (vms_original) {
+		cJSON_Delete(vms_original);
+	}
+
 	return;
 
 fail:
+	if (vms_original) {
+		cJSON_Delete(vms_original);
+	}
 	return;
 }

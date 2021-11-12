@@ -5,7 +5,7 @@
 		<param name="record-silence-hits" value="0"/>
 		<param name="record-check-silence" value="false"/>
 		<param name="record-max-len" value="600"/>
-		<param name="s3-url" value="http://happy-voicemail.s3.amazonaws.com"/>
+		<param name="s3-url" value="http://happy-voicemail.s3.amazonaws.com/dev/voicemail"/>
 		<param name="file-system-folder-in" value="/tmp/voicemails/in"/>
 		<param name="file-system-folder-out" value="/tmp/voicemails/out"/>
 		<param name="dump-events" value="false"/>

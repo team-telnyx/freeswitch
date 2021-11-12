@@ -7,6 +7,8 @@
 
 #define HV_CONFIG_FILE_NAME "happy_voicemail.conf"
 #define HV_NAME "Happy Voicemail"
+#define HV_VARIABLE_PIN_NAME "variable_telnyx_voicemail_user_pin"
+#define HV_VARIABLE_DIALED_EXTENSION "variable_telnyx_dialed_extension"
 
 #define HV_DEFAULT_BEEP "%(1300, 0, 640)"
 #define HV_DEFAULT_RECORD_MAX_LEN_S 600
@@ -95,11 +97,13 @@ SWITCH_DECLARE(switch_status_t) hv_http_upload_from_mem(hv_http_req_t *upload);
 SWITCH_DECLARE(void) hv_http_req_destroy(hv_http_req_t *req);
 SWITCH_DECLARE(switch_status_t) hv_http_get_to_mem(hv_http_req_t *req);
 SWITCH_DECLARE(switch_status_t) hv_http_get_to_disk(hv_http_req_t *req, const char *file_name);
+SWITCH_DECLARE(switch_status_t) hv_http_delete(hv_http_req_t *req);
 
 SWITCH_DECLARE(cJSON*) hv_json_vm_state_create(void);
 SWITCH_DECLARE(switch_status_t) hv_json_vm_state_add_new_voicemail(cJSON *v, const char *name);
 
 SWITCH_DECLARE(switch_status_t) hv_vm_state_get_from_s3_to_mem(hv_http_req_t *req, const char *cld, hv_settings_t *settings);
+SWITCH_DECLARE(switch_status_t) hv_vm_state_upload(const char *ext, cJSON *vms, hv_settings_t *settings);
 SWITCH_DECLARE(switch_status_t) hv_vm_state_update(const char *cld, const char *voicemail_name, hv_settings_t *settings);
 
 typedef struct hv_ivr_timeout_s {

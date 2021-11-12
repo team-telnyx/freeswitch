@@ -289,16 +289,15 @@ SWITCH_STANDARD_API(hv_http_upload_api)
 	memcpy(&settings, &globals.settings, sizeof(settings));
 	switch_mutex_unlock(globals.mutex);
 
-	if (SWITCH_STATUS_SUCCESS == hv_http_upload_api_exec(NULL, session, stream, &settings)) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Voicemail deposit OK\n");
-		return SWITCH_STATUS_SUCCESS;
-	} else {
+	if (SWITCH_STATUS_SUCCESS != hv_http_upload_api_exec(NULL, session, stream, &settings)) {
 		char prompt[2*HV_BUFLEN] = { 0 };
 		snprintf(prompt, sizeof(prompt), "Service temporarily unavailable. Message could not be saved.");
 		hv_ivr_speak_text(prompt, session, &settings, NULL);
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Voicemail deposit failed\n");
 		return SWITCH_STATUS_FALSE;
 	}
+
+	return SWITCH_STATUS_SUCCESS;
 }
 
 SWITCH_MODULE_LOAD_FUNCTION(mod_happy_voicemail_load)

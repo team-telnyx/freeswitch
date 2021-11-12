@@ -66,7 +66,7 @@ switch_status_t hv_http_upload_api_exec(_In_opt_z_ const char *cmd, _In_opt_ swi
 			free(buf);
 		}
 
-		cld = strdup(switch_event_get_header(event, "variable_telnyx_dialed_extension"));
+		cld = strdup(switch_event_get_header(event, HV_VARIABLE_DIALED_EXTENSION));
 		switch_event_destroy(&event);
 	}
 
@@ -96,6 +96,8 @@ switch_status_t hv_http_upload_api_exec(_In_opt_z_ const char *cmd, _In_opt_ swi
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to update vm JSON state on S3 (for %s)\n", cld);
 		goto fail;
 	}
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Voicemail deposit OK (for %s)\n", cld);
 
 	free(cld);
 	cld = NULL;
