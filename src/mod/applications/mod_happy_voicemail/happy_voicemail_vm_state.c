@@ -107,7 +107,7 @@ SWITCH_DECLARE(switch_status_t) hv_vm_state_update(const char *cld, const char *
 		goto fail;
 	}
 
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Done (for %s)\n", cld);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "State updated (for %s)\n", cld);
 
 	hv_http_req_destroy(&req);
 	cJSON_Delete(vms);

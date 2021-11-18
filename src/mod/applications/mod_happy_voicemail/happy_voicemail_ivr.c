@@ -7,7 +7,7 @@ SWITCH_DECLARE(void) hv_ivr_speak_text(const char *text, switch_core_session_t *
 		return;
 	}
 
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "VM: IVR playing: %s \n", text);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "IVR playing: %s \n", text);
 	switch_ivr_speak_text(session, "flite", settings->voice, text, args);
 }
 
@@ -642,7 +642,7 @@ cleanup:
 		cJSON_ArrayForEach(vm, vms_original) {
 			cJSON *name = cJSON_GetObjectItemCaseSensitive(vm, HV_JSON_KEY_VOICEMAIL_NAME);
 			snprintf(voicemail_path, sizeof(voicemail_path), "%s/%s", settings->file_system_folder_in, name->valuestring);
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "VM: removing %s from local storage %s (for %s)\n", name->valuestring, voicemail_path, cli);
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Removing %s from local storage %s (for %s)\n", name->valuestring, voicemail_path, cli);
 			unlink(voicemail_path);
 		}
 	}

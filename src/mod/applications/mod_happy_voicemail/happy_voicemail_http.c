@@ -168,7 +168,7 @@ SWITCH_DECLARE(switch_status_t) hv_http_upload_from_mem(hv_http_req_t *upload)
 
 	curl_easy_getinfo(curl, CURLINFO_SPEED_UPLOAD_T, &speed_upload);
 	curl_easy_getinfo(curl, CURLINFO_TOTAL_TIME_T, &total_time);
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Done. Upload speed: %" CURL_FORMAT_CURL_OFF_T " bytes/sec during %" CURL_FORMAT_CURL_OFF_T ".%06ld seconds\n", speed_upload, (total_time / 1000000), (long)(total_time % 1000000));
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "-> PUT (%s): speed: %" CURL_FORMAT_CURL_OFF_T " bytes/sec during %" CURL_FORMAT_CURL_OFF_T ".%06ld seconds\n", upload->url, speed_upload, (total_time / 1000000), (long)(total_time % 1000000));
 
 	curl_easy_cleanup(curl);
 	curl_global_cleanup();

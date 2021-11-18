@@ -52,8 +52,9 @@ switch_status_t hv_http_upload_api_exec(_In_opt_z_ const char *cmd, _In_opt_ swi
 
 	{
 		switch_event_t *event = NULL;
+		char *v = NULL;
 
-		if (SWITCH_STATUS_SUCCESS != switch_event_create_plain(&event, SWITCH_EVENT_CHANNEL_DATA)) {
+		if ((SWITCH_STATUS_SUCCESS != switch_event_create_plain(&event, SWITCH_EVENT_CHANNEL_DATA)) || !event) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Cannot get destination (callee) number (dump event failed)\n");
 			return SWITCH_STATUS_FALSE;
 		}
@@ -66,7 +67,14 @@ switch_status_t hv_http_upload_api_exec(_In_opt_z_ const char *cmd, _In_opt_ swi
 			free(buf);
 		}
 
-		cld = strdup(switch_event_get_header(event, HV_VARIABLE_DIALED_EXTENSION));
+		v = switch_event_get_header(event, HV_VARIABLE_DIALED_EXTENSION);
+		if (zstr(v)) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Missing destination (callee) number\n");
+			switch_event_destroy(&event);
+			return SWITCH_STATUS_FALSE;
+		}
+
+		cld = strdup(v);
 		switch_event_destroy(&event);
 	}
 
@@ -77,10 +85,7 @@ switch_status_t hv_http_upload_api_exec(_In_opt_z_ const char *cmd, _In_opt_ swi
 
 	if (SWITCH_STATUS_SUCCESS != hv_file_name_to_s3_url(voicemail_name, cld, url, sizeof(url), settings)) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to create S3 resource URL\n");
-		if (cld) {
-			free(cld);
-		}
-		return SWITCH_STATUS_FALSE;
+		goto fail;
 	}
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Executing voicemail upload for (CLD: %s, file: %s, s3 resource url: %s)\n", cld, voicemail_name, url);

@@ -23,9 +23,10 @@ void hv_deposit_app_exec(switch_core_session_t *session, const char *file_path, 
 
 	{
 		switch_event_t *event = NULL;
+		char *v = NULL;
 
-		if (SWITCH_STATUS_SUCCESS != switch_event_create_plain(&event, SWITCH_EVENT_CHANNEL_DATA)) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Cannot get source (caller) number (dump event failed)\n");
+		if ((SWITCH_STATUS_SUCCESS != switch_event_create_plain(&event, SWITCH_EVENT_CHANNEL_DATA)) || !event) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Cannot get destination (callee) number (dump event failed)\n");
 			goto fail;
 		}
 		switch_channel_event_set_data(channel, event);
@@ -37,7 +38,15 @@ void hv_deposit_app_exec(switch_core_session_t *session, const char *file_path, 
 			free(buf);
 		}
 
-		cld = strdup(switch_event_get_header(event, HV_VARIABLE_DIALED_EXTENSION));
+		v = switch_event_get_header(event, HV_VARIABLE_DIALED_EXTENSION);
+		if (zstr(v)) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Missing destination (callee) number\n");
+			switch_event_destroy(&event);
+			return;
+		}
+
+		cld = strdup(v);
+
 		switch_event_destroy(&event);
 	}
 
@@ -58,7 +67,6 @@ void hv_deposit_app_exec(switch_core_session_t *session, const char *file_path, 
 	fh.samplerate = settings->record_sample_rate;
 
 	memset(input, 0, sizeof(input));
-	//args.input_callback = cancel_on_dtmf;
 	args.buf = input;
 	args.buflen = sizeof(input);
 
@@ -66,18 +74,26 @@ void hv_deposit_app_exec(switch_core_session_t *session, const char *file_path, 
 
 	switch_channel_set_variable(channel, "record_post_process_exec_api", "happy_voicemail_upload");
 	switch_channel_set_variable(channel, "record_check_silence", settings->record_check_silence ? "true" : "false");
+
 	switch_ivr_record_file(session, &fh, file_path, &args, settings->record_max_len);
+
+	if (cld) {
+		free(cld);
+	}
 	return;
 
 fail:
 	snprintf(prompt, sizeof(prompt), "Service temporarily unavailable.");
 	hv_ivr_speak_text(prompt, session, settings, NULL);
+	if (cld) {
+		free(cld);
+	}
 }
 
 void hv_retrieval_app_exec(switch_core_session_t *session, const char *data, hv_settings_t *settings)
 {
 	char *cli = NULL;
-	const char *pin_var = NULL;
+	char *pin_var = NULL;
 	cJSON *json = NULL;
 	hv_http_req_t req = { 0 }; //upload = { 0 };
 	char *s = NULL;
@@ -98,8 +114,9 @@ void hv_retrieval_app_exec(switch_core_session_t *session, const char *data, hv_
 
 	{
 		switch_event_t *event = NULL;
+		char *v = NULL;
 
-		if (SWITCH_STATUS_SUCCESS != switch_event_create_plain(&event, SWITCH_EVENT_CHANNEL_DATA)) {
+		if ((SWITCH_STATUS_SUCCESS != switch_event_create_plain(&event, SWITCH_EVENT_CHANNEL_DATA)) || !event) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Cannot get origination (caller) number (dump event failed)\n");
 			return;
 		}
@@ -112,8 +129,24 @@ void hv_retrieval_app_exec(switch_core_session_t *session, const char *data, hv_
 			free(buf);
 		}
 
-		cli = strdup(switch_event_get_header(event, HV_VARIABLE_DIALED_EXTENSION));
-		pin_var = strdup(switch_event_get_header(event, HV_VARIABLE_PIN_NAME));
+		v = switch_event_get_header(event, HV_VARIABLE_DIALED_EXTENSION);
+		if (zstr(v)) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Missing origination (caller) number\n");
+			switch_event_destroy(&event);
+			return;
+		}
+
+		cli = strdup(v);
+
+		v = switch_event_get_header(event, HV_VARIABLE_PIN_NAME);
+		if (zstr(v)) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Missing PIN number\n");
+			switch_event_destroy(&event);
+			free(cli);
+			return;
+		}
+
+		pin_var = strdup(v);
 
 		switch_event_destroy(&event);
 	}
@@ -129,6 +162,7 @@ void hv_retrieval_app_exec(switch_core_session_t *session, const char *data, hv_
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "Missing PIN number\n");
 		if (settings->pin_check) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Missing PIN number, but it is required\n");
+			free(cli);
 			return;
 		}
 	} else {
@@ -172,6 +206,12 @@ void hv_retrieval_app_exec(switch_core_session_t *session, const char *data, hv_
 
 	hv_http_req_destroy(&req);
 	cJSON_Delete(json);
+	if (cli) {
+		free(cli);
+	}
+	if (pin_var) {
+		free(pin_var);
+	}
 	return;
 
 fail:
@@ -182,6 +222,12 @@ fail:
 	}
 	hv_http_req_destroy(&req);
 	if (json) cJSON_Delete(json);
+	if (cli) {
+		free(cli);
+	}
+	if (pin_var) {
+		free(pin_var);
+	}
 	return;
 
 voicemail_not_enabled:
@@ -192,5 +238,11 @@ voicemail_not_enabled:
 	}
 	hv_http_req_destroy(&req);
 	if (json) cJSON_Delete(json);
+	if (cli) {
+		free(cli);
+	}
+	if (pin_var) {
+		free(pin_var);
+	}
 	return;
 }

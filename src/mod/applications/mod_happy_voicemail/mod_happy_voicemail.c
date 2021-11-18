@@ -219,6 +219,10 @@ SWITCH_STANDARD_APP(hv_deposit_app)
 		return;
 	}
 
+	switch_channel_set_variable(channel, "telnyx_voicemail", "true");
+	switch_core_media_set_rtp_flag(session, SWITCH_MEDIA_TYPE_AUDIO, SWITCH_RTP_FLAG_AUTOADJ);
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "Turning telnyx_voicemail on\n");
+
 	switch_mutex_lock(globals.mutex);
 	memcpy(&settings, &globals.settings, sizeof(settings));
 	switch_mutex_unlock(globals.mutex);
@@ -243,6 +247,17 @@ SWITCH_STANDARD_APP(hv_deposit_app)
 SWITCH_STANDARD_APP(hv_retrieval_app)
 {
 	hv_settings_t settings = { 0 };
+	switch_channel_t *channel = NULL;
+
+	channel = switch_core_session_get_channel(session);
+	if (!channel) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Channel missing\n");
+		return;
+	}
+
+	switch_channel_set_variable(channel, "telnyx_voicemail", "true");
+	switch_core_media_set_rtp_flag(session, SWITCH_MEDIA_TYPE_AUDIO, SWITCH_RTP_FLAG_AUTOADJ);
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "Turning telnyx_voicemail on\n");
 
 	switch_mutex_lock(globals.mutex);
 	memcpy(&settings, &globals.settings, sizeof(settings));
