@@ -9,7 +9,7 @@
 		<param name="file-system-folder-in" value="/tmp/voicemails/in"/>
 		<param name="file-system-folder-out" value="/tmp/voicemails/out"/>
 		<param name="dump-events" value="false"/>
-		<param name="recording-file-ext" value="wav"/>
+		<param name="record-file-ext" value="wav"/>
 		<param name="cache-enabled" value="no"/>
 		<param name="pin-check" value="yes"/>
 
