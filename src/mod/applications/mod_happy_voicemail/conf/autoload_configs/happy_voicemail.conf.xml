@@ -5,15 +5,22 @@
 		<param name="record-silence-hits" value="0"/>
 		<param name="record-check-silence" value="false"/>
 		<param name="record-max-len" value="600"/>
-		<param name="s3-url" value="http://happy-voicemail.s3.amazonaws.com/dev/voicemail"/>
 		<param name="file-system-folder-in" value="/tmp/voicemails/in"/>
 		<param name="file-system-folder-out" value="/tmp/voicemails/out"/>
 		<param name="dump-events" value="false"/>
 		<param name="record-file-ext" value="wav"/>
 		<param name="cache-enabled" value="no"/>
 		<param name="pin-check" value="yes"/>
+		<param name="vm-state-create" value="yes"/>
 
 		<!-- slt|kal|awb|rms -->
 		<param name="voice" value="slt"/>
+
+		<param name="use-s3-auth" value="yes"/>
+
+		<param name="s3-id" value="{{ s3_id }}"/>
+		<param name="s3-key" value="{{ s3_key }}"/>
+		<param name="s3-region" value="{{ s3_region }}"/>
+		<param name="s3-bucket" value="{{ s3_bucket }}"/>
 	</settings>
 </configuration> 

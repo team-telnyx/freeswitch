@@ -307,14 +307,14 @@ SWITCH_DECLARE(void) hv_ivr_run(switch_core_session_t *session, cJSON *vm_state,
 	} else {
 		snprintf(prompt, sizeof(prompt), "You have no messages.");
 		hv_ivr_speak_text(prompt, session, settings, NULL);
-		goto end;
+		goto cleanup_commit;
 	}
 
 menu_main:
 
 	if (!switch_channel_ready(channel)) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
-		goto cleanup;
+		goto cleanup_commit;
 	}
 
 	i = 0;
@@ -342,7 +342,7 @@ menu_main:
 
 	if (!switch_channel_ready(channel)) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
-		goto cleanup;
+		goto cleanup_commit;
 	}
 
 	hv_ivr_timeout_set_ms(&timeout, 10000);
@@ -364,7 +364,7 @@ menu_main:
 
 	if (!switch_channel_ready(channel)) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
-		goto cleanup;
+		goto cleanup_commit;
 	}
 
 	if (switch_channel_has_dtmf(channel)) {
@@ -380,7 +380,7 @@ menu_main:
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Sub menu: LISTEN (for %s)\n", cli);
 		} else if (dtmf == '2') {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Sub menu: HANGUP (for %s)\n", cli);
-			goto cleanup;
+			goto cleanup_commit;
 		} else if (dtmf == '3') {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Sub menu: BAD ENTRY (for %s)\n", cli);
 			if (main_menu_loops < HV_IVR_LOOPS_MAX_MAIN_MENU) {
@@ -390,7 +390,7 @@ menu_main:
 			} else {
 				snprintf(prompt, sizeof(prompt), "You've reached maximum number of failures, please dial again.");
 				hv_ivr_speak_text(prompt, session, settings, NULL);
-				goto cleanup;
+				goto cleanup_commit;
 			}
 		}
 	} else {
@@ -401,13 +401,13 @@ menu_main:
 		} else {
 			snprintf(prompt, sizeof(prompt), "You've reached maximum number of failures, please dial again.");
 			hv_ivr_speak_text(prompt, session, settings, NULL);
-			goto cleanup;
+			goto cleanup_commit;
 		}
 	}
 
 	if (!switch_channel_ready(channel)) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
-		goto cleanup;
+		goto cleanup_commit;
 	}
 
 iterate_messages:
@@ -418,7 +418,7 @@ iterate_messages:
 		
 		if (!switch_channel_ready(channel)) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
-			goto cleanup;
+			goto cleanup_commit;
 		}
 
 		if (!name || !timestamp || !cJSON_IsString(name) || !cJSON_IsString(timestamp)) {
@@ -442,20 +442,20 @@ iterate_messages:
 
 		if (!switch_channel_ready(channel)) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
-			goto cleanup;
+			goto cleanup_commit;
 		}
 
 		if (SWITCH_STATUS_SUCCESS != switch_file_exists(voicemail_path, switch_core_session_get_pool(session))) {
 
 			if (!switch_channel_ready(switch_core_session_get_channel(session))) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
-				goto cleanup;
+				goto cleanup_commit;
 			}
 
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Need to download %s (for %s)\n", name->valuestring, cli);
 
-			if (SWITCH_STATUS_SUCCESS != hv_file_name_to_s3_url(name->valuestring, cli, req.url, sizeof(req.url), settings)) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to create S3 resource URL\n");
+			if (SWITCH_STATUS_SUCCESS != hv_http_req_prepare(name->valuestring, cli, req.url, sizeof(req.url), settings, &req)) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to prepare HTTP request\n");
 				err = 1;
 				continue;
 			}
@@ -489,7 +489,7 @@ iterate_messages:
 
 		if (!switch_channel_ready(channel)) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
-			goto cleanup;
+			goto cleanup_commit;
 		}	
 
 menu_sub:
@@ -498,7 +498,7 @@ menu_sub:
 
 		if (!switch_channel_ready(channel)) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
-			goto cleanup;
+			goto cleanup_commit;
 		}
 
 		if (dtmf) {
@@ -530,7 +530,7 @@ menu_sub:
 
 		if (!switch_channel_ready(channel)) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
-			goto cleanup;
+			goto cleanup_commit;
 		}
 
 		hv_ivr_timeout_set_ms(&timeout, 5000);
@@ -552,7 +552,7 @@ menu_sub:
 
 		if (!switch_channel_ready(channel)) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Channel closed (for %s)\n", cli);
-			goto cleanup;
+			goto cleanup_commit;
 		}
 
 process_playback_dtmf:
@@ -574,8 +574,8 @@ process_playback_dtmf:
 
 					cJSON_DetachItemViaPointer(vms, vm);
 
-					if (SWITCH_STATUS_SUCCESS != hv_file_name_to_s3_url(name->valuestring, cli, r.url, sizeof(r.url), settings)) {
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to create S3 resource URL\n");
+					if (SWITCH_STATUS_SUCCESS != hv_http_req_prepare(name->valuestring, cli, r.url, sizeof(r.url), settings, &r)) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to prepare HTTP request\n");
 						err = 1;
 					} else {
 						if (SWITCH_STATUS_SUCCESS !=  hv_http_delete(&r)) {
@@ -597,7 +597,7 @@ process_playback_dtmf:
 				}
 			} else if (dtmf == '3') {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Sub menu: HANGUP (for %s)\n", cli);
-				goto cleanup;
+				goto cleanup_commit;
 			} else {
 				if (sub_menu_loops < HV_IVR_LOOPS_MAX_SUB_MENU) {
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Sub menu: BAD ENTRY (for %s)\n", cli);
@@ -607,7 +607,7 @@ process_playback_dtmf:
 				} else {
 					snprintf(prompt, sizeof(prompt), "You've reached maximum number of failures, please dial again.");
 					hv_ivr_speak_text(prompt, session, settings, NULL);
-					goto cleanup;
+					goto cleanup_commit;
 				}
 			}
 		} else {
@@ -619,7 +619,7 @@ process_playback_dtmf:
 			} else {
 				snprintf(prompt, sizeof(prompt), "You've reached maximum number of failures, please dial again.");
 				hv_ivr_speak_text(prompt, session, settings, NULL);
-				goto cleanup;
+				goto cleanup_commit;
 			}
 		}
 
@@ -636,7 +636,7 @@ process_playback_dtmf:
 		goto menu_main;
 	}
 
-cleanup:
+cleanup_commit:
 
 	if (!settings->cache_enabled) {
 		cJSON_ArrayForEach(vm, vms_original) {
@@ -652,6 +652,7 @@ cleanup:
 
 		if (SWITCH_STATUS_SUCCESS != hv_vm_state_upload(cli, vm_state, settings)) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to upload JSON state to S3 (for %s)\n", cli);
+			err = 1;
 			goto fail;
 		}
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Updated JSON state uploaded (for %s)\n", cli);

@@ -5,7 +5,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
-SWITCH_DECLARE(switch_status_t) hv_http_upload_from_disk(const char *file_name, const char *url)
+SWITCH_DECLARE(switch_status_t) hv_http_upload_from_disk(const char *file_name, hv_http_req_t *req)
 {
 	CURL *curl = NULL;
 	CURLcode res = 0;
@@ -14,12 +14,17 @@ SWITCH_DECLARE(switch_status_t) hv_http_upload_from_disk(const char *file_name, 
 	FILE *fd = NULL;
 	long http_code = 0;
 
+	if (!req) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "PUT: bad params\n");
+		goto fail;
+	}
+
 	if (zstr(file_name)) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "PUT: file name missing\n");
 		goto fail;
 	}
 
-	if (zstr(url)) {
+	if (zstr(req->url) && !req->use_s3_auth) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "PUT: url missing\n");
 		goto fail;
 	}
@@ -47,28 +52,36 @@ SWITCH_DECLARE(switch_status_t) hv_http_upload_from_disk(const char *file_name, 
 		goto fail;
 	}
 
-	curl_easy_setopt(curl, CURLOPT_URL, url);
+	if (req->use_s3_auth) {
+		if (SWITCH_STATUS_SUCCESS != hv_http_add_s3_authentication(curl, req, "PUT")) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "PUT: Cannot obtain S3 authentication string\n");
+			goto fail;
+		}
+	} else {
+		curl_easy_setopt(curl, CURLOPT_URL, req->url);
+	}
+
 	curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
 	curl_easy_setopt(curl, CURLOPT_READDATA, fd);
 	curl_easy_setopt(curl, CURLOPT_INFILESIZE_LARGE, (curl_off_t) file_info.st_size);
 	curl_easy_setopt(curl, CURLOPT_VERBOSE, 0);
 
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "-> PUT (%s) to (%s)\n", file_name, url);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "-> PUT (%s) to (%s)\n", file_name, req->url);
 
 	res = curl_easy_perform(curl);
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
 	if (res != CURLE_OK) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "PUT (%s): curl_easy_perform() failed, HTTP code: %lu (%s)\n", url, http_code, curl_easy_strerror(res));
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "PUT (%s): curl_easy_perform() failed, HTTP code: %lu (%s)\n", req->url, http_code, curl_easy_strerror(res));
 		goto fail;
 	}
 
 	if (http_code != 200) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "PUT (%s): failed, HTTP code: %lu (%s)\n", url, http_code, curl_easy_strerror(res));
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "PUT (%s): failed, HTTP code: %lu (%s)\n", req->url, http_code, curl_easy_strerror(res));
 		goto fail;
 	}
 
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "-> PUT (%s): resulted with HTTP code %lu\n", url, http_code);
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "-> PUT (%s): %lu bytes uploaded\n", url, (unsigned long) file_info.st_size);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "-> PUT (%s): resulted with HTTP code %lu\n", req->url, http_code);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "-> PUT (%s): %lu bytes uploaded\n", req->url, (unsigned long) file_info.st_size);
 
 	curl_easy_getinfo(curl, CURLINFO_SPEED_UPLOAD_T, &speed_upload);
 	curl_easy_getinfo(curl, CURLINFO_TOTAL_TIME_T, &total_time);
@@ -82,7 +95,7 @@ SWITCH_DECLARE(switch_status_t) hv_http_upload_from_disk(const char *file_name, 
 
 fail:
 
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Upload failed (%s to %s)\n", file_name, url);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Upload failed (%s to %s)\n", file_name, req->url);
 
 	if (fd) {
 		fclose(fd);
@@ -144,7 +157,15 @@ SWITCH_DECLARE(switch_status_t) hv_http_upload_from_mem(hv_http_req_t *upload)
 		goto fail;
 	}
 
-	curl_easy_setopt(curl, CURLOPT_URL, upload->url);
+	if (upload->use_s3_auth) {
+		if (SWITCH_STATUS_SUCCESS != hv_http_add_s3_authentication(curl, upload, "PUT")) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "PUT: Cannot obtain S3 authentication string\n");
+			goto fail;
+		}
+	} else {
+		curl_easy_setopt(curl, CURLOPT_URL, upload->url);
+	}
+
 	curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
 	curl_easy_setopt(curl, CURLOPT_READFUNCTION, hv_http_read_memory_callback);
 	curl_easy_setopt(curl, CURLOPT_READDATA, upload);
@@ -234,7 +255,15 @@ SWITCH_DECLARE(switch_status_t) hv_http_get_to_mem(hv_http_req_t *req)
 		goto fail;
 	}
 
-	curl_easy_setopt(curl_handle, CURLOPT_URL, req->url);
+	if (req->use_s3_auth) {
+		if (SWITCH_STATUS_SUCCESS != hv_http_add_s3_authentication(curl_handle, req, "GET")) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "GET: Cannot obtain S3 authentication string\n");
+			goto fail;
+		}
+	} else {
+		curl_easy_setopt(curl_handle, CURLOPT_URL, req->url);
+	}
+
 	curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, hv_http_write_memory_callback);
 	curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *) req);
 	curl_easy_setopt(curl_handle, CURLOPT_USERAGENT, "libcurl-agent/1.0");
@@ -306,7 +335,7 @@ SWITCH_DECLARE(switch_status_t) hv_http_delete(hv_http_req_t *req)
 		return SWITCH_STATUS_FALSE;
 	}
 
-	if (zstr(req->url)) {
+	if (zstr(req->url) && !req->use_s3_auth) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "GET: empty URL\n");
 		return SWITCH_STATUS_FALSE;
 	}
@@ -318,7 +347,15 @@ SWITCH_DECLARE(switch_status_t) hv_http_delete(hv_http_req_t *req)
 		return SWITCH_STATUS_FALSE;
 	}
 
-	curl_easy_setopt(curl_handle, CURLOPT_URL, req->url);
+	if (req->use_s3_auth) {
+		if (SWITCH_STATUS_SUCCESS != hv_http_add_s3_authentication(curl_handle, req, "DELETE")) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "DELETE: Cannot obtain S3 authentication string\n");
+			return SWITCH_STATUS_FALSE;
+		}
+	} else {
+		curl_easy_setopt(curl_handle, CURLOPT_URL, req->url);
+	}
+
 	curl_easy_setopt(curl_handle, CURLOPT_CUSTOMREQUEST, "DELETE");
 	curl_easy_setopt(curl_handle, CURLOPT_USERAGENT, "libcurl-agent/1.0");
 
@@ -345,4 +382,39 @@ fail:
 		curl_global_cleanup();
 	}
 	return SWITCH_STATUS_FALSE;
+}
+
+SWITCH_DECLARE(switch_status_t) hv_http_add_s3_authentication(CURL *h, hv_http_req_t *req, const char *method)
+{
+	char *s3_auth = NULL, *url = NULL;
+	int len = 0;
+
+	if (!h || !req) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Bad params\n");
+		return SWITCH_STATUS_FALSE;
+	}
+
+	s3_auth = hv_s3_authentication_create(req, method);
+	if (zstr(s3_auth)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to create S3 authentication string\n");
+		return SWITCH_STATUS_FALSE;
+	}
+
+	url = switch_mprintf("%s?%s", req->url, s3_auth);
+	if (zstr(url)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to create URL with S3 authentication string\n");
+		free(s3_auth);
+		return SWITCH_STATUS_FALSE;
+	}
+
+	len = sizeof(req->url);
+	strncpy(req->url, url, len);
+	req->url[len - 1] = '\0';
+
+	curl_easy_setopt(h, CURLOPT_URL, url);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Request with S3 authentication string: %s\n", url);
+
+	free(s3_auth);
+	switch_safe_free(url);
+	return SWITCH_STATUS_SUCCESS;
 }

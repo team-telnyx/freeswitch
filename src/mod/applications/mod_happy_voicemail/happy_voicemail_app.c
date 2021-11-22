@@ -186,7 +186,16 @@ void hv_retrieval_app_exec(switch_core_session_t *session, const char *data, hv_
 			}
 		} else {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "No JSON state on S3 (for %s)\n", cli);
-			goto voicemail_not_enabled;
+			if (!settings->vm_state_create) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "JSON state missing on S3 and won't get created cause vm-state-create not set (for %s)\n", cli);
+				goto fail;
+			}
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Creating JSON state on S3 (for %s)\n", cli);
+			json = hv_json_vm_state_create();
+			if (!json) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to create JSON state (for %s)\n", cli);
+				goto fail;
+			}
 		}
 	}
 
@@ -245,4 +254,57 @@ voicemail_not_enabled:
 		free(pin_var);
 	}
 	return;
+}
+
+void hv_s3_test_app_exec(switch_core_session_t *session, const char *data, hv_settings_t *settings)
+{
+	hv_http_req_t req = { 0 };
+
+	// GET
+	if (SWITCH_STATUS_SUCCESS != hv_http_req_prepare("test.txt", "test/cli", req.url, sizeof(req.url), settings, &req)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to create S3 resource URL\n");
+		return;
+	}
+	if (SWITCH_STATUS_SUCCESS != hv_http_get_to_disk(&req, "/tmp/test.txt")) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed S3 test\n");
+		return;
+	}
+	hv_http_req_destroy(&req);
+
+	// PUT
+	memset(&req, 0, sizeof(req));
+	if (SWITCH_STATUS_SUCCESS != hv_http_req_prepare("test_uploaded.txt", "test/cli", req.url, sizeof(req.url), settings, &req)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to create S3 resource URL\n");
+		return;
+	}
+	if (SWITCH_STATUS_SUCCESS != hv_http_upload_from_disk("/tmp/test.txt", &req)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed S3 test\n");
+		return;
+	}
+	hv_http_req_destroy(&req);
+
+	// DELETE
+	// ...but first, upload something to delete 
+	memset(&req, 0, sizeof(req));
+	if (SWITCH_STATUS_SUCCESS != hv_http_req_prepare("test_uploaded_z.txt", "test/cli", req.url, sizeof(req.url), settings, &req)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to create S3 resource URL\n");
+		return;
+	}
+	if (SWITCH_STATUS_SUCCESS != hv_http_upload_from_disk("/tmp/test.txt", &req)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed S3 test\n");
+		return;
+	}
+	hv_http_req_destroy(&req);
+
+	// now DELETE
+	memset(&req, 0, sizeof(req));
+	if (SWITCH_STATUS_SUCCESS != hv_http_req_prepare("test_uploaded_z.txt", "test/cli", req.url, sizeof(req.url), settings, &req)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to create S3 resource URL\n");
+		return;
+	}
+	if (SWITCH_STATUS_SUCCESS != hv_http_delete(&req)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed S3 test\n");
+		return;
+	}
+	hv_http_req_destroy(&req);
 }

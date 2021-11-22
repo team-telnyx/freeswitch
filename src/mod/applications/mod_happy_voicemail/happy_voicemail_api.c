@@ -21,8 +21,8 @@ switch_status_t hv_http_upload_api_exec(_In_opt_z_ const char *cmd, _In_opt_ swi
 	const char *voicemail_name = NULL;
 	const char *voicemail_path = NULL;
 	char *cld = NULL;
-	char url[HV_BUFLEN] = { 0 };
 	switch_channel_t *channel = NULL;
+	hv_http_req_t upload = { 0 };
 
 	(void) cmd;
 	(void) stream;
@@ -83,14 +83,14 @@ switch_status_t hv_http_upload_api_exec(_In_opt_z_ const char *cmd, _In_opt_ swi
 		return SWITCH_STATUS_FALSE;
 	}
 
-	if (SWITCH_STATUS_SUCCESS != hv_file_name_to_s3_url(voicemail_name, cld, url, sizeof(url), settings)) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to create S3 resource URL\n");
+	if (SWITCH_STATUS_SUCCESS != hv_http_req_prepare(voicemail_name, cld, upload.url, sizeof(upload.url), settings, &upload)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to prepare HTTP request\n");
 		goto fail;
 	}
 
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Executing voicemail upload for (CLD: %s, file: %s, s3 resource url: %s)\n", cld, voicemail_name, url);
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Executing voicemail upload for (CLD: %s, file: %s, s3 resource url: %s)\n", cld, voicemail_name, upload.url);
 
-	if (SWITCH_STATUS_SUCCESS != hv_http_upload_from_disk(voicemail_path, url)) {
+	if (SWITCH_STATUS_SUCCESS != hv_http_upload_from_disk(voicemail_path, &upload)) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to upload to S3\n");
 		goto fail;
 	}
@@ -120,4 +120,46 @@ fail:
 	}
 
 	return SWITCH_STATUS_FALSE;
+}
+
+switch_status_t hv_s3_test_api_exec(_In_opt_z_ const char *cmd, _In_opt_ switch_core_session_t *session, _In_ switch_stream_handle_t *stream, hv_settings_t *settings)
+{
+	hv_http_req_t req = { 0 };
+	int len = 0;
+
+	if (SWITCH_STATUS_SUCCESS != hv_http_req_prepare("test.txt", "cli", req.url, sizeof(req.url), settings, &req)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to create S3 resource URL\n");
+		return SWITCH_STATUS_FALSE;
+	}
+
+	{
+		len = sizeof(req.s3.object);
+		snprintf(req.s3.object, len, "%s/%s", "cli", "test.txt");
+		req.s3.object[len-1] = '\0';
+		len = sizeof(req.s3.bucket);
+		strncpy(req.s3.bucket, settings->s3_bucket, len);
+		req.s3.object[len-1] = '\0';
+		len = sizeof(req.s3.id);
+		strncpy(req.s3.id, settings->s3_id, len);
+		req.s3.id[len-1] = '\0';
+		len = sizeof(req.s3.key);
+		strncpy(req.s3.key, settings->s3_key, len);
+		req.s3.key[len-1] = '\0';
+		len = sizeof(req.s3.base_domain);
+		strncpy(req.s3.base_domain, settings->s3_base_domain, len);
+		req.s3.base_domain[len-1] = '\0';
+		len = sizeof(req.s3.region);
+		strncpy(req.s3.region, settings->s3_region, len);
+		req.s3.region[len-1] = '\0';
+		req.use_s3_auth = 1;
+	}
+
+	if (SWITCH_STATUS_SUCCESS != hv_http_get_to_disk(&req, "/tmp/test.txt")) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed S3 test\n");
+		return SWITCH_STATUS_FALSE;
+	}
+
+	hv_http_req_destroy(&req);
+
+	return SWITCH_STATUS_SUCCESS;
 }

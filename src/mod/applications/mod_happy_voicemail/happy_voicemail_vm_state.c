@@ -8,8 +8,8 @@ SWITCH_DECLARE(switch_status_t) hv_vm_state_get_from_s3_to_mem(hv_http_req_t *re
 		return SWITCH_STATUS_FALSE;
 	}
 
-	if (SWITCH_STATUS_SUCCESS != hv_ext_to_s3_vm_state_url(ext, req->url, sizeof(req->url), settings)) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to create S3 resource URL (for %s)\n", ext);
+	if (SWITCH_STATUS_SUCCESS != hv_http_req_prepare(HV_JSON_S3_NAME, ext, req->url, sizeof(req->url), settings, req)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to prepare HTTP request (for %s)\n", ext);
 		return SWITCH_STATUS_FALSE;
 	}
 
@@ -26,8 +26,8 @@ SWITCH_DECLARE(switch_status_t) hv_vm_state_upload(const char *ext, cJSON *vms, 
 		return SWITCH_STATUS_FALSE;
 	}
 
-	if (SWITCH_STATUS_SUCCESS != hv_ext_to_s3_vm_state_url(ext, upload.url, sizeof(upload.url), settings)) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to create S3 resource URL (for %s)\n", ext);
+	if (SWITCH_STATUS_SUCCESS != hv_http_req_prepare(HV_JSON_S3_NAME, ext, upload.url, sizeof(upload.url), settings, &upload)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to prepare HTTP request (for %s)\n", ext);
 		return SWITCH_STATUS_FALSE;
 	}
 
@@ -85,11 +85,15 @@ SWITCH_DECLARE(switch_status_t) hv_vm_state_update(const char *cld, const char *
 			}
 		} else {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "No JSON state on S3 (for %s), will get created\n", cld);
+			if (!settings->vm_state_create) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "JSON state missing on S3 and won't get created cause vm-state-create not set (for %s)\n", cld);
+				goto fail;
+			}
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Creating JSON state on S3 (for %s)\n", cld);
+			vms = hv_json_vm_state_create();
 			if (!vms) {
-				vms = hv_json_vm_state_create();
-				if (!vms) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to create JSON state (for %s)\n", cld);
-				}
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to create JSON state (for %s)\n", cld);
+				goto fail;
 			}
 		}
 	}

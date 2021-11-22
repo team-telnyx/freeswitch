@@ -48,10 +48,30 @@ static switch_status_t hv_load_config(void)
 				} else if (!strcasecmp(var, "record-check-silence")) {
 					settings.record_check_silence = atoi(val);
 					settings.configured.record_check_silence = 1;
-				} else if (!strcasecmp(var, "s3-url")) {
-					strncpy(settings.s3_url, val, sizeof(settings.s3_url));
-					settings.s3_url[HV_BUFLEN-1] = '\0';
-					settings.configured.s3_url = 1;
+				} else if (!strcasecmp(var, "use-s3-auth")) {
+					settings.use_s3_auth = switch_true(val);
+					settings.configured.use_s3_auth = 1;
+				} else if (!strcasecmp(var, "s3-id")) {
+					strncpy(settings.s3_id, val, sizeof(settings.s3_id));
+					settings.s3_id[HV_BUFLEN-1] = '\0';
+					settings.configured.s3_id = 1;
+				} else if (!strcasecmp(var, "s3-key")) {
+					strncpy(settings.s3_key, val, sizeof(settings.s3_key));
+					settings.s3_key[HV_BUFLEN-1] = '\0';
+					settings.configured.s3_key = 1;
+				} else if (!strcasecmp(var, "s3-region")) {
+					strncpy(settings.s3_region, val, sizeof(settings.s3_region));
+					settings.s3_region[HV_BUFLEN-1] = '\0';
+					settings.configured.s3_region = 1;
+
+					{
+						snprintf(settings.s3_base_domain, sizeof(settings.s3_base_domain), HV_S3_DEFAULT_BASE_DOMAIN, settings.s3_region);
+						settings.s3_base_domain[HV_BUFLEN-1] = '\0';
+					}
+				} else if (!strcasecmp(var, "s3-bucket")) {
+					strncpy(settings.s3_bucket, val, sizeof(settings.s3_bucket));
+					settings.s3_bucket[HV_BUFLEN-1] = '\0';
+					settings.configured.s3_bucket = 1;
 				} else if (!strcasecmp(var, "file-system-folder-in")) {
 					strncpy(settings.file_system_folder_in, val, sizeof(settings.file_system_folder_in));
 					settings.file_system_folder_in[HV_BUFLEN-1] = '\0';
@@ -77,6 +97,9 @@ static switch_status_t hv_load_config(void)
 				} else if (!strcasecmp(var, "pin-check")) {
 					settings.pin_check = switch_true(val);
 					settings.configured.pin_check = 1;
+				} else if (!strcasecmp(var, "vm-state-create")) {
+					settings.vm_state_create = switch_true(val);
+					settings.configured.vm_state_create = 1;
 				}
 			}
 		}
@@ -110,11 +133,6 @@ static switch_status_t hv_check_settings(hv_settings_t *settings)
 	if (!settings->configured.record_check_silence) {
 		settings->record_check_silence = switch_true(HV_DEFAULT_RECORD_CHECK_SILENCE);
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: record-check-silence (using default value: %s)\n", HV_DEFAULT_RECORD_CHECK_SILENCE);
-	}
-
-	if (!settings->configured.s3_url) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Settings missing: S3 url\n");
-		return SWITCH_STATUS_FALSE;
 	}
 
 	if (!settings->configured.file_system_folder_in) {
@@ -151,6 +169,39 @@ static switch_status_t hv_check_settings(hv_settings_t *settings)
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: pin-check (using default value: %s)\n", HV_DEFAULT_PIN_CHECK);
 	}
 
+	if (!settings->configured.vm_state_create) {
+		settings->vm_state_create = switch_true(HV_DEFAULT_VM_STATE_CREATE);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: vm-state-create (using default value: %s)\n", HV_DEFAULT_VM_STATE_CREATE);
+	}
+
+	if (!settings->configured.use_s3_auth) {
+		settings->use_s3_auth = switch_true(HV_DEFAULT_USE_S3_AUTH);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Settings missing: use-s3-auth (using default value: %s)\n", HV_DEFAULT_USE_S3_AUTH);
+	}
+
+	if (settings->use_s3_auth) {
+		if (zstr(settings->s3_id)) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Settings missing: s3-id not set but use-s3-auth is enabled\n");
+			return SWITCH_STATUS_FALSE;
+		}
+		if (zstr(settings->s3_key)) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Settings missing: s3-key not set but use-s3-auth is enabled\n");
+			return SWITCH_STATUS_FALSE;
+		}
+		if (zstr(settings->s3_region)) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Settings missing: s3-region not set but use-s3-auth is enabled\n");
+			return SWITCH_STATUS_FALSE;
+		}
+		if (zstr(settings->s3_base_domain)) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Settings missing: Did not set S3 base domain but use-s3-auth is enabled\n");
+			return SWITCH_STATUS_FALSE;
+		}
+		if (zstr(settings->s3_bucket)) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Settings missing: s3-bucket not set but use-s3-auth is enabled\n");
+			return SWITCH_STATUS_FALSE;
+		}
+	}
+
 	return SWITCH_STATUS_SUCCESS;
 }
 
@@ -161,20 +212,41 @@ SWITCH_DECLARE(switch_status_t) hv_file_name_to_s3_url(const char *name, const c
 		return SWITCH_STATUS_FALSE;
 	}
 
-	snprintf(url, len, "%s/%s/%s", settings->s3_url, ext, name);
+	snprintf(url, len, "https://%s.%s%s%s/%s", settings->s3_bucket, settings->s3_base_domain, ext ? "/" : "", ext ? ext : "", name);
 	url[len-1] = '\0';
+
 	return SWITCH_STATUS_SUCCESS;
 }
 
-SWITCH_DECLARE(switch_status_t) hv_ext_to_s3_vm_state_url(const char *ext, char *url, uint32_t len, hv_settings_t *settings)
+SWITCH_DECLARE(switch_status_t) hv_http_req_prepare(const char *name, const char *ext, char *url, uint32_t len, hv_settings_t *settings, hv_http_req_t *req)
 {
-	if (zstr(ext) || !url || !len || !settings) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Bad params\n");
+	if (SWITCH_STATUS_SUCCESS != hv_file_name_to_s3_url(name, ext, url, len, settings)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to generate resource URL\n");
 		return SWITCH_STATUS_FALSE;
 	}
 
-	snprintf(url, len, "%s/%s/%s", settings->s3_url, ext, HV_JSON_S3_NAME);
-	url[len-1] = '\0';
+	if (req && settings->use_s3_auth) {
+		len = sizeof(req->s3.object);
+		snprintf(req->s3.object, len, "%s/%s", ext, name);
+		req->s3.object[len-1] = '\0';
+		len = sizeof(req->s3.bucket);
+		strncpy(req->s3.bucket, settings->s3_bucket, len);
+		req->s3.object[len-1] = '\0';
+		len = sizeof(req->s3.id);
+		strncpy(req->s3.id, settings->s3_id, len);
+		req->s3.id[len-1] = '\0';
+		len = sizeof(req->s3.key);
+		strncpy(req->s3.key, settings->s3_key, len);
+		req->s3.key[len-1] = '\0';
+		len = sizeof(req->s3.base_domain);
+		strncpy(req->s3.base_domain, settings->s3_base_domain, len);
+		req->s3.base_domain[len-1] = '\0';
+		len = sizeof(req->s3.region);
+		strncpy(req->s3.region, settings->s3_region, len);
+		req->s3.region[len-1] = '\0';
+		req->use_s3_auth = 1;
+	}
+
 	return SWITCH_STATUS_SUCCESS;
 }
 
@@ -270,6 +342,32 @@ SWITCH_STANDARD_APP(hv_retrieval_app)
 	hv_retrieval_app_exec(session, NULL, &settings);
 }
 
+SWITCH_STANDARD_APP(hv_s3_test_app)
+{
+	hv_settings_t settings = { 0 };
+	switch_channel_t *channel = NULL;
+
+	channel = switch_core_session_get_channel(session);
+	if (!channel) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Channel missing\n");
+		return;
+	}
+
+	switch_channel_set_variable(channel, "telnyx_voicemail", "true");
+	switch_core_media_set_rtp_flag(session, SWITCH_MEDIA_TYPE_AUDIO, SWITCH_RTP_FLAG_AUTOADJ);
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "Turning telnyx_voicemail on\n");
+
+	switch_mutex_lock(globals.mutex);
+	memcpy(&settings, &globals.settings, sizeof(settings));
+	switch_mutex_unlock(globals.mutex);
+
+	switch_mutex_lock(globals.mutex);
+	switch_dir_make_recursive(settings.file_system_folder_in, SWITCH_DEFAULT_DIR_PERMS, globals.pool);
+	switch_mutex_unlock(globals.mutex);
+
+	hv_s3_test_app_exec(session, NULL, &settings);
+}
+
 SWITCH_STANDARD_API(hv_deposit_api)
 {
 	hv_settings_t settings = { 0 };
@@ -342,6 +440,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_happy_voicemail_load)
 
 	SWITCH_ADD_APP(app_interface, "happy_voicemail_deposit", "Voicemail deposit", HV_NAME, hv_deposit_app, "happy_voicemail_deposit", SAF_NONE);
 	SWITCH_ADD_APP(app_interface, "happy_voicemail_retrieval", "Voicemail retrieval", HV_NAME, hv_retrieval_app, "happy_voicemail_retrieval", SAF_NONE);
+	SWITCH_ADD_APP(app_interface, "happy_voicemail_s3_test", "Voicemail S3 test", HV_NAME, hv_s3_test_app, "happy_voicemail_s3_test", SAF_NONE);
 
 	SWITCH_ADD_API(api_interface, "happy_voicemail_deposit", "Voicemail deposit", hv_deposit_api, "happy_voicemail_deposit");
 	SWITCH_ADD_API(api_interface, "happy_voicemail_retrieval", "Voicemail retrieval", hv_retrieval_api, "happy_voicemail_retrieval");
