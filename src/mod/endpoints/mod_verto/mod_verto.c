@@ -42,9 +42,6 @@ SWITCH_MODULE_RUNTIME_FUNCTION(mod_verto_runtime);
 SWITCH_MODULE_DEFINITION(mod_verto, mod_verto_load, mod_verto_shutdown, mod_verto_runtime);
 
 #define HTTP_CHUNK_SIZE 1024 * 32
-#ifndef EP_NAME
-#define EP_NAME "verto.rtc"
-#endif
 //#define WSS_STANDALONE 1
 #include "ks.h"
 
@@ -1179,7 +1176,7 @@ static void set_call_params(cJSON *params, verto_pvt_t *tech_pvt) {
 	const char *caller_id_number = NULL;
 	const char *callee_id_name = NULL;
 	const char *callee_id_number = NULL;
-	const char *prefix = "verto_h_";
+	const char *prefix = PARAMS_PREFIX;
 	switch_event_header_t *var = NULL;
 
 	caller_id_name = switch_channel_get_variable(tech_pvt->channel, "caller_id_name");
@@ -2822,10 +2819,10 @@ static switch_status_t messagehook (switch_core_session_t *session, switch_core_
 	case SWITCH_MESSAGE_INDICATE_ANSWER:
 		switch_channel_set_variable(tech_pvt->channel, SWITCH_ENDPOINT_DISPOSITION_VARIABLE, "ANSWERED");
 		switch_channel_mark_pre_answered(tech_pvt->channel);
-		r = verto_send_media_indication(session, "verto.answer");
+		r = verto_send_media_indication(session, MESSAGE_ANSWER);
 		break;
 	case SWITCH_MESSAGE_INDICATE_PROGRESS:
-		r = verto_send_media_indication(session, "verto.media");
+		r = verto_send_media_indication(session, MESSAGE_MEDIA);
 		switch_channel_set_variable(tech_pvt->channel, SWITCH_ENDPOINT_DISPOSITION_VARIABLE, "EARLY MEDIA");
 		switch_channel_mark_pre_answered(tech_pvt->channel);
 		break;

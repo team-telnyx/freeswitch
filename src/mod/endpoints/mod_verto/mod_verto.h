@@ -83,6 +83,14 @@
 #define CODE_AUTH_FAILED -32001
 #define CODE_SESSION_ERROR -32002
 
+#ifndef EP_NAME
+#define EP_NAME "verto.rtc"
+#endif
+
+#ifndef PARAMS_PREFIX
+#define PARAMS_PREFIX "verto_h_"
+#endif
+
 #ifndef MY_EVENT_CLIENT_CONNECT
 #define MY_EVENT_CLIENT_CONNECT "verto::client_connect"
 #endif
@@ -122,6 +130,10 @@
 
 #ifndef MESSAGE_PROMPT
 #define MESSAGE_PROMPT "verto.prompt"
+#endif
+
+#ifndef MESSAGE_MEDIA
+#define MESSAGE_MEDIA "verto.media"
 #endif
 
 #ifndef MESSAGE_MEDIAPARAMS
