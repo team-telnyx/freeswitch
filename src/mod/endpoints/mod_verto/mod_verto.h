@@ -25,8 +25,9 @@
  *
  * Anthony Minessale II <anthm@freeswitch.org>
  * Seven Du <dujinfang@gmail.com>
+ * Stefan Yohansson <sy.fen0@gmail.com>
  *
- * mod_html.h -- HTML 5 interface
+ * mod_verto.h -- HTML 5 interface
  *
  */
 
@@ -83,6 +84,24 @@
 #define MY_EVENT_CLIENT_CONNECT "verto::client_connect"
 #define MY_EVENT_CLIENT_DISCONNECT "verto::client_disconnect"
 #define MY_EVENT_LOGIN "verto::login"
+
+#define MESSAGE_EVENT "verto.event"
+#define MESSAGE_PUNT "verto.punt"
+#define MESSAGE_PING "verto.ping"
+#define MESSAGE_BYE "verto.bye"
+#define MESSAGE_ATTACH "verto.attach"
+#define MESSAGE_INVITE "verto.invite"
+#define MESSAGE_PROMPT "verto.prompt"
+#define MESSAGE_MEDIAPARAMS "verto.mediaParams"
+#define MESSAGE_INFO "verto.info"
+#define MESSAGE_ANSWER "verto.answer"
+#define MESSAGE_SUBSCRIBE "verto.subscribe"
+#define MESSAGE_UNSUBSCRIBE "verto.unsubscribe"
+#define MESSAGE_BROADCAST "verto.broadcast"
+#define MESSAGE_MODIFY "verto.modify"
+#define MESSAGE_ANNOUNCE "verto.announce"
+#define MESSAGE_CLIENTREADY "verto.clientReady"
+#define MESSAGE_DISPLAY "verto.display"
 
 typedef enum {
 	PTYPE_CLIENT     = (1 << 0),

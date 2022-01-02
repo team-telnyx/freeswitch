@@ -25,6 +25,7 @@
  *
  * Anthony Minessale II <anthm@freeswitch.org>
  * Seven Du <dujinfang@gmail.com>
+ * Stefan Yohansson <sy.fen0@gmail.com>
  *
  * mod_verto.c -- HTML5 Verto interface
  *
@@ -708,7 +709,7 @@ static void write_event(const char *event_channel, const char *super_channel, js
 				params = cJSON_Duplicate(event, 1);
 				cJSON_AddItemToObject(params, "eventSerno", cJSON_CreateNumber(np->serno++));
 				cJSON_AddItemToObject(params, "subscribedChannel", cJSON_CreateString(head->event_channel));
-				msg = jrpc_new_req("verto.event", NULL, &params);
+				msg = jrpc_new_req(MESSAGE_EVENT, NULL, &params);
 
 				jsock_queue_event(np->jsock, &msg, SWITCH_TRUE);
 			}
@@ -751,7 +752,7 @@ static void jsock_send_event(cJSON *event)
 	if (use_jsock || (use_jsock = get_jsock(direct_id))) { /* implicit subscription to channel identical to the connection uuid or session uuid */
 		cJSON *msg = NULL, *params;
 		params = cJSON_Duplicate(event, 1);
-		msg = jrpc_new_req("verto.event", NULL, &params);
+		msg = jrpc_new_req(MESSAGE_EVENT, NULL, &params);
 		jsock_queue_event(use_jsock, &msg, SWITCH_TRUE);
 		switch_thread_rwlock_unlock(use_jsock->rwlock);
 		use_jsock = NULL;
@@ -1236,7 +1237,7 @@ static void attach_jsock(jsock_t *jsock)
 		} else {
 			cJSON *params = NULL;
 			cJSON *msg = NULL;
-			msg = jrpc_new_req("verto.punt", NULL, &params);
+			msg = jrpc_new_req(MESSAGE_PUNT, NULL, &params);
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "New connection for session %s dropping previous connection.\n", jsock->uuid_str);
 			switch_core_hash_delete(verto_globals.jsock_hash, jsock->uuid_str);
 			ws_write_json(jp, &msg, SWITCH_TRUE);
@@ -1318,7 +1319,7 @@ static void tech_reattach(verto_pvt_t *tech_pvt, jsock_t *jsock)
 	verto_globals.detached--;
 	attach_wake();
 	switch_set_flag(tech_pvt, TFLAG_ATTACH_REQ);
-	msg = jrpc_new_req("verto.attach", tech_pvt->call_id, &params);
+	msg = jrpc_new_req(MESSAGE_ATTACH, tech_pvt->call_id, &params);
 
 	add_variables(tech_pvt, params);
 	
@@ -1389,7 +1390,7 @@ static void attach_calls(jsock_t *jsock)
 	}
 	switch_thread_rwlock_unlock(verto_globals.tech_rwlock);
 
-	msg = jrpc_new_req("verto.clientReady", NULL, &params);
+	msg = jrpc_new_req(MESSAGE_CLIENTREADY, NULL, &params);
 	cJSON_AddItemToObject(params, "reattached_sessions", reattached_sessions);
 	jsock_queue_event(jsock, &msg, SWITCH_TRUE);
 }
@@ -2011,7 +2012,7 @@ static void client_run(jsock_t *jsock)
 
 		if (idle >= 30000) {
 			cJSON *params = NULL;
-			cJSON *msg = jrpc_new_req("verto.ping", 0, &params);
+			cJSON *msg = jrpc_new_req(MESSAGE_PING, 0, &params);
 
 			if (jsock->exptime) {
 				cJSON_AddItemToObject(params, "auth-expires", cJSON_CreateNumber(jsock->exptime));
@@ -2321,7 +2322,7 @@ static switch_status_t verto_on_hangup(switch_core_session_t *session)
 	// get the jsock and send hangup notice
 	if (!tech_pvt->remote_hangup_cause && (jsock = get_jsock(tech_pvt->jsock_uuid))) {
 		cJSON *params = NULL;
-		cJSON *msg = jrpc_new_req("verto.bye", tech_pvt->call_id, &params);
+		cJSON *msg = jrpc_new_req(MESSAGE_BYE, tech_pvt->call_id, &params);
 		switch_call_cause_t cause = switch_channel_get_cause(tech_pvt->channel);
 		switch_channel_set_variable(tech_pvt->channel, "verto_hangup_disposition", "send_bye");
 
@@ -2470,7 +2471,7 @@ static switch_status_t verto_on_init(switch_core_session_t *session)
 
 		while(--tries > 0) {
 
-			status = verto_connect(session, "verto.attach");
+			status = verto_connect(session, MESSAGE_ATTACH);
 
 			if (status == SWITCH_STATUS_SUCCESS) {
 				switch_set_flag(tech_pvt, TFLAG_ATTACH_REQ);
@@ -2505,7 +2506,7 @@ static switch_status_t verto_on_init(switch_core_session_t *session)
 	}
 
 	if (switch_channel_direction(tech_pvt->channel) == SWITCH_CALL_DIRECTION_OUTBOUND) {
-		if ((status = verto_connect(tech_pvt->session, "verto.invite")) != SWITCH_STATUS_SUCCESS) {
+		if ((status = verto_connect(tech_pvt->session, MESSAGE_INVITE)) != SWITCH_STATUS_SUCCESS) {
 			switch_channel_hangup(tech_pvt->channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
 		} else {
 			switch_channel_mark_ring_ready(tech_pvt->channel);
@@ -2728,7 +2729,7 @@ static switch_status_t messagehook (switch_core_session_t *session, switch_core_
 				number = msg->string_array_arg[1];
 
 				if (name || number) {
-					jmsg = jrpc_new_req("verto.display", tech_pvt->call_id, &params);
+					jmsg = jrpc_new_req(MESSAGE_DISPLAY, tech_pvt->call_id, &params);
 					switch_ivr_eavesdrop_update_display(session, name, number);
 					switch_channel_set_variable(tech_pvt->channel, "last_sent_display_name", name);
 					switch_channel_set_variable(tech_pvt->channel, "last_sent_display_number", number);
@@ -2756,7 +2757,7 @@ static switch_status_t messagehook (switch_core_session_t *session, switch_core_
 				regex = msg->string_array_arg[2];
 
 				if (type && (!strcasecmp(type, "dtmf") || !strcasecmp(type, "message")) && text) {
-					jmsg = jrpc_new_req("verto.prompt", tech_pvt->call_id, &params);
+					jmsg = jrpc_new_req(MESSAGE_PROMPT, tech_pvt->call_id, &params);
 
 					cJSON_AddItemToObject(params, "type", cJSON_CreateString(type));
 					cJSON_AddItemToObject(params, "text", cJSON_CreateString(text));
@@ -2788,7 +2789,7 @@ static switch_status_t messagehook (switch_core_session_t *session, switch_core_
 				json_text = msg->string_arg;
 
 				if (json_text) {
-					jmsg = jrpc_new_req("verto.mediaParams", tech_pvt->call_id, &params);
+					jmsg = jrpc_new_req(MESSAGE_MEDIAPARAMS, tech_pvt->call_id, &params);
 					if ((vparams = cJSON_Parse((char *)json_text))) {
 						cJSON_AddItemToObject(params, "mediaParams", vparams);
 						jsock_queue_event(jsock, &jmsg, SWITCH_TRUE);
@@ -4623,16 +4624,16 @@ static void jrpc_init(void)
 	jrpc_add_func("fsapi", fsapi_func);
 	jrpc_add_func("login", login_func);
 
-	jrpc_add_func("verto.invite", verto__invite_func);
-	jrpc_add_func("verto.ping", verto__ping_func);
-	jrpc_add_func("verto.info", verto__info_func);
-	jrpc_add_func("verto.attach", verto__attach_func);
-	jrpc_add_func("verto.bye", verto__bye_func);
-	jrpc_add_func("verto.answer", verto__answer_func);
-	jrpc_add_func("verto.subscribe", verto__subscribe_func);
-	jrpc_add_func("verto.unsubscribe", verto__unsubscribe_func);
-	jrpc_add_func("verto.broadcast", verto__broadcast_func);
-	jrpc_add_func("verto.modify", verto__modify_func);
+	jrpc_add_func(MESSAGE_INVITE, verto__invite_func);
+	jrpc_add_func(MESSAGE_PING, verto__ping_func);
+	jrpc_add_func(MESSAGE_INFO, verto__info_func);
+	jrpc_add_func(MESSAGE_ATTACH, verto__attach_func);
+	jrpc_add_func(MESSAGE_BYE, verto__bye_func);
+	jrpc_add_func(MESSAGE_ANSWER, verto__answer_func);
+	jrpc_add_func(MESSAGE_SUBSCRIBE, verto__subscribe_func);
+	jrpc_add_func(MESSAGE_UNSUBSCRIBE, verto__unsubscribe_func);
+	jrpc_add_func(MESSAGE_BROADCAST, verto__broadcast_func);
+	jrpc_add_func(MESSAGE_MODIFY, verto__modify_func);
 
 }
 
@@ -5559,7 +5560,7 @@ static switch_status_t cmd_announce(char **argv, int argc, switch_stream_handle_
 		switch_mutex_lock(profile->mutex);
 		for (jsock = profile->jsock_head; jsock; jsock = jsock->next) {
 			cJSON *params = NULL;
-			cJSON *array, *msg = jrpc_new_req("verto.announce", 0, &params);
+			cJSON *array, *msg = jrpc_new_req(MESSAGE_ANNOUNCE, 0, &params);
 			int i;
 			
 			array = cJSON_CreateArray();
@@ -5936,7 +5937,7 @@ static switch_status_t verto_write_text_frame(switch_core_session_t *session, sw
 			cJSON *obj = NULL, *txt = NULL, *params = NULL;
 			jsock_t *jsock;
 
-			obj = jrpc_new_req("verto.info", tech_pvt->call_id, &params);
+			obj = jrpc_new_req(MESSAGE_INFO, tech_pvt->call_id, &params);
 			txt = json_add_child_obj(params, "txt", NULL);
 			cJSON_AddItemToObject(txt, "chars", cJSON_CreateString((char *)data));
 
@@ -6259,7 +6260,7 @@ static switch_status_t chat_send(switch_event_t *message_event)
 		cJSON *obj = NULL, *msg = NULL, *params = NULL;
 		switch_event_header_t *eh;
 
-		obj = jrpc_new_req("verto.info", call_id, &params);
+		obj = jrpc_new_req(MESSAGE_INFO, call_id, &params);
 		msg = json_add_child_obj(params, "msg", NULL);
 
 		cJSON_AddItemToObject(msg, "from", cJSON_CreateString(from));
