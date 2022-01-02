@@ -71,7 +71,9 @@
 #define MAXPENDING 10000
 #define STACK_SIZE 80 * 1024
 
+#ifndef VERTO_CHAT_PROTO
 #define VERTO_CHAT_PROTO "verto"
+#endif
 
 #define copy_string(x,y,z) strncpy(x, y, z - 1)
 #define set_string(x,y) strncpy(x, y, sizeof(x)-1)
@@ -81,27 +83,86 @@
 #define CODE_AUTH_FAILED -32001
 #define CODE_SESSION_ERROR -32002
 
+#ifndef MY_EVENT_CLIENT_CONNECT
 #define MY_EVENT_CLIENT_CONNECT "verto::client_connect"
-#define MY_EVENT_CLIENT_DISCONNECT "verto::client_disconnect"
-#define MY_EVENT_LOGIN "verto::login"
+#endif
 
+#ifndef MY_EVENT_CLIENT_DISCONNECT
+#define MY_EVENT_CLIENT_DISCONNECT "verto::client_disconnect"
+#endif
+
+#ifndef MY_EVENT_LOGIN
+#define MY_EVENT_LOGIN "verto::login"
+#endif
+
+
+#ifndef MESSAGE_EVENT
 #define MESSAGE_EVENT "verto.event"
+#endif
+
+#ifndef MESSAGE_PUNT
 #define MESSAGE_PUNT "verto.punt"
+#endif
+
+#ifndef MESSAGE_PING
 #define MESSAGE_PING "verto.ping"
+#endif
+
+#ifndef MESSAGE_BYE
 #define MESSAGE_BYE "verto.bye"
+#endif
+
+#ifndef MESSAGE_ATTACH
 #define MESSAGE_ATTACH "verto.attach"
+#endif
+
+#ifndef MESSAGE_INVITE
 #define MESSAGE_INVITE "verto.invite"
+#endif
+
+#ifndef MESSAGE_PROMPT
 #define MESSAGE_PROMPT "verto.prompt"
+#endif
+
+#ifndef MESSAGE_MEDIAPARAMS
 #define MESSAGE_MEDIAPARAMS "verto.mediaParams"
+#endif
+
+#ifndef MESSAGE_INFO
 #define MESSAGE_INFO "verto.info"
+#endif
+
+#ifndef MESSAGE_ANSWER
 #define MESSAGE_ANSWER "verto.answer"
+#endif
+
+#ifndef MESSAGE_SUBSCRIBE
 #define MESSAGE_SUBSCRIBE "verto.subscribe"
+#endif
+
+#ifndef MESSAGE_UNSUBSCRIBE
 #define MESSAGE_UNSUBSCRIBE "verto.unsubscribe"
+#endif
+
+#ifndef MESSAGE_BROADCAST
 #define MESSAGE_BROADCAST "verto.broadcast"
+#endif
+
+#ifndef MESSAGE_MODIFY
 #define MESSAGE_MODIFY "verto.modify"
+#endif
+
+#ifndef MESSAGE_ANNOUNCE
 #define MESSAGE_ANNOUNCE "verto.announce"
+#endif
+
+#ifndef MESSAGE_CLIENTREADY
 #define MESSAGE_CLIENTREADY "verto.clientReady"
+#endif
+
+#ifndef MESSAGE_DISPLAY
 #define MESSAGE_DISPLAY "verto.display"
+#endif
 
 typedef enum {
 	PTYPE_CLIENT     = (1 << 0),

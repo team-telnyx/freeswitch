@@ -42,7 +42,9 @@ SWITCH_MODULE_RUNTIME_FUNCTION(mod_verto_runtime);
 SWITCH_MODULE_DEFINITION(mod_verto, mod_verto_load, mod_verto_shutdown, mod_verto_runtime);
 
 #define HTTP_CHUNK_SIZE 1024 * 32
+#ifndef EP_NAME
 #define EP_NAME "verto.rtc"
+#endif
 //#define WSS_STANDALONE 1
 #include "ks.h"
 
