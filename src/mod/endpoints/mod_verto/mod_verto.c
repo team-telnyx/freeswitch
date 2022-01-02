@@ -2869,7 +2869,7 @@ static int verto_recover_callback(switch_core_session_t *session)
 
 	tech_pvt->call_id = switch_core_session_strdup(session, switch_core_session_get_uuid(session));
 
-	switch_snprintf(name, sizeof(name), "verto.rtc/%s", tech_pvt->jsock_uuid);
+	switch_snprintf(name, sizeof(name), "%s/%s", EP_NAME, tech_pvt->jsock_uuid);
 	switch_channel_set_name(channel, name);
 
 	if ((tech_pvt->smh = switch_core_session_get_media_handle(session))) {
@@ -4014,7 +4014,7 @@ static switch_bool_t verto__invite_func(const char *method, cJSON *params, jsock
 		destination_number = "service";
 	}
 
-	switch_snprintf(name, sizeof(name), "verto.rtc/%s", destination_number);
+	switch_snprintf(name, sizeof(name), "%s/%s", EP_NAME, destination_number);
 	switch_channel_set_name(channel, name);
 
 	if ((tech_pvt->smh = switch_core_session_get_media_handle(session))) {
@@ -6152,7 +6152,7 @@ static switch_call_cause_t verto_outgoing_channel(switch_core_session_t *session
 			tech_pvt->mparams = switch_core_media_get_mparams(tech_pvt->smh);
 		}
 
-		switch_snprintf(name, sizeof(name), "verto.rtc/%s", tech_pvt->jsock_uuid);
+		switch_snprintf(name, sizeof(name), "%s/%s", EP_NAME, tech_pvt->jsock_uuid);
 		switch_channel_set_name(channel, name);
 		switch_channel_set_variable(channel, "jsock_uuid_str", tech_pvt->jsock_uuid);
 		switch_channel_set_variable(channel, "event_channel_cookie", tech_pvt->jsock_uuid);
