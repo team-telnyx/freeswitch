@@ -385,6 +385,10 @@ struct verto_profile_s {
 	int enable_text;
 
 	struct verto_profile_s *next;
+
+	char *jwt_key;
+	char *jwt_aad;
+	char *jwt_grant_field;
 };
 
 typedef struct verto_profile_s verto_profile_t;

@@ -44,6 +44,7 @@ SWITCH_MODULE_DEFINITION(mod_verto, mod_verto_load, mod_verto_shutdown, mod_vert
 #define HTTP_CHUNK_SIZE 1024 * 32
 //#define WSS_STANDALONE 1
 #include "ks.h"
+#include "token_crypto.h"
 
 #include <mod_verto.h>
 #ifndef WIN32
@@ -959,10 +960,15 @@ static switch_bool_t check_auth(jsock_t *jsock, cJSON *params, int *code, char *
 	switch_bool_t r = SWITCH_FALSE;
 	const char *passwd = NULL;
 	const char *login = NULL;
+	const char *login_token = NULL;
 	cJSON *json_ptr = NULL;
 	char *input = NULL;
 	char *a1_hash = NULL;
 	char a1_hash_buff[33] = "";
+	int plaintext_len = 0;
+	unsigned char *plaintext = NULL;
+	char *token_values[2] = {0};
+	int res = 0;
 
 	if (!params) {
 		*code = CODE_AUTH_FAILED;
@@ -970,8 +976,28 @@ static switch_bool_t check_auth(jsock_t *jsock, cJSON *params, int *code, char *
 		goto end;
 	}
 
-	login = cJSON_GetObjectCstr(params, "login");
-	passwd = cJSON_GetObjectCstr(params, "passwd");
+	login_token = cJSON_GetObjectCstr(params, "login_token" );
+	if (login_token && !zstr(login_token)) {
+
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "We've got a TOKEN: '%s'\n", login_token);
+		plaintext_len = token_decrypt(login_token, &plaintext, jsock->profile->jwt_grant_field, jsock->profile->jwt_aad, jsock->profile->jwt_key);
+
+		if (plaintext_len > 0 && (res = switch_split((char *)plaintext, ':', token_values)) == 2) {
+			login = token_values[0];
+			passwd = token_values[1];
+
+			if (login && passwd) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "JWT user name: [%s]\n", login );
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "JWT password: [%.*s...]\n", 3, passwd );
+			}
+		}
+	}
+
+	if (zstr(login) || zstr(passwd)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Authentication via JWT failed, attempting with user/pass\n");
+		login = cJSON_GetObjectCstr(params, "login");
+		passwd = cJSON_GetObjectCstr(params, "passwd");
+	}
 
 	if (zstr(login)) {
 		goto end;
@@ -5260,6 +5286,12 @@ static switch_status_t parse_config(const char *cf)
 					profile->register_domain = switch_core_strdup(profile->pool, val);
 				} else if (!strcasecmp(var, "local-network") && !zstr(val)) {
 					profile->local_network = switch_core_strdup(profile->pool, val);
+				} else if (!strcasecmp(var, "jwt-key") && !zstr(val)) {
+					profile->jwt_key = switch_core_strdup(profile->pool, val);
+				} else if (!strcasecmp(var, "jwt-aad") && !zstr(val)) {
+					profile->jwt_aad = switch_core_strdup(profile->pool, val);
+				} else if (!strcasecmp(var, "jwt-grant-field") && !zstr(val)) {
+					profile->jwt_grant_field = switch_core_strdup(profile->pool, val);
 				} else if (!strcasecmp(var, "apply-candidate-acl")) {
 					if (profile->cand_acl_count < SWITCH_MAX_CAND_ACL) {
 						profile->cand_acl[profile->cand_acl_count++] = switch_core_strdup(profile->pool, val);
