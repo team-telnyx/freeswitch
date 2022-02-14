@@ -4852,21 +4852,23 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 			switch_port_t remote_rtcp_port = engine->remote_rtcp_port;
 
 			if (remote_rtcp_port) {
-				if (!strcasecmp(val, "passthru")) {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_INFO, "Activating %s RTCP PASSTHRU PORT %d\n",
-									  type2str(type), remote_rtcp_port);
-					switch_rtp_activate_rtcp(engine->rtp_session, -1, remote_rtcp_port, engine->rtcp_mux > 0);
-				} else {
-					int interval = atoi(val);
-					if (interval < 100 || interval > 500000) {
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_ERROR,
-										  "Invalid rtcp interval spec [%d] must be between 100 and 500000\n", interval);
-						interval = 5000;
-					}
+                if (strcasecmp(switch_channel_get_variable(smh->session->channel, "rtcp_disable"), "disable")) {
+                    if (!strcasecmp(val, "passthru")) {
+                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_INFO, "Activating %s RTCP PASSTHRU PORT %d\n",
+                                          type2str(type), remote_rtcp_port);
+                        switch_rtp_activate_rtcp(engine->rtp_session, -1, remote_rtcp_port, engine->rtcp_mux > 0);
+                    } else {
+                        int interval = atoi(val);
+                        if (interval < 100 || interval > 500000) {
+                            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_ERROR,
+                                              "Invalid rtcp interval spec [%d] must be between 100 and 500000\n", interval);
+                            interval = 5000;
+                        }
 
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_INFO, "Activating %s RTCP PORT %d\n", type2str(type), remote_rtcp_port);
-					switch_rtp_activate_rtcp(engine->rtp_session, interval, remote_rtcp_port, engine->rtcp_mux > 0);
-				}
+                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_INFO, "Activating %s RTCP PORT %d\n", type2str(type), remote_rtcp_port);
+                        switch_rtp_activate_rtcp(engine->rtp_session, interval, remote_rtcp_port, engine->rtcp_mux > 0);
+                    }
+                }
 			}
 		}
 
