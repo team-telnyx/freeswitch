@@ -4852,7 +4852,7 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 			switch_port_t remote_rtcp_port = engine->remote_rtcp_port;
 
 			if (remote_rtcp_port) {
-                if (strcasecmp(switch_channel_get_variable(smh->session->channel, "rtcp_disable"), "disable")) {
+                if (switch_channel_var_true(smh->session->channel, "telnyx_use_rtcp")) {
                     if (!strcasecmp(val, "passthru")) {
                         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_INFO, "Activating %s RTCP PASSTHRU PORT %d\n",
                                           type2str(type), remote_rtcp_port);
