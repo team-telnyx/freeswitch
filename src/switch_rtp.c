@@ -577,7 +577,6 @@ static switch_status_t switch_rtp_sendto(switch_rtp_t *rtp_session, switch_socke
 
 #define FORK_SSRC_CHECK 0
 
-
 static void switch_rtp_change_ice_dest(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, const char *host, switch_port_t port)
 {
 	int is_rtcp = ice == &rtp_session->rtcp_ice;
@@ -3264,7 +3263,10 @@ static void ping_socket(switch_rtp_t *rtp_session)
 {
 	uint32_t o = UINT_MAX;
 	switch_size_t len = sizeof(o);
-	switch_socket_sendto(rtp_session->sock_input, rtp_session->local_addr, 0, (void *) &o, &len);
+
+	if (rtp_session->sock_input) {
+		switch_socket_sendto(rtp_session->sock_input, rtp_session->local_addr, 0, (void *) &o, &len);
+	}
 
 	if (rtp_session->flags[SWITCH_RTP_FLAG_ENABLE_RTCP] && rtp_session->rtcp_sock_input && rtp_session->rtcp_sock_input != rtp_session->sock_input) {
 		switch_socket_sendto(rtp_session->rtcp_sock_input, rtp_session->rtcp_local_addr, 0, (void *) &o, &len);
@@ -5528,25 +5530,38 @@ SWITCH_DECLARE(void) switch_rtp_break(switch_rtp_t *rtp_session)
 
 SWITCH_DECLARE(void) switch_rtp_kill_socket(switch_rtp_t *rtp_session)
 {
+	switch_socket_t *sock_input, *sock_output;
 	switch_assert(rtp_session != NULL);
 	switch_mutex_lock(rtp_session->flag_mutex);
 	if (rtp_session->flags[SWITCH_RTP_FLAG_IO]) {
 		rtp_session->flags[SWITCH_RTP_FLAG_IO] = 0;
 		if (rtp_session->sock_input) {
 			ping_socket(rtp_session);
-			switch_socket_shutdown(rtp_session->sock_input, SWITCH_SHUTDOWN_READWRITE);
+			sock_input = rtp_session->sock_input;
+			switch_socket_shutdown(sock_input, SWITCH_SHUTDOWN_READWRITE);
+			rtp_session->sock_input = NULL;
+			switch_socket_close(sock_input);
 		}
-		if (rtp_session->sock_output && rtp_session->sock_output != rtp_session->sock_input) {
-			switch_socket_shutdown(rtp_session->sock_output, SWITCH_SHUTDOWN_READWRITE);
+		if (rtp_session->sock_output && rtp_session->sock_output != sock_input) {
+			sock_output = rtp_session->sock_output;
+			switch_socket_shutdown(sock_output, SWITCH_SHUTDOWN_READWRITE);
+			rtp_session->sock_output = NULL;
+			switch_socket_close(sock_output);
 		}
 
 		if (rtp_session->flags[SWITCH_RTP_FLAG_ENABLE_RTCP]) {
-			if (rtp_session->rtcp_sock_input && rtp_session->rtcp_sock_input != rtp_session->sock_input) {
+			if (rtp_session->rtcp_sock_input && rtp_session->rtcp_sock_input != sock_input) {
 				ping_socket(rtp_session);
-				switch_socket_shutdown(rtp_session->rtcp_sock_input, SWITCH_SHUTDOWN_READWRITE);
+				sock_input = rtp_session->rtcp_sock_input;
+				switch_socket_shutdown(sock_input, SWITCH_SHUTDOWN_READWRITE);
+				rtp_session->rtcp_sock_input = NULL;
+				switch_socket_close(sock_input);
 			}
-			if (rtp_session->rtcp_sock_output && rtp_session->rtcp_sock_output != rtp_session->sock_output && rtp_session->rtcp_sock_output != rtp_session->rtcp_sock_input) {
-				switch_socket_shutdown(rtp_session->rtcp_sock_output, SWITCH_SHUTDOWN_READWRITE);
+			if (rtp_session->rtcp_sock_output && rtp_session->rtcp_sock_output != sock_output && rtp_session->rtcp_sock_output != sock_input) {
+				sock_output = rtp_session->rtcp_sock_output;
+				switch_socket_shutdown(sock_output, SWITCH_SHUTDOWN_READWRITE);
+				rtp_session->rtcp_sock_output = NULL;
+				switch_socket_close(sock_output);
 			}
 		}
 	}
@@ -5595,7 +5610,6 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_sync_stats(switch_rtp_t *rtp_session)
 SWITCH_DECLARE(void) switch_rtp_destroy(switch_rtp_t **rtp_session)
 {
 	void *pop;
-	switch_socket_t *sock;
 #ifdef ENABLE_SRTP
 	int x;
 #endif
@@ -5667,27 +5681,6 @@ SWITCH_DECLARE(void) switch_rtp_destroy(switch_rtp_t **rtp_session)
 
 	if ((*rtp_session)->rtcp_sock_output == (*rtp_session)->sock_output) {
 		(*rtp_session)->rtcp_sock_output = NULL;
-	}
-
-	sock = (*rtp_session)->sock_input;
-	(*rtp_session)->sock_input = NULL;
-	switch_socket_close(sock);
-
-	if ((*rtp_session)->sock_output != sock) {
-		sock = (*rtp_session)->sock_output;
-		(*rtp_session)->sock_output = NULL;
-		switch_socket_close(sock);
-	}
-
-	if ((sock = (*rtp_session)->rtcp_sock_input)) {
-		(*rtp_session)->rtcp_sock_input = NULL;
-		switch_socket_close(sock);
-	}
-
-	if ((*rtp_session)->rtcp_sock_output && (*rtp_session)->rtcp_sock_output != sock) {
-		sock = (*rtp_session)->rtcp_sock_output;
-		(*rtp_session)->rtcp_sock_output = NULL;
-		switch_socket_close(sock);
 	}
 
 #ifdef ENABLE_SRTP
