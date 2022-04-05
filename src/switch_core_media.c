@@ -9682,8 +9682,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 		flags[SWITCH_RTP_FLAG_AUTOFLUSH]++;
 	}
 
-	if (!(switch_media_handle_test_media_flag(smh, SCMF_REWRITE_TIMESTAMPS) ||
-		  ((val = switch_channel_get_variable(session->channel, "rtp_rewrite_timestamps")) && switch_false(val)))) {
+	val = switch_channel_get_variable(session->channel, "rtp_rewrite_timestamps");
+	if ((!val && !switch_media_handle_test_media_flag(smh, SCMF_REWRITE_TIMESTAMPS)) || (val && switch_false(val))) {
 		flags[SWITCH_RTP_FLAG_RAW_WRITE]++;
 	}
 
