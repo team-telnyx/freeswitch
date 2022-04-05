@@ -5896,6 +5896,8 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 {
 	switch_frame_flag_t flags = 0;
 	uint32_t samples = rtp_session->samples_per_interval;
+	uint32_t gap_samples = 0;
+	uint32_t gap_ms = 0;
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG1, "do_2833 %s / %p\n", rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName", (void*) rtp_session);
 
@@ -6052,17 +6054,34 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 			rtp_session->dtmf_data.out_digit_packet[2] = (unsigned char) (rtp_session->dtmf_data.out_digit_sub_sofar >> 8);
 			rtp_session->dtmf_data.out_digit_packet[3] = (unsigned char) rtp_session->dtmf_data.out_digit_sub_sofar;
 
+			if (rtp_session->flags[SWITCH_RTP_FLAG_USE_TIMER] &&
+				(rtp_session->write_timer.samplecount - rtp_session->last_write_samplecount) > rtp_session->samples_per_interval) {
+				gap_samples = rtp_session->write_timer.samplecount - rtp_session->last_write_samplecount - rtp_session->samples_per_interval;
+#ifdef DEBUG_2833
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "DTMF: gap from last RTP write timestamp: %u samples\n", gap_samples);
+#endif
+			}
 
-			rtp_session->dtmf_data.timestamp_dtmf = rtp_session->last_write_ts + samples;
+			gap_ms = (unsigned) ((switch_micro_time_now() - rtp_session->last_write_timestamp)) / 1000;
+			if (!rtp_session->flags[SWITCH_RTP_FLAG_USE_TIMER] && gap_ms > (rtp_session->ms_per_packet * 2)) {
+				gap_samples = gap_ms * rtp_session->samples_per_second / 1000;
+#ifdef DEBUG_2833
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "DTMF: gap from last RTP write timestamp: %u ms, %u samples\n", gap_ms, gap_samples);
+#endif
+			}
+
+
+			rtp_session->dtmf_data.timestamp_dtmf = rtp_session->last_write_ts + samples + gap_samples;
 			rtp_session->last_write_ts = rtp_session->dtmf_data.timestamp_dtmf;
+			rtp_session->last_write_timestamp = switch_micro_time_now();
 
 			if (rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS) {
 				{
 					uint32_t ts = normalised_ts_get_next(rtp_session);
 					shift = rdigit->duration;
-					new_ts = ts + shift;
+					new_ts = ts + shift + gap_samples;
 #if DEBUG_RTP
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "RTP: NORM ts: %u shift by %u to %u (RFC 2833, START) %p/%p\n", ts, shift, new_ts, (void*)rtp_session->session, (void*)rtp_session); 
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "RTP: NORM ts: %u shift by %u (gap: %u) to %u (RFC 2833, START) %p/%p\n", ts, shift, gap_samples, new_ts, (void*)rtp_session->session, (void*)rtp_session);
 #endif
 					// Have to commit new_ts minus one packet, for get_next to return  new_ts
 					normalised_ts_commit(rtp_session, new_ts - (samples ? samples : 160));
@@ -6074,7 +6093,7 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 						rtp_session->dtmf_data.out_digit_packet,
 						4,
 						rtp_session->rtp_bugs & RTP_BUG_CISCO_SKIP_MARK_BIT_2833 ? 0 : 1,
-						rtp_session->te, normalised_ts_get_dtmf_ts(rtp_session), &flags);
+						rtp_session->te, normalised_ts_get_dtmf_ts(rtp_session) + gap_samples, &flags);
 
 
 				rtp_session->stats.outbound.raw_bytes += wrote;
