@@ -1169,6 +1169,14 @@ SWITCH_DECLARE(void) switch_core_media_parse_rtp_bugs(switch_rtp_bug_flag_t *fla
 	if (switch_stristr("~SEND_NORMALISED_TIMESTAMPS", str)) {
 		*flag_pole &= ~(RTP_BUG_SEND_LINEAR_TIMESTAMPS);
 	}
+
+	if (switch_stristr("ADJUST_DTMF_TIMESTAMPS", str)) {
+		*flag_pole |= (RTP_BUG_ADJUST_DTMF_TIMESTAMPS);
+	}
+
+	if (switch_stristr("~ADJUST_DTMF_TIMESTAMPS", str)) {
+		*flag_pole &= ~(RTP_BUG_ADJUST_DTMF_TIMESTAMPS);
+	}
 }
 
 /**

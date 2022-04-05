@@ -6054,26 +6054,29 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 			rtp_session->dtmf_data.out_digit_packet[2] = (unsigned char) (rtp_session->dtmf_data.out_digit_sub_sofar >> 8);
 			rtp_session->dtmf_data.out_digit_packet[3] = (unsigned char) rtp_session->dtmf_data.out_digit_sub_sofar;
 
-			if (rtp_session->flags[SWITCH_RTP_FLAG_USE_TIMER] &&
-				(rtp_session->write_timer.samplecount - rtp_session->last_write_samplecount) > rtp_session->samples_per_interval) {
-				gap_samples = rtp_session->write_timer.samplecount - rtp_session->last_write_samplecount - rtp_session->samples_per_interval;
-#ifdef DEBUG_2833
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "DTMF: gap from last RTP write timestamp: %u samples\n", gap_samples);
-#endif
-			}
+			if (rtp_session->rtp_bugs & RTP_BUG_ADJUST_DTMF_TIMESTAMPS) {
 
-			gap_ms = (unsigned) ((switch_micro_time_now() - rtp_session->last_write_timestamp)) / 1000;
-			if (!rtp_session->flags[SWITCH_RTP_FLAG_USE_TIMER] && gap_ms > (rtp_session->ms_per_packet * 2)) {
-				gap_samples = gap_ms * rtp_session->samples_per_second / 1000;
+				if (rtp_session->flags[SWITCH_RTP_FLAG_USE_TIMER] &&
+						(rtp_session->write_timer.samplecount - rtp_session->last_write_samplecount) > rtp_session->samples_per_interval) {
+					gap_samples = rtp_session->write_timer.samplecount - rtp_session->last_write_samplecount - rtp_session->samples_per_interval;
 #ifdef DEBUG_2833
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "DTMF: gap from last RTP write timestamp: %u ms, %u samples\n", gap_ms, gap_samples);
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "DTMF: gap from last RTP write timestamp: %u samples\n", gap_samples);
 #endif
-			}
+				}
 
+				gap_ms = (unsigned) ((switch_micro_time_now() - rtp_session->last_write_timestamp)) / 1000;
+				if (!rtp_session->flags[SWITCH_RTP_FLAG_USE_TIMER] && gap_ms > (rtp_session->ms_per_packet * 2)) {
+					gap_samples = gap_ms * rtp_session->samples_per_second / 1000;
+#ifdef DEBUG_2833
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "DTMF: gap from last RTP write timestamp: %u ms, %u samples\n", gap_ms, gap_samples);
+#endif
+				}
+
+				rtp_session->last_write_timestamp = switch_micro_time_now();
+			}
 
 			rtp_session->dtmf_data.timestamp_dtmf = rtp_session->last_write_ts + samples + gap_samples;
 			rtp_session->last_write_ts = rtp_session->dtmf_data.timestamp_dtmf;
-			rtp_session->last_write_timestamp = switch_micro_time_now();
 
 			if (rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS) {
 				{
