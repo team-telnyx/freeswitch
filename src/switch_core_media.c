@@ -9825,7 +9825,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 											   a_engine->cur_payload_map->remote_sdp_port,
 											   a_engine->cur_payload_map->pt,
 											   a_engine->read_impl.samples_per_packet,
-											   a_engine->cur_payload_map->codec_ms * 1000,
+											   a_engine->cur_payload_map->codec_ms,
 											   flags, timer_name, &err, switch_core_session_get_pool(session),
 											   0, 0);
 		{
