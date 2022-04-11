@@ -9694,6 +9694,10 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 	if ((!val && !switch_media_handle_test_media_flag(smh, SCMF_REWRITE_TIMESTAMPS)) || (val && switch_false(val))) {
 		flags[SWITCH_RTP_FLAG_RAW_WRITE]++;
 	}
+	
+	if (((val = switch_channel_get_variable(session->channel, "rtp_genesys_dtmf")) && switch_true(val))) {
+		flags[SWITCH_RTP_FLAG_USE_MILLISECONDS_PER_PACKET]++;
+	}
 
 	if (switch_media_handle_test_media_flag(smh, SCMF_SUPPRESS_CNG)) {
 		smh->mparams->cng_pt = 0;
@@ -9825,6 +9829,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 
 
 	if (switch_channel_up(session->channel)) {
+		uint32_t codec_ms = a_engine->cur_payload_map->codec_ms * (flags[SWITCH_RTP_FLAG_USE_MILLISECONDS_PER_PACKET] ? 1 : 1000);
 		switch_channel_set_variable(session->channel, "rtp_use_timer_name", timer_name);
 
 		a_engine->rtp_session = switch_rtp_new(a_engine->local_sdp_ip,
@@ -9833,7 +9838,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 											   a_engine->cur_payload_map->remote_sdp_port,
 											   a_engine->cur_payload_map->pt,
 											   a_engine->read_impl.samples_per_packet,
-											   a_engine->cur_payload_map->codec_ms,
+											   codec_ms,
 											   flags, timer_name, &err, switch_core_session_get_pool(session),
 											   0, 0);
 		{

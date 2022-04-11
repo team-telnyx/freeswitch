@@ -4731,7 +4731,9 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_set_interval(switch_rtp_t *rtp_sessio
 	rtp_session->samples_per_interval = rtp_session->conf_samples_per_interval = samples_per_interval;
 	rtp_session->missed_count = 0;
 	rtp_session->samples_per_second =
-		(uint32_t) ((double) (1000.0f / (double) rtp_session->ms_per_packet)) * (double) rtp_session->samples_per_interval;
+		(uint32_t) ((double) (1000.0f / (double) (rtp_session->ms_per_packet / 
+		(switch_rtp_test_flag(rtp_session, SWITCH_RTP_FLAG_USE_MILLISECONDS_PER_PACKET) ? 1:1000)))) * 
+		(double) rtp_session->samples_per_interval;
 
 	rtp_session->one_second = (rtp_session->samples_per_second / rtp_session->samples_per_interval);
 
@@ -6054,7 +6056,7 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 			rtp_session->dtmf_data.out_digit_packet[2] = (unsigned char) (rtp_session->dtmf_data.out_digit_sub_sofar >> 8);
 			rtp_session->dtmf_data.out_digit_packet[3] = (unsigned char) rtp_session->dtmf_data.out_digit_sub_sofar;
 
-			if (rtp_session->rtp_bugs & RTP_BUG_ADJUST_DTMF_TIMESTAMPS) {
+			if (switch_rtp_test_flag(rtp_session, SWITCH_RTP_FLAG_USE_MILLISECONDS_PER_PACKET) && rtp_session->rtp_bugs & RTP_BUG_ADJUST_DTMF_TIMESTAMPS) {
 
 				if (rtp_session->flags[SWITCH_RTP_FLAG_USE_TIMER] &&
 						(rtp_session->write_timer.samplecount - rtp_session->last_write_samplecount) > rtp_session->samples_per_interval) {
@@ -9021,7 +9023,8 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 			}
 
 			if (!rtp_session->flags[SWITCH_RTP_FLAG_USE_TIMER] &&
-				((unsigned) ((switch_micro_time_now() - rtp_session->last_write_timestamp))) / 1000 > (rtp_session->ms_per_packet * 10)) {
+				((unsigned) ((switch_micro_time_now() - rtp_session->last_write_timestamp))) 
+					/ (switch_rtp_test_flag(rtp_session, SWITCH_RTP_FLAG_USE_MILLISECONDS_PER_PACKET) ? 1000:1) > (rtp_session->ms_per_packet * 10)) {
 				m++;
 			}
 
