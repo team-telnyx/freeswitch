@@ -501,7 +501,9 @@ static switch_status_t switch_amrwb_control(switch_codec_t *codec,
 static char *generate_fmtp(switch_memory_pool_t *pool , int octet_align)
 {
 	char buf[256] = { 0 };
+#ifndef AMRWB_PASSTHROUGH
 	int i = 0;
+#endif
 
 	snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf), "octet-align=%d; ", octet_align);
 
