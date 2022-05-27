@@ -11302,6 +11302,17 @@ SWITCH_DECLARE(void)switch_core_media_set_local_sdp(switch_core_session_t *sessi
 	if (smh->sdp_mutex) switch_mutex_unlock(smh->sdp_mutex);
 }
 
+static void add_rtp_header_extensions(switch_core_session_t *session, char *buf, uint32_t buflen)
+{
+	const char *val;
+	int extmap_id = 1;
+
+	if ((val = switch_channel_get_variable(session->channel, "audio_level_events")) && switch_true(val)) {
+		// @TODO: right now, FS is not handling ssrc-audio-level events, so let's hardcode direction sendonly to save bandwidth
+		switch_snprintf(buf + strlen(buf), buflen - strlen(buf), "a=extmap:%d/sendonly urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\n", extmap_id++);
+	}
+}
+
 static void add_fb(char *buf, uint32_t buflen, int pt, int fir, int nack, int pli, int tmmbr)
 {
 	if (fir) {
@@ -12034,6 +12045,8 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 		}
 
 	}
+
+	add_rtp_header_extensions(session, buf, SDPBUFLEN);
 
 	if (switch_channel_test_flag(session->channel, CF_IMAGE_SDP)) {
 		switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "m=image 0 UDPTL T38\r\n", SWITCH_VA_NONE);
