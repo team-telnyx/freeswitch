@@ -537,6 +537,10 @@ static void *SWITCH_THREAD_FUNC read_stream_thread(switch_thread_t *thread, void
 						  context->curl_error_buff, context->stream_url,
 						  !zstr(local_ip) ? local_ip : "N/A", local_port,
 						  !zstr(remote_ip) ? remote_ip : "N/A", remote_port);
+	} else {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "CURL returned success: (local:%s:%ld remote:%s:%ld)\n",
+						  !zstr(local_ip) ? local_ip : "N/A", local_port,
+						  !zstr(remote_ip) ? remote_ip : "N/A", remote_port);
 	}
 	switch_curl_easy_cleanup(curl_handle);
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Read Thread Done\n");
