@@ -1366,6 +1366,7 @@ typedef enum {
 typedef uint32_t switch_core_session_message_flag_t;
 
 typedef struct switch_core_session switch_core_session_t;
+typedef struct switch_media_extensions switch_media_extensions_t;
 static inline switch_core_session_t *switch_core_session_type_check(switch_core_session_t *session) { return session; }
 static inline const char *switch_const_char_type_check(const char *str) { return str; }
 

@@ -103,6 +103,17 @@ typedef enum {
 	SSF_MEDIA_BUG_TAP_ONLY = (1 << 10)
 } switch_session_flag_t;
 
+struct switch_media_extensions {
+        struct switch_media_extensions  *em_next;		/**< Next entry  */
+	unsigned long  em_id;		/**< local identifier */
+	uint32_t    em_direction;		/**< direction */
+	const char    *em_uri;		/**< URI */
+	const char    *em_attributes;	        /**< attributes */
+	uint32_t           em_media;
+	int           em_active;
+	unsigned       :0;
+};
+
 struct switch_core_session {
 	switch_memory_pool_t *pool;
 	switch_thread_t *thread;
@@ -153,6 +164,7 @@ struct switch_core_session {
 	switch_queue_t *private_event_queue_pri;
 	switch_thread_rwlock_t *bug_rwlock;
 	switch_media_bug_t *bugs;
+  	switch_media_extensions_t *media_extensions;
 	switch_app_log_t *app_log;
 	uint32_t stack_count;
 

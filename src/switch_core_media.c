@@ -11302,15 +11302,32 @@ SWITCH_DECLARE(void)switch_core_media_set_local_sdp(switch_core_session_t *sessi
 	if (smh->sdp_mutex) switch_mutex_unlock(smh->sdp_mutex);
 }
 
-static void add_rtp_header_extensions(switch_core_session_t *session, char *buf, uint32_t buflen)
+static SWITCH_DECLARE(switch_status_t) add_rtp_header_extensions(switch_core_session_t *session, sdp_media_e media, char *buf, uint32_t buflen)
 {
 	const char *val;
 	int extmap_id = 1;
 
 	if ((val = switch_channel_get_variable(session->channel, "audio_level_events")) && switch_true(val)) {
+		switch_media_extensions_t *em;
+
+		if (!(em = switch_core_session_alloc(session, sizeof(*em)))) {
+			return SWITCH_STATUS_MEMERR;
+		}
+
+		em->em_id = extmap_id++;
 		// @TODO: right now, FS is not handling ssrc-audio-level events, so let's hardcode direction sendonly to save bandwidth
-		switch_snprintf(buf + strlen(buf), buflen - strlen(buf), "a=extmap:%d/sendonly urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\n", extmap_id++);
+		em->em_direction = sdp_sendonly;
+		em->em_uri = "urn:ietf:params:rtp-hdrext:ssrc-audio-level";
+		em->em_media = media;
+		em->em_active = 0;
+
+		switch_snprintf(buf + strlen(buf), buflen - strlen(buf), "a=extmap:%d/%s %s\r\n", em->em_id, "sendonly", em->em_uri);
+
+		em->em_next = session->media_extensions;
+		session->media_extensions = em;
 	}
+
+	return SWITCH_STATUS_SUCCESS;
 }
 
 static void add_fb(char *buf, uint32_t buflen, int pt, int fir, int nack, int pli, int tmmbr)
@@ -12046,8 +12063,8 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 
 	}
 
-	add_rtp_header_extensions(session, buf, SDPBUFLEN);
-
+	add_rtp_header_extensions(session, sdp_media_audio, buf, SDPBUFLEN);
+	
 	if (switch_channel_test_flag(session->channel, CF_IMAGE_SDP)) {
 		switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "m=image 0 UDPTL T38\r\n", SWITCH_VA_NONE);
 
