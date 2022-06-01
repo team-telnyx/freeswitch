@@ -6089,8 +6089,19 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 
 					if (argc > 0 && !zstr(argv[1])) {
 						if (!strcasecmp(argv[1], "urn:ietf:params:rtp-hdrext:ssrc-audio-level")) {
-							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Activating RTP header extension: urn:ietf:params:rtp-hdrext:ssrc-audio-level\n");
-							switch_channel_set_flag(session->channel, CF_AUDIO_LEVEL_EVENT);
+							if ((val = switch_channel_get_variable(session->channel, "force_audio_level_events_negotiation")) && switch_true(val)) {
+								switch_channel_set_flag(session->channel, CF_AUDIO_LEVEL_EVENT);
+							} else {
+								switch_media_extensions_t *em;
+
+								for (em = session->media_extensions; em; em = em->em_next) {
+									if (!strcasecmp(em->em_uri, "urn:ietf:params:rtp-hdrext:ssrc-audio-level") && em->em_media == sdp_media_audio) {
+										switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Activating RTP header extension: urn:ietf:params:rtp-hdrext:ssrc-audio-level\n");
+										switch_channel_set_flag(session->channel, CF_AUDIO_LEVEL_EVENT);
+										em->em_active = 1;
+									}
+								}
+							}
 						}
 					}
 
