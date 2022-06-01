@@ -6079,6 +6079,22 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 					switch_channel_set_variable(session->channel, "rtp_group", attr->a_value);
 				} else if (!strcasecmp(attr->a_name, "fingerprint") && !zstr(attr->a_value)) {
 					got_crypto = 1;
+				} else if (!strcasecmp(attr->a_name, "extmap") && attr->a_value) {
+					char *tmp = switch_mprintf("%s", attr->a_value);
+					char *argv[4] = { 0 };
+					int argc;
+
+					argc = switch_separate_string(tmp, ' ', argv, (sizeof(argv) / sizeof(argv[0])));
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Checking extmap header %s\n", attr->a_value);
+
+					if (argc > 0 && !zstr(argv[1])) {
+						if (!strcasecmp(argv[1], "urn:ietf:params:rtp-hdrext:ssrc-audio-level")) {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Activating RTP header extension: urn:ietf:params:rtp-hdrext:ssrc-audio-level\n");
+							switch_channel_set_flag(session->channel, CF_AUDIO_LEVEL_EVENT);
+						}
+					}
+
+					switch_safe_free(tmp);
 				}
 			}
 
