@@ -1632,6 +1632,8 @@ SWITCH_DECLARE(void) switch_core_session_perform_destroy(switch_core_session_t *
 		switch_event_fire(&event);
 	}
 
+	switch_core_hash_destroy(&(*session)->media_extensions);
+
 	switch_core_session_destroy_state(*session);
 
 	switch_buffer_destroy(&(*session)->raw_read_buffer);
@@ -2528,6 +2530,7 @@ SWITCH_DECLARE(switch_core_session_t *) switch_core_session_request_uuid(switch_
 	switch_mutex_init(&session->codec_read_mutex, SWITCH_MUTEX_NESTED, session->pool);
 	switch_mutex_init(&session->codec_write_mutex, SWITCH_MUTEX_NESTED, session->pool);
 	switch_mutex_init(&session->frame_read_mutex, SWITCH_MUTEX_NESTED, session->pool);
+	switch_mutex_init(&session->media_extensions_mutex, SWITCH_MUTEX_NESTED, session->pool);
 	switch_thread_rwlock_create(&session->bug_rwlock, session->pool);
 	switch_thread_cond_create(&session->cond, session->pool);
 	switch_thread_rwlock_create(&session->rwlock, session->pool);
@@ -2537,6 +2540,7 @@ SWITCH_DECLARE(switch_core_session_t *) switch_core_session_request_uuid(switch_
 	switch_queue_create(&session->event_queue, SWITCH_EVENT_QUEUE_LEN, session->pool);
 	switch_queue_create(&session->private_event_queue, SWITCH_EVENT_QUEUE_LEN, session->pool);
 	switch_queue_create(&session->private_event_queue_pri, SWITCH_EVENT_QUEUE_LEN, session->pool);
+	switch_core_hash_init(&session->media_extensions);
 
 	switch_mutex_lock(runtime.session_hash_mutex);
 	switch_core_hash_insert(session_manager.session_table, session->uuid_str, session);

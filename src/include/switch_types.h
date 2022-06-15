@@ -1365,6 +1365,8 @@ typedef enum {
 } switch_core_session_message_flag_enum_t;
 typedef uint32_t switch_core_session_message_flag_t;
 
+#define SWITCH_MEDIA_EXTENSIONS_AUDIO_LEVEL "urn:ietf:params:rtp-hdrext:ssrc-audio-level"
+
 typedef struct switch_core_session switch_core_session_t;
 typedef struct switch_media_extensions switch_media_extensions_t;
 static inline switch_core_session_t *switch_core_session_type_check(switch_core_session_t *session) { return session; }

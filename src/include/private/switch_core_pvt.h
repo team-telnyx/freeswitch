@@ -104,14 +104,12 @@ typedef enum {
 } switch_session_flag_t;
 
 struct switch_media_extensions {
-        struct switch_media_extensions  *em_next;		/**< Next entry  */
-	unsigned long  em_id;		/**< local identifier */
-	uint32_t    em_direction;		/**< direction */
-	const char    *em_uri;		/**< URI */
-	const char    *em_attributes;	        /**< attributes */
-	uint32_t           em_media;
-	int           em_active;
-	unsigned       :0;
+	unsigned long em_id;		/**< local identifier */
+	uint32_t em_direction;		/**< direction */
+	const char *em_uri;		/**< URI */
+	const char *em_attributes;	        /**< attributes */
+	uint32_t em_media;
+	int em_active;
 };
 
 struct switch_core_session {
@@ -148,6 +146,7 @@ struct switch_core_session {
 	switch_mutex_t *codec_write_mutex;
 	switch_thread_cond_t *cond;
 	switch_mutex_t *frame_read_mutex;
+	switch_mutex_t *media_extensions_mutex;
 
 	switch_thread_rwlock_t *rwlock;
 	switch_thread_rwlock_t *io_rwlock;
@@ -157,6 +156,7 @@ struct switch_core_session {
 
 	char uuid_str[SWITCH_UUID_FORMATTED_LENGTH + 1];
 	void *private_info[SWITCH_CORE_SESSION_MAX_PRIVATES];
+	switch_hash_t *media_extensions;
 	switch_queue_t *event_queue;
 	switch_queue_t *message_queue;
 	switch_queue_t *signal_data_queue;
@@ -164,7 +164,6 @@ struct switch_core_session {
 	switch_queue_t *private_event_queue_pri;
 	switch_thread_rwlock_t *bug_rwlock;
 	switch_media_bug_t *bugs;
-  	switch_media_extensions_t *media_extensions;
 	switch_app_log_t *app_log;
 	uint32_t stack_count;
 

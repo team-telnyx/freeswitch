@@ -6088,19 +6088,21 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Checking extmap header %s\n", attr->a_value);
 
 					if (argc > 0 && !zstr(argv[1])) {
-						if (!strcasecmp(argv[1], "urn:ietf:params:rtp-hdrext:ssrc-audio-level")) {
-							if ((val = switch_channel_get_variable(session->channel, "force_audio_level_events_negotiation")) && switch_true(val)) {
+						if (!strcasecmp(argv[1], SWITCH_MEDIA_EXTENSIONS_AUDIO_LEVEL)) {
+							if ((val = switch_channel_get_variable(session->channel, "force_rtp_ext_audio_level_events_negotiation")) && switch_true(val)) {
 								switch_channel_set_flag(session->channel, CF_AUDIO_LEVEL_EVENT);
 							} else {
 								switch_media_extensions_t *em;
 
-								for (em = session->media_extensions; em; em = em->em_next) {
-									if (!strcasecmp(em->em_uri, "urn:ietf:params:rtp-hdrext:ssrc-audio-level") && em->em_media == sdp_media_audio) {
-										switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Activating RTP header extension: urn:ietf:params:rtp-hdrext:ssrc-audio-level\n");
+								switch_mutex_lock(session->media_extensions_mutex);
+								if ((em = switch_core_hash_find(session->media_extensions, SWITCH_MEDIA_EXTENSIONS_AUDIO_LEVEL))) {
+									if (em->em_media == sdp_media_audio) {
+										switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Activating RTP header extension: %s\n", SWITCH_MEDIA_EXTENSIONS_AUDIO_LEVEL);
 										switch_channel_set_flag(session->channel, CF_AUDIO_LEVEL_EVENT);
 										em->em_active = 1;
 									}
 								}
+								switch_mutex_unlock(session->media_extensions_mutex);
 							}
 						}
 					}
@@ -11329,32 +11331,41 @@ SWITCH_DECLARE(void)switch_core_media_set_local_sdp(switch_core_session_t *sessi
 	if (smh->sdp_mutex) switch_mutex_unlock(smh->sdp_mutex);
 }
 
+static SWITCH_DECLARE(switch_status_t) add_rtp_header_extension_audio_level(int id, switch_core_session_t *session, sdp_media_e media, char *buf, uint32_t buflen)
+{
+	switch_media_extensions_t *em;
+
+	if (!(em = switch_core_session_alloc(session, sizeof(*em)))) {
+		return SWITCH_STATUS_MEMERR;
+	}
+
+	em->em_id = id;
+	// @TODO: right now, FS is not handling ssrc-audio-level events, so let's hardcode direction sendonly to save bandwidth
+	em->em_direction = sdp_sendonly;
+	em->em_uri = SWITCH_MEDIA_EXTENSIONS_AUDIO_LEVEL;
+	em->em_media = media;
+	em->em_active = 0;
+
+	switch_snprintf(buf + strlen(buf), buflen - strlen(buf), "a=extmap:%d/%s %s\r\n", em->em_id, "sendonly", em->em_uri);
+
+	switch_mutex_lock(session->media_extensions_mutex);
+	switch_core_hash_insert(session->media_extensions, em->em_uri, em);
+	switch_mutex_unlock(session->media_extensions_mutex);
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
 static SWITCH_DECLARE(switch_status_t) add_rtp_header_extensions(switch_core_session_t *session, sdp_media_e media, char *buf, uint32_t buflen)
 {
 	const char *val;
 	int extmap_id = 1;
+	switch_status_t result = SWITCH_STATUS_SUCCESS;
 
-	if ((val = switch_channel_get_variable(session->channel, "audio_level_events")) && switch_true(val)) {
-		switch_media_extensions_t *em;
-
-		if (!(em = switch_core_session_alloc(session, sizeof(*em)))) {
-			return SWITCH_STATUS_MEMERR;
-		}
-
-		em->em_id = extmap_id++;
-		// @TODO: right now, FS is not handling ssrc-audio-level events, so let's hardcode direction sendonly to save bandwidth
-		em->em_direction = sdp_sendonly;
-		em->em_uri = "urn:ietf:params:rtp-hdrext:ssrc-audio-level";
-		em->em_media = media;
-		em->em_active = 0;
-
-		switch_snprintf(buf + strlen(buf), buflen - strlen(buf), "a=extmap:%d/%s %s\r\n", em->em_id, "sendonly", em->em_uri);
-
-		em->em_next = session->media_extensions;
-		session->media_extensions = em;
+	if ((val = switch_channel_get_variable(session->channel, "rtp_ext_audio_level_events")) && switch_true(val)) {
+		result = add_rtp_header_extension_audio_level(extmap_id++, session, media, buf, buflen);
 	}
 
-	return SWITCH_STATUS_SUCCESS;
+	return result;
 }
 
 static void add_fb(char *buf, uint32_t buflen, int pt, int fir, int nack, int pli, int tmmbr)
