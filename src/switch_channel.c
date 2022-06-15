@@ -192,6 +192,7 @@ struct switch_channel {
 
 static void process_device_hup(switch_channel_t *channel);
 static void switch_channel_check_device_state(switch_channel_t *channel, switch_channel_callstate_t callstate);
+static switch_time_t select_ringback_delay(switch_time_t progress_time, switch_time_t first_early_rtp_packet);
 
 SWITCH_DECLARE(switch_hold_record_t *) switch_channel_get_hold_record(switch_channel_t *channel)
 {
@@ -3377,6 +3378,9 @@ SWITCH_DECLARE(void) switch_channel_set_hangup_time(switch_channel_t *channel)
 	if (channel->caller_profile && channel->caller_profile->times && !channel->caller_profile->times->hungup) {
 		switch_mutex_lock(channel->profile_mutex);
 		channel->caller_profile->times->hungup = switch_micro_time_now();
+		channel->caller_profile->times->ringback_delay = select_ringback_delay(
+			channel->caller_profile->times->progress,
+			channel->caller_profile->times->first_early_rtp_packet);
 		switch_mutex_unlock(channel->profile_mutex);
 	}
 }
@@ -3956,17 +3960,9 @@ SWITCH_DECLARE(switch_status_t) switch_channel_perform_mark_answered(switch_chan
 	if (channel->caller_profile && channel->caller_profile->times) {
 		switch_mutex_lock(channel->profile_mutex);
 		channel->caller_profile->times->answered = switch_micro_time_now();
-		if (channel->caller_profile->times->progress && channel->caller_profile->times->first_early_rtp_packet) {
-			if (channel->caller_profile->times->first_early_rtp_packet < channel->caller_profile->times->progress) {
-				channel->caller_profile->times->ringback_delay = channel->caller_profile->times->first_early_rtp_packet;
-			} else {
-				channel->caller_profile->times->ringback_delay = channel->caller_profile->times->progress;
-			}
-		} else if (channel->caller_profile->times->progress) {
-			channel->caller_profile->times->ringback_delay = channel->caller_profile->times->progress;
-		} else if (channel->caller_profile->times->first_early_rtp_packet) {
-			channel->caller_profile->times->ringback_delay = channel->caller_profile->times->first_early_rtp_packet;
-		}
+		channel->caller_profile->times->ringback_delay = select_ringback_delay(
+			channel->caller_profile->times->progress,
+			channel->caller_profile->times->first_early_rtp_packet);
 		// Calculate ringback delay
 		switch_mutex_unlock(channel->profile_mutex);
 	}
@@ -5628,6 +5624,18 @@ static switch_status_t create_device_record(switch_device_record_t **drecp, cons
 	*drecp = drec;
 
 	return SWITCH_STATUS_SUCCESS;
+}
+
+static switch_time_t select_ringback_delay(switch_time_t progress_time, switch_time_t first_early_rtp_packet_time)
+{
+	if (progress_time && first_early_rtp_packet_time) {
+		if (first_early_rtp_packet_time < progress_time) {
+			return first_early_rtp_packet_time;
+		} else {
+			return progress_time;
+		}
+	}
+	return progress_time ? progress_time : first_early_rtp_packet_time;
 }
 
 

@@ -46,7 +46,7 @@ SWITCH_BEGIN_EXTERN_C struct switch_channel_timetable {
 	switch_time_t answered;
 	switch_time_t progress;
 	switch_time_t progress_media;
-  switch_time_t ringback_delay;
+	switch_time_t ringback_delay;
 	switch_time_t hungup;
 	switch_time_t transferred;
 	switch_time_t resurrected;
@@ -55,7 +55,7 @@ SWITCH_BEGIN_EXTERN_C struct switch_channel_timetable {
 	switch_time_t hold_accum;
 	switch_time_t last_rtp_read_heartbeat;
 	switch_time_t last_rtp_write_heartbeat;
-  switch_time_t first_early_rtp_packet;
+ 	switch_time_t first_early_rtp_packet;
 	struct switch_channel_timetable *next;
 };
 
