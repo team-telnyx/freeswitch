@@ -4634,7 +4634,8 @@ SWITCH_DECLARE(switch_status_t) switch_channel_set_timestamps(switch_channel_t *
 	switch_time_t uduration = 0, legbillusec = 0, billusec = 0, progresssec = 0, progressusec = 0, progress_mediasec = 0, progress_mediausec = 0, ringback_delaysec = 0, ringback_delayusec = 0, first_early_rtp_packetsec = 0, first_early_rtp_packetusec = 0, waitusec = 0;
 	time_t tt_created = 0, tt_answered = 0, tt_resurrected = 0, tt_bridged, tt_last_hold, tt_hold_accum,
 		tt_progress = 0, tt_progress_media = 0, tt_ringback_delay = 0, tt_first_early_rtp_packet = 0, tt_hungup = 0, mtt_created = 0, mtt_answered = 0, mtt_bridged = 0,
-		mtt_hungup = 0, tt_prof_created, mtt_progress = 0, mtt_progress_media = 0, mtt_ringback_delay = 0, mtt_first_early_rtp_packet = 0;
+		mtt_hungup = 0, tt_prof_created, mtt_progress = 0, mtt_progress_media = 0, mtt_ringback_delay = 0, mtt_first_early_rtp_packet = 0,
+		sip_invite_received = 0,tt_sip_invite_received = 0, mtt_sip_invite_received = 0;
 	void *pop;
 	char dtstr[SWITCH_DTMF_LOG_LEN + 1] = "";
 	int x = 0;
@@ -4789,6 +4790,17 @@ SWITCH_DECLARE(switch_status_t) switch_channel_set_timestamps(switch_channel_t *
 			free(stream.data);
 		}
 
+		if (switch_channel_direction(channel) == SWITCH_CALL_DIRECTION_INBOUND)
+		{
+			const char *var = switch_channel_get_variable(channel, "sip_invite_stamp");
+			sip_invite_received = (time_t) atol(var);
+			if (sip_invite_received)
+			{
+				tt_sip_invite_received = (time_t) (sip_invite_received / 1000000);
+				mtt_sip_invite_received = (time_t) (sip_invite_received / 1000);
+			}
+		}
+
 		switch_time_exp_lt(&tm, caller_profile->times->hungup);
 		switch_strftime_nocheck(end, &retsize, sizeof(end), fmt, &tm);
 		switch_channel_set_variable(channel, "end_stamp", end);
@@ -4916,9 +4928,9 @@ SWITCH_DECLARE(switch_status_t) switch_channel_set_timestamps(switch_channel_t *
 		}
 
 		if (caller_profile->times->ringback_delay) {
-			ringback_delaysec = (int32_t) (tt_ringback_delay - tt_created);
-			ringback_delaymsec = (int32_t) (mtt_ringback_delay - mtt_created);
-			ringback_delayusec = caller_profile->times->ringback_delay - caller_profile->times->created;
+			ringback_delaysec = (int32_t) (tt_ringback_delay - (tt_sip_invite_received ? tt_sip_invite_received : tt_created));
+			ringback_delaymsec = (int32_t) (mtt_ringback_delay - (mtt_sip_invite_received ? mtt_sip_invite_received : mtt_created));
+			ringback_delayusec = caller_profile->times->ringback_delay - (sip_invite_received ? sip_invite_received : caller_profile->times->created);
 		}
 
 		if (caller_profile->times->first_early_rtp_packet) {
