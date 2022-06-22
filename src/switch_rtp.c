@@ -9962,6 +9962,12 @@ SWITCH_DECLARE(int) switch_rtp_write_frame(switch_rtp_t *rtp_session, switch_fra
 		switch_mutex_unlock(rtp_session->flag_mutex);
 	}
 
+	if (!rtp_session->flags[SWITCH_RTP_FLAG_PROXY_MEDIA] && !rtp_session->flags[SWITCH_RTP_FLAG_UDPTL]) {
+		send_msg->header.x = 1;
+		send_msg->ext->profile = 0xbede;
+		send_msg->ext->length = 1;
+	}
+
 	if (fwd) {
 		send_msg = frame->packet;
 		local_header = send_msg->header;
