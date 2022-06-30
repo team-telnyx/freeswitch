@@ -130,9 +130,16 @@ static switch_hash_t *alloc_hash = NULL;
 typedef struct {
 	srtp_hdr_t header;
 	char body[SWITCH_RTP_MAX_BUF_LEN+4+sizeof(char *)];
-	switch_rtp_hdr_ext_t *ext;
-	char *ebody;
+	switch_rtp_hdr_ext_t* ext;
+	char* ebody;
 } rtp_msg_t;
+
+typedef struct {
+	srtp_hdr_t header;
+	switch_rtp_hdr_ext_t ext;
+	switch_rtp_data_ext_t ebody;
+	char body[SWITCH_RTP_MAX_BUF_LEN+4+sizeof(char *)];
+} rtp_ext_msg_t;
 
 #define RTP_BODY(_s) (char *) (_s->recv_msg.ebody ? _s->recv_msg.ebody : _s->recv_msg.body)
 
@@ -518,6 +525,9 @@ struct switch_rtp {
 #endif
 	switch_time_t next_dtmf_send_time;
 	rtcp_probe_func rtcp_probe;
+
+	switch_rtp_hdr_ext_t rtp_ext_hdr;
+	switch_rtp_data_ext_t rtp_ext_data;
 };
 
 #if 0
@@ -4945,6 +4955,13 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_create(switch_rtp_t **new_rtp_session
 #endif
 	rtp_session->stats.inbound.R = 100.0;
 	rtp_session->stats.inbound.mos = 4.5;
+
+	rtp_session->rtp_ext_hdr.profile = 0;
+	rtp_session->rtp_ext_hdr.length = 0;
+	rtp_session->rtp_ext_data.id = 0;
+	rtp_session->rtp_ext_data.length = 0;
+	rtp_session->rtp_ext_data.data = 0;
+
 	rtp_session->send_msg.header.ssrc = htonl(rtp_session->ssrc);
 	rtp_session->send_msg.header.ts = 0;
 	rtp_session->send_msg.header.m = 0;
@@ -9617,19 +9634,48 @@ fork_done:
 			}
 		}
 #else
-		//if (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
-		//
-		//	rtp_session->flags[SWITCH_RTP_FLAG_DEBUG_RTP_READ]++;
-		//
-		//	//switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "SEND %u\n", ntohs(send_msg->header.seq));
-		//}
+		if (rtp_session->flags[SWITCH_RTP_FLAG_ENABLE_HEADER_EXTENSIONS]) {
+			char tmp[SWITCH_RTP_MAX_BUF_LEN+4+sizeof(char *)];
+			int length = 0;
+			int actual_length = 0;
+			switch_channel_t *channel = switch_core_session_get_channel(rtp_session->session);
+			switch_mutex_t *media_extensions_mutex = switch_core_session_get_media_extensions_mutex(rtp_session->session);
+			switch_hash_t *media_extensions = switch_core_session_get_media_extensions(rtp_session->session);
+			
+			send_msg->header.x = 1;
 
-			if (switch_rtp_sendto(rtp_session, rtp_session->sock_output, rtp_session->remote_addr, 0, (void *) send_msg, &bytes) != SWITCH_STATUS_SUCCESS) {
-				rtp_session->seq -= delta;
+			switch_mutex_lock(media_extensions_mutex);
+			length = switch_core_hash_count(media_extensions);
+			switch_mutex_unlock(media_extensions_mutex);
+			
+			rtp_session->rtp_ext_hdr.profile = htons(0xbede); // @TODO: implement two bytes as well
+			rtp_session->rtp_ext_hdr.length = htons(length);
 
-				ret = -1;
-				goto end;
+			memcpy(tmp, send_msg->body, sizeof(tmp));
+			memcpy(send_msg->body, (char*)&rtp_session->rtp_ext_hdr, sizeof(rtp_session->rtp_ext_hdr));
+			
+			if (switch_channel_test_flag(channel, CF_AUDIO_LEVEL_EVENT)) {
+				unsigned long id = 0;
+				if (switch_core_session_get_media_extension_id(rtp_session->session, SWITCH_MEDIA_EXTENSIONS_AUDIO_LEVEL, &id) == SWITCH_STATUS_SUCCESS) {
+					rtp_session->rtp_ext_data.id = htons(id);
+					rtp_session->rtp_ext_data.length = htons(actual_length++);
+					rtp_session->rtp_ext_data.data = htons(0x80); // @TODO: always sending voice, need to check the value using the RTP... how?
+
+					memcpy(send_msg->body+4, (char*)&rtp_session->rtp_ext_data, sizeof(rtp_session->rtp_ext_data));
+				}
 			}
+
+			memcpy(send_msg->body+4+4, tmp, sizeof(tmp)-(4+4));
+			bytes += (length * 4) + 4;
+		}
+		
+		if (switch_rtp_sendto(rtp_session, rtp_session->sock_output, rtp_session->remote_addr, 0, (void *) send_msg, &bytes) != SWITCH_STATUS_SUCCESS) {
+			rtp_session->seq -= delta;
+
+			ret = -1;
+			goto end;
+		}
+		
 #endif
 
 		rtp_session->last_write_ts = this_ts;
@@ -9960,12 +10006,6 @@ SWITCH_DECLARE(int) switch_rtp_write_frame(switch_rtp_t *rtp_session, switch_fra
 			}
 		}
 		switch_mutex_unlock(rtp_session->flag_mutex);
-	}
-
-	if (!rtp_session->flags[SWITCH_RTP_FLAG_PROXY_MEDIA] && !rtp_session->flags[SWITCH_RTP_FLAG_UDPTL]) {
-		send_msg->header.x = 1;
-		send_msg->ext->profile = 0xbede;
-		send_msg->ext->length = 1;
 	}
 
 	if (fwd) {

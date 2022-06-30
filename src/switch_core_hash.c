@@ -171,6 +171,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_hash_insert_locked(switch_hash_t *ha
 	return status;
 }
 
+SWITCH_DECLARE(unsigned int) switch_core_hash_count(switch_hash_t *hash)
+{
+	return switch_hashtable_count(hash);
+}
+
 SWITCH_DECLARE(switch_status_t) switch_core_hash_insert_wrlock(switch_hash_t *hash, const char *key, const void *data, switch_thread_rwlock_t *rwlock)
 {
 	switch_status_t status = SWITCH_STATUS_FALSE;

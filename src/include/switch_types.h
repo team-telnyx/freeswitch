@@ -837,6 +837,7 @@ typedef enum {
 	SWITCH_RTP_FLAG_ESTIMATORS,
 	SWITCH_RTP_FLAG_ADJ_BITRATE_CAP,
 	SWITCH_RTP_FLAG_VIDEO,
+	SWITCH_RTP_FLAG_ENABLE_HEADER_EXTENSIONS,
 	SWITCH_RTP_FLAG_ENABLE_RTCP,
 	SWITCH_RTP_FLAG_RTCP_MUX,
 	SWITCH_RTP_FLAG_KILL_JB,
@@ -1036,6 +1037,12 @@ typedef struct {
 	unsigned profile:16;		/* defined by profile     */
 } switch_rtp_hdr_ext_t;
 
+typedef struct {
+	unsigned id:4;				/* Data Ext ID */
+	unsigned length:4;			/* Data Ext Length */	
+	unsigned data:16;			/* Data Ext Data */
+} switch_rtp_data_ext_t;
+
 #else /*  BIG_ENDIAN */
 
 typedef struct {
@@ -1054,6 +1061,12 @@ typedef struct {
 	unsigned profile:16;		/* defined by profile     */
 	unsigned length:16;			/* length                 */
 } switch_rtp_hdr_ext_t;
+
+typedef struct {
+	unsigned length:4;			/* Data Ext Length */
+	unsigned id:4;				/* Data Ext ID */
+	unsigned data:16;			/* Data Ext Data */
+} switch_rtp_data_ext_t;
 
 #endif
 

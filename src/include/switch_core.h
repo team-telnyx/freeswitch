@@ -866,6 +866,10 @@ SWITCH_DECLARE(switch_status_t) switch_thread_pool_wait(switch_thread_data_t *td
 */
 	 _Ret_ SWITCH_DECLARE(switch_channel_t *) switch_core_session_get_channel(_In_ switch_core_session_t *session);
 
+_Ret_ SWITCH_DECLARE(switch_hash_t *) switch_core_session_get_media_extensions(_In_ switch_core_session_t *session);
+SWITCH_DECLARE(switch_mutex_t *) switch_core_session_get_media_extensions_mutex(switch_core_session_t *session);
+SWITCH_DECLARE(switch_status_t) switch_core_session_get_media_extension_id(switch_core_session_t *session, const char *extension, unsigned long *id);
+
 /*!
   \brief Signal a session's state machine thread that a state change has occured
 */
@@ -1569,6 +1573,14 @@ SWITCH_DECLARE(switch_status_t) switch_core_hash_delete_multi(_In_ switch_hash_t
   \return a pointer to the data held in the key
 */
 SWITCH_DECLARE(void *) switch_core_hash_find(_In_ switch_hash_t *hash, _In_z_ const char *key);
+
+
+/*!
+  \brief Retrieve the count of entries from a given hash
+  \param hash the hash to retrieve from
+  \return a integer with the count of elements in the hash
+*/
+SWITCH_DECLARE(unsigned int) switch_core_hash_count(_In_ switch_hash_t *hash);
 
 
 /*!

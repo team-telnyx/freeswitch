@@ -1480,6 +1480,32 @@ SWITCH_DECLARE(switch_channel_t *) switch_core_session_get_channel(switch_core_s
 	return session->channel;
 }
 
+SWITCH_DECLARE(switch_hash_t *) switch_core_session_get_media_extensions(switch_core_session_t *session)
+{
+	return session->media_extensions;
+}
+
+SWITCH_DECLARE(switch_mutex_t *) switch_core_session_get_media_extensions_mutex(switch_core_session_t *session)
+{
+	return session->media_extensions_mutex;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_session_get_media_extension_id(switch_core_session_t *session, const char *extension, unsigned long *id)
+{
+	switch_hash_t *media_extensions = switch_core_session_get_media_extensions(session);
+	switch_mutex_t *media_extensions_mutex = switch_core_session_get_media_extensions_mutex(session);
+	switch_media_extensions_t *em;
+
+	switch_mutex_lock(media_extensions_mutex);
+	if ((em = switch_core_hash_find(media_extensions, extension))) {
+		*id = em->em_id;
+		return SWITCH_STATUS_SUCCESS;
+	}
+	switch_mutex_unlock(media_extensions_mutex);
+	
+	return SWITCH_STATUS_FALSE;
+}
+
 SWITCH_DECLARE(switch_mutex_t *) switch_core_session_get_mutex(switch_core_session_t *session)
 {
 	return session->mutex;
