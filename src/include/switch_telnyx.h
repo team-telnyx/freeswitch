@@ -11,6 +11,7 @@ typedef switch_bool_t (*switch_telnyx_sofia_on_init_func)(switch_core_session_t 
 typedef void (*switch_telnyx_on_set_variable_func)(switch_channel_t*, const char*, const char*);
 typedef int (*switch_telnyx_recover_func)(switch_core_session_t *);
 typedef void (*switch_telnyx_on_channel_recover_func)(switch_channel_t*);
+typedef void (*switch_telnyx_on_populate_event_func)(switch_event_t *);
 typedef void (*switch_telnyx_on_populate_core_heartbeat_func)(switch_event_t *);
 typedef void (*switch_telnyx_publish_json_event_func)(const char*);
 typedef void (*switch_telnyx_process_audio_stats_func)(switch_core_session_t*,switch_rtp_stats_t*);
@@ -45,7 +46,9 @@ SWITCH_DECLARE(switch_telnyx_event_dispatch_t*) switch_telnyx_event_dispatch();
 SWITCH_DECLARE(void) switch_telnyx_on_set_variable(switch_channel_t* channel, const char* name, const char* value);
 SWITCH_DECLARE(int) switch_telnyx_call_recover(switch_core_session_t* session);
 SWITCH_DECLARE(void) switch_telnyx_on_channel_recover(switch_channel_t* channel);
+SWITCH_DECLARE(void) switch_telnyx_on_populate_event(switch_event_t* event);
 SWITCH_DECLARE(void) switch_telnyx_on_populate_core_heartbeat(switch_event_t* event);
+SWITCH_DECLARE(void) switch_telnyx_add_populate_event_callback(switch_telnyx_on_populate_event_func cb);
 SWITCH_DECLARE(void) switch_telnyx_add_core_heartbeat_callback(switch_telnyx_on_populate_core_heartbeat_func cb);
 SWITCH_DECLARE(void) switch_telnyx_publish_json_event(const char* json);
 SWITCH_DECLARE(void) switch_telnyx_process_audio_stats(switch_core_session_t* session, switch_rtp_stats_t* stats);
