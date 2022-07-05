@@ -97,7 +97,7 @@ void switch_telnyx_process_audio_stats(switch_core_session_t* session, switch_rt
 void switch_telnyx_on_populate_event(switch_event_t* event)
 {
 	switch_thread_rwlock_rdlock(_rwlock);
-	for (populate_event_callback::iterator iter = _populate_event_callbacks.begin(); iter != _populate_event_callbacks.end(); iter++)
+	for (auto iter = _populate_event_callbacks.begin(); iter != _populate_event_callbacks.end(); iter++)
 	{
 		(*iter)(event);
 	}
