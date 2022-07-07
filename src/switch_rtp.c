@@ -9061,6 +9061,7 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 {
 	switch_size_t bytes;
 	uint8_t send = 1;
+	uint32_t score = 0;
 	uint32_t this_ts = 0;
 	int ret;
 	switch_time_t now;
@@ -9294,7 +9295,6 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 
 			uint32_t energy = 0;
 			uint32_t x, y = 0, z = len / sizeof(int16_t);
-			uint32_t score = 0;
 			int divisor = 0;
 			if (z) {
 
@@ -9657,11 +9657,13 @@ fork_done:
 			if (switch_channel_test_flag(channel, CF_AUDIO_LEVEL_EVENT)) {
 				unsigned long id = 0;
 				if (switch_core_session_get_media_extension_id(rtp_session->session, SWITCH_MEDIA_EXTENSIONS_AUDIO_LEVEL, &id) == SWITCH_STATUS_SUCCESS) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "Sending RTP audio level extension score: %d\n", score);
+					char tmp_data[2] = {0x00, htons(score)};
 					rtp_session->rtp_ext_data.id = htons(id);
 					rtp_session->rtp_ext_data.length = htons(actual_length++);
-					rtp_session->rtp_ext_data.data = htons(0x80); // @TODO: always sending voice, need to check the value using the RTP... how?
 
-					memcpy(send_msg->body+4, (char*)&rtp_session->rtp_ext_data, sizeof(rtp_session->rtp_ext_data));
+					//memcpy(send_msg->body+4, (char*)&rtp_session->rtp_ext_data, sizeof(rtp_session->rtp_ext_data));
+					memcpy(send_msg->body+4, tmp_data, 4);
 				}
 			}
 

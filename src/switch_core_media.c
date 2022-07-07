@@ -5737,7 +5737,9 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 					if (!strcasecmp(argv[1], SWITCH_MEDIA_EXTENSIONS_AUDIO_LEVEL)) {
 						if ((val = switch_channel_get_variable(session->channel, "rtp_force_ext_audio_level_events_negotiation")) && switch_true(val)) {
 							switch_channel_set_flag(session->channel, CF_AUDIO_LEVEL_EVENT);
-							switch_rtp_set_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_ENABLE_HEADER_EXTENSIONS);
+							if (a_engine->rtp_session) {
+								switch_rtp_set_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_ENABLE_HEADER_EXTENSIONS);
+							}
 						} else {
 							switch_media_extensions_t *em;
 
@@ -5746,11 +5748,13 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 								if (em->em_media == sdp_media_audio) {
 									switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Activating RTP header extension: %s\n", SWITCH_MEDIA_EXTENSIONS_AUDIO_LEVEL);
 									switch_channel_set_flag(session->channel, CF_AUDIO_LEVEL_EVENT);
-									switch_rtp_set_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_ENABLE_HEADER_EXTENSIONS);
+									if (a_engine->rtp_session) {
+										switch_rtp_set_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_ENABLE_HEADER_EXTENSIONS);
+									}
 									em->em_active = 1;
 								}
 							}
-								switch_mutex_unlock(session->media_extensions_mutex);
+							switch_mutex_unlock(session->media_extensions_mutex);
 						}
 					}
 				}
