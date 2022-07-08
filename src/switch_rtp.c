@@ -9657,13 +9657,14 @@ fork_done:
 			if (switch_channel_test_flag(channel, CF_AUDIO_LEVEL_EVENT)) {
 				unsigned long id = 0;
 				if (switch_core_session_get_media_extension_id(rtp_session->session, SWITCH_MEDIA_EXTENSIONS_AUDIO_LEVEL, &id) == SWITCH_STATUS_SUCCESS) {
-					char tmp_data[2] = {0x00, htons(score)};
+					char tmp_data[4] = {htons(id), htons(actual_length++), 0x00, htons(score)};
 					
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "Sending RTP audio level extension score: %d\n", score);
 					rtp_session->rtp_ext_data.id = htons(id);
 					rtp_session->rtp_ext_data.length = htons(actual_length++);
 
 					//memcpy(send_msg->body+4, (char*)&rtp_session->rtp_ext_data, sizeof(rtp_session->rtp_ext_data));
+					memcpy(send_msg->body+4, (char*)&rtp_session->rtp_ext_data, sizeof(rtp_session->rtp_ext_data));
 					memcpy(send_msg->body+4, tmp_data, 4);
 				}
 			}
