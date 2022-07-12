@@ -9656,7 +9656,7 @@ fork_done:
 			
 			if (switch_channel_test_flag(channel, CF_AUDIO_LEVEL_EVENT)) {
 				unsigned long id = 0;
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "RTP header extension activated\n");
+
 				if (switch_core_session_get_media_extension_id(rtp_session->session, SWITCH_MEDIA_EXTENSIONS_AUDIO_LEVEL, &id) == SWITCH_STATUS_SUCCESS) {
 					char tmp_data[4] = {htons(id), htons(actual_length++), 0x00, htons(score)};
 					
