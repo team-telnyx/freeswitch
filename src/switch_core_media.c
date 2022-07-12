@@ -5724,6 +5724,15 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 		ptime = dptime;
 		maxptime = dmaxptime;
 
+		if ((val = switch_channel_get_variable(session->channel, "rtp_force_ext_audio_level_events_negotiation")) && switch_true(val)) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Activating RTP header extension: %s\n", SWITCH_MEDIA_EXTENSIONS_AUDIO_LEVEL);
+			switch_channel_set_flag(session->channel, CF_AUDIO_LEVEL_EVENT);
+			if (a_engine->rtp_session) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Activating RTP header extension in rtp session: %s\n", SWITCH_MEDIA_EXTENSIONS_AUDIO_LEVEL);
+				switch_rtp_set_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_ENABLE_HEADER_EXTENSIONS);
+			}
+		}
+
 		for (attr = m->m_attributes; attr; attr = attr->a_next) {
 			if (!strcasecmp(attr->a_name, "extmap") && attr->a_value) {
 				char *tmp = switch_mprintf("%s", attr->a_value);
@@ -6132,6 +6141,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 					if (argc > 0 && !zstr(argv[1])) {
 						if (!strcasecmp(argv[1], SWITCH_MEDIA_EXTENSIONS_AUDIO_LEVEL)) {
 							if ((val = switch_channel_get_variable(session->channel, "rtp_force_ext_audio_level_events_negotiation")) && switch_true(val)) {
+								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Activating RTP header extension: %s\n", SWITCH_MEDIA_EXTENSIONS_AUDIO_LEVEL);
 								switch_channel_set_flag(session->channel, CF_AUDIO_LEVEL_EVENT);
 							} else {
 								switch_media_extensions_t *em;
