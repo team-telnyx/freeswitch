@@ -9,8 +9,8 @@ typedef std::vector<switch_telnyx_on_populate_json_status_func> json_status_call
 
 static switch_telnyx_event_dispatch_t _event_dispatch;
 static heartbeat_callbacks _heartbeat_callbacks;
-static plain_status_callback _plain_status_callback;
-static json_status_callback _json_status_callback;
+static plain_status_callback _plain_status_callbacks;
+static json_status_callback _json_status_callbacks;
 static switch_thread_rwlock_t* _rwlock;
 
 void switch_telnyx_init(switch_memory_pool_t *pool)
@@ -98,9 +98,9 @@ void switch_telnyx_process_audio_stats(switch_core_session_t* session, switch_rt
 void switch_telnyx_on_populate_core_heartbeat(switch_event_t* event)
 {
 	switch_thread_rwlock_rdlock(_rwlock);
-	for (auto iter = _heartbeat_callbacks.begin(); iter != _heartbeat_callbacks.end(); iter++)
+	for (auto& cb : _heartbeat_callbacks)
 	{
-		(*iter)(event);
+    	cb(event); 
 	}
 	switch_thread_rwlock_unlock(_rwlock);
 }
@@ -108,9 +108,9 @@ void switch_telnyx_on_populate_core_heartbeat(switch_event_t* event)
 void switch_telnyx_on_populate_api_plain_status(switch_stream_handle_t *stream)
 {
 	switch_thread_rwlock_rdlock(_rwlock);
-	for (auto iter = _plain_status_callback.begin(); iter != _plain_status_callback.end(); iter++)
+	for (auto& cb : _plain_status_callbacks)
 	{
-		(*iter)(stream);
+    	cb(stream); 
 	}
 	switch_thread_rwlock_unlock(_rwlock);
 }
@@ -118,9 +118,9 @@ void switch_telnyx_on_populate_api_plain_status(switch_stream_handle_t *stream)
 void switch_telnyx_on_populate_api_json_status(cJSON* reply)
 {
 	switch_thread_rwlock_rdlock(_rwlock);
-	for (auto iter = _json_status_callback.begin(); iter != _json_status_callback.end(); iter++)
+	for (auto& cb : _json_status_callbacks)
 	{
-		(*iter)(reply);
+    	cb(reply); 
 	}
 	switch_thread_rwlock_unlock(_rwlock);
 }
@@ -135,14 +135,14 @@ void switch_telnyx_add_core_heartbeat_callback(switch_telnyx_on_populate_core_he
 void switch_telnyx_add_populate_api_plain_status_callback(switch_telnyx_on_populate_plain_status_func cb)
 {
 	switch_thread_rwlock_wrlock(_rwlock);
-	_plain_status_callback.push_back(cb);
+	_plain_status_callbacks.push_back(cb);
 	switch_thread_rwlock_unlock(_rwlock);
 }
 
 void switch_telnyx_add_populate_api_json_status_callback(switch_telnyx_on_populate_json_status_func cb)
 {
 	switch_thread_rwlock_wrlock(_rwlock);
-	_json_status_callback.push_back(cb);
+	_json_status_callbacks.push_back(cb);
 	switch_thread_rwlock_unlock(_rwlock);
 }
 
