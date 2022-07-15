@@ -97,9 +97,9 @@ void switch_telnyx_process_audio_stats(switch_core_session_t* session, switch_rt
 void switch_telnyx_on_populate_event(switch_event_t* event)
 {
 	switch_thread_rwlock_rdlock(_rwlock);
-	for (auto iter = _populate_event_callbacks.begin(); iter != _populate_event_callbacks.end(); iter++)
+	for (auto& cb : _populate_event_callbacks)
 	{
-		(*iter)(event);
+    	cb(event); 
 	}
 	switch_thread_rwlock_unlock(_rwlock);
 }
@@ -107,9 +107,9 @@ void switch_telnyx_on_populate_event(switch_event_t* event)
 void switch_telnyx_on_populate_core_heartbeat(switch_event_t* event)
 {
 	switch_thread_rwlock_rdlock(_rwlock);
-	for (heartbeat_callbacks::iterator iter = _heartbeat_callbacks.begin(); iter != _heartbeat_callbacks.end(); iter++)
+	for (auto& cb : _heartbeat_callbacks)
 	{
-		(*iter)(event);
+    	cb(event); 
 	}
 	switch_thread_rwlock_unlock(_rwlock);
 }
