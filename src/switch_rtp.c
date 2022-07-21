@@ -9495,7 +9495,7 @@ fork_done:
 		if (switch_channel_test_flag(switch_core_session_get_channel(rtp_session->session), CF_AUDIO_LEVEL_EVENT) || rtp_session->flags[SWITCH_RTP_FLAG_ENABLE_HEADER_EXTENSIONS]) {
 			char tmp[SWITCH_RTP_MAX_BUF_LEN+4+sizeof(char *)];
 			int length = 0;
-			int actual_length = 0;
+			//int actual_length = 0;
 			switch_channel_t *channel = switch_core_session_get_channel(rtp_session->session);
 			switch_mutex_t *media_extensions_mutex = switch_core_session_get_media_extensions_mutex(rtp_session->session);
 			switch_hash_t *media_extensions = switch_core_session_get_media_extensions(rtp_session->session);
@@ -9517,13 +9517,17 @@ fork_done:
 
 				if (switch_core_session_get_media_extension_id(rtp_session->session, SWITCH_MEDIA_EXTENSIONS_AUDIO_LEVEL, &id) == SWITCH_STATUS_SUCCESS) {
 					int dvol = score + MIN_AUDIO_LEVEL;
-					char rtp_data[4] = {htons(id), htons(actual_length++), 0x00, htons(dvol)};
+					char rtp_data[4] = {0x10, htons(dvol), 0x00, 0x00};
 					
 					if (dvol < MIN_AUDIO_LEVEL) {
 						dvol = MIN_AUDIO_LEVEL;
 					} else if (dvol > MAX_AUDIO_LEVEL) {
 						dvol = MAX_AUDIO_LEVEL;
 					}
+
+					dvol = abs(dvol);
+
+					rtp_data[1] = htons(dvol);
 
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "Sending RTP audio level extension score: %d\n", dvol);
 					//rtp_session->rtp_ext_data.id = htons(id);
