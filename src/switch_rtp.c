@@ -9513,11 +9513,11 @@ fork_done:
 			memcpy(send_msg->body, (char*)&rtp_session->rtp_ext_hdr, sizeof(rtp_session->rtp_ext_hdr));
 			
 			if (switch_channel_test_flag(channel, CF_AUDIO_LEVEL_EVENT)) {
-				unsigned long id = 0;
+				unsigned long id = 1;
 
 				if (switch_core_session_get_media_extension_id(rtp_session->session, SWITCH_MEDIA_EXTENSIONS_AUDIO_LEVEL, &id) == SWITCH_STATUS_SUCCESS) {
 					int dvol = score + MIN_AUDIO_LEVEL;
-					char rtp_data[4] = {0x10, htons(dvol), 0x00, 0x00};
+					char rtp_data[4] = {id << 4, htons(dvol), 0x00, 0x00};
 					
 					if (dvol < MIN_AUDIO_LEVEL) {
 						dvol = MIN_AUDIO_LEVEL;
@@ -9526,7 +9526,6 @@ fork_done:
 					}
 
 					dvol = abs(dvol);
-
 					rtp_data[1] = htons(dvol);
 
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "Sending RTP audio level extension score: %d\n", dvol);
