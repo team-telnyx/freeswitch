@@ -5201,7 +5201,7 @@ static void switch_core_media_set_rmode(switch_core_session_t *session, switch_m
 
 SWITCH_DECLARE(uint8_t) switch_core_media_validate_common_audio_sdp(switch_core_session_t *session, const char *r_sdp, switch_sdp_type_t sdp_type)
 {
-	uint8_t match = 0;
+	uint8_t match = 0, no_audio = 1;
 	switch_payload_t cng_pt = 0;
 	sdp_media_t *m;
 	sdp_attribute_t *attr;
@@ -5277,6 +5277,8 @@ SWITCH_DECLARE(uint8_t) switch_core_media_validate_common_audio_sdp(switch_core_
 
 			nm_idx = 0;
 			m_idx = 0;
+			no_audio = 0;
+
 			memset(near_matches, 0, sizeof(near_matches[0]) * MAX_MATCHES);
 
 			for (attr = sdp->sdp_attributes; attr; attr = attr->a_next) {
@@ -5521,6 +5523,11 @@ SWITCH_DECLARE(uint8_t) switch_core_media_validate_common_audio_sdp(switch_core_
 				return match;
 			}
 		}
+	}
+
+	if (no_audio) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "No Audio found! Skip audio validation.\n");
+		return -1;
 	}
 
 	return match;
