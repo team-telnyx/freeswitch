@@ -12081,6 +12081,11 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 
 	}
 
+	// Offer always audio level
+	{
+		switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=extmap:1/%s %s\r\n", "sendonly", "urn:ietf:params:rtp-hdrext:ssrc-audio-level");
+	}
+
 	if (switch_channel_test_flag(session->channel, CF_IMAGE_SDP)) {
 		switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "m=image 0 UDPTL T38\r\n", SWITCH_VA_NONE);
 

@@ -555,6 +555,23 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_enable_vad(switch_rtp_t *rtp_session,
 SWITCH_DECLARE(switch_status_t) switch_rtp_disable_vad(switch_rtp_t *rtp_session);
 
 /*!
+  \brief Enable Audio Level Extension on an RTP Session
+  \param rtp_session the RTP session
+  \param session the core session associated with the RTP session
+  \param codec the codec the channel is currenty using
+  \return SWITCH_STAUTS_SUCCESS on success
+*/
+SWITCH_DECLARE(switch_status_t) switch_rtp_enable_audio_level_extension(switch_rtp_t *rtp_session, switch_core_session_t *session,
+													  switch_codec_t *codec);
+
+/*!
+  \brief Disable Audio Level Extension on an RTP Session
+  \param rtp_session the RTP session
+  \return SWITCH_STAUTS_SUCCESS on success
+*/
+SWITCH_DECLARE(switch_status_t) switch_rtp_disable_audio_level_extension(switch_rtp_t *rtp_session);
+
+/*!
   \brief Write data to a given RTP session
   \param rtp_session the RTP session to write to
   \param frame the frame to write
