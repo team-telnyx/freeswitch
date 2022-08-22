@@ -5199,9 +5199,9 @@ static void switch_core_media_set_rmode(switch_core_session_t *session, switch_m
 	switch_channel_set_variable(session->channel, varname, rmode_str);
 }
 
-SWITCH_DECLARE(uint8_t) switch_core_media_validate_common_audio_sdp(switch_core_session_t *session, const char *r_sdp, switch_sdp_type_t sdp_type)
+SWITCH_DECLARE(int16_t) switch_core_media_validate_common_audio_sdp(switch_core_session_t *session, const char *r_sdp, switch_sdp_type_t sdp_type)
 {
-	uint8_t match = 0, no_audio = 1;
+	int16_t match = 0, no_audio = 1;
 	switch_payload_t cng_pt = 0;
 	sdp_media_t *m;
 	sdp_attribute_t *attr;
