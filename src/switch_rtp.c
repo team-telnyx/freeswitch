@@ -241,6 +241,7 @@ struct switch_ext_audio_level_data {
 	switch_core_session_t *session;
 	switch_codec_t ext_codec;
 	switch_codec_t *read_codec;
+	uint8_t ext_id;
 	switch_payload_t agreed_pt;
 };
 
@@ -842,7 +843,7 @@ static handle_rfc2833_result_t handle_rfc2833(switch_rtp_t *rtp_session, switch_
 	return RESULT_CONTINUE;
 }
 
-static int rtp_add_extension_header(switch_rtp_t *rtp_session, rtp_msg_t *send_msg, uint32_t score, void *data, switch_size_t *datalen);
+static int rtp_add_extension_header(switch_rtp_t *rtp_session, rtp_msg_t *send_msg, uint8_t score, void *data, switch_size_t *datalen);
 static int rtp_write_ready(switch_rtp_t *rtp_session, uint32_t bytes, int line);
 static int global_init = 0;
 static int rtp_common_write(switch_rtp_t *rtp_session,
@@ -5778,6 +5779,10 @@ SWITCH_DECLARE(void) switch_rtp_destroy(switch_rtp_t **rtp_session)
 		switch_rtp_disable_vad(*rtp_session);
 	}
 
+	if ((*rtp_session)->flags[SWITCH_RTP_FLAG_EXT_AUDIO_LEVEL]) {
+		switch_rtp_disable_audio_level_extension(*rtp_session);
+	}
+
 	switch_mutex_lock((*rtp_session)->flag_mutex);
 
 	switch_rtp_kill_socket(*rtp_session);
@@ -9099,10 +9104,10 @@ static int rtp_write_ready(switch_rtp_t *rtp_session, uint32_t bytes, int line)
 	return 1;
 }
 
-#define MIN_AUDIO_LEVEL -127
-#define MAX_AUDIO_LEVEL 0
+#define RTP_EXT_MIN_AUDIO_LEVEL -127
+#define RTP_EXT_MAX_AUDIO_LEVEL 0
 
-static double calculate_audio_level(int16_t* samples, int offset, int length, int overload)
+static int8_t calculate_audio_level(int16_t* samples, int offset, int length, int overload)
 {
 	double rms = 0, db = 0;
 
@@ -9117,34 +9122,26 @@ static double calculate_audio_level(int16_t* samples, int offset, int length, in
 	if (rms > 0)
 	{
 		db = 20 * log10(rms);
-		if (db < MIN_AUDIO_LEVEL)
-			db = MIN_AUDIO_LEVEL;
-		else if (db > MAX_AUDIO_LEVEL)
-			db = MAX_AUDIO_LEVEL;
+		if (db < RTP_EXT_MIN_AUDIO_LEVEL)
+			db = RTP_EXT_MIN_AUDIO_LEVEL;
+		else if (db > RTP_EXT_MAX_AUDIO_LEVEL)
+			db = RTP_EXT_MAX_AUDIO_LEVEL;
 	}
 	else
 	{
-		db = MIN_AUDIO_LEVEL;
+		db = RTP_EXT_MIN_AUDIO_LEVEL;
 	}
 
-	//(int)round(db);
-	return db;
+	return (int)round(db);
 }
 
-static int rtp_add_extension_header(switch_rtp_t *rtp_session, rtp_msg_t *send_msg, uint32_t score, void *data, switch_size_t *datalen)
+static int rtp_add_extension_header(switch_rtp_t *rtp_session, rtp_msg_t *send_msg, uint8_t score, void *data, switch_size_t *datalen)
 {
 	int finallen = 0;
-	int extensionlen = 1; // TODO fill this info with data
+	int extensionlen = 1;
 	int maxlen = 0;
 	int shiftlen = 0;
 	switch_channel_t *channel = NULL;
-	const char *val = NULL;
-	int audio_level = score;
-	int shift_level = 0;
-	int raw_level = 0;
-	int htons_level = 0;
-	int sign = 1;
-	int log = 0;
 
 	if (!(rtp_session && send_msg && data && datalen)) {
 		return 0;
@@ -9154,46 +9151,15 @@ static int rtp_add_extension_header(switch_rtp_t *rtp_session, rtp_msg_t *send_m
 		return 0;
 	}
 
-	if ((channel && (val = switch_channel_get_variable(channel, "rtp_ext_log")))) {
-		log = atoi(val);
-	}
-
-	if (log)
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG1, "%s Score audio level %d\n", switch_channel_get_uuid(switch_core_session_get_channel(rtp_session->session)), audio_level);
-
-	if ((channel && (val = switch_channel_get_variable(channel, "rtp_custom_int_sign")))) {
-		sign = atoi(val) * -1;
-	}
-
-	if ((channel && (val = switch_channel_get_variable(channel, "rtp_custom_audio_level")))) {
-		audio_level = atoi(val) * sign;
-	}
-
-	if ((channel && (val = switch_channel_get_variable(channel, "rtp_ext_shift_level")))) {
-		shift_level = atoi(val);
-	}
-
-	if ((channel && (val = switch_channel_get_variable(channel, "rtp_ext_raw_level")))) {
-		raw_level = atoi(val);
-	}
-
-	if ((channel && (val = switch_channel_get_variable(channel, "rtp_ext_htons_level")))) {
-		htons_level = atoi(val);
-	}
-
 	shiftlen = ((extensionlen * 4) + 4);
 	finallen = *datalen + shiftlen;
 	maxlen = SWITCH_RTP_MAX_BUF_LEN - shiftlen;
 	if (finallen < maxlen) {
 		int id = 1;
 		char ext_hdr[4] = {(char)0xbe, (char)0xde, 0x00, 0x01};
-		int ext_level = (shift_level ? 1 << 7 : 0) + (raw_level ? audio_level : audio_level & 0x7F);
-		char ext_data[4] = {id << 4, (char)(htons_level ? htons(ext_level) : ext_level), 0x00, 0x00};
+		char ext_data[4] = {id << 4, (char)(score), 0x00, 0x00};
 
 		send_msg->header.x = 1;
-
-		if (log)
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG1, "%s Sending audio level %d(%X)\n", switch_channel_get_uuid(switch_core_session_get_channel(rtp_session->session)), ext_data[1], ext_data[1]);
 
 		// Shift data packet to the right
 		memmove(&send_msg->body[shiftlen], send_msg->body, *datalen - shiftlen); 
@@ -9643,10 +9609,24 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 
 fork_done:
 
-		// TODO:
-		// Enable this condition when will use extension
-		if (1) {
-			rtp_add_extension_header(rtp_session, send_msg, rfcscore, data, &bytes);
+		if (rtp_session->flags[SWITCH_RTP_FLAG_EXT_AUDIO_LEVEL] &&
+			((rtp_session->last_rtp_hdr.pt == rtp_session->ext_audio_level_data.read_codec->implementation->ianacode) ||
+			(rtp_session->last_rtp_hdr.pt == rtp_session->ext_audio_level_data.agreed_pt))) {
+
+			int16_t decoded[SWITCH_RECOMMENDED_BUFFER_SIZE / sizeof(int16_t)] = { 0 };
+			uint32_t len = sizeof(decoded);
+			uint32_t rate = 0;
+			uint32_t codec_flags = 0;
+
+			if (switch_core_codec_decode(&rtp_session->ext_audio_level_data.ext_codec,
+										rtp_session->ext_audio_level_data.read_codec,
+										data,
+										datalen,
+										rtp_session->ext_audio_level_data.read_codec->implementation->actual_samples_per_second,
+										decoded, &len, &rate, &codec_flags) == SWITCH_STATUS_SUCCESS) {
+				int8_t score = calculate_audio_level(decoded, 0, len, SHRT_MAX);
+				rtp_add_extension_header(rtp_session, send_msg, abs(score), data, &bytes);
+			}
 		}
 
 #ifdef ENABLE_SRTP
@@ -9918,14 +9898,77 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_enable_vad(switch_rtp_t *rtp_session,
 	return SWITCH_STATUS_SUCCESS;
 }
 
+#define SWITCH_MEDIA_EXTENSIONS_AUDIO_LEVEL "urn:ietf:params:rtp-hdrext:ssrc-audio-level"
+
 SWITCH_DECLARE(switch_status_t) switch_rtp_enable_audio_level_extension(switch_rtp_t *rtp_session, switch_core_session_t *session,
 													  switch_codec_t *codec)
 {
+	int ext_id = 1;
+	const char *val = NULL;
+
+	if (!switch_rtp_ready(rtp_session)) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	if (rtp_session->flags[SWITCH_RTP_FLAG_EXT_AUDIO_LEVEL]) {
+		return SWITCH_STATUS_GENERR;
+	}
+
+	memset(&rtp_session->ext_audio_level_data, 0, sizeof(rtp_session->ext_audio_level_data));
+
+	if ((val = switch_channel_get_variable(switch_core_session_get_channel(rtp_session->session), "rtp_ext_audio_level_id"))) {
+		ext_id = atoi(val);
+	}
+
+	if (switch_core_codec_init(&rtp_session->ext_audio_level_data.ext_codec,
+							   codec->implementation->iananame,
+							   codec->implementation->modname,
+							   NULL,
+							   codec->implementation->samples_per_second,
+							   codec->implementation->microseconds_per_packet / 1000,
+							   codec->implementation->number_of_channels,
+							   SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, NULL, rtp_session->pool) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR, "Can't load codec?\n");
+		return SWITCH_STATUS_FALSE;
+	}
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "Activate RTP EXT audio level codec %s %dms\n", codec->implementation->iananame,
+					  codec->implementation->microseconds_per_packet / 1000);
+	rtp_session->ext_audio_level_data.read_codec = codec;
+	rtp_session->ext_audio_level_data.agreed_pt = codec->agreed_pt;
+	rtp_session->ext_audio_level_data.ext_id = ext_id > 0 ? ext_id : 1;
+
+	switch_rtp_set_flag(rtp_session, SWITCH_RTP_FLAG_EXT_AUDIO_LEVEL);
 	return SWITCH_STATUS_SUCCESS;
 }
 
 SWITCH_DECLARE(switch_status_t) switch_rtp_disable_audio_level_extension(switch_rtp_t *rtp_session)
 {
+	if (!rtp_session) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	if (!rtp_session->flags[SWITCH_RTP_FLAG_EXT_AUDIO_LEVEL]) {
+		return SWITCH_STATUS_GENERR;
+	}
+
+	switch_core_codec_destroy(&rtp_session->vad_data.vad_codec);
+	switch_rtp_clear_flag(rtp_session, SWITCH_RTP_FLAG_EXT_AUDIO_LEVEL);
+	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_offer_audio_level_extension(switch_core_session_t *session, char *buf, uint32_t buflen)
+{
+	int ext_id = 1;
+	const char *val = NULL;
+
+	if ((val = switch_channel_get_variable(switch_core_session_get_channel(session), "rtp_ext_audio_level_id"))) {
+		ext_id = atoi(val);
+	}
+
+	switch_snprintf(buf + strlen(buf), buflen - strlen(buf), "a=extmap:%d/%s %s\r\n"
+		, ext_id > 0 ? ext_id : 1
+		, "sendonly"
+		, SWITCH_MEDIA_EXTENSIONS_AUDIO_LEVEL);
 	return SWITCH_STATUS_SUCCESS;
 }
 
