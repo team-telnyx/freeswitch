@@ -1082,6 +1082,7 @@ void sofia_handle_sip_i_bye(switch_core_session_t *session, int status,
 		}
 	}
 
+
 	switch_channel_hangup(channel, cause);
 	nua_respond(nh, SIP_200_OK, NUTAG_WITH_THIS_MSG(de->data->e_msg),
 				TAG_IF(call_info, SIPTAG_CALL_INFO_STR(call_info)), TAG_IF(!zstr(extra_headers), SIPTAG_HEADER_STR(extra_headers)),
@@ -9028,7 +9029,6 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 			}
 			switch_snprintf(st, sizeof(st), "%d", cause);
 			switch_channel_set_variable(channel, "sip_term_cause", st);
-
 			switch_channel_hangup(channel, cause);
 			ss_state = nua_callstate_terminated;
 		}
