@@ -85,41 +85,6 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 static void sofia_handle_sip_r_options(switch_core_session_t *session, int status, char const *phrase, nua_t *nua, sofia_profile_t *profile,
 									   nua_handle_t *nh, sofia_private_t *sofia_private, sip_t const *sip,
 								sofia_dispatch_event_t *de, tagi_t tags[]);
-static void telnyx_sofia_set_peer_hangup_variables(switch_core_session_t *session);
-
-
-static void telnyx_sofia_set_peer_hangup_variables(switch_core_session_t *session)
-{
-	switch_channel_t *channel = switch_core_session_get_channel(session);
-	if (session) {
-		switch_core_session_t *other_session = 0;
-		if (switch_core_session_get_partner(session, &other_session) == SWITCH_STATUS_SUCCESS) {
-			switch_channel_t* other_channel = 0;
-			other_channel = switch_core_session_get_channel(other_session);
-			if (other_channel) {
-				private_object_t *other_tech_pvt = switch_core_session_get_private(session);
-				const char *peer_sip_reason_phrase = switch_channel_get_variable(other_channel, "peer_sip_reason_phrase");
-				const char *peer_sip_hangup_disposition = switch_channel_get_variable(other_channel, "sip_hangup_disposition");
-				const char *sip_hangup_disposition = switch_channel_get_variable(channel, "sip_hangup_disposition");
-				
-				if (!zstr(peer_sip_reason_phrase)) {
-					switch_channel_set_variable(channel, "sip_reason_phrase", peer_sip_reason_phrase);
-				}
-
-				if (!zstr(peer_sip_hangup_disposition) && zstr(sip_hangup_disposition)) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Peer sip_hangup_disposition found '%s'\n", peer_sip_hangup_disposition);
-					switch_channel_set_variable(channel, "sip_hangup_disposition", peer_sip_hangup_disposition);
-				} else {
-					if (!sofia_test_flag(other_tech_pvt, TFLAG_GOT_ACK)) {
-						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "No Peer sip_hangup_disposition found, NO ACK\n");
-						switch_channel_set_variable(channel, "hangup_disposition", "send_bye");
-					}
-				}
-			}
-			switch_core_session_rwunlock(other_session);
-		}
-	}
-}
 
 static void sofia_set_accept_language_channel_variable(switch_channel_t *channel, sip_t const *sip)
 {
@@ -1117,8 +1082,6 @@ void sofia_handle_sip_i_bye(switch_core_session_t *session, int status,
 		}
 	}
 
-	telnyx_sofia_set_peer_hangup_variables(session);
-
 	switch_channel_hangup(channel, cause);
 	nua_respond(nh, SIP_200_OK, NUTAG_WITH_THIS_MSG(de->data->e_msg),
 				TAG_IF(call_info, SIPTAG_CALL_INFO_STR(call_info)), TAG_IF(!zstr(extra_headers), SIPTAG_HEADER_STR(extra_headers)),
@@ -1602,6 +1565,11 @@ static void our_sofia_event_callback(nua_event_t event,
 				switch_channel_set_variable(other_channel, "peer_sip_reason_phrase", phrase);
 			}
 			switch_core_session_rwunlock(other_session);
+		}
+
+		if (!strcasecmp(phrase, "ACK Timeout")) {
+			switch_channel_set_variable(channel, "sip_reason_phrase", phrase);
+			switch_channel_set_variable(channel, "sip_hangup_disposition", "send_bye");
 		}
 	}
 
@@ -9060,8 +9028,6 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 			}
 			switch_snprintf(st, sizeof(st), "%d", cause);
 			switch_channel_set_variable(channel, "sip_term_cause", st);
-
-			telnyx_sofia_set_peer_hangup_variables(session);
 
 			switch_channel_hangup(channel, cause);
 			ss_state = nua_callstate_terminated;
