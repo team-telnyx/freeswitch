@@ -1760,8 +1760,9 @@ static void do_pp_mos(switch_rtp_t *rtp_session)
 	rtp_session->stats.inbound.pp_R = R;
 	rtp_session->stats.inbound.pp_mos = mos;
 
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG3, "PP Mos R:%0.2f M:%0.2f RTT:%0.2f PP:%0.2f/%0.2f JP:%0.2f/%0.2f\n"
-		, R, mos, rtt, (packet_loss * rtp_mos_packet_loss_penalty), rtp_mos_packet_loss_penalty
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG3, "PP Mos R:%0.2f M:%0.2f RTT:%0.2f PL:%d JV:%0.2f LP:%0.2f/%0.2f JP:%0.2f/%0.2f\n"
+		, R, mos, rtt, packet_loss, rtp_session->stats.inbound.variance
+		, (packet_loss * rtp_mos_packet_loss_penalty), rtp_mos_packet_loss_penalty
 		, (rtt/1000 + rtp_session->stats.inbound.variance * rtp_mos_jitter_penalty + 10), rtp_mos_jitter_penalty);
 
 	do_cumulative_pp_mos(rtp_session);
