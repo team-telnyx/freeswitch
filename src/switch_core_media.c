@@ -5238,7 +5238,12 @@ SWITCH_DECLARE(int16_t) switch_core_media_validate_common_audio_sdp(switch_core_
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "No Audio found! Skip audio validation.\n");
 		return -1;
 	}
-
+	
+	if (switch_channel_test_flag(session->channel, CF_RECOVERING)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Call is recovered! Skip audio validation.\n");
+		return -1;
+	}
+	
 	if (!(parser = sdp_parse(NULL, r_sdp, (int) strlen(r_sdp), 0))) {
 		return 0;
 	}
