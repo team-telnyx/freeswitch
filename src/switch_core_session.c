@@ -1459,12 +1459,14 @@ SWITCH_DECLARE(uint32_t) switch_core_session_flush_and_publish_private_events(sw
 	return x;
 }
 
-SWITCH_DECLARE(uint32_t) switch_core_session_flush_and_publish_private_media_events(switch_core_session_t *session)
+SWITCH_DECLARE(uint32_t) switch_core_session_flush_and_publish_private_media_events(switch_core_session_t *session, char *cmds[], int cmdlen)
 {
 	switch_status_t status = SWITCH_STATUS_FALSE;
 	switch_queue_t *queue_pri, *queue;
 	int x = 0;
 	void *pop;
+	int index = 0;
+	int matches = 0;
 	
 	if (session->private_event_queue) {
 		switch_memory_pool_t *pool = switch_core_session_get_pool(session);
@@ -1477,8 +1479,13 @@ SWITCH_DECLARE(uint32_t) switch_core_session_flush_and_publish_private_media_eve
 					switch_event_t *command_event = (switch_event_t *) pop;
 					const char *app_name = switch_event_get_header(command_event, "execute-app-name");
 
-					// filter only playback and TTS cmds
-					if (!strcasecmp(app_name, playback_cmd) || !strcasecmp(app_name, speak_cmd) || !strcasecmp(app_name, say_cmd)) {
+					for(index = 0; index < cmdlen; ++index) {
+						if (!strcasecmp(app_name, cmds[index])) {
+							matches = 1;
+							break;
+						}
+					}
+					if (matches) {
 						if (switch_event_create(&interrupt_event, SWITCH_EVENT_COMMAND_INTERRUPTED) == SWITCH_STATUS_SUCCESS) {
 							switch_channel_event_set_data(session->channel, interrupt_event);
 							switch_event_add_header_string(interrupt_event, SWITCH_STACK_BOTTOM, "Unique-ID", session->uuid_str);
@@ -1508,8 +1515,13 @@ SWITCH_DECLARE(uint32_t) switch_core_session_flush_and_publish_private_media_eve
 					switch_event_t *command_event = (switch_event_t *) pop;
 					const char *app_name = switch_event_get_header(command_event, "execute-app-name");
 
-					// filter only playback and TTS cmds
-					if (!strcasecmp(app_name, playback_cmd) || !strcasecmp(app_name, speak_cmd) || !strcasecmp(app_name, say_cmd)) {
+					for(index = 0; index < cmdlen; ++index) {
+						if (!strcasecmp(app_name, cmds[index])) {
+							matches = 1;
+							break;
+						}
+					}
+					if (matches) {
 						if (switch_event_create(&interrupt_event, SWITCH_EVENT_COMMAND_INTERRUPTED) == SWITCH_STATUS_SUCCESS) {
 							switch_channel_event_set_data(session->channel, interrupt_event);
 							switch_event_add_header_string(interrupt_event, SWITCH_STACK_BOTTOM, "Unique-ID", session->uuid_str);

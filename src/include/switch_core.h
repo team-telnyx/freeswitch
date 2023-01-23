@@ -1330,8 +1330,7 @@ SWITCH_DECLARE(uint32_t) switch_core_session_flush_and_publish_private_events(sw
   \param session the session to flush
   \return SWITCH_STATUS_SUCCESS if the events have been flushed
 */
-SWITCH_DECLARE(uint32_t) switch_core_session_flush_and_publish_private_media_events(switch_core_session_t *session, const char *playback_cmd, 
-                          const char *speak_cmd, const char *say_cmd);
+SWITCH_DECLARE(uint32_t) switch_core_session_flush_and_publish_private_media_events(switch_core_session_t *session, char *cmds[], int cmdlen);
 
 /*!
   \brief Read a frame from a session
