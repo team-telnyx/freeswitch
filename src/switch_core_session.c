@@ -1468,62 +1468,67 @@ SWITCH_DECLARE(uint32_t) switch_core_session_flush_and_publish_private_media_eve
 	
 	if (session->private_event_queue) {
 		switch_memory_pool_t *pool = switch_core_session_get_pool(session);
-		switch_queue_create(&queue_pri, SWITCH_EVENT_QUEUE_LEN, pool);
-		switch_queue_create(&queue, SWITCH_EVENT_QUEUE_LEN, pool);
 
-		while ((status = (switch_status_t) switch_queue_trypop(session->private_event_queue_pri, &pop)) == SWITCH_STATUS_SUCCESS) {
-			if (pop) {
-				switch_event_t *interrupt_event = NULL;
-				switch_event_t *command_event = (switch_event_t *) pop;
-				const char *app_name = switch_event_get_header(command_event, "execute-app-name");
+		if (switch_queue_size(session->private_event_queue_pri)) {
+			switch_queue_create(&queue_pri, SWITCH_EVENT_QUEUE_LEN, pool);
+			while ((status = (switch_status_t) switch_queue_trypop(session->private_event_queue_pri, &pop)) == SWITCH_STATUS_SUCCESS) {
+				if (pop) {
+					switch_event_t *interrupt_event = NULL;
+					switch_event_t *command_event = (switch_event_t *) pop;
+					const char *app_name = switch_event_get_header(command_event, "execute-app-name");
 
-				if (!strcasecmp(app_name, "playback") || !strcasecmp(app_name, "speak") || !strcasecmp(app_name, "say")) {
-					if (switch_event_create(&interrupt_event, SWITCH_EVENT_COMMAND_INTERRUPTED) == SWITCH_STATUS_SUCCESS) {
-						switch_channel_event_set_data(session->channel, interrupt_event);
-						switch_event_add_header_string(interrupt_event, SWITCH_STACK_BOTTOM, "Unique-ID", session->uuid_str);
-						switch_event_add_header_string(interrupt_event, SWITCH_STACK_BOTTOM, "execute-app-name", switch_event_get_header(command_event, "execute-app-name"));
-						switch_event_add_header_string(interrupt_event, SWITCH_STACK_BOTTOM, "execute-app-arg", switch_event_get_header(command_event, "execute-app-arg"));
-						switch_event_fire(&interrupt_event);
+					// filter only playback and TTS cmds
+					if (!strcasecmp(app_name, playback_cmd) || !strcasecmp(app_name, speak_cmd) || !strcasecmp(app_name, say_cmd)) {
+						if (switch_event_create(&interrupt_event, SWITCH_EVENT_COMMAND_INTERRUPTED) == SWITCH_STATUS_SUCCESS) {
+							switch_channel_event_set_data(session->channel, interrupt_event);
+							switch_event_add_header_string(interrupt_event, SWITCH_STACK_BOTTOM, "Unique-ID", session->uuid_str);
+							switch_event_add_header_string(interrupt_event, SWITCH_STACK_BOTTOM, "execute-app-name", switch_event_get_header(command_event, "execute-app-name"));
+							switch_event_add_header_string(interrupt_event, SWITCH_STACK_BOTTOM, "execute-app-arg", switch_event_get_header(command_event, "execute-app-arg"));
+							switch_event_fire(&interrupt_event);
+						}
+						x++;
+					}else {
+						switch_event_t *clone_pri = NULL;
+						switch_event_dup(&clone_pri, command_event);
+						switch_queue_trypush(queue_pri, clone_pri);
 					}
-				}else{
-					switch_event_t *clone_pri = NULL;
-					switch_event_dup(&clone_pri, command_event);
-					status = switch_queue_trypush(queue_pri, clone_pri);
+					switch_event_destroy(&command_event);
 				}
-				switch_event_destroy(&command_event);
 			}
-			x++;
-		}
-		if (queue_pri){
-			session->private_event_queue_pri = queue_pri;
+			if (queue_pri){
+				session->private_event_queue_pri = queue_pri;
+			}
 		}
 
-		while ((status = (switch_status_t) switch_queue_trypop(session->private_event_queue, &pop)) == SWITCH_STATUS_SUCCESS) {
-			if (pop) {
-				switch_event_t *interrupt_event = NULL;
-				switch_event_t *command_event = (switch_event_t *) pop;
-				const char *app_name = switch_event_get_header(command_event, "execute-app-name");
+		if (switch_queue_size(session->private_event_queue)) {
+			switch_queue_create(&queue, SWITCH_EVENT_QUEUE_LEN, pool);
+			while ((status = (switch_status_t) switch_queue_trypop(session->private_event_queue, &pop)) == SWITCH_STATUS_SUCCESS) {
+				if (pop) {
+					switch_event_t *interrupt_event = NULL;
+					switch_event_t *command_event = (switch_event_t *) pop;
+					const char *app_name = switch_event_get_header(command_event, "execute-app-name");
 
-				// filter only playback and TTS cmds
-				if (!strcasecmp(app_name, "playback") || !strcasecmp(app_name, "speak") || !strcasecmp(app_name, "say")) {
-					if (switch_event_create(&interrupt_event, SWITCH_EVENT_COMMAND_INTERRUPTED) == SWITCH_STATUS_SUCCESS) {
-						switch_channel_event_set_data(session->channel, interrupt_event);
-						switch_event_add_header_string(interrupt_event, SWITCH_STACK_BOTTOM, "Unique-ID", session->uuid_str);
-						switch_event_add_header_string(interrupt_event, SWITCH_STACK_BOTTOM, "execute-app-name", app_name);
-						switch_event_add_header_string(interrupt_event, SWITCH_STACK_BOTTOM, "execute-app-arg", switch_event_get_header(command_event, "execute-app-arg"));
-						switch_event_fire(&interrupt_event);
+					// filter only playback and TTS cmds
+					if (!strcasecmp(app_name, playback_cmd) || !strcasecmp(app_name, speak_cmd) || !strcasecmp(app_name, say_cmd)) {
+						if (switch_event_create(&interrupt_event, SWITCH_EVENT_COMMAND_INTERRUPTED) == SWITCH_STATUS_SUCCESS) {
+							switch_channel_event_set_data(session->channel, interrupt_event);
+							switch_event_add_header_string(interrupt_event, SWITCH_STACK_BOTTOM, "Unique-ID", session->uuid_str);
+							switch_event_add_header_string(interrupt_event, SWITCH_STACK_BOTTOM, "execute-app-name", app_name);
+							switch_event_add_header_string(interrupt_event, SWITCH_STACK_BOTTOM, "execute-app-arg", switch_event_get_header(command_event, "execute-app-arg"));
+							switch_event_fire(&interrupt_event);
+						}
+						x++;
+					}else {
+						switch_event_t *clone = NULL;
+						switch_event_dup(&clone, command_event);
+						switch_queue_trypush(queue, clone);
 					}
-				}else {
-					switch_event_t *clone = NULL;
-					switch_event_dup(&clone, command_event);
-					status = switch_queue_trypush(queue, clone);
+					switch_event_destroy(&command_event);
 				}
-				switch_event_destroy(&command_event);
 			}
-			x++;
-		}
-		if (queue){
-			session->private_event_queue = queue;
+			if (queue){
+				session->private_event_queue = queue;
+			}
 		}
 		check_media(session);
 	}
