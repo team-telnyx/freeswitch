@@ -1501,6 +1501,7 @@ SWITCH_DECLARE(uint32_t) switch_core_session_flush_and_publish_private_media_eve
 					}
 					switch_event_destroy(&command_event);
 				}
+				matches = 0;
 			}
 			if (queue_pri){
 				session->private_event_queue_pri = queue_pri;
@@ -1537,6 +1538,7 @@ SWITCH_DECLARE(uint32_t) switch_core_session_flush_and_publish_private_media_eve
 					}
 					switch_event_destroy(&command_event);
 				}
+				matches = 0;
 			}
 			if (queue){
 				session->private_event_queue = queue;
