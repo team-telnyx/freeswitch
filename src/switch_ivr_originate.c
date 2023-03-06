@@ -2433,7 +2433,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 		switch_channel_set_variable(caller_channel, "originate_disposition", "failure");
 		switch_channel_set_variable(caller_channel, "DIALSTATUS", "INVALIDARGS");
 
-		if (switch_channel_test_flag(caller_channel, CF_PROXY_MODE) || switch_channel_test_flag(caller_channel, CF_PROXY_MEDIA)) {
+		if (switch_channel_test_flag(caller_channel, CF_PROXY_MODE) || switch_channel_test_flag(caller_channel, CF_PROXY_MEDIA) || switch_channel_test_flag(caller_channel, CF_3PCC_PROXY)) {
 			ringback_data = NULL;
 		}
 	}
