@@ -2072,6 +2072,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 	uint8_t to = 0;
 	char *var_val;
 	const char *ringback_data = NULL;
+	const char *caller_ringback_data = NULL;
+	const char * outbound_ringback = NULL;
 	switch_event_t *var_event = NULL;
 	int8_t fail_on_single_reject = 0;
 	int8_t hangup_on_single_reject = 0;
@@ -3356,10 +3358,53 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 		  endfor1:
 
 			if (caller_channel) {
+				const char * bridge_early_media = NULL;
+				// Set the ringback data from the ca
+				if(zstr(caller_ringback_data)) {
+					caller_ringback_data = ringback_data;
+				}
+
+				outbound_ringback = switch_channel_get_variable(oglobals.originate_status[i].peer_channel, "outbound_ringback");
+				if (!zstr(outbound_ringback)) {
+					switch_log_printf(SWITCH_CHANNEL_CHANNEL_LOG(oglobals.originate_status[i].peer_channel), SWITCH_LOG_DEBUG, "%s Outbound Ringback is set: %s.\n",
+									  switch_channel_get_name(caller_channel), outbound_ringback);
+					ringback_data = outbound_ringback;
+					outbound_ringback = NULL;
+				} else {
+					switch_log_printf(SWITCH_CHANNEL_CHANNEL_LOG(oglobals.originate_status[i].peer_channel), SWITCH_LOG_DEBUG, "%s No Outbound Ringback is set.\n",
+									  switch_channel_get_name(caller_channel));
+					if(!zstr(caller_ringback_data)) {
+						ringback_data = caller_ringback_data;
+						switch_log_printf(SWITCH_CHANNEL_CHANNEL_LOG(oglobals.originate_status[i].peer_channel), SWITCH_LOG_DEBUG, "%s Default Ringback to %s.\n",
+									  switch_channel_get_name(caller_channel), ringback_data);
+					}
+				}
+
+				if ((bridge_early_media = switch_channel_get_variable(oglobals.originate_status[i].peer_channel, "bridge_early_media"))) {
+					if (switch_true(bridge_early_media)) {
+						switch_log_printf(SWITCH_CHANNEL_CHANNEL_LOG(oglobals.originate_status[i].peer_channel), SWITCH_LOG_DEBUG, "%s Enabling Bridge Early Media.\n",
+									  switch_channel_get_name(caller_channel));
+						oglobals.early_ok = 0;
+						oglobals.ignore_early_media = 3;
+					}
+				}
+			}
+			
+			if (caller_channel) {
 				if (switch_channel_test_flag(caller_channel, CF_PROXY_MODE) ||
 					switch_channel_test_flag(caller_channel, CF_PROXY_MEDIA) || switch_channel_test_flag(caller_channel, CF_DISABLE_RINGBACK)) {
 					ringback_data = NULL;
 				}
+			}
+
+			if (caller_channel && ringback_data
+				&& !switch_channel_test_flag(caller_channel, CF_3PCC_PROXY)
+				&& switch_channel_test_flag(caller_channel, CF_EARLY_MEDIA)) {
+				// Force bridge_early_media
+				oglobals.early_ok = 0;
+				oglobals.ignore_early_media = 3;
+				switch_log_printf(SWITCH_CHANNEL_CHANNEL_LOG(oglobals.originate_status[i].peer_channel), SWITCH_LOG_DEBUG, "%s Enforce bridge early media.\n",
+									  switch_channel_get_name(caller_channel));
 			}
 
 
