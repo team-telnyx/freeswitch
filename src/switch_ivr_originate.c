@@ -2073,7 +2073,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 	char *var_val;
 	const char *ringback_data = NULL;
 	const char *caller_ringback_data = NULL;
-	const char * outbound_ringback = NULL;
+	const char *outbound_ringback = NULL;
 	switch_event_t *var_event = NULL;
 	int8_t fail_on_single_reject = 0;
 	int8_t hangup_on_single_reject = 0;
@@ -3364,9 +3364,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 		  endfor1:
 
 			if (caller_channel) {
-				const char * bridge_early_media = NULL;
-
-				bridge_early_media = switch_channel_get_variable(oglobals.originate_status[i].peer_channel, "bridge_early_media");
+				const char *bridge_early_media = switch_channel_get_variable(oglobals.originate_status[i].peer_channel, "bridge_early_media");
 				if (switch_true(bridge_early_media)) {
 					if (!switch_channel_test_flag(caller_channel, CF_3PCC_PROXY)) {
 						switch_log_printf(SWITCH_CHANNEL_CHANNEL_LOG(oglobals.originate_status[i].peer_channel), SWITCH_LOG_DEBUG, "%s Enforce Bridge Early Media via profile.\n",
