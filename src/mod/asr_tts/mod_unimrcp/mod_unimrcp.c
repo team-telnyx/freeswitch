@@ -3754,22 +3754,26 @@ static apt_bool_t recog_stream_read(mpf_audio_stream_t *stream, mpf_frame_t *fra
 	recognizer_data_t *r = (recognizer_data_t *) schannel->data;
 	switch_size_t to_read = frame->codec_frame.size;
 
-	/* grab the data.  pad it if there isn't enough */
-	if (speech_channel_read(schannel, frame->codec_frame.buffer, &to_read, 0) == SWITCH_STATUS_SUCCESS) {
-		if (to_read < frame->codec_frame.size) {
-			memset((uint8_t *) frame->codec_frame.buffer + to_read, schannel->silence, frame->codec_frame.size - to_read);
+	if (schannel) {
+		/* grab the data.  pad it if there isn't enough */
+		if (speech_channel_read(schannel, frame->codec_frame.buffer, &to_read, 0) == SWITCH_STATUS_SUCCESS) {
+			if (to_read < frame->codec_frame.size) {
+				memset((uint8_t *) frame->codec_frame.buffer + to_read, schannel->silence, frame->codec_frame.size - to_read);
+			}
+			frame->type |= MEDIA_FRAME_TYPE_AUDIO;
 		}
-		frame->type |= MEDIA_FRAME_TYPE_AUDIO;
-	}
 
-	switch_mutex_lock(schannel->mutex);
-	if (r->dtmf_generator_active) {
-		if (!mpf_dtmf_generator_put_frame(r->dtmf_generator, frame)) {
-			if (!mpf_dtmf_generator_sending(r->dtmf_generator))
-				r->dtmf_generator_active = 0;
+		if (schannel->mutex){
+			switch_mutex_lock(schannel->mutex);
+			if (r && r->dtmf_generator_active) {
+				if (!mpf_dtmf_generator_put_frame(r->dtmf_generator, frame)) {
+					if (!mpf_dtmf_generator_sending(r->dtmf_generator))
+						r->dtmf_generator_active = 0;
+				}
+			}
+			switch_mutex_unlock(schannel->mutex);
 		}
 	}
-	switch_mutex_unlock(schannel->mutex);
 
 	return TRUE;
 }
