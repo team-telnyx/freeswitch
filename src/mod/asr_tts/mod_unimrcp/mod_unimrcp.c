@@ -295,6 +295,7 @@ static switch_status_t audio_queue_destroy(audio_queue_t *queue);
  */
 
 #define SPEECH_CHANNEL_TIMEOUT_USEC (5000 * 1000)
+#define SPEECH_CHANNEL_INTERVAL_USEC (SPEECH_CHANNEL_TIMEOUT_USEC / 10)
 #define AUDIO_TIMEOUT_USEC (SWITCH_MAX_INTERVAL * 1000)
 
 /**
@@ -347,6 +348,8 @@ struct speech_channel {
 	switch_memory_pool_t *memory_pool;
 	/** synchronizes channel state */
 	switch_mutex_t *mutex;
+	/** synchronizes cancel state */
+	switch_mutex_t *cancel_mutex;
 	/** wait on channel states */
 	switch_thread_cond_t *cond;
 	/** channel state */
@@ -355,6 +358,8 @@ struct speech_channel {
 	audio_queue_t *audio_queue;
 	/** True, if channel was opened successfully */
 	int channel_opened;
+	/** True, if cancel is issued */
+	int cancel;
 	/** rate */
 	uint16_t rate;
 	/** silence sample */
@@ -381,6 +386,7 @@ static mpf_termination_t *speech_channel_create_mpf_termination(speech_channel_t
 static switch_status_t speech_channel_open(speech_channel_t *schannel, profile_t *profile);
 static switch_status_t speech_channel_destroy(speech_channel_t *schannel);
 static switch_status_t speech_channel_stop(speech_channel_t *schannel);
+static switch_status_t speech_channel_try_cancel(speech_channel_t *schannel);
 static switch_status_t speech_channel_set_param(speech_channel_t *schannel, const char *name, const char *val);
 static switch_status_t speech_channel_write(speech_channel_t *schannel, void *data, switch_size_t *len);
 static switch_status_t speech_channel_read(speech_channel_t *schannel, void *data, switch_size_t *len, int block);
@@ -388,6 +394,7 @@ static switch_status_t speech_channel_set_state(speech_channel_t *schannel, spee
 static switch_status_t speech_channel_set_state_unlocked(speech_channel_t *schannel, speech_channel_state_t state);
 static const char *speech_channel_state_to_string(speech_channel_state_t state);
 static const char *speech_channel_type_to_string(speech_channel_type_t type);
+static int speech_channel_is_cancel(speech_channel_t *schannel);
 
 
 /*********************************************************************************************************************************************
@@ -503,6 +510,7 @@ static switch_status_t recog_asr_unload_grammar(switch_asr_handle_t *ah, const c
 static switch_status_t recog_asr_enable_grammar(switch_asr_handle_t *ah, const char *name);
 static switch_status_t recog_asr_disable_grammar(switch_asr_handle_t *ah, const char *name);
 static switch_status_t recog_asr_disable_all_grammars(switch_asr_handle_t *ah);
+static switch_status_t recog_asr_try_cancel(switch_asr_handle_t *ah);
 static switch_status_t recog_asr_close(switch_asr_handle_t *ah, switch_asr_flag_t *flags);
 static switch_status_t recog_asr_feed(switch_asr_handle_t *ah, void *data, unsigned int len, switch_asr_flag_t *flags);
 static switch_status_t recog_asr_feed_dtmf(switch_asr_handle_t *ah, const switch_dtmf_t *dtmf, switch_asr_flag_t *flags);
@@ -893,8 +901,10 @@ static switch_status_t speech_channel_create(speech_channel_t ** schannel, const
 	schan->rate = rate;
 	schan->silence = 0;			/* L16 silence sample */
 	schan->channel_opened = 0;
+	schan->cancel = 0;
 
 	if (switch_mutex_init(&schan->mutex, SWITCH_MUTEX_UNNESTED, pool) != SWITCH_STATUS_SUCCESS ||
+		switch_mutex_init(&schan->cancel_mutex, SWITCH_MUTEX_UNNESTED, pool) != SWITCH_STATUS_SUCCESS ||
 		switch_thread_cond_create(&schan->cond, pool) != SWITCH_STATUS_SUCCESS ||
 		audio_queue_create(&schan->audio_queue, name, session_uuid, pool) != SWITCH_STATUS_SUCCESS) {
 		status = SWITCH_STATUS_FALSE;
@@ -1003,7 +1013,7 @@ static switch_status_t speech_channel_open(speech_channel_t *schannel, profile_t
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
 	mpf_termination_t *termination = NULL;
 	mrcp_resource_type_e resource_type;
-	int warned = 0, retry = 0;
+	int warned = 0, retry = 0, max_retry = 0;
 
 	switch_mutex_lock(schannel->mutex);
 
@@ -1054,13 +1064,22 @@ static switch_status_t speech_channel_open(speech_channel_t *schannel, profile_t
 	/* wait for channel to be ready */
 	warned = 0;
 	retry = 0;
-	while (schannel->state == SPEECH_CHANNEL_CLOSED && !(globals.max_retry && (retry++ >= globals.max_retry))) {
-		if (switch_thread_cond_timedwait(schannel->cond, schannel->mutex, SPEECH_CHANNEL_TIMEOUT_USEC) == SWITCH_STATUS_TIMEOUT && !warned) {
+	max_retry = globals.max_retry * (SPEECH_CHANNEL_TIMEOUT_USEC/SPEECH_CHANNEL_INTERVAL_USEC);
+	while (schannel->state == SPEECH_CHANNEL_CLOSED && !speech_channel_is_cancel(schannel) && !(globals.max_retry && (retry++ >= max_retry))) {
+		if (switch_thread_cond_timedwait(schannel->cond, schannel->mutex, SPEECH_CHANNEL_INTERVAL_USEC) == SWITCH_STATUS_TIMEOUT && !warned && (retry * SPEECH_CHANNEL_INTERVAL_USEC) >= SPEECH_CHANNEL_TIMEOUT_USEC) {
 			warned = 1;
 			switch_log_printf(SWITCH_CHANNEL_UUID_LOG(schannel->session_uuid), SWITCH_LOG_WARNING, "(%s) MRCP session has not opened after %d ms\n", schannel->name, SPEECH_CHANNEL_TIMEOUT_USEC / (1000));
 		}
 	}
-	if (schannel->state == SPEECH_CHANNEL_READY) {
+
+	if (speech_channel_is_cancel(schannel)) {
+		switch_log_printf(SWITCH_CHANNEL_UUID_LOG(schannel->session_uuid), SWITCH_LOG_INFO, "(%s) Request is cancelled\n", schannel->name);
+		status = SWITCH_STATUS_BREAK;
+		if (!mrcp_application_session_terminate(schannel->unimrcp_session)) {
+			switch_log_printf(SWITCH_CHANNEL_UUID_LOG(schannel->session_uuid), SWITCH_LOG_WARNING, "(%s) Unable to terminate application session\n", schannel->name);
+		}
+		goto done;
+	} else if (schannel->state == SPEECH_CHANNEL_READY) {
 		switch_log_printf(SWITCH_CHANNEL_UUID_LOG(schannel->session_uuid), SWITCH_LOG_DEBUG, "(%s) channel is ready\n", schannel->name);
 	} else if (schannel->state == SPEECH_CHANNEL_CLOSED) {
 		switch_log_printf(SWITCH_CHANNEL_UUID_LOG(schannel->session_uuid), SWITCH_LOG_ERROR, "(%s) Timed out waiting for channel to be ready\n", schannel->name);
@@ -1427,6 +1446,29 @@ static switch_status_t speech_channel_stop(speech_channel_t *schannel)
 
 	switch_mutex_unlock(schannel->mutex);
 	return status;
+}
+
+/**
+ * Cancel SPEAK/RECOGNIZE request on speech channel
+ *
+ * @param schannel the channel
+ * @return SWITCH_STATUS_SUCCESS if successful
+ */
+static switch_status_t speech_channel_try_cancel(speech_channel_t *schannel)
+{
+	switch_mutex_lock(schannel->cancel_mutex);
+	schannel->cancel = 1;
+	switch_mutex_unlock(schannel->cancel_mutex);
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static int speech_channel_is_cancel(speech_channel_t *schannel)
+{
+	int cancel = 0;
+	switch_mutex_lock(schannel->cancel_mutex);
+	cancel = schannel->cancel;
+	switch_mutex_unlock(schannel->cancel_mutex);
+	return cancel;
 }
 
 /**
@@ -3398,6 +3440,17 @@ static switch_status_t recog_asr_disable_all_grammars(switch_asr_handle_t *ah)
 }
 
 /**
+ * Process asr_pause request from FreeSWITCH
+ *
+ * @param ah the FreeSWITCH speech recognition handle
+ */
+static switch_status_t recog_asr_try_cancel(switch_asr_handle_t *ah)
+{
+	speech_channel_t *schannel = (speech_channel_t *) ah->private_info;
+	return speech_channel_try_cancel(schannel);
+}
+
+/**
  * Process asr_close request from FreeSWITCH
  *
  * @param ah the FreeSWITCH speech recognition handle
@@ -3791,6 +3844,7 @@ static switch_status_t recog_load(switch_loadable_module_interface_t *module_int
 	asr_interface->asr_enable_grammar = recog_asr_enable_grammar;
 	asr_interface->asr_disable_grammar = recog_asr_disable_grammar;
 	asr_interface->asr_disable_all_grammars = recog_asr_disable_all_grammars;
+	asr_interface->asr_try_cancel = recog_asr_try_cancel;
 	asr_interface->asr_close = recog_asr_close;
 	asr_interface->asr_feed = recog_asr_feed;
 	asr_interface->asr_feed_dtmf = recog_asr_feed_dtmf;
