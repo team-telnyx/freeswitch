@@ -5245,6 +5245,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_stop_detect_speech(switch_core_sessio
 {
 	switch_channel_t *channel = switch_core_session_get_channel(session);
 	struct speech_thread_handle *sth;
+	switch_asr_handle_t *ah;
 
 	switch_assert(channel != NULL);
 	if ((sth = switch_channel_get_private(channel, SWITCH_SPEECH_KEY))) {
@@ -5252,6 +5253,10 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_stop_detect_speech(switch_core_sessio
 		switch_channel_set_private(channel, SWITCH_SPEECH_KEY, NULL);
 		switch_core_event_hook_remove_recv_dtmf(session, speech_on_dtmf);
 		switch_core_media_bug_remove(session, &sth->bug);
+		return SWITCH_STATUS_SUCCESS;
+	} else if ((ah = switch_channel_get_private(channel, SWITCH_SPEECH_KEY "_tmp"))) {
+		switch_channel_set_private(channel, SWITCH_SPEECH_KEY "_tmp", NULL);
+		switch_core_asr_try_cancel(ah);
 		return SWITCH_STATUS_SUCCESS;
 	}
 
