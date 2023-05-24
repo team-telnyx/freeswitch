@@ -3423,8 +3423,8 @@ static switch_status_t recog_asr_close(switch_asr_handle_t *ah, switch_asr_flag_
 		if (r->result_headers) {
 			switch_event_destroy(&r->result_headers);
 		}
-		switch_mutex_unlock(schannel->mutex);
 		schannel->data = NULL;
+		switch_mutex_unlock(schannel->mutex);
 		speech_channel_destroy(schannel);
 	}
 	/* this lets FreeSWITCH's speech_thread know the handle is closed */
