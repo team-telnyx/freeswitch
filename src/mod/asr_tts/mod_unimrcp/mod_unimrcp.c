@@ -3424,6 +3424,7 @@ static switch_status_t recog_asr_close(switch_asr_handle_t *ah, switch_asr_flag_
 			switch_event_destroy(&r->result_headers);
 		}
 		switch_mutex_unlock(schannel->mutex);
+		schannel->data = NULL;
 		speech_channel_destroy(schannel);
 	}
 	/* this lets FreeSWITCH's speech_thread know the handle is closed */
@@ -3753,6 +3754,11 @@ static apt_bool_t recog_stream_read(mpf_audio_stream_t *stream, mpf_frame_t *fra
 	speech_channel_t *schannel = (speech_channel_t *) stream->obj;
 	recognizer_data_t *r = (recognizer_data_t *) schannel->data;
 	switch_size_t to_read = frame->codec_frame.size;
+	
+	// Check schannel data is not NULL
+	if (!r) {
+		return FALSE;
+	}
 
 	/* grab the data.  pad it if there isn't enough */
 	if (speech_channel_read(schannel, frame->codec_frame.buffer, &to_read, 0) == SWITCH_STATUS_SUCCESS) {
@@ -3763,7 +3769,7 @@ static apt_bool_t recog_stream_read(mpf_audio_stream_t *stream, mpf_frame_t *fra
 	}
 
 	switch_mutex_lock(schannel->mutex);
-	if (r && r->dtmf_generator_active && r->dtmf_generator) {
+	if (r->dtmf_generator_active && r->dtmf_generator) {
 		if (!mpf_dtmf_generator_put_frame(r->dtmf_generator, frame)) {
 			if (!mpf_dtmf_generator_sending(r->dtmf_generator))
 				r->dtmf_generator_active = 0;
