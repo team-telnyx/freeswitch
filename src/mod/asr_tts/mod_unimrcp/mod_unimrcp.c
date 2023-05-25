@@ -1873,10 +1873,15 @@ static apt_bool_t speech_on_channel_add(mrcp_application_t *application, mrcp_se
 	speech_channel_t *schannel = (speech_channel_t *) mrcp_application_channel_object_get(channel);
 	char codec_name[60] = { 0 };
 	const mpf_codec_descriptor_t *descriptor;
+	switch_channel_t *orig_channel = NULL;
 
 	/* check status */
 	if (!session || !schannel || status != MRCP_SIG_STATUS_CODE_SUCCESS) {
 		goto error;
+	} else {
+		switch_core_session_t *orig_session = switch_core_memory_pool_get_data(schannel->memory_pool, "__session");
+		if (orig_session)
+			orig_channel = switch_core_session_get_channel(orig_session);
 	}
 
 	/* what sample rate did we negotiate? */
@@ -1912,6 +1917,27 @@ static apt_bool_t speech_on_channel_add(mrcp_application_t *application, mrcp_se
 			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "MRCP-Resource-Type", "TTS");
 		} else {
 			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "MRCP-Resource-Type", "ASR");
+		}
+		switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "MRCP-Session-Identifier", schannel->unimrcp_session->id.buf);
+		if (!zstr(schannel->unimrcp_session->signaling_agent->sip_id)) {
+			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "MRCP-Session-SIP-Id", schannel->unimrcp_session->signaling_agent->sip_id);
+		}
+		if(orig_channel){
+			const char* telnyx_session_uuid = switch_channel_get_variable(orig_channel, "telnyx_session_uuid");
+			const char* telnyx_uuid = switch_channel_get_variable(orig_channel, "telnyx_uuid");
+			const char* logical_leg_uuid = switch_channel_get_variable(orig_channel, "logical_leg_uuid");
+			const char* call_control = switch_channel_get_variable(orig_channel, "call_control");
+
+			if (!zstr(call_control)) {
+				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "call_control", call_control);
+			}
+			if (!zstr(logical_leg_uuid)) {
+				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "logical_leg_uuid", logical_leg_uuid);
+			}
+			if (!zstr(telnyx_session_uuid) && !zstr(telnyx_uuid)) {
+				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "telnyx_session_uuid", telnyx_session_uuid);
+				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "telnyx_uuid", telnyx_uuid);
+			}
 		}
 		switch_event_fire(&event);
 	}
