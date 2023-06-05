@@ -3129,24 +3129,29 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_refresh_media_timer(switch_cor
 
 	a_engine = &smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
 	v_engine = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
+
 	if (timeoutms) {
 		a_engine->media_timeout = *timeoutms;
 		if (switch_rtp_ready(a_engine->rtp_session)) {
 			switch_rtp_set_media_timeout(a_engine->rtp_session, a_engine->media_timeout);
+			switch_rtp_reset_media_timer(a_engine->rtp_session);
 		}
-		switch_rtp_reset_media_timer(a_engine->rtp_session);
 
 		v_engine->media_timeout = *timeoutms;
 		if (switch_rtp_ready(v_engine->rtp_session)) {
 			switch_rtp_set_media_timeout(v_engine->rtp_session, v_engine->media_timeout);
+			switch_rtp_reset_media_timer(v_engine->rtp_session);
 		}
-		switch_rtp_reset_media_timer(v_engine->rtp_session);
 	} else {
-		check_media_timeout_params(session, a_engine);
-		switch_rtp_reset_media_timer(a_engine->rtp_session);
+		if (switch_rtp_ready(a_engine->rtp_session)) {
+			check_media_timeout_params(session, a_engine);
+			switch_rtp_reset_media_timer(a_engine->rtp_session);
+		}
 
-		check_media_timeout_params(session, v_engine);
-		switch_rtp_reset_media_timer(v_engine->rtp_session);
+		if (switch_rtp_ready(v_engine->rtp_session)) {
+			check_media_timeout_params(session, v_engine);
+			switch_rtp_reset_media_timer(v_engine->rtp_session);
+		}
 	}
 
 	return SWITCH_STATUS_SUCCESS;
