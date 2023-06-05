@@ -3116,6 +3116,28 @@ static void check_media_timeout_params(switch_core_session_t *session, switch_rt
 
 }
 
+SWITCH_DECLARE(switch_status_t) switch_core_media_refresh_media_timer(switch_core_session_t *session)
+{
+	switch_media_handle_t *smh;
+	switch_rtp_engine_t *a_engine, *v_engine;
+
+	switch_assert(session);
+
+	if (!(smh = session->media_handle)) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	a_engine = &smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
+	check_media_timeout_params(session, a_engine);
+	switch_rtp_reset_media_timer(a_engine->rtp_session);
+
+	v_engine = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
+	check_media_timeout_params(session, v_engine);
+	switch_rtp_reset_media_timer(v_engine->rtp_session);
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
 SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session_t *session, switch_frame_t **frame,
 															 switch_io_flag_t flags, int stream_id, switch_media_type_t type)
 {
@@ -3182,7 +3204,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 					(*frame)->datalen = engine->read_impl.encoded_bytes_per_packet;
 					memset((*frame)->data, 0, (*frame)->datalen);
 					if (!switch_channel_test_flag(session->channel, CF_MEDIA_TIMEOUT_FIRED)) {
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Execute on media timeout\n");
 						switch_channel_set_flag(session->channel, CF_MEDIA_TIMEOUT_FIRED);
 						switch_channel_execute_on(session->channel, "execute_on_media_timeout");
 						switch_channel_clear_flag(session->channel, CF_MEDIA_READABLE_FIRED);
@@ -3204,7 +3225,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 		fire_readable = !switch_channel_test_flag(session->channel, CF_MEDIA_READABLE_FIRED);
 		if (fire_readable && status == SWITCH_STATUS_SUCCESS && !switch_test_flag((&engine->read_frame), SFF_CNG)) {
 			switch_event_t *event = NULL;
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Execute on media readable\n");
 			if (switch_event_create(&event, SWITCH_EVENT_CHANNEL_MEDIA_READABLE) == SWITCH_STATUS_SUCCESS) {
 				switch_channel_event_set_data(session->channel, event);
 				switch_event_fire(&event);
