@@ -3116,7 +3116,7 @@ static void check_media_timeout_params(switch_core_session_t *session, switch_rt
 
 }
 
-SWITCH_DECLARE(switch_status_t) switch_core_media_refresh_media_timer(switch_core_session_t *session)
+SWITCH_DECLARE(switch_status_t) switch_core_media_refresh_media_timer(switch_core_session_t *session, uint32_t* timeoutms)
 {
 	switch_media_handle_t *smh;
 	switch_rtp_engine_t *a_engine, *v_engine;
@@ -3128,12 +3128,26 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_refresh_media_timer(switch_cor
 	}
 
 	a_engine = &smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
-	check_media_timeout_params(session, a_engine);
-	switch_rtp_reset_media_timer(a_engine->rtp_session);
-
 	v_engine = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
-	check_media_timeout_params(session, v_engine);
-	switch_rtp_reset_media_timer(v_engine->rtp_session);
+	if (timeoutms) {
+		a_engine->media_timeout = *timeoutms;
+		if (switch_rtp_ready(a_engine->rtp_session)) {
+			switch_rtp_set_media_timeout(a_engine->rtp_session, a_engine->media_timeout);
+		}
+		switch_rtp_reset_media_timer(a_engine->rtp_session);
+
+		v_engine->media_timeout = *timeoutms;
+		if (switch_rtp_ready(v_engine->rtp_session)) {
+			switch_rtp_set_media_timeout(v_engine->rtp_session, v_engine->media_timeout);
+		}
+		switch_rtp_reset_media_timer(v_engine->rtp_session);
+	} else {
+		check_media_timeout_params(session, a_engine);
+		switch_rtp_reset_media_timer(a_engine->rtp_session);
+
+		check_media_timeout_params(session, v_engine);
+		switch_rtp_reset_media_timer(v_engine->rtp_session);
+	}
 
 	return SWITCH_STATUS_SUCCESS;
 }
