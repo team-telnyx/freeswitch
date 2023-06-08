@@ -6888,8 +6888,8 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 				|| !strcasecmp(sip->sip_reason->re_protocol, "FreeSWITCH")
 				|| !strcasecmp(sip->sip_reason->re_protocol, profile->sdp_username)) && sip->sip_reason->re_cause) {
 			char status_str[5];
-			const char * session_ignore_list = switch_channel_get_variable(channel, "ignore_reason_header_by_sip_code");
-			const char * current_ignore_list = !zstr(session_ignore_list) ? session_ignore_list : profile->ignore_reason_header_by_sip_code;
+			const char* session_ignore_list = switch_channel_get_variable(channel, "ignore_reason_header_by_sip_code");
+			const char* current_ignore_list = !zstr(session_ignore_list) ? session_ignore_list : profile->ignore_reason_header_by_sip_code;
 			switch_snprintf(status_str, sizeof(status_str), "%d", status);
 			if(!zstr(current_ignore_list) && !!switch_stristr(status_str, current_ignore_list)) {
 				tech_pvt->q850_cause = 0;
