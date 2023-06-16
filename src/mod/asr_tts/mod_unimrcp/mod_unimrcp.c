@@ -1596,6 +1596,11 @@ static const char *speech_channel_state_to_string(speech_channel_state_t state)
 static switch_status_t speech_channel_set_state(speech_channel_t *schannel, speech_channel_state_t state)
 {
 	switch_status_t status;
+
+	if (!schannel || !schannel->mutex) {
+		return SWITCH_STATUS_FALSE;
+	}
+	
 	switch_mutex_lock(schannel->mutex);
 	status = speech_channel_set_state_unlocked(schannel, state);
 	switch_mutex_unlock(schannel->mutex);
