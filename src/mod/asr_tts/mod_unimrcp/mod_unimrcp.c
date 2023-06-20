@@ -358,7 +358,7 @@ struct speech_channel {
 	/** True, if channel was opened successfully */
 	int channel_opened;
 	/** channel destroy flag*/
-	apt_bool_t channel_destroyed;
+	int channel_destroyed;
 	/** rate */
 	uint16_t rate;
 	/** silence sample */
@@ -899,7 +899,7 @@ static switch_status_t speech_channel_create(speech_channel_t ** schannel, const
 	schan->rate = rate;
 	schan->silence = 0;			/* L16 silence sample */
 	schan->channel_opened = 0;
-	schan->channel_destroyed = FALSE;
+	schan->channel_destroyed = 0;
 
 	if (switch_mutex_init(&schan->mutex, SWITCH_MUTEX_UNNESTED, pool) != SWITCH_STATUS_SUCCESS ||
 		switch_thread_cond_create(&schan->cond, pool) != SWITCH_STATUS_SUCCESS ||
@@ -943,7 +943,7 @@ static switch_status_t speech_channel_destroy(speech_channel_t *schannel)
 					}
 				}
 			}
-			schannel->channel_destroyed = TRUE;
+			schannel->channel_destroyed = 1;
 			switch_mutex_unlock(schannel->mutex);
 		}
 
@@ -1601,7 +1601,7 @@ static switch_status_t speech_channel_set_state(speech_channel_t *schannel, spee
 {
 	switch_status_t status;
 
-	if (!schannel || schannel->channel_destroyed) {
+	if (!schannel || !schannel->mutex || schannel->channel_destroyed) {
 		return SWITCH_STATUS_FALSE;
 	}
 
