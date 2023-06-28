@@ -276,6 +276,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_fork_set(switch_core_session_t
 SWITCH_DECLARE(switch_status_t) switch_core_media_fork_set_id(switch_core_session_t *session, const char *id);
 SWITCH_DECLARE(switch_status_t) switch_core_media_fork_set_wait_ssrc(switch_core_session_t *session, int timeout_ms);
 SWITCH_DECLARE(switch_status_t) switch_core_media_fork_set_local_address(switch_core_session_t *session);
+SWITCH_DECLARE(switch_status_t) switch_core_media_fork_reset_state(switch_core_session_t *session);
 SWITCH_DECLARE(switch_status_t) switch_core_media_fork_activate(switch_core_session_t *session, switch_fork_direction_t direction);
 SWITCH_DECLARE(switch_status_t) switch_core_media_fork_deactivate(switch_core_session_t *session, switch_fork_direction_t direction);
 SWITCH_DECLARE(void) switch_core_media_fork_fire_start_event(switch_core_session_t *session);
@@ -302,7 +303,7 @@ SWITCH_DECLARE(void) switch_core_media_hard_mute(switch_core_session_t *session,
 SWITCH_DECLARE(cJSON *) switch_core_media_gen_json_constraint(float min, float ideal, float max);
 SWITCH_DECLARE(switch_status_t) switch_core_media_media_params(switch_core_session_t *session, const char *json);
 SWITCH_DECLARE(switch_status_t) switch_core_media_receive_message(switch_core_session_t *session, switch_core_session_message_t *msg);
-
+SWITCH_DECLARE(switch_status_t) switch_core_media_refresh_media_timer(switch_core_session_t *session, uint32_t* timeoutms);
 
 
 SWITCH_DECLARE(void) switch_core_media_break(switch_core_session_t *session, switch_media_type_t type);

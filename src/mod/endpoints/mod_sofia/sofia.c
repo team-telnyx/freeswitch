@@ -1665,7 +1665,7 @@ static void our_sofia_event_callback(nua_event_t event,
 			sip->sip_payload->pl_data = su_strndup(nua_handle_get_home(nh), sip->sip_payload->pl_data, sip->sip_payload->pl_len);
 		}
 	}
-
+	
 	switch (event) {
 	case nua_r_get_params:
 	case nua_i_fork:
@@ -1711,6 +1711,7 @@ static void our_sofia_event_callback(nua_event_t event,
 		{
 			if (channel && sip) {
 				const char *r_sdp = NULL;
+				
 				sofia_glue_store_session_id(session, profile, sip, 0);
 
 				if (sip->sip_payload && sip->sip_payload->pl_data) {
@@ -2162,7 +2163,7 @@ static void our_sofia_event_callback(nua_event_t event,
 		}
 		break;
 	}
-
+	
   done:
 
 	if (tech_pvt && tech_pvt->want_event && event == tech_pvt->want_event) {
@@ -2719,7 +2720,7 @@ void sofia_event_callback(nua_event_t event,
 
 			set_call_id(tech_pvt, sip);
 		} else {
-			nua_respond(nh, 503, "Maximum Calls In Progress", SIPTAG_RETRY_AFTER_STR("300"), TAG_END());
+			nua_respond(nh, mod_sofia_globals.min_idle_cpu_failure_code, mod_sofia_globals.min_idle_cpu_failure_text, SIPTAG_RETRY_AFTER_STR("300"), TAG_END());
 			nua_destroy_event(de->event);
 			su_free(nua_handle_get_home(nh), de);
 
@@ -4660,6 +4661,9 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 	mod_sofia_globals.auto_restart = SWITCH_TRUE;
 	mod_sofia_globals.reg_deny_binding_fetch_and_no_lookup = SWITCH_FALSE; /* handle backwards compatilibity - by default use new behavior */
 	mod_sofia_globals.rewrite_multicasted_fs_path = SWITCH_FALSE;
+	
+	mod_sofia_globals.min_idle_cpu_failure_code = 503;
+	strcpy(mod_sofia_globals.min_idle_cpu_failure_text, "Maximum Calls In Progress");
 
 	if ((settings = switch_xml_child(cfg, "global_settings"))) {
 		for (param = switch_xml_child(settings, "param"); param; param = param->next) {
@@ -4716,6 +4720,17 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 				mod_sofia_globals.stir_shaken_vs_cert_path_check = switch_true(val);
 			} else if (!strcasecmp(var, "stir-shaken-vs-require-date")) {
 				mod_sofia_globals.stir_shaken_vs_require_date = switch_true(val);
+			} else if (!strcasecmp(var, "min-idle-cpu-failure-code")) {
+				int temp_rc = atoi(val);
+				if(temp_rc > 399 && temp_rc < 700) {
+					mod_sofia_globals.min_idle_cpu_failure_code = temp_rc;
+				} else {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "min-idle-cpu-failure-code must be between 400 and 699.  Value was %d, leaving value set to 503.\n", temp_rc);
+				}
+			} else if (!strcasecmp(var, "min-idle-cpu-failure-text")) {
+				strncpy(mod_sofia_globals.min_idle_cpu_failure_text, val, 128);
+			} else if (!strcasecmp(var, "min-idle-cpu-override-outbound")) {
+				mod_sofia_globals.min_idle_cpu_override_outbound = atoi(val);
 			}
 		}
 	}
@@ -4874,6 +4889,8 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						profile->domain_name = switch_core_strdup(profile->pool, xprofiledomain);
 					}
 				}
+				
+				profile->disable_recovery_record_route_fixup = 0; // We want recovery RR fixups by default
 
 				for (param = switch_xml_child(settings, "param"); param; param = param->next) {
 					char *var = (char *) switch_xml_attr_soft(param, "name");
@@ -6230,6 +6247,8 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						profile->acl_inbound_x_token_header = switch_core_strdup(profile->pool, val);
 					} else if (!strcasecmp(var, "apply-proxy-acl-x-token")) {
 						profile->acl_proxy_x_token_header = switch_core_strdup(profile->pool, val);
+					} else if (!strcasecmp(var, "ignore-reason-header-by-sip-code")) {
+						profile->ignore_reason_header_by_sip_code = switch_core_strdup(profile->pool, val);
 					} else if (!strcasecmp(var, "proxy-hold")) {
 						if(switch_true(val)) {
 							sofia_set_pflag(profile, PFLAG_PROXY_HOLD);
@@ -6316,6 +6335,8 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 								}
 							}
 						}
+					} else if (!strcasecmp(var, "disable_recovery_record_route_fixup")) {
+						profile->disable_recovery_record_route_fixup = atoi(val);
 					}
 				}
 
@@ -6825,6 +6846,8 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 		int network_port = 0;
 		switch_caller_profile_t *caller_profile = NULL;
 		int has_t38 = 0;
+		const char *drrrf_chanvar_str = switch_channel_get_variable(channel, "disable_recovery_record_route_fixup"); // disable_recovery_record_route_fixup as a chanvar
+		switch_bool_t drrrf_chanvar_zstr = zstr(drrrf_chanvar_str), drrrf_chanvar = switch_true(drrrf_chanvar_str);
 
 		if (status == 100 && !sofia_test_flag(tech_pvt, TFLAG_100_UEPOCH_SET)) {
 			sofia_set_flag(tech_pvt, TFLAG_100_UEPOCH_SET);
@@ -6885,8 +6908,17 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 		if (status >= 400 && sip->sip_reason && sip->sip_reason->re_protocol && (!strcasecmp(sip->sip_reason->re_protocol, "Q.850")
 				|| !strcasecmp(sip->sip_reason->re_protocol, "FreeSWITCH")
 				|| !strcasecmp(sip->sip_reason->re_protocol, profile->sdp_username)) && sip->sip_reason->re_cause) {
+			char status_str[5];
+			const char* session_ignore_list = switch_channel_get_variable(channel, "ignore_reason_header_by_sip_code");
+			const char* current_ignore_list = !zstr(session_ignore_list) ? session_ignore_list : profile->ignore_reason_header_by_sip_code;
+			switch_snprintf(status_str, sizeof(status_str), "%d", status);
+			if(!zstr(current_ignore_list) && !!switch_stristr(status_str, current_ignore_list)) {
+				tech_pvt->q850_cause = 0;
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Ignore Remote Reason for %d: %s\n", status, sip->sip_reason->re_cause);
+			} else {
 				tech_pvt->q850_cause = atoi(sip->sip_reason->re_cause);
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Remote Reason: %d\n", tech_pvt->q850_cause);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Remote Reason: %d\n", tech_pvt->q850_cause);
+			}
 		}
 
 		if ((caller_profile = switch_channel_get_caller_profile(channel)) && !zstr(network_ip) &&
@@ -6970,7 +7002,37 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 				}
 			}
 		}
-
+		
+		// Feature flipper:  We want the chanvar to override the profile setting.
+		if(status == 200 && switch_channel_test_flag(channel, CF_RECOVERED) && !tech_pvt->recovered_call_route_fixed && ((!profile->disable_recovery_record_route_fixup && drrrf_chanvar == SWITCH_FALSE ) || (profile->disable_recovery_record_route_fixup && !drrrf_chanvar_zstr && drrrf_chanvar == SWITCH_FALSE))) {
+			const char *sip_invite_record_route = switch_channel_get_variable(channel, "sip_invite_record_route");
+			const char *total_recovery_rr_fixups = switch_channel_get_variable(channel, "total_recovery_record_route_fixups");
+			
+			if(!zstr(sip_invite_record_route)) {
+				int32_t total_recovery_rr_fixups_int = 0;
+				nta_agent_t *curagent = nua_get_agent(profile->nua);
+				const char *sip_call_id = switch_channel_get_variable(channel, "sip_call_id");
+				su_home_t *home = nua_handle_get_home(nh);
+				sip_record_route_t *rrtemp = sip_record_route_make(home, sip_invite_record_route);
+				nta_leg_t *curleg = nta_leg_by_call_id(curagent, sip_call_id);
+				
+				nta_leg_client_reroute(curleg, rrtemp, sip->sip_contact, 1);
+				
+				if(!zstr(total_recovery_rr_fixups)) {
+					total_recovery_rr_fixups_int = atoi(total_recovery_rr_fixups);
+				}
+				
+				switch_channel_set_variable_printf(channel, "total_recovery_record_route_fixups", "%d", ++total_recovery_rr_fixups_int);
+				
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Recovered call: fixing routes for this dialog.  This is the %d time for this dialog.\n", total_recovery_rr_fixups_int);
+			} else {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Recovered call had no Record Route information associated with it.\n");
+			}
+			
+			// Let's keep this from being called repeatedly.
+			tech_pvt->recovered_call_route_fixed++;
+		}
+		
 		if ((status == 180 || status == 183 || status > 199)) {
 			const char *vval;
 

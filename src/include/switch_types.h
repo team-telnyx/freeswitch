@@ -151,6 +151,7 @@ SWITCH_BEGIN_EXTERN_C
 #define SWITCH_CHANNEL_EXECUTE_ON_PRE_ANSWER_VARIABLE "execute_on_pre_answer"
 #define SWITCH_CHANNEL_EXECUTE_ON_MEDIA_VARIABLE "execute_on_media"
 #define SWITCH_CHANNEL_EXECUTE_ON_MEDIA_WRITABLE_VARIABLE "execute_on_media_writable"
+#define SWITCH_CHANNEL_EXECUTE_ON_MEDIA_READABLE_VARIABLE "execute_on_media_readable"
 #define SWITCH_CHANNEL_EXECUTE_ON_RING_VARIABLE "execute_on_ring"
 #define SWITCH_CHANNEL_EXECUTE_ON_TONE_DETECT_VARIABLE "execute_on_tone_detect"
 #define SWITCH_CHANNEL_EXECUTE_ON_ORIGINATE_VARIABLE "execute_on_originate"
@@ -337,7 +338,8 @@ typedef enum {
 	SOF_NO_EFFECTIVE_ANIII = (1 << 3),
 	SOF_NO_EFFECTIVE_CID_NUM = (1 << 4),
 	SOF_NO_EFFECTIVE_CID_NAME = (1 << 5),
-	SOF_NO_LIMITS = (1 << 6)
+	SOF_NO_LIMITS = (1 << 6),
+	SOF_NO_CPU_IDLE_LIMITS = (1 << 7)
 } switch_originate_flag_enum_t;
 typedef uint32_t switch_originate_flag_t;
 
@@ -723,6 +725,9 @@ typedef struct {
 	double mos;
 	double pp_R;
 	double pp_mos;
+	int pp_packet_counter;
+	int pp_packet_lost;
+	double pp_lost_percentage;
 
 	switch_size_t cumulative_flaws;
 	double cumulative_R;
@@ -1681,6 +1686,8 @@ typedef enum {
 	CF_WANT_DTLSv1_2,
 	CF_RFC7329_COMPAT,
 	CF_MEDIA_WRITABLE_FIRED,
+	CF_MEDIA_READABLE_FIRED,
+	CF_MEDIA_TIMEOUT_FIRED,
 	CF_3PCC_PROXY,
 	CF_REATTACHED,
 	CF_VIDEO_READ_TAPPED,
@@ -2144,6 +2151,7 @@ typedef enum {
 	SWITCH_EVENT_CHANNEL_PROGRESS,
 	SWITCH_EVENT_CHANNEL_PROGRESS_MEDIA,
 	SWITCH_EVENT_CHANNEL_MEDIA_WRITABLE,
+	SWITCH_EVENT_CHANNEL_MEDIA_READABLE,
 	SWITCH_EVENT_CHANNEL_OUTGOING,
 	SWITCH_EVENT_CHANNEL_PARK,
 	SWITCH_EVENT_CHANNEL_UNPARK,

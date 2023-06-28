@@ -2586,7 +2586,8 @@ SWITCH_DECLARE(switch_core_session_t *) switch_core_session_request_uuid(switch_
 		return NULL;
 	}
 
-	if (runtime.min_idle_time > 0 && runtime.profile_time < runtime.min_idle_time) {
+	if (runtime.min_idle_time > 0 && runtime.profile_time < runtime.min_idle_time && !(originate_flags & SOF_NO_CPU_IDLE_LIMITS)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Minimum CPU idle time is insufficient to process any new calls.  Session cannot be created.  Min set to %lf , current value %lf .\n", runtime.min_idle_time, runtime.profile_time);
 		return NULL;
 	}
 
@@ -3344,6 +3345,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_override_io_routines(switch_
 SWITCH_DECLARE(void) switch_core_session_media_writable(switch_core_session_t *session)
 {
 	switch_channel_execute_on(session->channel, SWITCH_CHANNEL_EXECUTE_ON_MEDIA_WRITABLE_VARIABLE);
+}
+
+SWITCH_DECLARE(void) switch_core_session_media_readable(switch_core_session_t *session)
+{
+	switch_channel_execute_on(session->channel, SWITCH_CHANNEL_EXECUTE_ON_MEDIA_READABLE_VARIABLE);
 }
 
 

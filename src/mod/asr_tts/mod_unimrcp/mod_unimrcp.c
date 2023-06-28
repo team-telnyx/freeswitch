@@ -318,6 +318,8 @@ enum speech_channel_state {
 	SPEECH_CHANNEL_PROCESSING,
 	/** finished processing speech request */
 	SPEECH_CHANNEL_DONE,
+	/** cancel request */
+	SPEECH_CHANNEL_CANCEL,
 	/** error opening channel */
 	SPEECH_CHANNEL_ERROR
 };
@@ -355,6 +357,8 @@ struct speech_channel {
 	audio_queue_t *audio_queue;
 	/** True, if channel was opened successfully */
 	int channel_opened;
+	/** channel destroy flag*/
+	int channel_destroyed;
 	/** rate */
 	uint16_t rate;
 	/** silence sample */
@@ -381,6 +385,7 @@ static mpf_termination_t *speech_channel_create_mpf_termination(speech_channel_t
 static switch_status_t speech_channel_open(speech_channel_t *schannel, profile_t *profile);
 static switch_status_t speech_channel_destroy(speech_channel_t *schannel);
 static switch_status_t speech_channel_stop(speech_channel_t *schannel);
+static switch_status_t speech_channel_try_cancel(speech_channel_t *schannel);
 static switch_status_t speech_channel_set_param(speech_channel_t *schannel, const char *name, const char *val);
 static switch_status_t speech_channel_write(speech_channel_t *schannel, void *data, switch_size_t *len);
 static switch_status_t speech_channel_read(speech_channel_t *schannel, void *data, switch_size_t *len, int block);
@@ -503,6 +508,7 @@ static switch_status_t recog_asr_unload_grammar(switch_asr_handle_t *ah, const c
 static switch_status_t recog_asr_enable_grammar(switch_asr_handle_t *ah, const char *name);
 static switch_status_t recog_asr_disable_grammar(switch_asr_handle_t *ah, const char *name);
 static switch_status_t recog_asr_disable_all_grammars(switch_asr_handle_t *ah);
+static switch_status_t recog_asr_try_cancel(switch_asr_handle_t *ah);
 static switch_status_t recog_asr_close(switch_asr_handle_t *ah, switch_asr_flag_t *flags);
 static switch_status_t recog_asr_feed(switch_asr_handle_t *ah, void *data, unsigned int len, switch_asr_flag_t *flags);
 static switch_status_t recog_asr_feed_dtmf(switch_asr_handle_t *ah, const switch_dtmf_t *dtmf, switch_asr_flag_t *flags);
@@ -893,6 +899,7 @@ static switch_status_t speech_channel_create(speech_channel_t ** schannel, const
 	schan->rate = rate;
 	schan->silence = 0;			/* L16 silence sample */
 	schan->channel_opened = 0;
+	schan->channel_destroyed = 0;
 
 	if (switch_mutex_init(&schan->mutex, SWITCH_MUTEX_UNNESTED, pool) != SWITCH_STATUS_SUCCESS ||
 		switch_thread_cond_create(&schan->cond, pool) != SWITCH_STATUS_SUCCESS ||
@@ -936,6 +943,7 @@ static switch_status_t speech_channel_destroy(speech_channel_t *schannel)
 					}
 				}
 			}
+			schannel->channel_destroyed = 1;
 			switch_mutex_unlock(schannel->mutex);
 		}
 
@@ -1060,6 +1068,7 @@ static switch_status_t speech_channel_open(speech_channel_t *schannel, profile_t
 			switch_log_printf(SWITCH_CHANNEL_UUID_LOG(schannel->session_uuid), SWITCH_LOG_WARNING, "(%s) MRCP session has not opened after %d ms\n", schannel->name, SPEECH_CHANNEL_TIMEOUT_USEC / (1000));
 		}
 	}
+
 	if (schannel->state == SPEECH_CHANNEL_READY) {
 		switch_log_printf(SWITCH_CHANNEL_UUID_LOG(schannel->session_uuid), SWITCH_LOG_DEBUG, "(%s) channel is ready\n", schannel->name);
 	} else if (schannel->state == SPEECH_CHANNEL_CLOSED) {
@@ -1090,6 +1099,19 @@ static switch_status_t speech_channel_open(speech_channel_t *schannel, profile_t
 			/* failed to open profile, retry is allowed */
 			status = SWITCH_STATUS_RESTART;
 		}
+	} else if (schannel->state == SPEECH_CHANNEL_CANCEL) {
+		switch_log_printf(SWITCH_CHANNEL_UUID_LOG(schannel->session_uuid), SWITCH_LOG_DEBUG, "(%s) Cancelling MRCP session\n", schannel->name);
+		if (!mrcp_application_session_terminate(schannel->unimrcp_session)) {
+			switch_log_printf(SWITCH_CHANNEL_UUID_LOG(schannel->session_uuid), SWITCH_LOG_WARNING, "(%s) Unable to terminate application session\n", schannel->name);
+			goto done;
+		}
+
+		/* Wait for session to be cleaned up */
+		if (switch_thread_cond_timedwait(schannel->cond, schannel->mutex, SPEECH_CHANNEL_TIMEOUT_USEC) == SWITCH_STATUS_TIMEOUT) {
+			switch_log_printf(SWITCH_CHANNEL_UUID_LOG(schannel->session_uuid), SWITCH_LOG_WARNING, "(%s) MRCP session has not cleaned up after %d ms\n", schannel->name, SPEECH_CHANNEL_TIMEOUT_USEC / (1000));
+		}
+
+		status = SWITCH_STATUS_BREAK;
 	}
 
   done:
@@ -1430,6 +1452,18 @@ static switch_status_t speech_channel_stop(speech_channel_t *schannel)
 }
 
 /**
+ * Cancel SPEAK/RECOGNIZE request on speech channel
+ *
+ * @param schannel the channel
+ * @return SWITCH_STATUS_SUCCESS if successful
+ */
+static switch_status_t speech_channel_try_cancel(speech_channel_t *schannel)
+{
+	speech_channel_set_state(schannel, SPEECH_CHANNEL_CANCEL);
+	return SWITCH_STATUS_SUCCESS;
+}
+
+/**
  * Convert speech channel type into a string
  *
  * @param type the speech channel type
@@ -1483,7 +1517,7 @@ static switch_status_t speech_channel_set_param(speech_channel_t *schannel, cons
  */
 static switch_status_t speech_channel_write(speech_channel_t *schannel, void *data, switch_size_t *len)
 {
-	if (!schannel || !schannel->mutex || !schannel->audio_queue) {
+	if (!schannel || !schannel->mutex || !schannel->audio_queue || schannel->channel_destroyed) {
 		return SWITCH_STATUS_FALSE;
 	}
 
@@ -1507,7 +1541,7 @@ static switch_status_t speech_channel_read(speech_channel_t *schannel, void *dat
 {
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
 
-	if (!schannel || !schannel->mutex || !schannel->audio_queue) {
+	if (!schannel || !schannel->mutex || !schannel->audio_queue || schannel->channel_destroyed) {
 		return SWITCH_STATUS_FALSE;
 	}
 
@@ -1547,6 +1581,8 @@ static const char *speech_channel_state_to_string(speech_channel_state_t state)
 		return "PROCESSING";
 	case SPEECH_CHANNEL_DONE:
 		return "DONE";
+	case SPEECH_CHANNEL_CANCEL:
+		return "CANCEL";
 	case SPEECH_CHANNEL_ERROR:
 		return "ERROR";
 	}
@@ -1564,6 +1600,11 @@ static const char *speech_channel_state_to_string(speech_channel_state_t state)
 static switch_status_t speech_channel_set_state(speech_channel_t *schannel, speech_channel_state_t state)
 {
 	switch_status_t status;
+
+	if (!schannel || !schannel->mutex || schannel->channel_destroyed) {
+		return SWITCH_STATUS_FALSE;
+	}
+
 	switch_mutex_lock(schannel->mutex);
 	status = speech_channel_set_state_unlocked(schannel, state);
 	switch_mutex_unlock(schannel->mutex);
@@ -1877,7 +1918,7 @@ static apt_bool_t speech_on_channel_add(mrcp_application_t *application, mrcp_se
 	switch_channel_t *orig_channel = NULL;
 
 	/* check status */
-	if (!session || !schannel || status != MRCP_SIG_STATUS_CODE_SUCCESS) {
+	if (!session || !schannel || status != MRCP_SIG_STATUS_CODE_SUCCESS || schannel->channel_destroyed) {
 		goto error;
 	}
 
@@ -3428,6 +3469,17 @@ static switch_status_t recog_asr_disable_all_grammars(switch_asr_handle_t *ah)
 }
 
 /**
+ * Process asr_pause request from FreeSWITCH
+ *
+ * @param ah the FreeSWITCH speech recognition handle
+ */
+static switch_status_t recog_asr_try_cancel(switch_asr_handle_t *ah)
+{
+	speech_channel_t *schannel = (speech_channel_t *) ah->private_info;
+	return speech_channel_try_cancel(schannel);
+}
+
+/**
  * Process asr_close request from FreeSWITCH
  *
  * @param ah the FreeSWITCH speech recognition handle
@@ -3453,6 +3505,7 @@ static switch_status_t recog_asr_close(switch_asr_handle_t *ah, switch_asr_flag_
 		if (r->result_headers) {
 			switch_event_destroy(&r->result_headers);
 		}
+		schannel->data = NULL;
 		switch_mutex_unlock(schannel->mutex);
 		speech_channel_destroy(schannel);
 	}
@@ -3783,6 +3836,11 @@ static apt_bool_t recog_stream_read(mpf_audio_stream_t *stream, mpf_frame_t *fra
 	speech_channel_t *schannel = (speech_channel_t *) stream->obj;
 	recognizer_data_t *r = (recognizer_data_t *) schannel->data;
 	switch_size_t to_read = frame->codec_frame.size;
+	
+	// Check schannel data is not NULL
+	if (!r) {
+		return FALSE;
+	}
 
 	/* grab the data.  pad it if there isn't enough */
 	if (speech_channel_read(schannel, frame->codec_frame.buffer, &to_read, 0) == SWITCH_STATUS_SUCCESS) {
@@ -3793,7 +3851,7 @@ static apt_bool_t recog_stream_read(mpf_audio_stream_t *stream, mpf_frame_t *fra
 	}
 
 	switch_mutex_lock(schannel->mutex);
-	if (r->dtmf_generator_active) {
+	if (r->dtmf_generator_active && r->dtmf_generator) {
 		if (!mpf_dtmf_generator_put_frame(r->dtmf_generator, frame)) {
 			if (!mpf_dtmf_generator_sending(r->dtmf_generator))
 				r->dtmf_generator_active = 0;
@@ -3821,6 +3879,7 @@ static switch_status_t recog_load(switch_loadable_module_interface_t *module_int
 	asr_interface->asr_enable_grammar = recog_asr_enable_grammar;
 	asr_interface->asr_disable_grammar = recog_asr_disable_grammar;
 	asr_interface->asr_disable_all_grammars = recog_asr_disable_all_grammars;
+	asr_interface->asr_try_cancel = recog_asr_try_cancel;
 	asr_interface->asr_close = recog_asr_close;
 	asr_interface->asr_feed = recog_asr_feed;
 	asr_interface->asr_feed_dtmf = recog_asr_feed_dtmf;
