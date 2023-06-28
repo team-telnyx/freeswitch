@@ -1966,6 +1966,9 @@ static apt_bool_t speech_on_channel_add(mrcp_application_t *application, mrcp_se
 		if (!zstr(schannel->unimrcp_session->signaling_agent->sip_id)) {
 			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "MRCP-Session-SIP-Id", schannel->unimrcp_session->signaling_agent->sip_id);
 		}
+		if (!zstr(schannel->session_uuid)) {
+			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "FS-Session-UUID", schannel->session_uuid);
+		}
 		if(orig_channel){
 			const char* telnyx_session_uuid = switch_channel_get_variable(orig_channel, "telnyx_session_uuid");
 			const char* telnyx_uuid = switch_channel_get_variable(orig_channel, "telnyx_uuid");
