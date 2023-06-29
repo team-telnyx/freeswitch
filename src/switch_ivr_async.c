@@ -1226,7 +1226,7 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 
 	if (rh->fh) {
 		switch_size_t current_samples_out = rh->fh->samples_out;
-		switch_size_t updated_record_seconds = current_samples_out;
+		switch_size_t updated_samples_out = current_samples_out;
 		const char *last_record_index_str = switch_channel_get_variable(channel, "last_record_index");
 		const char *prev_record_samples_str = switch_channel_get_variable(channel, "record_samples");
 		int record_index = 1;
@@ -1237,10 +1237,10 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 		switch_channel_set_variable_printf(channel, "last_record_index", "%d", record_index);
 
 		if (!zstr(prev_record_samples_str) && switch_is_number(prev_record_samples_str)) {
-			updated_record_seconds += atoi(prev_record_samples_str);
+			updated_samples_out += atoi(prev_record_samples_str);
 		}
 
-		switch_channel_set_variable_printf(channel, "record_samples", "%d", updated_record_seconds);
+		switch_channel_set_variable_printf(channel, "record_samples", "%d", updated_samples_out);
 		if (read_impl->actual_samples_per_second) {
 			switch_size_t current_record_seconds = rh->fh->samples_out / read_impl->actual_samples_per_second;
 			switch_size_t current_record_ms = rh->fh->samples_out / (read_impl->actual_samples_per_second / 1000);
