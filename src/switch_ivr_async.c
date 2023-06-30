@@ -1085,6 +1085,16 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_displace_session(switch_core_session_
 		return SWITCH_STATUS_GENERR;
 	}
 
+	if((id = switch_event_get_header(dh->fh.params, "id"))) {
+		dh->id = switch_core_session_strdup(session, id);
+
+		if ((bug = switch_channel_get_private(channel, id))) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Only 1 of the same file per channel please!\n");
+			switch_core_file_close(&dh->fh);
+			return SWITCH_STATUS_FALSE;
+		}
+	}
+
 	if (limit) {
 		to = switch_epoch_time_now(NULL) + limit;
 	}
@@ -1099,10 +1109,6 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_displace_session(switch_core_session_
 
 	if (flags && strchr(flags, 'f')) {
 		bug_flags |= SMBF_FIRST;
-	}
-
-	if((id = switch_event_get_header(dh->fh.params, "id"))) {
-		dh->id = switch_core_session_strdup(session, id);
 	}
 
 	if (flags && strchr(flags, 'r')) {
