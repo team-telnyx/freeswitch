@@ -1926,7 +1926,7 @@ static apt_bool_t speech_on_channel_add(mrcp_application_t *application, mrcp_se
 	} else {
 		descriptor = mrcp_application_source_descriptor_get(channel);
 	}
-	if (!descriptor) {
+	if (!descriptor || !descriptor->sampling_rate || schannel->channel_destroyed) {
 		goto error;
 	}
 
@@ -1961,7 +1961,9 @@ static apt_bool_t speech_on_channel_add(mrcp_application_t *application, mrcp_se
 	return TRUE;
 
 error:
-	if (schannel) {
+	if (schannel->channel_destroyed) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Session already destroyed!\n");
+	} else if (schannel) {
 		switch_log_printf(SWITCH_CHANNEL_UUID_LOG(schannel->session_uuid), SWITCH_LOG_ERROR, "(%s) %s channel error!\n", schannel->name,
 			speech_channel_type_to_string(schannel->type));
 		speech_channel_set_state(schannel, SPEECH_CHANNEL_ERROR);
@@ -3787,8 +3789,12 @@ static apt_bool_t recog_on_message_receive(mrcp_application_t *application, mrcp
 static apt_bool_t recog_stream_open(mpf_audio_stream_t *stream, mpf_codec_t *codec)
 {
 	speech_channel_t *schannel = (speech_channel_t *) stream->obj;
-	recognizer_data_t *r = (recognizer_data_t *) schannel->data;
 
+	if (!schannel){
+		return FALSE;
+	}
+
+	recognizer_data_t *r = (recognizer_data_t *) schannel->data;
 	r->unimrcp_stream = stream;
 
 	return TRUE;
