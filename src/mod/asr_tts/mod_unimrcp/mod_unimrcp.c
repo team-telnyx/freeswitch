@@ -3791,7 +3791,7 @@ static apt_bool_t recog_stream_open(mpf_audio_stream_t *stream, mpf_codec_t *cod
 	speech_channel_t *schannel = (speech_channel_t *) stream->obj;
 	recognizer_data_t *r;
 
-	if (schannel){
+	if (schannel && !schannel->channel_destroyed){
 		r = (recognizer_data_t *) schannel->data;
 		r->unimrcp_stream = stream;
 
@@ -3814,8 +3814,8 @@ static apt_bool_t recog_stream_read(mpf_audio_stream_t *stream, mpf_frame_t *fra
 	recognizer_data_t *r = (recognizer_data_t *) schannel->data;
 	switch_size_t to_read = frame->codec_frame.size;
 	
-	// Check schannel data is not NULL
-	if (!r) {
+	// Check schannel data is not NULL or destroyed
+	if (!r || schannel->channel_destroyed) {
 		return FALSE;
 	}
 
