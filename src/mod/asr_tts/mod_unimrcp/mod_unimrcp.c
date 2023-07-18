@@ -943,6 +943,7 @@ static switch_status_t speech_channel_destroy(speech_channel_t *schannel)
 						switch_log_printf(SWITCH_CHANNEL_UUID_LOG(schannel->session_uuid), SWITCH_LOG_WARNING, "(%s) MRCP session has not terminated after %d ms\n", schannel->name, SPEECH_CHANNEL_TIMEOUT_USEC / (1000));
 					}
 				}
+				mrcp_application_channel_object_set(schannel->unimrcp_channel, NULL);
 			}
 			switch_mutex_unlock(schannel->mutex);
 		}
@@ -1879,6 +1880,12 @@ static apt_bool_t speech_on_session_terminate(mrcp_application_t *application, m
 {
 	speech_channel_t *schannel = (speech_channel_t *) mrcp_application_session_object_get(session);
 	switch_event_t *event = NULL;
+
+	/* check mrcp data */
+	if (!session || !schannel || schannel->channel_destroyed) {
+		return FALSE;
+	}
+
 	switch_log_printf(SWITCH_CHANNEL_UUID_LOG(schannel->session_uuid), SWITCH_LOG_DEBUG, "(%s) Destroying MRCP session\n", schannel->name);
 	mrcp_application_session_destroy(session);
 
