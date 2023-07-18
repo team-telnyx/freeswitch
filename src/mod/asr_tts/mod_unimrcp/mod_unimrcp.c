@@ -1915,9 +1915,15 @@ static apt_bool_t speech_on_channel_add(mrcp_application_t *application, mrcp_se
 	char codec_name[60] = { 0 };
 	const mpf_codec_descriptor_t *descriptor;
 
-	/* check status */
+	/* check mrcp data */
 	if (!session || !schannel || status != MRCP_SIG_STATUS_CODE_SUCCESS || schannel->channel_destroyed) {
 		goto error;
+	}
+
+	/* verify freeswitch session still active */
+	if (!switch_core_session_locate(schannel->session_uuid)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Freeswitch session doesn't exist.\n");
+		return FALSE;
 	}
 
 	/* what sample rate did we negotiate? */
@@ -1926,7 +1932,7 @@ static apt_bool_t speech_on_channel_add(mrcp_application_t *application, mrcp_se
 	} else {
 		descriptor = mrcp_application_source_descriptor_get(channel);
 	}
-	if (!descriptor || !descriptor->sampling_rate || schannel->channel_destroyed) {
+	if (!descriptor || schannel->channel_destroyed) {
 		goto error;
 	}
 
