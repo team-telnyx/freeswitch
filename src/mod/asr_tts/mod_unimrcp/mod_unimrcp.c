@@ -931,6 +931,7 @@ static switch_status_t speech_channel_destroy(speech_channel_t *schannel)
 		/* Terminate the MRCP session if not already done */
 		if (schannel->mutex) {
 			switch_mutex_lock(schannel->mutex);
+			schannel->channel_destroyed = 1;
 			if (schannel->state != SPEECH_CHANNEL_CLOSED) {
 				int warned = 0;
 				mrcp_application_session_terminate(schannel->unimrcp_session);
@@ -943,7 +944,6 @@ static switch_status_t speech_channel_destroy(speech_channel_t *schannel)
 					}
 				}
 			}
-			schannel->channel_destroyed = 1;
 			switch_mutex_unlock(schannel->mutex);
 		}
 
@@ -1095,6 +1095,8 @@ static switch_status_t speech_channel_open(speech_channel_t *schannel, profile_t
 		if (schannel->state != SPEECH_CHANNEL_CLOSED) {
 			/* major issue... can't retry */
 			status = SWITCH_STATUS_FALSE;
+			/* set mrcp channel object to NULL */
+			schannel = (speech_channel_t *) mrcp_application_channel_object_set(schannel->unimrcp_channel, NULL);
 		} else {
 			/* failed to open profile, retry is allowed */
 			status = SWITCH_STATUS_RESTART;
@@ -1190,6 +1192,8 @@ static switch_status_t synth_channel_speak(speech_channel_t *schannel, const cha
 	}
 	if (schannel->state != SPEECH_CHANNEL_PROCESSING) {
 		status = SWITCH_STATUS_FALSE;
+		/* set mrcp channel object to NULL */
+		schannel = (speech_channel_t *) mrcp_application_channel_object_set(schannel->unimrcp_channel, NULL);
 		goto done;
 	}
 
@@ -1920,12 +1924,6 @@ static apt_bool_t speech_on_channel_add(mrcp_application_t *application, mrcp_se
 		goto error;
 	}
 
-	/* verify freeswitch session still active */
-	if (!switch_core_session_locate(schannel->session_uuid)) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Freeswitch session doesn't exist.\n");
-		return FALSE;
-	}
-
 	/* what sample rate did we negotiate? */
 	if (schannel->type == SPEECH_CHANNEL_SYNTHESIZER) {
 		descriptor = mrcp_application_sink_descriptor_get(channel);
@@ -1994,11 +1992,12 @@ static apt_bool_t speech_on_channel_remove(mrcp_application_t *application, mrcp
 										   mrcp_sig_status_code_e status)
 {
 	speech_channel_t *schannel = (speech_channel_t *) mrcp_application_channel_object_get(channel);
-	switch_log_printf(SWITCH_CHANNEL_UUID_LOG(schannel->session_uuid), SWITCH_LOG_INFO, "(%s) %s channel is removed\n", schannel->name, speech_channel_type_to_string(schannel->type));
-	schannel->unimrcp_channel = NULL;
+	if (schannel){
+		switch_log_printf(SWITCH_CHANNEL_UUID_LOG(schannel->session_uuid), SWITCH_LOG_INFO, "(%s) %s channel is removed\n", schannel->name, speech_channel_type_to_string(schannel->type));
+		schannel->unimrcp_channel = NULL;
+	}
 
 	if (session) {
-		switch_log_printf(SWITCH_CHANNEL_UUID_LOG(schannel->session_uuid), SWITCH_LOG_DEBUG, "(%s) Terminating MRCP session\n", schannel->name);
 		mrcp_application_session_terminate(session);
 	}
 
@@ -2017,6 +2016,12 @@ static apt_bool_t speech_on_channel_remove(mrcp_application_t *application, mrcp
 static apt_bool_t synth_on_message_receive(mrcp_application_t *application, mrcp_session_t *session, mrcp_channel_t *channel, mrcp_message_t *message)
 {
 	speech_channel_t *schannel = (speech_channel_t *) mrcp_application_channel_object_get(channel);
+	
+	/* check mrcp data */
+	if (!session || !schannel || schannel->channel_destroyed) {
+		return FALSE;
+	}
+
 	if (message->start_line.message_type == MRCP_MESSAGE_TYPE_RESPONSE) {
 		/* received MRCP response */
 		if (message->start_line.method_id == SYNTHESIZER_SPEAK) {
@@ -2388,6 +2393,8 @@ static switch_status_t recog_channel_start(speech_channel_t *schannel)
 	}
 	if (schannel->state != SPEECH_CHANNEL_PROCESSING) {
 		status = SWITCH_STATUS_FALSE;
+		/* set mrcp channel object to NULL */
+		schannel = (speech_channel_t *) mrcp_application_channel_object_set(schannel->unimrcp_channel, NULL);
 		goto done;
 	}
 
@@ -2468,6 +2475,8 @@ static switch_status_t recog_channel_load_grammar(speech_channel_t *schannel, co
 		}
 		if (schannel->state != SPEECH_CHANNEL_READY) {
 			status = SWITCH_STATUS_FALSE;
+			/* set mrcp channel object to NULL */
+			schannel = (speech_channel_t *) mrcp_application_channel_object_set(schannel->unimrcp_channel, NULL);
 			goto done;
 		}
 
@@ -3673,6 +3682,12 @@ static apt_bool_t recog_on_message_receive(mrcp_application_t *application, mrcp
 {
 	speech_channel_t *schannel = (speech_channel_t *) mrcp_application_channel_object_get(channel);
 	mrcp_recog_header_t *recog_hdr = (mrcp_recog_header_t *) mrcp_resource_header_get(message);
+
+	/* check mrcp data */
+	if (!session || !schannel || schannel->channel_destroyed) {
+		return FALSE;
+	}
+
 	if (message->start_line.message_type == MRCP_MESSAGE_TYPE_RESPONSE) {
 		/* received MRCP response */
 		if (message->start_line.method_id == RECOGNIZER_RECOGNIZE) {
