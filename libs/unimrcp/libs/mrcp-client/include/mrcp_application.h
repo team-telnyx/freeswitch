@@ -250,11 +250,11 @@ MRCP_DECLARE(mrcp_channel_t*) mrcp_application_channel_create(
 MRCP_DECLARE(void*) mrcp_application_channel_object_get(const mrcp_channel_t *channel);
 
 /**
- * Set unique object with the channel.
+ * Set an object to the channel.
  * @param channel the channel to set object
  * @param obj the obj to set on the channel
  */
-MRCP_DECLARE(void*) mrcp_application_channel_object_set(mrcp_channel_t *channel, void *obj);
+MRCP_DECLARE(void) mrcp_application_channel_object_set(mrcp_channel_t *channel, void *obj);
 
 /**
  * Get RTP termination descriptor.

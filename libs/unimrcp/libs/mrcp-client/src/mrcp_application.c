@@ -239,14 +239,12 @@ MRCP_DECLARE(void*) mrcp_application_channel_object_get(const mrcp_channel_t *ch
 	return channel->obj;
 }
 
-/** Set channel object with passed obj */
-MRCP_DECLARE(void*) mrcp_application_channel_object_set(mrcp_channel_t *channel, void *obj)
+/** Set external object to the channel */
+MRCP_DECLARE(void) mrcp_application_channel_object_set(mrcp_channel_t *channel, void *obj)
 {
-	if(!channel) {
-		return FALSE;
+	if(channel) {
+		channel->obj = obj;
 	}
-	channel->obj = obj;
-	return channel->obj;
 }
 
 /** Get RTP termination descriptor */

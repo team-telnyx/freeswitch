@@ -1096,7 +1096,7 @@ static switch_status_t speech_channel_open(speech_channel_t *schannel, profile_t
 			/* major issue... can't retry */
 			status = SWITCH_STATUS_FALSE;
 			/* set mrcp channel object to NULL */
-			schannel = (speech_channel_t *) mrcp_application_channel_object_set(schannel->unimrcp_channel, NULL);
+			mrcp_application_channel_object_set(schannel->unimrcp_channel, NULL);
 		} else {
 			/* failed to open profile, retry is allowed */
 			status = SWITCH_STATUS_RESTART;
@@ -1192,8 +1192,6 @@ static switch_status_t synth_channel_speak(speech_channel_t *schannel, const cha
 	}
 	if (schannel->state != SPEECH_CHANNEL_PROCESSING) {
 		status = SWITCH_STATUS_FALSE;
-		/* set mrcp channel object to NULL */
-		schannel = (speech_channel_t *) mrcp_application_channel_object_set(schannel->unimrcp_channel, NULL);
 		goto done;
 	}
 
@@ -1930,7 +1928,7 @@ static apt_bool_t speech_on_channel_add(mrcp_application_t *application, mrcp_se
 	} else {
 		descriptor = mrcp_application_source_descriptor_get(channel);
 	}
-	if (!descriptor || schannel->channel_destroyed) {
+	if (!descriptor) {
 		goto error;
 	}
 
@@ -1965,12 +1963,14 @@ static apt_bool_t speech_on_channel_add(mrcp_application_t *application, mrcp_se
 	return TRUE;
 
 error:
-	if (schannel && schannel->channel_destroyed) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Session already destroyed!\n");
-	} else if (schannel) {
-		switch_log_printf(SWITCH_CHANNEL_UUID_LOG(schannel->session_uuid), SWITCH_LOG_ERROR, "(%s) %s channel error!\n", schannel->name,
-			speech_channel_type_to_string(schannel->type));
-		speech_channel_set_state(schannel, SPEECH_CHANNEL_ERROR);
+	if (schannel) {
+		if(schannel->channel_destroyed) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Session already destroyed!\n");
+		} else {
+			switch_log_printf(SWITCH_CHANNEL_UUID_LOG(schannel->session_uuid), SWITCH_LOG_ERROR, "(%s) %s channel error!\n", schannel->name,
+				speech_channel_type_to_string(schannel->type));
+			speech_channel_set_state(schannel, SPEECH_CHANNEL_ERROR);
+		}
 	} else {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "(unknown) channel error!\n");
 	}
@@ -1998,6 +1998,9 @@ static apt_bool_t speech_on_channel_remove(mrcp_application_t *application, mrcp
 	}
 
 	if (session) {
+		if (schannel){
+			switch_log_printf(SWITCH_CHANNEL_UUID_LOG(schannel->session_uuid), SWITCH_LOG_DEBUG, "(%s) Terminating MRCP session\n", schannel->name);
+		}
 		mrcp_application_session_terminate(session);
 	}
 
@@ -2393,8 +2396,6 @@ static switch_status_t recog_channel_start(speech_channel_t *schannel)
 	}
 	if (schannel->state != SPEECH_CHANNEL_PROCESSING) {
 		status = SWITCH_STATUS_FALSE;
-		/* set mrcp channel object to NULL */
-		schannel = (speech_channel_t *) mrcp_application_channel_object_set(schannel->unimrcp_channel, NULL);
 		goto done;
 	}
 
@@ -2475,8 +2476,6 @@ static switch_status_t recog_channel_load_grammar(speech_channel_t *schannel, co
 		}
 		if (schannel->state != SPEECH_CHANNEL_READY) {
 			status = SWITCH_STATUS_FALSE;
-			/* set mrcp channel object to NULL */
-			schannel = (speech_channel_t *) mrcp_application_channel_object_set(schannel->unimrcp_channel, NULL);
 			goto done;
 		}
 
