@@ -1113,6 +1113,7 @@ static switch_status_t speech_channel_open(speech_channel_t *schannel, profile_t
 
 		/* Wait for session to be cleaned up */
 		if (switch_thread_cond_timedwait(schannel->cond, schannel->mutex, SPEECH_CHANNEL_TIMEOUT_USEC) == SWITCH_STATUS_TIMEOUT) {
+			mrcp_application_channel_object_set(schannel->unimrcp_channel, NULL);
 			switch_log_printf(SWITCH_CHANNEL_UUID_LOG(schannel->session_uuid), SWITCH_LOG_WARNING, "(%s) MRCP session has not cleaned up after %d ms\n", schannel->name, SPEECH_CHANNEL_TIMEOUT_USEC / (1000));
 		}
 
