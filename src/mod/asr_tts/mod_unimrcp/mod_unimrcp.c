@@ -933,17 +933,19 @@ static switch_status_t speech_channel_destroy(speech_channel_t *schannel)
 			switch_mutex_lock(schannel->mutex);
 			schannel->channel_destroyed = 1;
 			if (schannel->state != SPEECH_CHANNEL_CLOSED) {
-				int warned = 0;
+				int warned = 0, retry = 0;
 				mrcp_application_session_terminate(schannel->unimrcp_session);
-				/* wait forever for session to terminate.  Log WARNING if this starts taking too long */
+				/* wait for session to terminate.  Log WARNING if this starts taking too long */
 				switch_log_printf(SWITCH_CHANNEL_UUID_LOG(schannel->session_uuid), SWITCH_LOG_DEBUG, "(%s) Waiting for MRCP session to terminate\n", schannel->name);
-				while (schannel->state != SPEECH_CHANNEL_CLOSED) {
+				while (schannel->state != SPEECH_CHANNEL_CLOSED && !(globals.max_retry && (retry++ >= globals.max_retry))) {
 					if (switch_thread_cond_timedwait(schannel->cond, schannel->mutex, SPEECH_CHANNEL_TIMEOUT_USEC) == SWITCH_STATUS_TIMEOUT && !warned) {
 						warned = 1;
 						switch_log_printf(SWITCH_CHANNEL_UUID_LOG(schannel->session_uuid), SWITCH_LOG_WARNING, "(%s) MRCP session has not terminated after %d ms\n", schannel->name, SPEECH_CHANNEL_TIMEOUT_USEC / (1000));
 					}
+					if (globals.max_retry && (retry == globals.max_retry)){
+						mrcp_application_channel_object_set(schannel->unimrcp_channel, NULL);
+					}
 				}
-				mrcp_application_channel_object_set(schannel->unimrcp_channel, NULL);
 			}
 			switch_mutex_unlock(schannel->mutex);
 		}
@@ -3838,10 +3840,14 @@ static apt_bool_t recog_stream_open(mpf_audio_stream_t *stream, mpf_codec_t *cod
 static apt_bool_t recog_stream_read(mpf_audio_stream_t *stream, mpf_frame_t *frame)
 {
 	speech_channel_t *schannel = (speech_channel_t *) stream->obj;
-	recognizer_data_t *r = (recognizer_data_t *) schannel->data;
 	switch_size_t to_read = frame->codec_frame.size;
+	recognizer_data_t *r = NULL;
 	
 	// Check schannel data is not NULL or destroyed
+	if (schannel) {
+		r = (recognizer_data_t *) schannel->data;	
+	}
+
 	if (!r || schannel->channel_destroyed) {
 		return FALSE;
 	}
