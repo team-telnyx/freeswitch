@@ -7824,6 +7824,14 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 		status = 183;
 	}
 
+	if (status == 200 && r_sdp && ss_state == nua_callstate_proceeding) {
+		if (sip && sip->sip_cseq && sip->sip_cseq->cs_method_name && !strcasecmp(sip->sip_cseq->cs_method_name, "UPDATE")) {
+			if(switch_core_media_has_mismatch_dynamic_payload_code(session, r_sdp)) {
+				switch_channel_set_flag(channel, CF_RENEG_AFTER_BRIDGE);				
+			}
+		}
+	}
+
 	if (channel && profile->pres_type && ss_state == nua_callstate_ready && status == 200) {
 		const char* to_tag = "";
 		char *sql = NULL;

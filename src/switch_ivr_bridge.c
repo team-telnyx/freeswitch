@@ -625,7 +625,24 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 			hmsg.from = __FILE__;
 			hmsg.numeric_arg = 1;
 			switch_core_session_receive_message(session_a, &hmsg);
+		} else if (switch_channel_test_flag(chan_a, CF_RENEG_AFTER_BRIDGE)) {
+			switch_core_session_message_t hmsg = { 0 };
+			switch_channel_clear_flag(chan_a, CF_RENEG_AFTER_BRIDGE);
+			hmsg.message_id = SWITCH_MESSAGE_INDICATE_MEDIA_RENEG;
+			hmsg.from = __FILE__;
+			hmsg.numeric_arg = 1;
+			switch_core_session_receive_message(session_a, &hmsg);
+		} 
+			
+		if (switch_channel_test_flag(chan_b, CF_RENEG_AFTER_BRIDGE)) {
+			switch_core_session_message_t hmsg = { 0 };
+			switch_channel_clear_flag(chan_b, CF_RENEG_AFTER_BRIDGE);
+			hmsg.message_id = SWITCH_MESSAGE_INDICATE_MEDIA_RENEG;
+			hmsg.from = __FILE__;
+			hmsg.numeric_arg = 1;
+			switch_core_session_receive_message(session_b, &hmsg);
 		}
+
 #if DEBUG_RTP
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_NOTICE, "Audio bridge thread: #16 %p -> %p\n", (void*)session_a, (void*)session_b);
 #endif
