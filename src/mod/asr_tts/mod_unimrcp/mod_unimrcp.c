@@ -934,6 +934,7 @@ static switch_status_t speech_channel_destroy(speech_channel_t *schannel)
 			if (schannel->state != SPEECH_CHANNEL_CLOSED) {
 				int warned = 0, retry = 0;
 				mrcp_application_session_terminate(schannel->unimrcp_session);
+				schannel->channel_destroyed = 1;
 				/* wait for session to terminate.  Log WARNING if this starts taking too long */
 				switch_log_printf(SWITCH_CHANNEL_UUID_LOG(schannel->session_uuid), SWITCH_LOG_DEBUG, "(%s) Waiting for MRCP session to terminate\n", schannel->name);
 				while (schannel->state != SPEECH_CHANNEL_CLOSED && !(globals.max_retry && (retry++ >= globals.max_retry))) {
@@ -942,7 +943,6 @@ static switch_status_t speech_channel_destroy(speech_channel_t *schannel)
 						switch_log_printf(SWITCH_CHANNEL_UUID_LOG(schannel->session_uuid), SWITCH_LOG_WARNING, "(%s) MRCP session has not terminated after %d ms\n", schannel->name, SPEECH_CHANNEL_TIMEOUT_USEC / (1000));
 					}
 					if (globals.max_retry && (retry == globals.max_retry)){
-						schannel->channel_destroyed = 1;
 						mrcp_application_channel_object_set(schannel->unimrcp_channel, NULL);
 					}
 				}
@@ -3879,6 +3879,7 @@ static apt_bool_t recog_stream_read(mpf_audio_stream_t *stream, mpf_frame_t *fra
 	speech_channel_t *schannel = (speech_channel_t *) stream->obj;
 	switch_size_t to_read = frame->codec_frame.size;
 	recognizer_data_t *r = NULL;
+	switch_status_t status;
 	
 	// Check schannel data is not NULL or destroyed
 	if (schannel) {
@@ -3890,11 +3891,13 @@ static apt_bool_t recog_stream_read(mpf_audio_stream_t *stream, mpf_frame_t *fra
 	}
 
 	/* grab the data.  pad it if there isn't enough */
-	if (speech_channel_read(schannel, frame->codec_frame.buffer, &to_read, 0) == SWITCH_STATUS_SUCCESS) {
+	if ((status = speech_channel_read(schannel, frame->codec_frame.buffer, &to_read, 0)) == SWITCH_STATUS_SUCCESS) {
 		if (to_read < frame->codec_frame.size) {
 			memset((uint8_t *) frame->codec_frame.buffer + to_read, schannel->silence, frame->codec_frame.size - to_read);
 		}
 		frame->type |= MEDIA_FRAME_TYPE_AUDIO;
+	} else if (status == SWITCH_STATUS_FALSE) {
+		return FALSE;
 	}
 
 	switch_mutex_lock(schannel->mutex);
@@ -4704,7 +4707,7 @@ static apt_bool_t unimrcp_log(const char *file, int line, const char *obj, apt_l
 	switch_log_level_t level;
 	char log_message[4096] = { 0 };	/* same size as MAX_LOG_ENTRY_SIZE in UniMRCP apt_log.c */
 	size_t msglen;
-	const char *id = (obj == NULL) ? "" : ((speech_channel_t *)obj)->name;
+	const char *id = (obj == NULL || ((speech_channel_t *)obj)->channel_destroyed) ? "" : ((speech_channel_t *)obj)->name;
 
 	if (zstr(format)) {
 		return TRUE;
