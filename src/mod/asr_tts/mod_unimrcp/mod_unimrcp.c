@@ -1968,7 +1968,6 @@ static apt_bool_t speech_on_channel_add(mrcp_application_t *application, mrcp_se
 	if (globals.enable_profile_events && switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, MY_EVENT_PROFILE_OPEN) == SWITCH_STATUS_SUCCESS) {
 		if ((orig_session = switch_core_session_locate(schannel->session_uuid))) {
 			orig_channel = switch_core_session_get_channel(orig_session);
-			switch_core_session_rwunlock(orig_session);
 		}
 		switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "MRCP-Profile", schannel->profile->name);
 		if (schannel->type == SPEECH_CHANNEL_SYNTHESIZER) {
@@ -2001,6 +2000,7 @@ static apt_bool_t speech_on_channel_add(mrcp_application_t *application, mrcp_se
 				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "telnyx_session_uuid", telnyx_session_uuid);
 				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "telnyx_uuid", telnyx_uuid);
 			}
+			switch_core_session_rwunlock(orig_session);
 		}
 		switch_event_fire(&event);
 	}
