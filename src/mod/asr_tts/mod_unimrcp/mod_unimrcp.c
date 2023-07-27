@@ -1966,10 +1966,9 @@ static apt_bool_t speech_on_channel_add(mrcp_application_t *application, mrcp_se
 
 	/* notify of channel open */
 	if (globals.enable_profile_events && switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, MY_EVENT_PROFILE_OPEN) == SWITCH_STATUS_SUCCESS) {
-		orig_session = switch_core_memory_pool_get_data(schannel->memory_pool, "__session");
-		
-		if (orig_session && switch_core_session_read_lock(orig_session) == SWITCH_STATUS_SUCCESS) {
+		if ((orig_session = switch_core_session_locate(schannel->session_uuid))) {
 			orig_channel = switch_core_session_get_channel(orig_session);
+			switch_core_session_rwunlock(orig_session);
 		}
 		switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "MRCP-Profile", schannel->profile->name);
 		if (schannel->type == SPEECH_CHANNEL_SYNTHESIZER) {
@@ -2004,7 +2003,6 @@ static apt_bool_t speech_on_channel_add(mrcp_application_t *application, mrcp_se
 			}
 		}
 		switch_event_fire(&event);
-		switch_core_session_rwunlock(orig_session);
 	}
 	schannel->channel_opened = 1;
 
