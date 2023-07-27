@@ -7824,14 +7824,6 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 		status = 183;
 	}
 
-	if (status == 200 && r_sdp && ss_state == nua_callstate_proceeding) {
-		if (sip && sip->sip_cseq && sip->sip_cseq->cs_method_name && !strcasecmp(sip->sip_cseq->cs_method_name, "UPDATE")) {
-			if(switch_core_media_has_mismatch_dynamic_payload_code(session, r_sdp)) {
-				switch_channel_set_flag(channel, CF_RENEG_AFTER_BRIDGE);				
-			}
-		}
-	}
-
 	if (channel && profile->pres_type && ss_state == nua_callstate_ready && status == 200) {
 		const char* to_tag = "";
 		char *sql = NULL;
@@ -7985,6 +7977,20 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 						nua_respond(nh, SIP_488_NOT_ACCEPTABLE, 
 								TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)),TAG_END());
 						switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
+					} else {
+						if (status == 200 && r_sdp && !switch_channel_test_flag(channel, CF_RENEG_AFTER_BRIDGE)) {
+							if (sip && sip->sip_cseq && sip->sip_cseq->cs_method_name && !strcasecmp(sip->sip_cseq->cs_method_name, "UPDATE")) {
+								if(switch_core_media_has_mismatch_dynamic_payload_code(session, r_sdp)) {
+									switch_channel_set_flag(channel, CF_RENEG_AFTER_BRIDGE);
+									
+									if (switch_core_session_get_partner(session, &other_session) == SWITCH_STATUS_SUCCESS) {
+										switch_ivr_displace_session(other_session, "tone_stream://L=5;%(2000,4000,440,480)", 0, "w");
+										switch_core_session_rwunlock(other_session);
+										other_session = NULL;
+									}
+								}
+							}
+						}
 					}
 				}
 				goto done;

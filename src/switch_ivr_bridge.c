@@ -625,8 +625,9 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 			hmsg.from = __FILE__;
 			hmsg.numeric_arg = 1;
 			switch_core_session_receive_message(session_a, &hmsg);
-		} else if (switch_channel_test_flag(chan_a, CF_RENEG_AFTER_BRIDGE)) {
+		} else if (switch_channel_test_flag(chan_a, CF_ANSWERED) && switch_channel_test_flag(chan_a, CF_RENEG_AFTER_BRIDGE)) {
 			switch_core_session_message_t hmsg = { 0 };
+			switch_ivr_stop_displace_session(session_b, "tone_stream://L=5;%(2000,4000,440,480)");
 			switch_channel_clear_flag(chan_a, CF_RENEG_AFTER_BRIDGE);
 			hmsg.message_id = SWITCH_MESSAGE_INDICATE_MEDIA_RENEG;
 			hmsg.from = __FILE__;
@@ -634,8 +635,9 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 			switch_core_session_receive_message(session_a, &hmsg);
 		} 
 			
-		if (switch_channel_test_flag(chan_b, CF_RENEG_AFTER_BRIDGE)) {
+		if (switch_channel_test_flag(chan_b, CF_ANSWERED) && switch_channel_test_flag(chan_b, CF_RENEG_AFTER_BRIDGE)) {
 			switch_core_session_message_t hmsg = { 0 };
+			switch_ivr_stop_displace_session(session_a, "tone_stream://L=5;%(2000,4000,440,480)");
 			switch_channel_clear_flag(chan_b, CF_RENEG_AFTER_BRIDGE);
 			hmsg.message_id = SWITCH_MESSAGE_INDICATE_MEDIA_RENEG;
 			hmsg.from = __FILE__;
