@@ -3688,31 +3688,18 @@ static switch_status_t cmd_count(char **argv, int argc, switch_stream_handle_t *
 		void *val;
 
 		switch_mutex_lock(mod_sofia_globals.hash_mutex);
-		if (argc > 1) {
-			for (hi = switch_core_hash_first(mod_sofia_globals.profile_hash); hi; hi = switch_core_hash_next(&hi)) {
-				switch_core_hash_this(hi, NULL, NULL, &val);
-				profile = (sofia_profile_t *) val;
-				if (!strcasecmp(argv[1], profile->name) && sofia_test_pflag(profile, PFLAG_RUNNING)) {
-					sofia_gateway_t *gp;
-					switch_mutex_lock(profile->gw_mutex);
-					for (gp = profile->gateways; gp; gp = gp->next) {
-						count++;
-					}
-					switch_mutex_unlock(profile->gw_mutex);
+		for (hi = switch_core_hash_first(mod_sofia_globals.profile_hash); hi; hi = switch_core_hash_next(&hi)) {
+			switch_core_hash_this(hi, NULL, NULL, &val);
+			profile = (sofia_profile_t *) val;
+			if ((argc > 1 && !strcasecmp(argv[1], profile->name) && sofia_test_pflag(profile, PFLAG_RUNNING))
+				|| (argc == 1 && sofia_test_pflag(profile, PFLAG_RUNNING) )
+			) {
+				sofia_gateway_t *gp;
+				switch_mutex_lock(profile->gw_mutex);
+				for (gp = profile->gateways; gp; gp = gp->next) {
+					count++;
 				}
-			}
-		} else {
-			for (hi = switch_core_hash_first(mod_sofia_globals.profile_hash); hi; hi = switch_core_hash_next(&hi)) {
-				switch_core_hash_this(hi, NULL, NULL, &val);
-				profile = (sofia_profile_t *) val;
-				if (sofia_test_pflag(profile, PFLAG_RUNNING)) {
-					sofia_gateway_t *gp;
-					switch_mutex_lock(profile->gw_mutex);
-					for (gp = profile->gateways; gp; gp = gp->next) {
-						count++;
-					}
-					switch_mutex_unlock(profile->gw_mutex);
-				}
+				switch_mutex_unlock(profile->gw_mutex);
 			}
 		}
 		switch_mutex_unlock(mod_sofia_globals.hash_mutex);
