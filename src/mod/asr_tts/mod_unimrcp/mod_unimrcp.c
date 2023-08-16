@@ -2023,6 +2023,7 @@ error:
 			switch_log_printf(SWITCH_CHANNEL_UUID_LOG(schannel->session_uuid), SWITCH_LOG_ERROR, "(%s) %s channel error!\n", schannel->name,
 				speech_channel_type_to_string(schannel->type));
 			speech_channel_set_state(schannel, SPEECH_CHANNEL_ERROR);
+			prometheus_increment_asr_failure();
 		}
 	} else {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "(unknown) channel error!\n");
@@ -3842,7 +3843,6 @@ static apt_bool_t recog_on_message_receive(mrcp_application_t *application, mrcp
 				recog_channel_set_result_headers(schannel, recog_hdr);
 				recog_channel_set_results(schannel, completion_cause);
 				switch_safe_free(completion_cause);
-				prometheus_increment_asr_failure();
 			}
 			speech_channel_set_state(schannel, SPEECH_CHANNEL_READY);
 		} else if (message->start_line.method_id == RECOGNIZER_START_OF_INPUT) {
