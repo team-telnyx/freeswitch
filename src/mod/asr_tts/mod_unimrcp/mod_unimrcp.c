@@ -3893,7 +3893,8 @@ static apt_bool_t recog_stream_read(mpf_audio_stream_t *stream, mpf_frame_t *fra
 	}
 
 	/* grab the data.  pad it if there isn't enough */
-	if ((status = speech_channel_read(schannel, frame->codec_frame.buffer, &to_read, 0)) == SWITCH_STATUS_SUCCESS) {
+	status = speech_channel_read(schannel, frame->codec_frame.buffer, &to_read, 0);
+	if (status == SWITCH_STATUS_SUCCESS) {
 		if (to_read < frame->codec_frame.size) {
 			memset((uint8_t *) frame->codec_frame.buffer + to_read, schannel->silence, frame->codec_frame.size - to_read);
 		}
