@@ -6831,8 +6831,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 					a_engine->reset_codec = 1;
 					if (changed_pt) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Force reset codec for %s\n", a_engine->read_impl.iananame);
-						switch_core_media_set_codec(session, 2, smh->mparams->codec_flags);
-						if (switch_core_media_set_codec(session, 0, smh->mparams->codec_flags) != SWITCH_STATUS_SUCCESS) {
+						if (switch_core_media_set_codec(session, 2, smh->mparams->codec_flags) != SWITCH_STATUS_SUCCESS) {
 							match = 0;
 						}
 					} else {
