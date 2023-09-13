@@ -60,7 +60,7 @@ switch_endpoint_interface_t *sofia_endpoint_interface;
 
 #define STRLEN 15
 
-void mod_sofia_shutdown_cleanup();
+void mod_sofia_shutdown_cleanup(void);
 static switch_status_t sofia_on_init(switch_core_session_t *session);
 
 static switch_status_t sofia_on_exchange_media(switch_core_session_t *session);
@@ -358,6 +358,7 @@ static int hangup_cause_to_sip(switch_call_cause_t cause)
 	case SWITCH_CAUSE_BUSY_EVERYWHERE:
 		return 600;
 	case SWITCH_CAUSE_DECLINE:
+	case SWITCH_CAUSE_REJECT_ALL:
 		return 603;
 	case SWITCH_CAUSE_DOES_NOT_EXIST_ANYWHERE:
 		return 604;
@@ -493,7 +494,7 @@ switch_status_t sofia_on_hangup(switch_core_session_t *session)
 		switch_core_hash_delete_locked(tech_pvt->profile->chat_hash, tech_pvt->hash_key, tech_pvt->profile->flag_mutex);
 	}
 
-	if (session && tech_pvt->profile->pres_type) {
+	if (tech_pvt->profile->pres_type) {
 		char *sql = switch_mprintf("delete from sip_dialogs where uuid='%q'", switch_core_session_get_uuid(session));
 		switch_assert(sql);
 		sofia_glue_execute_sql_now(tech_pvt->profile, &sql, SWITCH_TRUE);
@@ -979,7 +980,7 @@ static switch_status_t sofia_answer_channel(switch_core_session_t *session)
 	}
 
 	if (sofia_test_flag(tech_pvt, TFLAG_NAT) ||
-		(val = switch_channel_get_variable(channel, "sip-force-contact")) ||
+		switch_channel_get_variable(channel, "sip-force-contact") ||
 		((val = switch_channel_get_variable(channel, "sip_sticky_contact")) && switch_true(val))) {
 		sticky = tech_pvt->record_route;
 		session_timeout = SOFIA_NAT_SESSION_TIMEOUT;
@@ -2203,11 +2204,13 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 
 							nua_info(tech_pvt->nh, SIPTAG_CONTENT_TYPE_STR("message/sipfrag"),
 									 TAG_IF(!zstr(tech_pvt->user_via), SIPTAG_VIA_STR(tech_pvt->user_via)), SIPTAG_PAYLOAD_STR(message), TAG_END());
-						} else if (update_allowed && ua && (switch_stristr("polycom", ua) ||
+						} else if (update_allowed && ua && (switch_channel_var_true(tech_pvt->channel, "update_ignore_ua") ||
+									  switch_stristr("polycom", ua) ||
 									  (switch_stristr("aastra", ua) && !switch_stristr("Intelligate", ua)) ||
 									  (switch_stristr("cisco/spa50", ua) ||
 									  switch_stristr("cisco/spa525", ua)) ||
 									  switch_stristr("cisco/spa30", ua) ||
+									  switch_stristr("Fanvil", ua) ||
 									  switch_stristr("Grandstream", ua) ||
 									  switch_stristr("Yealink", ua) ||
 									  switch_stristr("Mitel", ua) ||
@@ -2341,11 +2344,7 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 													argv[i], (double)((double)(MAX_REDIR + 1 - i))/1000);
 								}
 							} else {
-								if (i == argc - 1) {
-									switch_snprintf(newdest + strlen(newdest), len - strlen(newdest), "\"unknown\" <%s>", argv[i]);
-								} else {
-									switch_snprintf(newdest + strlen(newdest), len - strlen(newdest), "\"unknown\" <%s>,", argv[i]);
-								}
+								switch_snprintf(newdest + strlen(newdest), len - strlen(newdest), "\"unknown\" <%s>", argv[i]);
 							}
 						} else {
 							if (i == argc - 1) {
@@ -2747,8 +2746,6 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 						}
 					}
 
-					switch_channel_check_zrtp(tech_pvt->channel);
-
 					if ((status = switch_core_media_choose_port(tech_pvt->session, SWITCH_MEDIA_TYPE_AUDIO, 0)) != SWITCH_STATUS_SUCCESS) {
 						switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
 						goto end_lock;
@@ -2765,7 +2762,7 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 
 
 				if (sofia_test_flag(tech_pvt, TFLAG_NAT) ||
-					(val = switch_channel_get_variable(channel, "sip-force-contact")) ||
+					switch_channel_get_variable(channel, "sip-force-contact") ||
 					((val = switch_channel_get_variable(channel, "sip_sticky_contact")) && switch_true(val))) {
 					sticky = tech_pvt->record_route;
 					switch_channel_set_variable(channel, "sip_nat_detected", "true");
@@ -3089,9 +3086,9 @@ static switch_status_t cmd_status(char **argv, int argc, switch_stream_handle_t 
 												   gp->ib_failed_calls, gp->ib_calls, gp->ob_failed_calls, gp->ob_calls);
 							free(pkey);
 
-							if (gp->state == REG_STATE_FAILED || gp->state == REG_STATE_TRYING) {
+							if (gp->state == REG_STATE_FAILED || gp->state == REG_STATE_FAIL_WAIT || gp->state == REG_STATE_TRYING) {
 								time_t now = switch_epoch_time_now(NULL);
-								if (gp->reg_timeout > now) {
+								if (gp->reg_timeout >= now) {
 									stream->write_function(stream, " (retry: %ds)", gp->reg_timeout - now);
 								} else {
 									stream->write_function(stream, " (retry: NEVER)");
@@ -3219,7 +3216,6 @@ static switch_status_t cmd_status(char **argv, int argc, switch_stream_handle_t 
 					stream->write_function(stream, "NOMEDIA          \t%s\n", sofia_test_flag(profile, TFLAG_INB_NOMEDIA) ? "true" : "false");
 					stream->write_function(stream, "LATE-NEG         \t%s\n", sofia_test_flag(profile, TFLAG_LATE_NEGOTIATION) ? "true" : "false");
 					stream->write_function(stream, "PROXY-MEDIA      \t%s\n", sofia_test_flag(profile, TFLAG_PROXY_MEDIA) ? "true" : "false");
-					stream->write_function(stream, "ZRTP-PASSTHRU    \t%s\n", sofia_test_flag(profile, TFLAG_ZRTP_PASSTHRU) ? "true" : "false");
 					stream->write_function(stream, "AGGRESSIVENAT    \t%s\n",
 										   sofia_test_pflag(profile, PFLAG_AGGRESSIVE_NAT_DETECTION) ? "true" : "false");
 					if (profile->user_agent_filter) {
@@ -3340,9 +3336,9 @@ static switch_status_t cmd_status(char **argv, int argc, switch_stream_handle_t 
 					stream->write_function(stream, "%25s\t%s\t  %40s\t%s", pkey, "gateway", gp->register_to, sofia_state_names[gp->state]);
 					free(pkey);
 
-					if (gp->state == REG_STATE_FAILED || gp->state == REG_STATE_TRYING) {
+					if (gp->state == REG_STATE_FAILED || gp->state == REG_STATE_FAIL_WAIT || gp->state == REG_STATE_TRYING) {
 						time_t now = switch_epoch_time_now(NULL);
-						if (gp->retry > now) {
+						if (gp->retry >= now) {
 							stream->write_function(stream, " (retry: %ds)", gp->retry - now);
 						} else {
 							stream->write_function(stream, " (retry: NEVER)");
@@ -3394,9 +3390,9 @@ static void xml_gateway_status(sofia_gateway_t *gp, switch_stream_handle_t *stre
 	stream->write_function(stream, "    <failed-calls-in>%u</failed-calls-in>\n", gp->ib_failed_calls);
 	stream->write_function(stream, "    <failed-calls-out>%u</failed-calls-out>\n", gp->ob_failed_calls);
 
-	if (gp->state == REG_STATE_FAILED || gp->state == REG_STATE_TRYING) {
+	if (gp->state == REG_STATE_FAILED || gp->state == REG_STATE_FAIL_WAIT || gp->state == REG_STATE_TRYING) {
 		time_t now = switch_epoch_time_now(NULL);
-		if (gp->retry > now) {
+		if (gp->retry >= now) {
 			stream->write_function(stream, "    <retry>%ds</retry>\n", gp->retry - now);
 		} else {
 			stream->write_function(stream, "    <retry>NEVER</retry>\n");
@@ -3413,8 +3409,6 @@ static switch_status_t cmd_xml_status(char **argv, int argc, switch_stream_handl
 	switch_hash_index_t *hi;
 	void *val;
 	const void *vvar;
-	int c = 0;
-	int ac = 0;
 	const char *header = "<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>";
 
 	if (argc > 0) {
@@ -3523,7 +3517,6 @@ static switch_status_t cmd_xml_status(char **argv, int argc, switch_stream_handl
 					stream->write_function(stream, "    <nomedia>%s</nomedia>\n", sofia_test_flag(profile, TFLAG_INB_NOMEDIA) ? "true" : "false");
 					stream->write_function(stream, "    <late-neg>%s</late-neg>\n", sofia_test_flag(profile, TFLAG_LATE_NEGOTIATION) ? "true" : "false");
 					stream->write_function(stream, "    <proxy-media>%s</proxy-media>\n", sofia_test_flag(profile, TFLAG_PROXY_MEDIA) ? "true" : "false");
-					stream->write_function(stream, "    <zrtp-passthru>%s</zrtp-passthru>\n", sofia_test_flag(profile, TFLAG_ZRTP_PASSTHRU) ? "true" : "false");
 					stream->write_function(stream, "    <aggressive-nat>%s</aggressive-nat>\n",
 										   sofia_test_pflag(profile, PFLAG_AGGRESSIVE_NAT_DETECTION) ? "true" : "false");
 					if (profile->user_agent_filter) {
@@ -3626,7 +3619,6 @@ static switch_status_t cmd_xml_status(char **argv, int argc, switch_stream_handl
 		if (sofia_test_pflag(profile, PFLAG_RUNNING)) {
 
 			if (strcmp(vvar, profile->name)) {
-				ac++;
 				stream->write_function(stream, "<alias>\n<name>%s</name>\n<type>%s</type>\n<data>%s</data>\n<state>%s</state>\n</alias>\n", vvar, "alias",
 									   profile->name, "ALIASED");
 			} else {
@@ -3652,15 +3644,13 @@ static switch_status_t cmd_xml_status(char **argv, int argc, switch_stream_handl
 									   profile->inuse);
 				}
 
-				c++;
-
 				for (gp = profile->gateways; gp; gp = gp->next) {
 					switch_assert(gp->state < REG_STATE_LAST);
 					stream->write_function(stream, "<gateway>\n<name>%s</name>\n<type>%s</type>\n<data>%s</data>\n<state>%s</state>\n</gateway>\n",
 										   gp->name, "gateway", gp->register_to, sofia_state_names[gp->state]);
-					if (gp->state == REG_STATE_FAILED || gp->state == REG_STATE_TRYING) {
+					if (gp->state == REG_STATE_FAILED || gp->state == REG_STATE_FAIL_WAIT || gp->state == REG_STATE_TRYING) {
 						time_t now = switch_epoch_time_now(NULL);
-						if (gp->retry > now) {
+						if (gp->retry >= now) {
 							stream->write_function(stream, " (retry: %ds)", gp->retry - now);
 						} else {
 							stream->write_function(stream, " (retry: NEVER)");
@@ -4534,6 +4524,8 @@ SWITCH_STANDARD_API(sofia_presence_data_function)
 		user = argv[1];
 	}
 
+	if (!user) goto end;
+
 	if ((domain = strchr(user, '@'))) {
 		*domain++ = '\0';
 		if ((concat = strchr(domain, '/'))) {
@@ -4549,8 +4541,6 @@ SWITCH_STANDARD_API(sofia_presence_data_function)
 		dup_domain = switch_core_get_domain(SWITCH_TRUE);
 		domain = dup_domain;
 	}
-
-	if (!user) goto end;
 
 	if (zstr(profile_name) || strcmp(profile_name, "*") || zstr(domain)) {
 		if (!zstr(profile_name)) {
@@ -4607,7 +4597,6 @@ SWITCH_STANDARD_API(sofia_gateway_data_function)
 {
 	char *argv[4];
 	char *mydata;
-	int argc;
 	sofia_gateway_t *gateway;
 	char *gwname, *param, *varname;
 	const char *val = NULL;
@@ -4620,7 +4609,7 @@ SWITCH_STANDARD_API(sofia_gateway_data_function)
 		return SWITCH_STATUS_FALSE;
 	}
 
-	if (!(argc = switch_separate_string(mydata, ' ', argv, (sizeof(argv) / sizeof(argv[0])))) || !argv[0]) {
+	if (!switch_separate_string(mydata, ' ', argv, (sizeof(argv) / sizeof(argv[0]))) || !argv[0]) {
 		goto end;
 	}
 
@@ -4880,14 +4869,14 @@ static switch_status_t sofia_manage(char *relative_oid, switch_management_action
 	return SWITCH_STATUS_SUCCESS;
 }
 
-static int protect_dest_uri(switch_caller_profile_t *cp)
+int protect_dest_uri(switch_caller_profile_t *cp)
 {
 	char *p = cp->destination_number, *o = p;
 	char *q = NULL, *e = NULL, *qenc = NULL;
 	switch_size_t enclen = 0;
 	int mod = 0;
 
-	if (!(e = strchr(p, '@'))) {
+	if (!strchr(p, '@')) {
 		return 0;
 	}
 
@@ -5433,17 +5422,6 @@ static switch_call_cause_t sofia_outgoing_channel(switch_core_session_t *session
 				sofia_set_flag(ctech_pvt, TFLAG_ENABLE_SOA);
 			} else {
 				sofia_clear_flag(ctech_pvt, TFLAG_ENABLE_SOA);
-			}
-
-			if (switch_channel_test_flag(o_channel, CF_ZRTP_PASSTHRU_REQ) && switch_channel_test_flag(o_channel, CF_ZRTP_HASH)) {
-				const char *x = NULL;
-				switch_core_media_pass_zrtp_hash2(session, nsession);
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "[zrtp_passthru] Setting a-leg inherit_codec=true\n");
-				switch_channel_set_variable(o_channel, "inherit_codec", "true");
-				if ((x = switch_channel_get_variable(o_channel, "ep_codec_string"))) {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "[zrtp_passthru] Setting b-leg absolute_codec_string='%s'\n", x);
-					switch_channel_set_variable(nchannel, "absolute_codec_string", x);
-				}
 			}
 
 			/* SNARK: lets copy this across so we can see if we're the other leg of 3PCC + bypass_media... */
@@ -6404,7 +6382,12 @@ static switch_status_t sofia_stir_shaken_vs_create(stir_shaken_context_t *contex
 		return SWITCH_STATUS_FALSE;
 	}
 	if (mod_sofia_globals.stir_shaken_vs_ca_dir) {
-		stir_shaken_vs_load_ca_dir(context, sofia_stir_shaken_vs, mod_sofia_globals.stir_shaken_vs_ca_dir);
+		if (stir_shaken_vs_load_ca_dir(context, sofia_stir_shaken_vs, mod_sofia_globals.stir_shaken_vs_ca_dir) != STIR_SHAKEN_STATUS_OK) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to load trusted root certificates from %s\n", mod_sofia_globals.stir_shaken_vs_ca_dir);
+			return SWITCH_STATUS_FALSE;
+		} else {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Loaded trusted root certificates from %s\n", mod_sofia_globals.stir_shaken_vs_ca_dir);
+		}
 	}
 	stir_shaken_vs_set_x509_cert_path_check(context, sofia_stir_shaken_vs, mod_sofia_globals.stir_shaken_vs_cert_path_check);
 	stir_shaken_vs_set_connect_timeout(context, sofia_stir_shaken_vs, 3);
@@ -7066,7 +7049,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_sofia_load)
 	SWITCH_ADD_API(api_interface, "sofia", "Sofia Controls", sofia_function, "<cmd> <args>");
 	SWITCH_ADD_API(api_interface, "sofia_gateway_data", "Get data from a sofia gateway", sofia_gateway_data_function, "<gateway_name> [ivar|ovar|var] <name>");
 	switch_console_set_complete("add sofia ::[help:status");
-	switch_console_set_complete("add sofia status profile ::sofia::list_profiles reg");
+	switch_console_set_complete("add sofia status profile ::sofia::list_profiles ::[reg:user:pres");
 	switch_console_set_complete("add sofia status gateway ::sofia::list_gateways");
 
 	switch_console_set_complete("add sofia count profiles");
@@ -7123,7 +7106,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_sofia_load)
 	return status;
 }
 
-void mod_sofia_shutdown_cleanup() {
+void mod_sofia_shutdown_cleanup(void) {
 	int sanity = 0;
 	int i;
 	switch_status_t st;
