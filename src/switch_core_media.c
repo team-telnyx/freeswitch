@@ -10068,7 +10068,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 											   a_engine->cur_payload_map->pt,
 											   strcasecmp("opus", a_engine->read_impl.iananame) ? a_engine->read_impl.samples_per_packet : 
 											   a_engine->read_impl.samples_per_second * (a_engine->read_impl.microseconds_per_packet / 1000) / 1000,
-											   a_engine->cur_payload_map->codec_ms * 1000,
+											   codec_ms,
 											   flags, timer_name, &err, switch_core_session_get_pool(session),
 											   0, 0);
 		{
@@ -10494,7 +10494,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 												   t_engine->cur_payload_map->remote_sdp_ip,
 												   t_engine->cur_payload_map->remote_sdp_port,
 												   t_engine->cur_payload_map->pt,
-												   TEXT_TIMER_SAMPLES, TEXT_TIMER_MS * 1000, flags, NULL, &err, switch_core_session_get_pool(session));
+												   TEXT_TIMER_SAMPLES, TEXT_TIMER_MS * 1000, flags, NULL, &err, switch_core_session_get_pool(session), 0, 0);
 
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%sTEXT RTP [%s] %s:%d->%s:%d codec: %u ms: %d [%s]\n",
 							  switch_channel_test_flag(session->channel, CF_PROXY_MEDIA) ? "PROXY " : "",
@@ -10817,7 +10817,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 														 v_engine->cur_payload_map->remote_sdp_ip,
 														 v_engine->cur_payload_map->remote_sdp_port,
 														 v_engine->cur_payload_map->pt,
-														 1, 90000, flags, NULL, &err, switch_core_session_get_pool(session));
+														 1, 90000, flags, NULL, &err, switch_core_session_get_pool(session), 0, 0);
 
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%sVIDEO RTP [%s] %s:%d->%s:%d codec: %u ms: %d [%s]\n",
 							  switch_channel_test_flag(session->channel, CF_PROXY_MEDIA) ? "PROXY " : "",

@@ -626,33 +626,35 @@ static switch_bool_t avmd_media_bug_init(avmd_session_t *avmd_session) {
  */
 static switch_bool_t avmd_callback(switch_media_bug_t * bug, void *user_data, switch_abc_type_t type) {
 	avmd_session_t *avmd_session;
-	switch_codec_t *read_codec;
-	switch_codec_t *write_codec;
 	switch_frame_t *frame;
 	switch_core_session_t *fs_session;
 	switch_channel_t *channel = NULL;
 	switch_bool_t ret = SWITCH_TRUE;
+	int lock_flag = (type != SWITCH_ABC_TYPE_INIT) && (type != SWITCH_ABC_TYPE_CLOSE);
 
 	avmd_session = (avmd_session_t *) user_data;
 	if (avmd_session == NULL) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "No avmd session assigned!\n");
 		return SWITCH_FALSE;
 	}
-	if ((type != SWITCH_ABC_TYPE_INIT) && (type != SWITCH_ABC_TYPE_CLOSE)) {
+	if (lock_flag) {
 		switch_mutex_lock(avmd_session->mutex);
 	}
-	fs_session = avmd_session->session;
+	fs_session = switch_core_session_locate(avmd_session->session_uuid);
 	if (fs_session == NULL) {
-		if (type != SWITCH_ABC_TYPE_INIT) {
+		if (lock_flag) {
 			switch_mutex_unlock(avmd_session->mutex);
 		}
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "No FreeSWITCH session assigned!\n");
+		switch_log_printf(SWITCH_CHANNEL_UUID_LOG(avmd_session->session_uuid), SWITCH_LOG_ERROR, "No FreeSWITCH session assigned!\n");
 		return SWITCH_FALSE;
 	}
 
 	channel = switch_core_session_get_channel(fs_session);
 	if (channel == NULL) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "No channel for FreeSWITCH session!\n");
+		if (lock_flag) {
+            		switch_mutex_unlock(avmd_session->mutex);
+        	}
+        	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(fs_session), SWITCH_LOG_ERROR, "No channel for FreeSWITCH session!\n");
 		return SWITCH_FALSE;
 	}
 
@@ -686,7 +688,7 @@ static switch_bool_t avmd_callback(switch_media_bug_t * bug, void *user_data, sw
 			break;
 	}
 
-	if ((type != SWITCH_ABC_TYPE_INIT) && (type != SWITCH_ABC_TYPE_CLOSE)) {
+	if (lock_flag) {
 		switch_mutex_unlock(avmd_session->mutex);
 	}
 	return ret;

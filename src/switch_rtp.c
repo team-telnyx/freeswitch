@@ -5328,7 +5328,9 @@ SWITCH_DECLARE(switch_rtp_t *) switch_rtp_new(const char *rx_host,
 											  switch_payload_t payload,
 											  uint32_t samples_per_interval,
 											  uint32_t ms_per_packet,
-											  switch_rtp_flag_t flags[SWITCH_RTP_FLAG_INVALID], char *timer_name, const char **err, switch_memory_pool_t *pool)
+											  switch_rtp_flag_t flags[SWITCH_RTP_FLAG_INVALID], char *timer_name, const char **err, switch_memory_pool_t *pool,
+											  switch_port_t bundle_internal_port,
+                                              						  switch_port_t bundle_external_port)
 {
 	switch_rtp_t *rtp_session = NULL;
 
@@ -8146,6 +8148,7 @@ static void check_timeout(switch_rtp_t *rtp_session)
 					  elapsed, rtp_session->media_timeout);
 
 	if (elapsed > rtp_session->media_timeout) {
+		if (rtp_session->session) {
 			switch_channel_t *channel = switch_core_session_get_channel(rtp_session->session);
 
 			if (switch_channel_has_variable_prefix(channel, "execute_on_media_timeout") == SWITCH_STATUS_SUCCESS) {
