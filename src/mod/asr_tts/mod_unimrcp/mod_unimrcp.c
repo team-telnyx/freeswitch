@@ -2643,7 +2643,7 @@ static switch_status_t recog_channel_disable_all_grammars(speech_channel_t *scha
 {
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
 
-	recognizer_data_t *r;
+	recognizer_data_t *r = NULL;
 	if (schannel) {
 		r = (recognizer_data_t *) schannel->data;	
 	}
