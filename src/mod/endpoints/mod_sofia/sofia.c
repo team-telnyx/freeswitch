@@ -1042,7 +1042,7 @@ void sofia_handle_sip_i_bye(switch_core_session_t *session, int status,
 		tech_pvt->q850_cause = atoi(sip->sip_reason->re_cause);
 		cause = tech_pvt->q850_cause;
 	} else {
-		cause = sofia_glue_sip_cause_to_freeswitch(channel, status);
+		cause = sofia_glue_sip_cause_to_freeswitch(status);
 	}
 
 	if (sip->sip_content_type && sip->sip_content_type->c_type) {
@@ -6336,6 +6336,12 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						} else {
 							sofia_clear_pflag(profile, PFLAG_ALWAYS_BRIDGE_EARLY_MEDIA);
 						}
+					} else if (!strcasecmp(var, "telnyx-sip-proxy-timeout-hangup-cause")) {
+						if (switch_true(val)) {
+							sofia_set_pflag(profile, PFLAG_SIP_PROXY_TIMEOUT_HANGUP_CAUSE);
+						} else {
+							sofia_clear_pflag(profile, PFLAG_SIP_PROXY_TIMEOUT_HANGUP_CAUSE);
+						}
 					} else if (!strcasecmp(var, "default-ringback")) {
 						profile->default_ringback = switch_core_strdup(profile->pool, val);
 					} else if (!strcasecmp(var, "ringback-on-mismatch-media")) {
@@ -9183,7 +9189,12 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 			if (tech_pvt->q850_cause) {
 				cause = tech_pvt->q850_cause;
 			} else {
-				cause = sofia_glue_sip_cause_to_freeswitch(channel, status);
+				// ENGDESK-27289: this modifies hangup cause for timeouts caused by unresponsiveness of sip proxy
+				if (status == 408 && zstr(switch_channel_get_variable(channel, "sip_reply_host")) && sofia_test_pflag(profile, PFLAG_SIP_PROXY_TIMEOUT_HANGUP_CAUSE)) {
+					cause = SWITCH_CAUSE_NORMAL_TEMPORARY_FAILURE;
+				} else {
+					cause = sofia_glue_sip_cause_to_freeswitch(status);
+				}
 			}
 			if (status) {
 				switch_snprintf(st, sizeof(st), "%d", status);

@@ -1882,10 +1882,10 @@ void sofia_glue_do_xfer_invite(switch_core_session_t *session)
 
 
 /* map sip responses to QSIG cause codes ala RFC4497 section 8.4.4 */
-switch_call_cause_t sofia_glue_sip_cause_to_freeswitch(switch_channel_t *channel, int status)
+switch_call_cause_t sofia_glue_sip_cause_to_freeswitch(int status)
 {
 	switch_call_cause_t cause = SWITCH_CAUSE_NORMAL_UNSPECIFIED;
-	if(switch_telnyx_sip_cause_to_q850(channel, status, &cause)) {
+	if(switch_telnyx_sip_cause_to_q850(status, &cause)) {
 		return cause;
 	}
 
