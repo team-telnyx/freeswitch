@@ -1042,7 +1042,7 @@ void sofia_handle_sip_i_bye(switch_core_session_t *session, int status,
 		tech_pvt->q850_cause = atoi(sip->sip_reason->re_cause);
 		cause = tech_pvt->q850_cause;
 	} else {
-		cause = sofia_glue_sip_cause_to_freeswitch(status);
+		cause = sofia_glue_sip_cause_to_freeswitch(channel, status);
 	}
 
 	if (sip->sip_content_type && sip->sip_content_type->c_type) {
@@ -9183,7 +9183,7 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 			if (tech_pvt->q850_cause) {
 				cause = tech_pvt->q850_cause;
 			} else {
-				cause = sofia_glue_sip_cause_to_freeswitch(status);
+				cause = sofia_glue_sip_cause_to_freeswitch(channel, status);
 			}
 			if (status) {
 				switch_snprintf(st, sizeof(st), "%d", status);
