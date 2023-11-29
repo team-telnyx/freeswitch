@@ -6336,11 +6336,13 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						} else {
 							sofia_clear_pflag(profile, PFLAG_ALWAYS_BRIDGE_EARLY_MEDIA);
 						}
-					} else if (!strcasecmp(var, "telnyx-sip-proxy-timeout-hangup-cause")) {
-						if (switch_true(val)) {
-							sofia_set_pflag(profile, PFLAG_SIP_PROXY_TIMEOUT_HANGUP_CAUSE);
+					} else if (!strcasecmp(var, "telnyx-sip-proxy-timeout-hangup-cause") && !zstr(val)) {
+						switch_call_cause_t timeout_cause;
+						timeout_cause = switch_channel_str2cause(val);
+						if (timeout_cause != SWITCH_CAUSE_NORMAL_CLEARING) {
+							profile->telnyx_sip_proxy_timeout_hangup_cause = timeout_cause;
 						} else {
-							sofia_clear_pflag(profile, PFLAG_SIP_PROXY_TIMEOUT_HANGUP_CAUSE);
+							profile->telnyx_sip_proxy_timeout_hangup_cause = 0;
 						}
 					} else if (!strcasecmp(var, "default-ringback")) {
 						profile->default_ringback = switch_core_strdup(profile->pool, val);
@@ -9189,10 +9191,11 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 			if (tech_pvt->q850_cause) {
 				cause = tech_pvt->q850_cause;
 			} else {
-				// ENGDESK-27289: this modifies hangup cause for timeouts caused by unresponsiveness of sip proxy
-				if (status == 408 && zstr(switch_channel_get_variable(channel, "sip_reply_host")) && sofia_test_pflag(profile, PFLAG_SIP_PROXY_TIMEOUT_HANGUP_CAUSE)) {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "No response from sip proxy. Mapping 408 to NORMAL_TEMPORARY_FAILURE\n");
-					cause = SWITCH_CAUSE_NORMAL_TEMPORARY_FAILURE;
+				// ENGDESK-27289: this modifies 408 hangup cause caused by sip transaction timeouts
+				if (status == 408 && zstr(switch_channel_get_variable(channel, "sip_reply_host")) && profile->telnyx_sip_proxy_timeout_hangup_cause) {
+					cause = profile->telnyx_sip_proxy_timeout_hangup_cause;
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "SIP transaction timer expired. Mapping 408 to %s\n",
+										switch_channel_cause2str(cause));
 				} else {
 					cause = sofia_glue_sip_cause_to_freeswitch(status);
 				}
