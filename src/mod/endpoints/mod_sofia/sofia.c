@@ -9191,6 +9191,7 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 			} else {
 				// ENGDESK-27289: this modifies hangup cause for timeouts caused by unresponsiveness of sip proxy
 				if (status == 408 && zstr(switch_channel_get_variable(channel, "sip_reply_host")) && sofia_test_pflag(profile, PFLAG_SIP_PROXY_TIMEOUT_HANGUP_CAUSE)) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "No response from sip proxy. Mapping 408 to NORMAL_TEMPORARY_FAILURE\n");
 					cause = SWITCH_CAUSE_NORMAL_TEMPORARY_FAILURE;
 				} else {
 					cause = sofia_glue_sip_cause_to_freeswitch(status);
