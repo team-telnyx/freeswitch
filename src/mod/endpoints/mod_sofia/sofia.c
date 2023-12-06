@@ -6312,6 +6312,12 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						} else {
 							sofia_clear_pflag(profile, PFLAG_IGNORE_REASON_HDR_BYE);
 						}
+					} else if (!strcasecmp(var, "disable-gen-ice-sdp")) {
+						if (switch_true(val)) {
+							sofia_set_pflag(profile, PFLAG_DISABLE_GEN_ICE_SDP);
+						} else {
+							sofia_clear_pflag(profile, PFLAG_DISABLE_GEN_ICE_SDP);
+						}
 					} else if (!strcasecmp(var, "disable-sip-replaces")) {
 						if (switch_true(val)) {
 							sofia_set_pflag(profile, PFLAG_DISABLE_SIP_REPLACES);
@@ -10958,7 +10964,6 @@ void sofia_handle_sip_i_invite(switch_core_session_t *session, nua_t *nua, sofia
 		switch_core_media_set_sdp_codec_string(session, r_sdp, SDP_TYPE_REQUEST);
 	}
 
-
 	if (sofia_test_pflag(profile, PFLAG_AGGRESSIVE_NAT_DETECTION) ||
 		(sofia_test_pflag(profile, PFLAG_TLS_ALWAYS_NAT) && (is_tcp || is_tls)) ||
 		(!is_tcp && !is_tls && (zstr(network_ip) || !switch_check_network_list_ip(network_ip, profile->local_network)) &&
@@ -11234,6 +11239,11 @@ void sofia_handle_sip_i_invite(switch_core_session_t *session, nua_t *nua, sofia
 	switch_channel_set_variable_printf(channel, "sip_network_ip", "%s", network_ip);
 	switch_channel_set_variable_printf(channel, "sip_network_port", "%d", network_port);
 	switch_channel_set_variable_printf(channel, "sip_invite_stamp", "%" SWITCH_TIME_T_FMT, sip_invite_time);
+
+	if (sofia_test_pflag(profile, PFLAG_DISABLE_GEN_ICE_SDP)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Disabling generating ICE SDP!\n");
+		switch_channel_set_flag(tech_pvt->channel, CF_DISABLE_GEN_ICE_SDP);
+	}
 
 	if (*acl_token) {
 		if (x_user) {

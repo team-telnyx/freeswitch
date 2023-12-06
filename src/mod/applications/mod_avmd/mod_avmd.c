@@ -875,7 +875,7 @@ static void avmd_set_xml_default_configuration(switch_mutex_t *mutex) {
     avmd_globals.settings.detectors_lagged_n = 1;
 
     if (mutex != NULL) {
-        switch_mutex_unlock(avmd_globals.mutex);
+        switch_mutex_unlock(mutex);
     }
     return;
 }
@@ -890,7 +890,7 @@ static void avmd_set_xml_inbound_configuration(switch_mutex_t *mutex)
     avmd_globals.settings.outbound_channnel = 0;
 
     if (mutex != NULL) {
-        switch_mutex_unlock(avmd_globals.mutex);
+        switch_mutex_unlock(mutex);
     }
     return;
 }
@@ -904,7 +904,7 @@ static void avmd_set_xml_outbound_configuration(switch_mutex_t *mutex) {
     avmd_globals.settings.outbound_channnel = 1;
 
     if (mutex != NULL) {
-        switch_mutex_unlock(avmd_globals.mutex);
+        switch_mutex_unlock(mutex);
     }
     return;
 }
@@ -1117,7 +1117,7 @@ static switch_status_t avmd_load_xml_outbound_configuration(switch_mutex_t *mute
     avmd_globals.settings.outbound_channnel = 1;
 
     if (mutex != NULL) {
-        switch_mutex_unlock(avmd_globals.mutex);
+        switch_mutex_unlock(mutex);
     }
     return SWITCH_STATUS_SUCCESS;
 }
@@ -1671,7 +1671,7 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_avmd_shutdown) {
     session_n = avmd_globals.session_n;
     if (session_n > 0) {
         switch_mutex_unlock(avmd_globals.mutex);
-            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "PLEASE DO NOT RELOAD MODULE WHILE SESSIONS ARE RUNNING\n");
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "PLEASE DO NOT RELOAD MODULE WHILE SESSIONS ARE RUNNING\n");
     }
 
     avmd_unregister_all_events();

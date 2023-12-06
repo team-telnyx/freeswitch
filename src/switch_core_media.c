@@ -12186,6 +12186,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 			uint32_t c2 = c1 - 1;
 			uint32_t c3 = c1 - 2;
 			uint32_t c4 = c1 - 3;
+			int disable_ice = 0;
 
 			tmp1[10] = '\0';
 			tmp2[10] = '\0';
@@ -12196,69 +12197,71 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 
 			ice_out = &a_engine->ice_out;
 
+			disable_ice = switch_channel_var_true(session->channel, "disable_generate_sdp_ice") ? 1 : switch_channel_test_flag(session->channel, CF_DISABLE_GEN_ICE_SDP);
+			if (!(sdp_type == SDP_TYPE_RESPONSE && disable_ice)) {
+				switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=ice-ufrag:%s\r\n", ice_out->ufrag);
+				switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=ice-pwd:%s\r\n", ice_out->pwd);
 
-			switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=ice-ufrag:%s\r\n", ice_out->ufrag);
-			switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=ice-pwd:%s\r\n", ice_out->pwd);
 
-
-			switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=candidate:%s 1 %s %u %s %d typ host generation 0\r\n",
-							tmp1, ice_out->cands[0][0].transport, c1,
-							ice_out->cands[0][0].con_addr, ice_out->cands[0][0].con_port
-							);
-
-			if (include_external && !zstr(smh->mparams->extsipip)) {
 				switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=candidate:%s 1 %s %u %s %d typ host generation 0\r\n",
-					tmp3, ice_out->cands[0][0].transport, c1,
-					smh->mparams->extsipip, ice_out->cands[0][0].con_port
-					);
-			}
-
-			if (!zstr(a_engine->local_sdp_ip) && !zstr(ice_out->cands[0][0].con_addr) && 
-				strcmp(a_engine->local_sdp_ip, ice_out->cands[0][0].con_addr)
-				&& a_engine->local_sdp_port != ice_out->cands[0][0].con_port) {
-
-				switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=candidate:%s 1 %s %u %s %d typ srflx raddr %s rport %d generation 0\r\n",
-								tmp2, ice_out->cands[0][0].transport, c3,
-								ice_out->cands[0][0].con_addr, ice_out->cands[0][0].con_port,
-								a_engine->local_sdp_ip, a_engine->local_sdp_port
-								);
-			}
-
-
-			if (a_engine->rtcp_mux < 1 || is_outbound || switch_channel_test_flag(session->channel, CF_RECOVERING)) {
-
-				switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=candidate:%s 2 %s %u %s %d typ host generation 0\r\n",
-								tmp1, ice_out->cands[0][0].transport, c2,
-								ice_out->cands[0][0].con_addr, ice_out->cands[0][0].con_port + (a_engine->rtcp_mux > 0 ? 0 : 1)
+								tmp1, ice_out->cands[0][0].transport, c1,
+								ice_out->cands[0][0].con_addr, ice_out->cands[0][0].con_port
 								);
 
 				if (include_external && !zstr(smh->mparams->extsipip)) {
-					switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=candidate:%s 2 %s %u %s %d typ host generation 0\r\n",
-						tmp3, ice_out->cands[0][0].transport, c2,
-						smh->mparams->extsipip, ice_out->cands[0][0].con_port + (a_engine->rtcp_mux > 0 ? 0 : 1)
+					switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=candidate:%s 1 %s %u %s %d typ host generation 0\r\n",
+						tmp3, ice_out->cands[0][0].transport, c1,
+						smh->mparams->extsipip, ice_out->cands[0][0].con_port
 						);
 				}
 
-
-
-				if (!zstr(a_engine->local_sdp_ip) && !zstr(ice_out->cands[0][0].con_addr) &&
+				if (!zstr(a_engine->local_sdp_ip) && !zstr(ice_out->cands[0][0].con_addr) && 
 					strcmp(a_engine->local_sdp_ip, ice_out->cands[0][0].con_addr)
 					&& a_engine->local_sdp_port != ice_out->cands[0][0].con_port) {
 
-					switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=candidate:%s 2 %s %u %s %d typ srflx raddr %s rport %d generation 0\r\n",
-									tmp2, ice_out->cands[0][0].transport, c4,
-									ice_out->cands[0][0].con_addr, ice_out->cands[0][0].con_port + (a_engine->rtcp_mux > 0 ? 0 : 1),
-									a_engine->local_sdp_ip, a_engine->local_sdp_port + (a_engine->rtcp_mux > 0 ? 0 : 1)
+					switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=candidate:%s 1 %s %u %s %d typ srflx raddr %s rport %d generation 0\r\n",
+									tmp2, ice_out->cands[0][0].transport, c3,
+									ice_out->cands[0][0].con_addr, ice_out->cands[0][0].con_port,
+									a_engine->local_sdp_ip, a_engine->local_sdp_port
 									);
 				}
+
+
+				if (a_engine->rtcp_mux < 1 || is_outbound || switch_channel_test_flag(session->channel, CF_RECOVERING)) {
+
+					switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=candidate:%s 2 %s %u %s %d typ host generation 0\r\n",
+									tmp1, ice_out->cands[0][0].transport, c2,
+									ice_out->cands[0][0].con_addr, ice_out->cands[0][0].con_port + (a_engine->rtcp_mux > 0 ? 0 : 1)
+									);
+
+					if (include_external && !zstr(smh->mparams->extsipip)) {
+						switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=candidate:%s 2 %s %u %s %d typ host generation 0\r\n",
+							tmp3, ice_out->cands[0][0].transport, c2,
+							smh->mparams->extsipip, ice_out->cands[0][0].con_port + (a_engine->rtcp_mux > 0 ? 0 : 1)
+							);
+					}
+
+
+
+					if (!zstr(a_engine->local_sdp_ip) && !zstr(ice_out->cands[0][0].con_addr) &&
+						strcmp(a_engine->local_sdp_ip, ice_out->cands[0][0].con_addr)
+						&& a_engine->local_sdp_port != ice_out->cands[0][0].con_port) {
+
+						switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=candidate:%s 2 %s %u %s %d typ srflx raddr %s rport %d generation 0\r\n",
+										tmp2, ice_out->cands[0][0].transport, c4,
+										ice_out->cands[0][0].con_addr, ice_out->cands[0][0].con_port + (a_engine->rtcp_mux > 0 ? 0 : 1),
+										a_engine->local_sdp_ip, a_engine->local_sdp_port + (a_engine->rtcp_mux > 0 ? 0 : 1)
+										);
+					}
+				}
+
+				switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=end-of-candidates\r\n");
+
+				switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=ssrc:%u cname:%s\r\n", a_engine->ssrc, smh->cname);
+				switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=ssrc:%u msid:%s a0\r\n", a_engine->ssrc, smh->msid);
+				switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=ssrc:%u mslabel:%s\r\n", a_engine->ssrc, smh->msid);
+				switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=ssrc:%u label:%sa0\r\n", a_engine->ssrc, smh->msid);
 			}
-
-			switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=end-of-candidates\r\n");
-
-			switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=ssrc:%u cname:%s\r\n", a_engine->ssrc, smh->cname);
-			switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=ssrc:%u msid:%s a0\r\n", a_engine->ssrc, smh->msid);
-			switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=ssrc:%u mslabel:%s\r\n", a_engine->ssrc, smh->msid);
-			switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=ssrc:%u label:%sa0\r\n", a_engine->ssrc, smh->msid);
 
 
 #ifdef GOOGLE_ICE
