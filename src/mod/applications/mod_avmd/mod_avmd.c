@@ -1531,21 +1531,6 @@ SWITCH_STANDARD_APP(avmd_start_app) {
     }
 
     status = switch_core_media_bug_add(session, "avmd", NULL, avmd_callback, avmd_session, 0, flags, &bug); /* Add a media bug that allows me to intercept the audio stream */
-    if (status != SWITCH_STATUS_SUCCESS) { /* If adding a media bug fails exit */
-        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to add media bug!\n");
-        goto end_unlock;
-    }
-
-    status = avmd_launch_threads(avmd_session, session);
-    if (status != SWITCH_STATUS_SUCCESS) {
-        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to start detection threads\n");
-        avmd_join_threads(avmd_session);
-        switch_core_media_bug_remove(session, &bug);
-        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Joined detection threads\n");
-        goto end_unlock;
-    }
-
-	status = switch_core_media_bug_add(session, "avmd", NULL, avmd_callback, avmd_session, 0, flags, &bug); /* Add a media bug that allows me to intercept the audio stream */
 	if (status != SWITCH_STATUS_SUCCESS) { /* If adding a media bug fails exit */
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to add media bug!\n");
 
@@ -1555,6 +1540,17 @@ SWITCH_STANDARD_APP(avmd_start_app) {
 		switch_mutex_unlock(avmd_globals.mutex);
 		goto end;
 	}
+
+    status = avmd_launch_threads(avmd_session, session);
+    if (status != SWITCH_STATUS_SUCCESS) {
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to start detection threads\n");
+        avmd_join_threads(avmd_session);
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Joined detection threads\n");
+        
+        switch_mutex_unlock(avmd_session->mutex);
+        switch_core_media_bug_remove(session, &bug);
+        goto end;
+    }
 
     switch_mutex_lock(avmd_globals.mutex);
     ++avmd_globals.session_n;
@@ -1606,13 +1602,13 @@ SWITCH_STANDARD_APP(avmd_stop_app) {
     }
 
     avmd_session = switch_core_media_bug_get_user_data(bug);
+    
+    switch_channel_set_private(channel, "_avmd_", NULL);
+    switch_core_media_bug_remove(session, &bug);
+    
     if (avmd_session == NULL) {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Stop failed - no avmd session object, stop event not fired on this channel [%s]!\n", switch_channel_get_name(channel));
     } else {
-		switch_mutex_lock(avmd_globals.mutex);
-		avmd_session_close(avmd_session);
-		switch_mutex_unlock(avmd_globals.mutex);
-
         switch_mutex_lock(avmd_session->mutex);
         report_status = avmd_session->settings.report_status;
         beep_status = avmd_session->state.beep_state;
@@ -1626,8 +1622,6 @@ SWITCH_STANDARD_APP(avmd_stop_app) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Avmd on channel [%s] stopped, beep status: [%s], total running time [%" PRId64 "] [us]\n", switch_channel_get_name(channel), beep_status == BEEP_DETECTED ? "DETECTED" : "NOTDETECTED", total_time);
         }
     }
-    switch_channel_set_private(channel, "_avmd_", NULL);
-    switch_core_media_bug_remove(session, &bug);
 
     return;
 }
