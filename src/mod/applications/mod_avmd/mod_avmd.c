@@ -1432,8 +1432,8 @@ SWITCH_STANDARD_APP(avmd_start_app) {
     switch_channel_t    *channel = NULL;
     avmd_session_t      *avmd_session = NULL;
     switch_core_media_flag_t flags = 0;
-	const char *direction = "NO DIRECTION";
-	uint8_t report = 0;
+    const char *direction = "NO DIRECTION";
+    uint8_t report = 0;
 
     if (session == NULL) {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "BUGGG. FreeSWITCH session is NULL! Please report to developers\n");
@@ -1505,15 +1505,15 @@ SWITCH_STANDARD_APP(avmd_start_app) {
     }
     if ((SWITCH_CALL_DIRECTION_OUTBOUND == switch_channel_direction(channel)) && (avmd_session->settings.outbound_channnel == 1)) {
             flags |= SMBF_READ_REPLACE;
-			direction = "READ_REPLACE";
+            direction = "READ_REPLACE";
     }
     if ((SWITCH_CALL_DIRECTION_INBOUND == switch_channel_direction(channel)) && (avmd_session->settings.inbound_channnel == 1)) {
             flags |= SMBF_WRITE_REPLACE;
-			if (!strcmp(direction, "READ_REPLACE")) {
-				direction = "READ_REPLACE | WRITE_REPLACE";
-			} else {
-				direction = "WRITE_REPLACE";
-			}
+            if (!strcmp(direction, "READ_REPLACE")) {
+                direction = "READ_REPLACE | WRITE_REPLACE";
+            } else {
+                direction = "WRITE_REPLACE";
+            }
     }
 
     if (flags == 0) {
@@ -1531,15 +1531,15 @@ SWITCH_STANDARD_APP(avmd_start_app) {
     }
 
     status = switch_core_media_bug_add(session, "avmd", NULL, avmd_callback, avmd_session, 0, flags, &bug); /* Add a media bug that allows me to intercept the audio stream */
-	if (status != SWITCH_STATUS_SUCCESS) { /* If adding a media bug fails exit */
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to add media bug!\n");
+    if (status != SWITCH_STATUS_SUCCESS) { /* If adding a media bug fails exit */
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to add media bug!\n");
 
-		switch_mutex_unlock(avmd_session->mutex);
-		switch_mutex_lock(avmd_globals.mutex);
-		avmd_session_close(avmd_session);
-		switch_mutex_unlock(avmd_globals.mutex);
-		goto end;
-	}
+        switch_mutex_unlock(avmd_session->mutex);
+        switch_mutex_lock(avmd_globals.mutex);
+        avmd_session_close(avmd_session);
+        switch_mutex_unlock(avmd_globals.mutex);
+        goto end;
+    }
 
     status = avmd_launch_threads(avmd_session, session);
     if (status != SWITCH_STATUS_SUCCESS) {
