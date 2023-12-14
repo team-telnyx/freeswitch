@@ -531,6 +531,8 @@ static void avmd_session_close(avmd_session_t *s) {
 		return;
 	}
 
+    s->closed = 1;
+
     switch_mutex_lock(s->mutex);
 
     switch_mutex_lock(s->mutex_detectors_done);
@@ -543,7 +545,6 @@ static void avmd_session_close(avmd_session_t *s) {
     while (idx < (s->settings.detectors_n + s->settings.detectors_lagged_n)) {
         d = &s->detectors[idx];
         switch_mutex_lock(d->mutex);
-        d = &s->detectors[idx];
         d->flag_processing_done = 0;
         d->flag_should_exit = 1;
         d->samples = 0;
@@ -561,7 +562,6 @@ static void avmd_session_close(avmd_session_t *s) {
     switch_mutex_destroy(s->mutex_detectors_done);
     switch_thread_cond_destroy(s->cond_detectors_done);
     switch_mutex_destroy(s->mutex);
-	s->closed = 1;
 }
 
 static switch_bool_t avmd_media_bug_init(avmd_session_t *avmd_session) {
@@ -2136,7 +2136,6 @@ static void avmd_process(avmd_session_t *s, switch_frame_t *frame, uint8_t direc
         d = &s->detectors[idx];
         if (d->result == AVMD_DETECT_NONE) {
             d->flag_processing_done = 0;
-            d->flag_should_exit = 0;
             d->samples = (s->frame_n == 0 ? frame->samples - AVMD_P : frame->samples);
             switch_thread_cond_signal(d->cond_start_processing);
         }
