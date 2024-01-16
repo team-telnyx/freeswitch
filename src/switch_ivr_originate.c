@@ -3078,6 +3078,10 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 									  chan_type, switch_channel_cause2str(reason));
 					if (local_var_event) switch_event_destroy(&local_var_event);
 
+					if (caller_channel) {
+						switch_channel_set_variable(caller_channel, "last_bridge_hangup_cause", switch_channel_cause2str(reason));
+					}
+
 					if (fail_on_single_reject_var) {
 						const char *cause_str = switch_channel_cause2str(reason);
 						int neg = *fail_on_single_reject_var == '!';
@@ -3096,6 +3100,10 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 						}
 					}
 					continue;
+				} else {
+					if (caller_channel) {
+						switch_channel_set_variable(caller_channel, "last_bridge_hangup_cause", NULL);
+					}
 				}
 
 				if (switch_core_session_read_lock(new_session) != SWITCH_STATUS_SUCCESS) {
