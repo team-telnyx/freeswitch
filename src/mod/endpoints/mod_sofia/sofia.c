@@ -1516,7 +1516,7 @@ static void our_sofia_event_callback(nua_event_t event,
 	if (sofia_private && sofia_private != &mod_sofia_globals.destroy_private && sofia_private != &mod_sofia_globals.keep_private) {
 		if (!zstr(sofia_private->gateway_name)) {
 			if (event == nua_r_unregister && status != 401 && status == 407) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Destroy handle after unregister.\n");
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Destroy handle after unregister for gateway %s.\n", sofia_private->gateway_name);
 				sofia_private_free(sofia_private);
 				nua_handle_bind(nh, NULL);
 				nua_handle_destroy(nh);
