@@ -1462,6 +1462,8 @@ static switch_status_t sofia_send_dtmf(switch_core_session_t *session, const swi
 	return SWITCH_STATUS_SUCCESS;
 }
 
+#define SIP_100REL_MIN_DIFF_PROGRESS_TIME 300
+
 static switch_status_t sofia_receive_message(switch_core_session_t *session, switch_core_session_message_t *msg)
 {
 	switch_channel_t *channel = switch_core_session_get_channel(session);
@@ -1493,6 +1495,55 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 	if (switch_channel_test_flag(channel, CF_CONFERENCE) && !zstr(tech_pvt->reply_contact) && !switch_stristr(";isfocus", tech_pvt->reply_contact)) {
 		tech_pvt->reply_contact = switch_core_session_sprintf(session, "%s;isfocus", tech_pvt->reply_contact);
 	}
+
+	// TODO
+	// Temporary solution until sofia-sip has been patch
+	// Possible race condition if 1xx and 200 OK is sent 
+	// immediately that may cause crash or will not wait
+	// for the prack before sending the final response.
+	if (switch_channel_var_true(channel, "apply_100rel_delay")) {
+		switch_channel_timetable_t *times = switch_channel_get_timetable(channel);
+		if (times) {
+			int minimum_diff = SIP_100REL_MIN_DIFF_PROGRESS_TIME;
+			const char * custom_diff = switch_channel_get_variable(channel, "100rel_min_diff_progress_time");
+			if (!zstr(custom_diff)) {
+				minimum_diff = atoi(custom_diff);
+			}
+
+			switch (msg->message_id) {
+			case SWITCH_MESSAGE_INDICATE_PROGRESS:
+				{
+					if (times->progress) {
+						switch_time_t diff = (switch_micro_time_now() - times->progress)/1000;
+						if (diff < minimum_diff) {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+								"%s Applying progress delay due to 100rel: %ld\n", switch_channel_get_name(channel), ((300 - diff) + 100));
+							switch_yield(((minimum_diff - diff) + 100) * 1000);
+						}
+					}
+				}
+				break;
+			case SWITCH_MESSAGE_INDICATE_ANSWER:
+				{
+					switch_time_t diff = 0;
+					if (times->progress_media && times->progress_media > times->progress) {
+						diff = (switch_micro_time_now() - times->progress_media)/1000;
+					} else if (times->progress && times->progress > times->progress_media) {
+						diff = (switch_micro_time_now() - times->progress)/1000;
+					}
+					if (diff < minimum_diff) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+								"%s Applying answer delay due to 100rel: %ld\n", switch_channel_get_name(channel), ((300 - diff) + 100));
+						switch_yield(((minimum_diff - diff) + 100) * 1000);
+					}
+				}
+				break;
+			default:
+				break;
+			}
+		}
+	}
+
 
 	/* ones that do not need to lock sofia mutex */
 	switch (msg->message_id) {

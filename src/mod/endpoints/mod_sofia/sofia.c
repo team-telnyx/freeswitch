@@ -5891,7 +5891,13 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 							sofia_clear_pflag(profile, PFLAG_DISABLE_100REL);
 						} else {
 							sofia_set_pflag(profile, PFLAG_DISABLE_100REL);
-						}
+						}					sofia_set_pflag(profile, PFLAG_DELAY_100REL_RESPONSE);
+					} else if (!strcasecmp(var, "delay-100rel-response")) {
+						if (switch_true(val)) {
+							sofia_set_pflag(profile, PFLAG_DELAY_100REL_RESPONSE);
+						} else {
+							sofia_clear_pflag(profile, PFLAG_DELAY_100REL_RESPONSE);
+						}					
 					} else if (!strcasecmp(var, "enable-compact-headers")) {
 						if (switch_true(val)) {
 							sofia_set_pflag(profile, PFLAG_SIPCOMPACT);
@@ -11256,6 +11262,14 @@ void sofia_handle_sip_i_invite(switch_core_session_t *session, nua_t *nua, sofia
 				}
 				goto fail;
 			}
+		}
+	}
+
+	// if 100 rel is supported
+	if (sip && sip->sip_supported && !sofia_test_pflag(profile, PFLAG_DISABLE_100REL)) {
+		int supported_100rel = sip_has_feature(sip->sip_supported, "100rel");
+		if (supported_100rel && sofia_test_pflag(profile, PFLAG_DELAY_100REL_RESPONSE)) {
+			switch_channel_set_variable(channel, "apply_100rel_delay", "true");
 		}
 	}
 
