@@ -11285,10 +11285,15 @@ void sofia_handle_sip_i_invite(switch_core_session_t *session, nua_t *nua, sofia
 		}
 	}
 
-	if (sip && sip->sip_supported && !sofia_test_pflag(profile, PFLAG_DISABLE_100REL) && !switch_channel_var_false(channel, "apply_100rel_sync")) {
+	if (sip && sip->sip_supported && !sofia_test_pflag(profile, PFLAG_DISABLE_100REL)) {
 		int supported_100rel = sip_has_feature(sip->sip_supported, "100rel");
-		if (supported_100rel && sofia_test_pflag(profile, PFLAG_ENABLE_100REL_SYNC)) {
-			switch_channel_set_variable(channel, "apply_100rel_sync", "true");
+		if (supported_100rel) {
+			const char *sync = switch_channel_get_variable(channel, "apply_100rel_sync");
+			if (sync) {
+				switch_channel_set_variable(channel, "apply_100rel_sync", switch_true(sync) ? "true" : "false");
+			} else if (sofia_test_pflag(profile, PFLAG_ENABLE_100REL_SYNC)) {
+				switch_channel_set_variable(channel, "apply_100rel_sync", "true");
+			}
 		}
 	}
 
