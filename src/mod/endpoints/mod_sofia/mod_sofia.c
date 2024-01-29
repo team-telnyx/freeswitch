@@ -448,6 +448,18 @@ switch_status_t sofia_on_hangup(switch_core_session_t *session)
 		return SWITCH_STATUS_SUCCESS;
 	}
 
+	if (switch_channel_var_true(channel, "apply_100rel_sync")) {
+		private_object_t *tech_pvt = switch_core_session_get_private(session);					
+		switch_mutex_lock(tech_pvt->prack_mutex);
+		if (sofia_test_flag(tech_pvt, TFLAG_PRACK_LOCK)) {
+			sofia_clear_flag(tech_pvt, TFLAG_PRACK_LOCK);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+					"%s Received Hangup while waiting PRACK: release PRACK lock\n", switch_channel_get_name(channel));
+			switch_thread_cond_signal(tech_pvt->prack_cond);
+		}
+		switch_mutex_unlock(tech_pvt->prack_mutex);
+	}
+
 	switch_mutex_lock(tech_pvt->sofia_mutex);
 
 
@@ -1501,46 +1513,41 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 	// Possible race condition if 1xx and 200 OK is sent 
 	// immediately that may cause crash or will not wait
 	// for the prack before sending the final response.
-	if (switch_channel_var_true(channel, "apply_100rel_delay")) {
-		switch_channel_timetable_t *times = switch_channel_get_timetable(channel);
-		if (times) {
-			int minimum_diff = SIP_100REL_MIN_DIFF_PROGRESS_TIME;
-			const char * custom_diff = switch_channel_get_variable(channel, "100rel_min_diff_progress_time");
-			if (!zstr(custom_diff)) {
-				minimum_diff = atoi(custom_diff);
-			}
-
-			switch (msg->message_id) {
-			case SWITCH_MESSAGE_INDICATE_PROGRESS:
-				{
-					if (times->progress) {
-						switch_time_t diff = (switch_micro_time_now() - times->progress)/1000;
-						if (diff < minimum_diff) {
-							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-								"%s Applying progress delay due to 100rel: %ld\n", switch_channel_get_name(channel), ((300 - diff) + 100));
-							switch_yield(((minimum_diff - diff) + 100) * 1000);
-						}
+	if (switch_channel_var_true(channel, "apply_100rel_sync")) {
+		const char* message_str = "N/A";
+		switch (msg->message_id) {
+		case SWITCH_MESSAGE_INDICATE_RINGING:
+			message_str = "RINGING";
+		case SWITCH_MESSAGE_INDICATE_PROGRESS:
+			message_str = "PROGRESS";
+		case SWITCH_MESSAGE_INDICATE_ANSWER:
+			message_str = "ANSWER";
+			{
+				// PRACK timeout is also based on timer t1x64
+				// to prevent deadlock, will need to time the
+				// lock based on the value of t1x64
+				uint32_t t1x64 = tech_pvt->profile->timer_t1x64 ? tech_pvt->profile->timer_t1x64 : 32000;
+				switch_mutex_lock(tech_pvt->prack_mutex);
+				if (sofia_test_flag(tech_pvt, TFLAG_PRACK_LOCK)) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+							"%s Waiting for incoming PRACK! (Blocking %s message)\n", switch_channel_get_name(channel), message_str);
+					if (switch_thread_cond_timedwait(tech_pvt->prack_cond, tech_pvt->prack_mutex, t1x64 * 1000) == SWITCH_STATUS_TIMEOUT) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+							"%s Timeout on waiting for PRACK! (Unblock %s message)\n", switch_channel_get_name(channel), message_str);
+					} else {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+							"%s Received PRACK! (Unblock %s message)\n", switch_channel_get_name(channel), message_str);
+					}
+				} else {
+					if (msg->message_id != SWITCH_MESSAGE_INDICATE_ANSWER) {
+						sofia_set_flag(tech_pvt, TFLAG_PRACK_LOCK);
 					}
 				}
-				break;
-			case SWITCH_MESSAGE_INDICATE_ANSWER:
-				{
-					switch_time_t diff = 0;
-					if (times->progress_media && times->progress_media > times->progress) {
-						diff = (switch_micro_time_now() - times->progress_media)/1000;
-					} else if (times->progress && times->progress > times->progress_media) {
-						diff = (switch_micro_time_now() - times->progress)/1000;
-					}
-					if (diff < minimum_diff) {
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-								"%s Applying answer delay due to 100rel: %ld\n", switch_channel_get_name(channel), ((300 - diff) + 100));
-						switch_yield(((minimum_diff - diff) + 100) * 1000);
-					}
-				}
-				break;
-			default:
-				break;
+				switch_mutex_unlock(tech_pvt->prack_mutex);
 			}
+			break;
+		default:
+			break;
 		}
 	}
 
