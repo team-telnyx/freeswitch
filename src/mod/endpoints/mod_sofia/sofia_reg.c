@@ -229,16 +229,6 @@ void sofia_reg_truly_del_gateway(sofia_profile_t *profile)
 						switch_event_destroy(&gateway_ptr->ib_vars);
 					}
 
-					if (gateway_ptr->sofia_private) {
-						sofia_private_free(gateway_ptr->sofia_private);
-					}
-
-					if (gateway_ptr->nh) {
-						nua_handle_bind(gateway_ptr->nh, NULL);
-						nua_handle_destroy(gateway_ptr->nh);
-						gateway_ptr->nh = NULL;
-					}
-
 					switch_core_destroy_memory_pool(&(gateway_ptr->pool));
 			}
 			
@@ -469,6 +459,22 @@ void sofia_reg_check_gateway(sofia_profile_t *profile, time_t now)
 
 			switch_safe_free(user_via);
 			user_via = NULL;
+		}
+
+		if(ostate == REG_STATE_DOWN && gateway_ptr->destroy) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Destroy sofia_private and nua_handler for gateway %s\n", gateway_ptr->name);
+
+			if (gateway_ptr->sofia_private) {
+				sofia_private_free(gateway_ptr->sofia_private);
+			}
+
+			if (gateway_ptr->nh) {
+				nua_handle_bind(gateway_ptr->nh, NULL);
+				nua_handle_destroy(gateway_ptr->nh);
+				gateway_ptr->nh = NULL;
+			}
+
+			gateway_ptr->destroy = 0;
 		}
 
 		switch (ostate) {

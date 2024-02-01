@@ -1518,11 +1518,6 @@ static void our_sofia_event_callback(nua_event_t event,
 			if (!(gateway = sofia_reg_find_gateway(sofia_private->gateway_name))) {
 				return;
 			}
-			if (event == nua_r_unregister && status != 401 && status != 407) {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Delete gateway %s after unregister.\n", sofia_private->gateway_name);
-				sofia_glue_del_gateway(gateway);
-				return;
-			}
 		} else if (!zstr(sofia_private->uuid)) {
 			if ((session = de->init_session)) {
 				de->init_session = NULL;
@@ -1628,6 +1623,12 @@ static void our_sofia_event_callback(nua_event_t event,
 				}
 			}
 		}
+	}
+
+	if (event == nua_r_unregister && status != 401 && status != 407 && status >= 200) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Mark gateway %s for destruction after unregister. Status %d.\n", sofia_private->gateway_name, status);
+		gateway->destroy = 1;
+		goto done;
 	}
 
 	if (sofia_test_pflag(profile, PFLAG_AUTH_ALL) && tech_pvt && tech_pvt->key && sip && (event < nua_r_set_params || event > nua_r_authenticate)) {
