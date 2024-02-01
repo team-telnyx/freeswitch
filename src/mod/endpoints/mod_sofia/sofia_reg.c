@@ -205,16 +205,6 @@ void sofia_reg_truly_del_gateway(sofia_profile_t *profile)
 				}
 			}
 
-			if (gateway_ptr->sofia_private) {
-				sofia_private_free(gateway_ptr->sofia_private);
-			}
-
-			if (gateway_ptr->nh) {
-				nua_handle_bind(gateway_ptr->nh, NULL);
-				nua_handle_destroy(gateway_ptr->nh);
-				gateway_ptr->nh = NULL;
-			}
-
 			if (gateway_ptr->state == REG_STATE_NOREG || gateway_ptr->state == REG_STATE_DOWN) {
 					if (last) {
 						last->next = gateway_ptr->next;
@@ -237,6 +227,16 @@ void sofia_reg_truly_del_gateway(sofia_profile_t *profile)
 					}
 					if (gateway_ptr->ib_vars) {
 						switch_event_destroy(&gateway_ptr->ib_vars);
+					}
+
+					if (gateway_ptr->sofia_private) {
+						sofia_private_free(gateway_ptr->sofia_private);
+					}
+
+					if (gateway_ptr->nh) {
+						nua_handle_bind(gateway_ptr->nh, NULL);
+						nua_handle_destroy(gateway_ptr->nh);
+						gateway_ptr->nh = NULL;
 					}
 
 					switch_core_destroy_memory_pool(&(gateway_ptr->pool));
