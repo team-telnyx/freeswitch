@@ -2094,7 +2094,7 @@ SWITCH_DECLARE(int) switch_core_session_check_incoming_crypto(switch_core_sessio
 			if (switch_channel_var_true(session->channel, "skip_empty_rtp_secure_media_mki") 
 				&& (!strcmp((switch_core_session_sprintf(smh->session, "%s|1:1", crypto)), engine->ssec[engine->crypto_type].remote_crypto_key) 
 				|| !strcmp(crypto, switch_core_session_sprintf(smh->session, "%s|1:1", engine->ssec[engine->crypto_type].remote_crypto_key)))) {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "CRYPTO: Remote key is same as existing key still but with or without MKI present\n");
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "CRYPTO: Remote key is same as existing key but with or without MKI present\n");
 					skip_local = 1;
 			}
 
