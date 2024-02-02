@@ -1626,8 +1626,8 @@ static void our_sofia_event_callback(nua_event_t event,
 	}
 
 	if (event == nua_r_unregister && status != 401 && status != 407 && status >= 200) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Mark gateway %s for destruction after unregister. Status %d.\n", sofia_private->gateway_name, status);
 		if (gateway) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Mark gateway %s for destruction after unregister. Status %d.\n", sofia_private->gateway_name, status);
 			gateway->destroy = 1;
 		}
 		goto done;
