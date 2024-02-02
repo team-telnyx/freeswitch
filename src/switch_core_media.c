@@ -2088,17 +2088,30 @@ SWITCH_DECLARE(int) switch_core_session_check_incoming_crypto(switch_core_sessio
 		} else {
 			const char *a = switch_stristr("AE", engine->ssec[engine->crypto_type].remote_crypto_key);
 			const char *b = switch_stristr("AE", crypto);
+			switch_bool_t skip_local = 0;
 
-			if (sdp_type == SDP_TYPE_REQUEST) {
-				if (!vval) {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Unsupported Crypto [%s]\n", crypto);
-					goto end;
+			/* Skip building new local key if only remote mki is added or removed */
+			if (switch_channel_var_true(session->channel, "skip_empty_rtp_secure_media_mki") 
+				&& (!strcmp((switch_core_session_sprintf(smh->session, "%s|1:1", crypto)), engine->ssec[engine->crypto_type].remote_crypto_key) 
+				|| !strcmp(crypto, switch_core_session_sprintf(smh->session, "%s|1:1", engine->ssec[engine->crypto_type].remote_crypto_key)))) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "CRYPTO: Remote key is same as existing key still but with or without MKI present\n");
+					skip_local = 1;
+			}
+
+			if (!skip_local){
+				if (sdp_type == SDP_TYPE_REQUEST) {
+					if (!vval) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Unsupported Crypto [%s]\n", crypto);
+						goto end;
+					}
+					switch_channel_set_variable(session->channel, varname, vval);
+
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "CRYPTO: build crypto for tag %d\n", crypto_tag);
+					switch_core_media_build_crypto(session->media_handle, type, crypto_tag, ctype, SWITCH_RTP_CRYPTO_SEND, 1, use_alias);
+					if (switch_channel_var_true(session->channel, "rtp_secure_media_mki"))
+						switch_core_media_add_crypto(session, &engine->ssec[engine->crypto_type], SWITCH_RTP_CRYPTO_SEND);
+					switch_rtp_add_crypto_key(engine->rtp_session, SWITCH_RTP_CRYPTO_SEND, atoi(crypto), &engine->ssec[engine->crypto_type]);
 				}
-				switch_channel_set_variable(session->channel, varname, vval);
-
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "CRYPTO: build crypto for tag %d\n", crypto_tag);
-				switch_core_media_build_crypto(session->media_handle, type, crypto_tag, ctype, SWITCH_RTP_CRYPTO_SEND, 1, use_alias);
-				switch_rtp_add_crypto_key(engine->rtp_session, SWITCH_RTP_CRYPTO_SEND, atoi(crypto), &engine->ssec[engine->crypto_type]);
 			}
 
 			if (a && b && !strncasecmp(a, b, 23)) {
