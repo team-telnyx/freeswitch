@@ -4745,9 +4745,9 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 				const char *use_rtcp_mux = switch_channel_get_variable(smh->session->channel, "rtcp_mux");
 
 				if (!use_rtcp_mux || switch_true(use_rtcp_mux)) {
-				engine->rtcp_mux = SWITCH_TRUE;
-				engine->remote_rtcp_port = engine->cur_payload_map->remote_sdp_port;
-				got_rtcp_mux++;
+					engine->rtcp_mux = SWITCH_TRUE;
+					engine->remote_rtcp_port = engine->cur_payload_map->remote_sdp_port;
+					got_rtcp_mux++;
 
 				}
 
