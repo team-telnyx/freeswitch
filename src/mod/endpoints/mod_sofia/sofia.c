@@ -1625,14 +1625,6 @@ static void our_sofia_event_callback(nua_event_t event,
 		}
 	}
 
-	if (event == nua_r_unregister && status != 401 && status != 407 && status >= 200) {
-		if (gateway) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Mark gateway %s for destruction after unregister. Status %d.\n", sofia_private->gateway_name, status);
-			gateway->destroy = 1;
-		}
-		goto done;
-	}
-
 	if (sofia_test_pflag(profile, PFLAG_AUTH_ALL) && tech_pvt && tech_pvt->key && sip && (event < nua_r_set_params || event > nua_r_authenticate)) {
 		sip_authorization_t const *authorization = NULL;
 
