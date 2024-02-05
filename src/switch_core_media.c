@@ -2032,6 +2032,7 @@ SWITCH_DECLARE(int) switch_core_session_check_incoming_crypto(switch_core_sessio
 	int use_alias = 0;
 	switch_rtp_engine_t *engine;
 	switch_media_handle_t *smh;
+	int mki_set;
 
 	if (!(smh = session->media_handle)) {
 		return 0;
@@ -2057,6 +2058,7 @@ SWITCH_DECLARE(int) switch_core_session_check_incoming_crypto(switch_core_sessio
 		engine->ssec[j].remote_crypto_tag = SWITCH_REMOTE_CRYPTO_TAG_INVALID;
 	}
 **/
+	mki_set = switch_channel_var_true(session->channel, "skip_empty_rtp_secure_media_mki");
 
 	for (i = 0; smh->crypto_suite_order[i] != CRYPTO_INVALID; i++) {
 		switch_rtp_crypto_key_type_t j = SUITES[smh->crypto_suite_order[i]].type;
@@ -2090,7 +2092,15 @@ SWITCH_DECLARE(int) switch_core_session_check_incoming_crypto(switch_core_sessio
 		} else {
 			const char *a = switch_stristr("AE", engine->ssec[engine->crypto_type].remote_crypto_key);
 			const char *b = switch_stristr("AE", crypto);
+			switch_bool_t skip_local = SWITCH_FALSE;
 
+			/* Skip building new local key if only remote mki is added or removed */
+			if (mki_set && (strstr(crypto, engine->ssec[engine->crypto_type].remote_crypto_key) || strstr(engine->ssec[engine->crypto_type].remote_crypto_key, crypto))) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "CRYPTO: Remote key is same as existing key but with or without MKI present\n");
+					skip_local = SWITCH_TRUE;
+			}
+
+			if (!skip_local){
 				if (sdp_type == SDP_TYPE_REQUEST) {
 					if (!vval) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Unsupported Crypto [%s]\n", crypto);
@@ -2103,6 +2113,7 @@ SWITCH_DECLARE(int) switch_core_session_check_incoming_crypto(switch_core_sessio
 					if (switch_channel_var_true(session->channel, "rtp_secure_media_mki"))
 						switch_core_media_add_crypto(session, &engine->ssec[engine->crypto_type], SWITCH_RTP_CRYPTO_SEND);
 					switch_rtp_add_crypto_key(engine->rtp_session, SWITCH_RTP_CRYPTO_SEND, atoi(crypto), &engine->ssec[engine->crypto_type]);
+				}
 			}
 
 			if (a && b && !strncasecmp(a, b, 23)) {
