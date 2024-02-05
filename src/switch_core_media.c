@@ -2031,6 +2031,7 @@ SWITCH_DECLARE(int) switch_core_session_check_incoming_crypto(switch_core_sessio
 	switch_rtp_engine_t *engine;
 	switch_media_handle_t *smh;
 	int mki_set;
+	int skip_empty_mki_set;
 
 	if (!(smh = session->media_handle)) {
 		return 0;
@@ -2056,7 +2057,9 @@ SWITCH_DECLARE(int) switch_core_session_check_incoming_crypto(switch_core_sessio
 		engine->ssec[j].remote_crypto_tag = SWITCH_REMOTE_CRYPTO_TAG_INVALID;
 	}
 **/
-	mki_set = switch_channel_var_true(session->channel, "skip_empty_rtp_secure_media_mki");
+
+	mki_set = switch_channel_var_true(session->channel, "rtp_secure_media_mki");
+	skip_empty_mki_set = switch_channel_var_true(session->channel, "skip_empty_rtp_secure_media_mki");
 
 	for (i = 0; smh->crypto_suite_order[i] != CRYPTO_INVALID; i++) {
 		switch_rtp_crypto_key_type_t j = SUITES[smh->crypto_suite_order[i]].type;
@@ -2093,7 +2096,7 @@ SWITCH_DECLARE(int) switch_core_session_check_incoming_crypto(switch_core_sessio
 			switch_bool_t skip_local = SWITCH_FALSE;
 
 			/* Skip building new local key if only remote mki is added or removed */
-			if (mki_set && (strstr(crypto, engine->ssec[engine->crypto_type].remote_crypto_key) || strstr(engine->ssec[engine->crypto_type].remote_crypto_key, crypto))) {
+			if (skip_empty_mki_set && (strstr(crypto, engine->ssec[engine->crypto_type].remote_crypto_key) || strstr(engine->ssec[engine->crypto_type].remote_crypto_key, crypto))) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "CRYPTO: Remote key is same as existing key but with or without MKI present\n");
 					skip_local = SWITCH_TRUE;
 			}
@@ -2108,7 +2111,7 @@ SWITCH_DECLARE(int) switch_core_session_check_incoming_crypto(switch_core_sessio
 
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "CRYPTO: build crypto for tag %d\n", crypto_tag);
 					switch_core_media_build_crypto(session->media_handle, type, crypto_tag, ctype, SWITCH_RTP_CRYPTO_SEND, 1, use_alias);
-					if (switch_channel_var_true(session->channel, "rtp_secure_media_mki"))
+					if (mki_set)
 						switch_core_media_add_crypto(session, &engine->ssec[engine->crypto_type], SWITCH_RTP_CRYPTO_SEND);
 					switch_rtp_add_crypto_key(engine->rtp_session, SWITCH_RTP_CRYPTO_SEND, atoi(crypto), &engine->ssec[engine->crypto_type]);
 				}
