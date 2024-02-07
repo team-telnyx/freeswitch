@@ -500,9 +500,6 @@ void sofia_reg_check_gateway(sofia_profile_t *profile, time_t now)
 
 		case REG_STATE_UNREGISTER:
 			sofia_reg_kill_reg(gateway_ptr);
-			gateway_ptr->state = REG_STATE_DOWN;
-			gateway_ptr->status = SOFIA_GATEWAY_DOWN;
-			gateway_ptr->last_inactive = switch_epoch_time_now(NULL);
 			request++; // Only increment when FS sends out request
 			break;
 		case REG_STATE_UNREGED:

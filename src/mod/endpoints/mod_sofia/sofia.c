@@ -1672,11 +1672,24 @@ static void our_sofia_event_callback(nua_event_t event,
 		break;
 	case nua_r_unregister:
 		if (gateway && status != 401 && status != 407 && status >= 200) {
-			sofia_private_free(gateway->sofia_private);
-			nua_handle_bind(gateway->nh, NULL);
-			nua_handle_destroy(gateway->nh);
-			gateway->nh = NULL;
-			sofia_reg_fire_custom_gateway_state_event(gateway, status, NULL);
+			reg_state_t ostate = gateway->state;
+
+			gateway->state = REG_STATE_DOWN;
+			gateway->status = SOFIA_GATEWAY_DOWN;
+			gateway->last_inactive = switch_epoch_time_now(NULL);
+
+			if (gateway->sofia_private) {
+				sofia_private_free(gateway->sofia_private);
+			}
+
+			if (gateway->nh) {
+				nua_handle_bind(gateway->nh, NULL);
+				nua_handle_destroy(gateway->nh);
+				gateway->nh = NULL;
+			}
+			if (ostate != gateway->state) {
+				sofia_reg_fire_custom_gateway_state_event(gateway, status, NULL);
+			}
 		}
 		break;
 	case nua_r_unsubscribe:
