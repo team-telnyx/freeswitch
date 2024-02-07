@@ -3967,7 +3967,7 @@ static switch_status_t cmd_profile(char **argv, int argc, switch_stream_handle_t
 			stream->write_function(stream, "+OK\n");
 		} else if ((gateway_ptr = sofia_reg_find_gateway(gname))) {
 			if (gateway_ptr->state != REG_STATE_NOREG && gateway_ptr->state != REG_STATE_DOWN) {
-				if (gateway_ptr->state == REG_STATE_FAILED) {
+				if (gateway_ptr->state == REG_STATE_FAILED && !sofia_test_flag(gateway_ptr, REG_FLAG_REGISTERED)) {
 					gateway_ptr->retry = 0;
 					gateway_ptr->state = REG_STATE_DOWN;
 					sofia_reg_fire_custom_gateway_state_event(gateway_ptr, 0, NULL);

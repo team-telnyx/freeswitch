@@ -2744,6 +2744,9 @@ void sofia_reg_handle_sip_r_register(int status,
 					}
 				}
 			}
+			if (!sofia_test_flag(gateway, REG_FLAG_REGISTERED)) {
+				sofia_set_flag(gateway, REG_FLAG_REGISTERED);
+			}
 			gateway->state = REG_STATE_REGISTER;
 			break;
 		case 100:
