@@ -1671,6 +1671,14 @@ static void our_sofia_event_callback(nua_event_t event,
 	case nua_r_info:
 		break;
 	case nua_r_unregister:
+		if (gateway && status != 401 && status != 407 && status >= 200) {
+			sofia_private_free(gateway->sofia_private);
+			nua_handle_bind(gateway->nh, NULL);
+			nua_handle_destroy(gateway->nh);
+			gateway->nh = NULL;
+			sofia_reg_fire_custom_gateway_state_event(gateway, status, NULL);
+		}
+		break;
 	case nua_r_unsubscribe:
 	case nua_i_terminated:
 	case nua_r_publish:
