@@ -1544,7 +1544,7 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 			break;
 		}
 
-		if (channel_flag != CF_FLAG_MAX && !switch_channel_test_flag(channel, channel_flag)) {
+		if (channel_flag != CF_FLAG_MAX) {
 			switch (msg->message_id) {
 			case SWITCH_MESSAGE_INDICATE_RINGING:
 			case SWITCH_MESSAGE_INDICATE_PROGRESS:
