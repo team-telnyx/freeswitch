@@ -3981,7 +3981,6 @@ static void parse_gateways(sofia_profile_t *profile, switch_xml_t gateways_tag, 
 
 		switch_mutex_lock(mod_sofia_globals.hash_mutex);
 		if ((gp = switch_core_hash_find(mod_sofia_globals.gateway_hash, name)) && (gp = switch_core_hash_find(mod_sofia_globals.gateway_hash, pkey)) && !gp->deleted) {
-			// GWs are parsed each time we add/remove a GW. The logs are flooded with this warning when using mod_verto/mod_telnyx_rtc
 			//switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Ignoring duplicate gateway '%s'\n", name);
 			switch_mutex_unlock(mod_sofia_globals.hash_mutex);
 			free(pkey);
