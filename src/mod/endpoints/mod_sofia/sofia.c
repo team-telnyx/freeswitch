@@ -5803,6 +5803,12 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						} else {
 							sofia_clear_media_flag(profile, SCMF_REWRITE_TIMESTAMPS);
 						}
+					} else if (!strcasecmp(var, "srtp-skip-empty-mki")) {
+						if (switch_true(val)) {
+							sofia_set_media_flag(profile, SCMF_SRTP_SKIP_EMPTY_MKI);
+						} else {
+							sofia_clear_media_flag(profile, SCMF_SRTP_SKIP_EMPTY_MKI);
+						}
 					} else if (!strcasecmp(var, "sdp-reject-ipv6")) {
 						if (switch_true(val)) {
 							sofia_set_media_flag(profile, SCMF_REJECT_IPV6);

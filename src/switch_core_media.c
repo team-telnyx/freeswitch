@@ -1642,8 +1642,20 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_add_crypto(switch_core_session
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Bad MKI found in %s, (parsed as: id %u size %u lifetime base %u exp %u\n", p, mki_id, mki_size, lifetime_base, lifetime_exp);
 				return SWITCH_STATUS_FALSE;
 			} else if (mki_id == 0 || lifetime == 0) {
+				switch_media_handle_t *smh = NULL;
+				const char * skip_empty_mki_var = NULL;
+				int skip_empty_mki = 0;
+				if ((smh = session->media_handle)) {
+					skip_empty_mki = switch_media_handle_test_media_flag(smh, SCMF_SRTP_SKIP_EMPTY_MKI);
+				}
+
+				skip_empty_mki_var = switch_channel_get_variable(session->channel, "skip_empty_rtp_secure_media_mki");
+				if (!zstr(skip_empty_mki_var)) {
+					skip_empty_mki = switch_true(skip_empty_mki_var);
+				}
+
 				if (mki_id == 0) {
-					if (key_material && !switch_channel_var_true(session->channel, "skip_empty_rtp_secure_media_mki"))
+					if (key_material && !skip_empty_mki)
 						goto bad_key_no_mki_index;
 
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "Skipping MKI due to empty index\n");
