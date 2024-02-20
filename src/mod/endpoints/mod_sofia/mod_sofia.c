@@ -1474,8 +1474,6 @@ static switch_status_t sofia_send_dtmf(switch_core_session_t *session, const swi
 	return SWITCH_STATUS_SUCCESS;
 }
 
-#define SIP_100REL_MIN_DIFF_PROGRESS_TIME 300
-
 static switch_status_t sofia_receive_message(switch_core_session_t *session, switch_core_session_message_t *msg)
 {
 	switch_channel_t *channel = switch_core_session_get_channel(session);
