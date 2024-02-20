@@ -1515,14 +1515,6 @@ static void our_sofia_event_callback(nua_event_t event,
 
 	if (sofia_private && sofia_private != &mod_sofia_globals.destroy_private && sofia_private != &mod_sofia_globals.keep_private) {
 		if (!zstr(sofia_private->gateway_name)) {
-			if (event == nua_r_unregister && status != 401 && status != 407) {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Destroy handle after unregister for gateway %s.\n", sofia_private->gateway_name);
-				sofia_private_free(sofia_private);
-				nua_handle_bind(nh, NULL);
-				nua_handle_destroy(nh);
-				nh = NULL;
-				return;
-			}
 			if (!(gateway = sofia_reg_find_gateway(sofia_private->gateway_name))) {
 				return;
 			}
@@ -1679,6 +1671,27 @@ static void our_sofia_event_callback(nua_event_t event,
 	case nua_r_info:
 		break;
 	case nua_r_unregister:
+		if (gateway && status != 401 && status != 407 && status >= 200) {
+			reg_state_t ostate = gateway->state;
+
+			gateway->state = REG_STATE_DOWN;
+			gateway->status = SOFIA_GATEWAY_DOWN;
+			gateway->last_inactive = switch_epoch_time_now(NULL);
+
+			if (gateway->sofia_private) {
+				sofia_private_free(gateway->sofia_private);
+			}
+
+			if (gateway->nh) {
+				nua_handle_bind(gateway->nh, NULL);
+				nua_handle_destroy(gateway->nh);
+				gateway->nh = NULL;
+			}
+			if (ostate != gateway->state) {
+				sofia_reg_fire_custom_gateway_state_event(gateway, status, NULL);
+			}
+		}
+		break;
 	case nua_r_unsubscribe:
 	case nua_i_terminated:
 	case nua_r_publish:
@@ -3659,7 +3672,7 @@ void *SWITCH_THREAD_FUNC sofia_profile_thread_run(switch_thread_t *thread, void 
 	/* Mark all gateways as deleted and set REG_STATE_UNREGISTER state on REG gateways */
 	sofia_glue_del_every_gateway(profile);
 	/* This prevent doing batch request for reg check */
-	profile->gateway_reg_max_cps = 0; 
+	profile->gateway_reg_max_cps = profile->gateway_shutdown_reg_max_cps; 
 	/* First call will unregister and set state to DOWN so a gateway is ready for deletion */
 	sofia_reg_check_gateway(profile, switch_epoch_time_now(NULL));
 	sofia_sub_check_gateway(profile, switch_epoch_time_now(NULL));
@@ -3968,7 +3981,7 @@ static void parse_gateways(sofia_profile_t *profile, switch_xml_t gateways_tag, 
 
 		switch_mutex_lock(mod_sofia_globals.hash_mutex);
 		if ((gp = switch_core_hash_find(mod_sofia_globals.gateway_hash, name)) && (gp = switch_core_hash_find(mod_sofia_globals.gateway_hash, pkey)) && !gp->deleted) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Ignoring duplicate gateway '%s'\n", name);
+			//switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Ignoring duplicate gateway '%s'\n", name);
 			switch_mutex_unlock(mod_sofia_globals.hash_mutex);
 			free(pkey);
 			goto skip;
@@ -5847,6 +5860,8 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						profile->max_auth_validity = atoi(val);
 					} else if (!strcasecmp(var, "gateway-reg-max-cps")) {
 						profile->gateway_reg_max_cps = atoi(val);
+					} else if (!strcasecmp(var, "gateway-shutdown-reg-max-cps")) {
+						profile->gateway_shutdown_reg_max_cps = atoi(val);
 					} else if (!strcasecmp(var, "auth-require-user")) {
 						if (switch_true(val)) {
 							sofia_set_pflag(profile, PFLAG_AUTH_REQUIRE_USER);
