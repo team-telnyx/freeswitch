@@ -1513,7 +1513,6 @@ static void our_sofia_event_callback(nua_event_t event,
 		}
 	}
 
-
 	if (sofia_private && sofia_private != &mod_sofia_globals.destroy_private && sofia_private != &mod_sofia_globals.keep_private) {
 		if (!zstr(sofia_private->gateway_name)) {
 			if (!(gateway = sofia_reg_find_gateway(sofia_private->gateway_name))) {
@@ -1672,6 +1671,27 @@ static void our_sofia_event_callback(nua_event_t event,
 	case nua_r_info:
 		break;
 	case nua_r_unregister:
+		if (gateway && status != 401 && status != 407 && status >= 200) {
+			reg_state_t ostate = gateway->state;
+
+			gateway->state = REG_STATE_DOWN;
+			gateway->status = SOFIA_GATEWAY_DOWN;
+			gateway->last_inactive = switch_epoch_time_now(NULL);
+
+			if (gateway->sofia_private) {
+				sofia_private_free(gateway->sofia_private);
+			}
+
+			if (gateway->nh) {
+				nua_handle_bind(gateway->nh, NULL);
+				nua_handle_destroy(gateway->nh);
+				gateway->nh = NULL;
+			}
+			if (ostate != gateway->state) {
+				sofia_reg_fire_custom_gateway_state_event(gateway, status, NULL);
+			}
+		}
+		break;
 	case nua_r_unsubscribe:
 	case nua_i_terminated:
 	case nua_r_publish:
@@ -2606,6 +2626,26 @@ void sofia_event_callback(nua_event_t event,
 				nua_respond(nh, 503, "System Paused", NUTAG_WITH_THIS(nua), TAG_END());
 				nua_handle_destroy(nh);
 				goto end;
+			}
+		}
+
+		break;
+
+	case nua_i_prack:
+		if (sofia_private) {
+			switch_core_session_t *session;
+			if ((session = switch_core_session_locate(sofia_private->uuid))) {
+				switch_channel_t *channel = switch_core_session_get_channel(session);
+				if (switch_channel_var_true(channel, "apply_100rel_sync")) {
+					private_object_t *tech_pvt = switch_core_session_get_private(session);					
+					switch_mutex_lock(tech_pvt->prack_mutex);
+					if (sofia_test_flag(tech_pvt, TFLAG_PRACK_LOCK)) {
+						sofia_clear_flag(tech_pvt, TFLAG_PRACK_LOCK);
+						switch_thread_cond_signal(tech_pvt->prack_cond);
+					}
+					switch_mutex_unlock(tech_pvt->prack_mutex);
+				}
+				switch_core_session_rwunlock(session);
 			}
 		}
 
@@ -3631,6 +3671,8 @@ void *SWITCH_THREAD_FUNC sofia_profile_thread_run(switch_thread_t *thread, void 
 	/* Gateway cleanup start */
 	/* Mark all gateways as deleted and set REG_STATE_UNREGISTER state on REG gateways */
 	sofia_glue_del_every_gateway(profile);
+	/* This prevent doing batch request for reg check */
+	profile->gateway_reg_max_cps = profile->gateway_shutdown_reg_max_cps; 
 	/* First call will unregister and set state to DOWN so a gateway is ready for deletion */
 	sofia_reg_check_gateway(profile, switch_epoch_time_now(NULL));
 	sofia_sub_check_gateway(profile, switch_epoch_time_now(NULL));
@@ -3939,7 +3981,7 @@ static void parse_gateways(sofia_profile_t *profile, switch_xml_t gateways_tag, 
 
 		switch_mutex_lock(mod_sofia_globals.hash_mutex);
 		if ((gp = switch_core_hash_find(mod_sofia_globals.gateway_hash, name)) && (gp = switch_core_hash_find(mod_sofia_globals.gateway_hash, pkey)) && !gp->deleted) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Ignoring duplicate gateway '%s'\n", name);
+			//switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Ignoring duplicate gateway '%s'\n", name);
 			switch_mutex_unlock(mod_sofia_globals.hash_mutex);
 			free(pkey);
 			goto skip;
@@ -5315,6 +5357,12 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						} else {
 							sofia_clear_media_flag(profile, SCMF_DISABLE_RTP_AUTOADJ);
 						}
+					} else if (!strcasecmp(var, "srtp-hangup-on-error")) {
+						if (switch_true(val)) {
+							sofia_set_media_flag(profile, SCMF_SRTP_HANGUP_ON_ERROR);
+						} else {
+							sofia_clear_media_flag(profile, SCMF_SRTP_HANGUP_ON_ERROR);
+						}
 					} else if (!strcasecmp(var, "NDLB-support-asterisk-missing-srtp-auth")) {
 						if (switch_true(val)) {
 							profile->mndlb |= SM_NDLB_DISABLE_SRTP_AUTH;
@@ -5810,6 +5858,10 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						profile->nonce_ttl = atoi(val);
 					} else if (!strcasecmp(var, "max-auth-validity") && !zstr(val)) {
 						profile->max_auth_validity = atoi(val);
+					} else if (!strcasecmp(var, "gateway-reg-max-cps")) {
+						profile->gateway_reg_max_cps = atoi(val);
+					} else if (!strcasecmp(var, "gateway-shutdown-reg-max-cps")) {
+						profile->gateway_shutdown_reg_max_cps = atoi(val);
 					} else if (!strcasecmp(var, "auth-require-user")) {
 						if (switch_true(val)) {
 							sofia_set_pflag(profile, PFLAG_AUTH_REQUIRE_USER);
@@ -5882,6 +5934,12 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						} else {
 							sofia_set_pflag(profile, PFLAG_DISABLE_100REL);
 						}
+					} else if (!strcasecmp(var, "enable-100rel-sync")) {
+						if (switch_true(val)) {
+							sofia_set_pflag(profile, PFLAG_ENABLE_100REL_SYNC);
+						} else {
+							sofia_clear_pflag(profile, PFLAG_ENABLE_100REL_SYNC);
+						}					
 					} else if (!strcasecmp(var, "enable-compact-headers")) {
 						if (switch_true(val)) {
 							sofia_set_pflag(profile, PFLAG_SIPCOMPACT);
@@ -6335,6 +6393,14 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 							sofia_set_pflag(profile, PFLAG_ALWAYS_BRIDGE_EARLY_MEDIA);
 						} else {
 							sofia_clear_pflag(profile, PFLAG_ALWAYS_BRIDGE_EARLY_MEDIA);
+						}
+					} else if (!strcasecmp(var, "telnyx-sip-proxy-timeout-hangup-cause") && !zstr(val)) {
+						switch_call_cause_t timeout_cause;
+						timeout_cause = switch_channel_str2cause(val);
+						if (timeout_cause != SWITCH_CAUSE_NORMAL_CLEARING) {
+							profile->telnyx_sip_proxy_timeout_hangup_cause = timeout_cause;
+						} else {
+							profile->telnyx_sip_proxy_timeout_hangup_cause = 0;
 						}
 					} else if (!strcasecmp(var, "default-ringback")) {
 						profile->default_ringback = switch_core_strdup(profile->pool, val);
@@ -9183,7 +9249,14 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 			if (tech_pvt->q850_cause) {
 				cause = tech_pvt->q850_cause;
 			} else {
-				cause = sofia_glue_sip_cause_to_freeswitch(status);
+				// ENGDESK-27289: this modifies 408 hangup cause caused by sip transaction timeouts
+				if (status == 408 && zstr(switch_channel_get_variable(channel, "sip_reply_host")) && profile->telnyx_sip_proxy_timeout_hangup_cause) {
+					cause = profile->telnyx_sip_proxy_timeout_hangup_cause;
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "SIP transaction timer expired. Mapping 408 to %s\n",
+										switch_channel_cause2str(cause));
+				} else {
+					cause = sofia_glue_sip_cause_to_freeswitch(status);
+				}
 			}
 			if (status) {
 				switch_snprintf(st, sizeof(st), "%d", status);
@@ -11230,6 +11303,18 @@ void sofia_handle_sip_i_invite(switch_core_session_t *session, nua_t *nua, sofia
 					switch_event_destroy(&v_event);
 				}
 				goto fail;
+			}
+		}
+	}
+
+	if (sip && sip->sip_supported && !sofia_test_pflag(profile, PFLAG_DISABLE_100REL)) {
+		int supported_100rel = sip_has_feature(sip->sip_supported, "100rel");
+		if (supported_100rel) {
+			const char *sync = switch_channel_get_variable(channel, "apply_100rel_sync");
+			if (sync) {
+				switch_channel_set_variable(channel, "apply_100rel_sync", switch_true(sync) ? "true" : "false");
+			} else if (sofia_test_pflag(profile, PFLAG_ENABLE_100REL_SYNC)) {
+				switch_channel_set_variable(channel, "apply_100rel_sync", "true");
 			}
 		}
 	}

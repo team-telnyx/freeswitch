@@ -320,6 +320,7 @@ typedef enum {
 	PFLAG_TAGGED_ON_PRACK,
 	PFLAG_SDP_MEDIA_STRICT_FMT,
 	PFLAG_ALWAYS_BRIDGE_EARLY_MEDIA,
+	PFLAG_ENABLE_100REL_SYNC,
 	/* No new flags below this line */
 	PFLAG_MAX
 } PFLAGS;
@@ -373,6 +374,7 @@ typedef enum {
 	TFLAG_KEEPALIVE,
 	TFLAG_SKIP_EARLY,
 	TFLAG_100_UEPOCH_SET,
+	TFLAG_PRACK_LOCK,
 	/* No new flags below this line */
 	TFLAG_MAX
 } TFLAGS;
@@ -432,6 +434,7 @@ extern struct mod_sofia_globals mod_sofia_globals;
 typedef enum {
 	REG_FLAG_AUTHED,
 	REG_FLAG_CALLERID,
+	REG_FLAG_REGISTERED,
 
 	/* No new flags below this line */
 	REG_FLAG_MAX
@@ -728,6 +731,9 @@ struct sofia_profile {
 	switch_mutex_t *dbh_mutex;
 	switch_mutex_t *gateway_mutex;
 	sofia_gateway_t *gateways;
+	sofia_gateway_t *next_check_gateway_ptr;
+	unsigned int gateway_reg_max_cps;
+	unsigned int gateway_shutdown_reg_max_cps;
 	unsigned int gateway_unreg_max_yield_ms;
 	//su_home_t *home;
 	switch_hash_t *chat_hash;
@@ -840,6 +846,7 @@ struct sofia_profile {
 	uint8_t rfc8760_algs_count;
 	sofia_auth_algs_t auth_algs[SOFIA_MAX_REG_ALGS];
 	uint8_t disable_recovery_record_route_fixup;
+	switch_call_cause_t telnyx_sip_proxy_timeout_hangup_cause;
 };
 
 
@@ -924,6 +931,9 @@ struct private_object {
 	switch_time_t last_audio_activity_signal_write;
 	switch_time_t last_audio_inactivity_signal_write;
 	uint8_t recovered_call_route_fixed;
+
+	switch_mutex_t *prack_mutex;
+	switch_thread_cond_t *prack_cond;
 };
 
 

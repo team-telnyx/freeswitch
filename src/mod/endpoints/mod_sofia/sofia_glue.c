@@ -55,6 +55,8 @@ private_object_t *sofia_glue_new_pvt(switch_core_session_t *session)
 	private_object_t *tech_pvt = (private_object_t *) switch_core_session_alloc(session, sizeof(private_object_t));
 	switch_mutex_init(&tech_pvt->flag_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 	switch_mutex_init(&tech_pvt->sofia_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
+	switch_mutex_init(&tech_pvt->prack_mutex, SWITCH_MUTEX_DEFAULT, switch_core_session_get_pool(session));
+	switch_thread_cond_create(&tech_pvt->prack_cond, switch_core_session_get_pool(session));
 	return tech_pvt;
 }
 
@@ -2175,7 +2177,7 @@ void sofia_glue_gateway_list(sofia_profile_t *profile, switch_stream_handle_t *s
 void sofia_glue_del_gateway(sofia_gateway_t *gp)
 {
 	if (!gp->deleted) {
-		if (gp->state != REG_STATE_NOREG) {
+		if (gp->state != REG_STATE_NOREG && gp->state != REG_STATE_DOWN) {
 			gp->retry = 0;
 			gp->state = REG_STATE_UNREGISTER;
 		}
@@ -2393,6 +2395,8 @@ int sofia_recover_callback(switch_core_session_t *session)
 
 	switch_mutex_init(&tech_pvt->flag_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 	switch_mutex_init(&tech_pvt->sofia_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
+	switch_mutex_init(&tech_pvt->prack_mutex, SWITCH_MUTEX_DEFAULT, switch_core_session_get_pool(session));
+	switch_thread_cond_create(&tech_pvt->prack_cond, switch_core_session_get_pool(session));
 
 	tech_pvt->mparams.remote_ip = (char *) switch_channel_get_variable(channel, "sip_network_ip");
 	tech_pvt->mparams.remote_port = atoi(switch_str_nil(switch_channel_get_variable(channel, "sip_network_port")));

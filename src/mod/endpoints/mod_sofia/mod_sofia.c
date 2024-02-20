@@ -448,6 +448,18 @@ switch_status_t sofia_on_hangup(switch_core_session_t *session)
 		return SWITCH_STATUS_SUCCESS;
 	}
 
+	if (switch_channel_var_true(channel, "apply_100rel_sync")) {
+		private_object_t *tech_pvt = switch_core_session_get_private(session);					
+		switch_mutex_lock(tech_pvt->prack_mutex);
+		if (sofia_test_flag(tech_pvt, TFLAG_PRACK_LOCK)) {
+			sofia_clear_flag(tech_pvt, TFLAG_PRACK_LOCK);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+					"%s Received Hangup while waiting PRACK: release PRACK lock\n", switch_channel_get_name(channel));
+			switch_thread_cond_signal(tech_pvt->prack_cond);
+		}
+		switch_mutex_unlock(tech_pvt->prack_mutex);
+	}
+
 	switch_mutex_lock(tech_pvt->sofia_mutex);
 
 
@@ -1493,6 +1505,82 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 	if (switch_channel_test_flag(channel, CF_CONFERENCE) && !zstr(tech_pvt->reply_contact) && !switch_stristr(";isfocus", tech_pvt->reply_contact)) {
 		tech_pvt->reply_contact = switch_core_session_sprintf(session, "%s;isfocus", tech_pvt->reply_contact);
 	}
+
+	// TODO
+	// Temporary solution until sofia-sip has been patch
+	// Possible race condition if 1xx and 200 OK is sent 
+	// immediately that may cause crash or will not wait
+	// for the prack before sending the final response.
+	if (switch_channel_var_true(channel, "apply_100rel_sync")) {
+		const char* message_str = "N/A";
+		uint32_t channel_flag = CF_FLAG_MAX;
+		switch (msg->message_id) {
+		case SWITCH_MESSAGE_INDICATE_RINGING: 
+			{
+				message_str = "RINGING";
+				if (!sofia_test_flag(tech_pvt, TFLAG_BYE) && !switch_channel_test_flag(channel, CF_RING_READY) &&
+					!switch_channel_test_flag(channel, CF_EARLY_MEDIA) && !switch_channel_test_flag(channel, CF_ANSWERED)) {
+					channel_flag = CF_RING_READY;
+				}
+				
+			}
+			break;
+		case SWITCH_MESSAGE_INDICATE_PROGRESS:
+			{
+				message_str = "PROGRESS";
+				if (!sofia_test_flag(tech_pvt, TFLAG_BYE) && !switch_channel_test_flag(channel, CF_EARLY_MEDIA) && !switch_channel_test_flag(channel, CF_ANSWERED)) {
+					channel_flag = CF_EARLY_MEDIA;
+				}
+			}
+		case SWITCH_MESSAGE_INDICATE_ANSWER:
+			{
+				message_str = "ANSWER";
+				if (!sofia_test_flag(tech_pvt, TFLAG_BYE) && !switch_channel_test_flag(channel, CF_ANSWERED)) {
+					channel_flag = CF_ANSWERED;
+				}
+			}
+			break;
+		default:
+			break;
+		}
+
+		if (channel_flag != CF_FLAG_MAX) {
+			switch (msg->message_id) {
+			case SWITCH_MESSAGE_INDICATE_RINGING:
+			case SWITCH_MESSAGE_INDICATE_PROGRESS:
+			case SWITCH_MESSAGE_INDICATE_ANSWER:
+				{
+					// PRACK timeout is also based on timer t1x64
+					// to prevent deadlock, will need to time the
+					// lock based on the value of t1x64
+					uint32_t t1x64 = tech_pvt->profile->timer_t1x64 ? tech_pvt->profile->timer_t1x64 : 32000;
+					switch_mutex_lock(tech_pvt->prack_mutex);
+					if (sofia_test_flag(tech_pvt, TFLAG_PRACK_LOCK)) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+								"%s Waiting for incoming PRACK! (Blocking %s message)\n", switch_channel_get_name(channel), message_str);
+						if (switch_thread_cond_timedwait(tech_pvt->prack_cond, tech_pvt->prack_mutex, t1x64 * 1000) == SWITCH_STATUS_TIMEOUT) {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+								"%s Timeout on waiting for PRACK! (Unblock %s message)\n", switch_channel_get_name(channel), message_str);
+						} else {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+								"%s Received PRACK! (Unblock %s message)\n", switch_channel_get_name(channel), message_str);
+						}
+					} else {
+						if (msg->message_id != SWITCH_MESSAGE_INDICATE_ANSWER) {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+								"%s Expecting incoming PRACK! (Trigger by %s message)\n", switch_channel_get_name(channel), message_str);
+							sofia_set_flag(tech_pvt, TFLAG_PRACK_LOCK);
+						}
+					}
+					switch_mutex_unlock(tech_pvt->prack_mutex);
+				}
+				break;
+			default:
+				break;
+			}
+		}
+	}
+
 
 	/* ones that do not need to lock sofia mutex */
 	switch (msg->message_id) {
@@ -3908,14 +3996,20 @@ static switch_status_t cmd_profile(char **argv, int argc, switch_stream_handle_t
 			}
 			stream->write_function(stream, "+OK\n");
 		} else if ((gateway_ptr = sofia_reg_find_gateway(gname))) {
-			if (gateway_ptr->state != REG_STATE_NOREG) {
-				gateway_ptr->retry = 0;
-				gateway_ptr->state = REG_STATE_UNREGISTER;
+			if (gateway_ptr->state != REG_STATE_NOREG && gateway_ptr->state != REG_STATE_DOWN) {
+				if (gateway_ptr->state == REG_STATE_FAILED && !sofia_test_flag(gateway_ptr, REG_FLAG_REGISTERED)) {
+					gateway_ptr->retry = 0;
+					gateway_ptr->state = REG_STATE_DOWN;
+					sofia_reg_fire_custom_gateway_state_event(gateway_ptr, 0, NULL);
+				} else {
+					gateway_ptr->retry = 0;
+					gateway_ptr->state = REG_STATE_UNREGISTER;
+				}
 				stream->write_function(stream, "+OK\n");
-				sofia_reg_release_gateway(gateway_ptr);
 			} else {
 				stream->write_function(stream, "-ERR NOREG gateway [%s] can't be unregistered!\n", gname);
 			}
+			sofia_reg_release_gateway(gateway_ptr);
 		} else {
 			stream->write_function(stream, "Invalid gateway!\n");
 		}

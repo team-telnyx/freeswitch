@@ -10012,6 +10012,12 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 		flags[SWITCH_RTP_FLAG_USE_MILLISECONDS_PER_PACKET]++;
 	}
 
+	if (((val = switch_channel_get_variable(session->channel, "srtp_hangup_on_error")))) {
+		flags[SWITCH_RTP_FLAG_SRTP_HANGUP_ON_ERROR] = switch_true(val);
+	} else if (switch_media_handle_test_media_flag(smh, SCMF_SRTP_HANGUP_ON_ERROR)) {
+		flags[SWITCH_RTP_FLAG_SRTP_HANGUP_ON_ERROR]++;
+	}
+
 	if (switch_media_handle_test_media_flag(smh, SCMF_SUPPRESS_CNG)) {
 		smh->mparams->cng_pt = 0;
 	} else if (smh->mparams->cng_pt) {
@@ -17699,8 +17705,13 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 			session->enc_write_frame.datalen = session->enc_write_frame.buflen;
 			session->write_codec->cur_frame = frame;
 			frame->codec->cur_frame = frame;
-			switch_assert(enc_frame->datalen <= SWITCH_RECOMMENDED_BUFFER_SIZE);
-			switch_assert(session->enc_write_frame.datalen <= SWITCH_RECOMMENDED_BUFFER_SIZE);
+			if (enc_frame->datalen > SWITCH_RECOMMENDED_BUFFER_SIZE || session->enc_write_frame.datalen > SWITCH_RECOMMENDED_BUFFER_SIZE) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Encoded write frame datalen %d or %d greater than recommended size %d\n",
+								  enc_frame->datalen, session->enc_write_frame.datalen, SWITCH_RECOMMENDED_BUFFER_SIZE);
+				write_frame = NULL;
+				status = SWITCH_STATUS_FALSE;
+				goto error;
+			}
 			status = switch_core_codec_encode(session->write_codec,
 											  frame->codec,
 											  enc_frame->data,
@@ -17708,7 +17719,13 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 											  session->write_impl.actual_samples_per_second,
 											  session->enc_write_frame.data, &session->enc_write_frame.datalen, &session->enc_write_frame.rate, &flag);
 
-			switch_assert(session->enc_write_frame.datalen <= SWITCH_RECOMMENDED_BUFFER_SIZE);
+			if (session->enc_write_frame.datalen > SWITCH_RECOMMENDED_BUFFER_SIZE) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Encoded write frame datalen %d greater than recommended size %d\n",
+								  session->enc_write_frame.datalen, SWITCH_RECOMMENDED_BUFFER_SIZE);
+				write_frame = NULL;
+				status = SWITCH_STATUS_FALSE;
+				goto error;
+			}
 
 			session->write_codec->cur_frame = NULL;
 			frame->codec->cur_frame = NULL;
@@ -17809,8 +17826,13 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 
 				session->write_codec->cur_frame = frame;
 				frame->codec->cur_frame = frame;
-				switch_assert(enc_frame->datalen <= SWITCH_RECOMMENDED_BUFFER_SIZE);
-				switch_assert(session->enc_write_frame.datalen <= SWITCH_RECOMMENDED_BUFFER_SIZE);
+				if (enc_frame->datalen > SWITCH_RECOMMENDED_BUFFER_SIZE || session->enc_write_frame.datalen > SWITCH_RECOMMENDED_BUFFER_SIZE) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Encoded write frame datalen %d or %d greater than recommended size %d\n",
+								  enc_frame->datalen, session->enc_write_frame.datalen, SWITCH_RECOMMENDED_BUFFER_SIZE);
+					write_frame = NULL;
+					status = SWITCH_STATUS_FALSE;
+					goto error;
+				}
 				status = switch_core_codec_encode(session->write_codec,
 												  frame->codec,
 												  enc_frame->data,
@@ -17818,7 +17840,13 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 												  rate,
 												  session->enc_write_frame.data, &session->enc_write_frame.datalen, &session->enc_write_frame.rate, &flag);
 
-				switch_assert(session->enc_write_frame.datalen <= SWITCH_RECOMMENDED_BUFFER_SIZE);
+				if (session->enc_write_frame.datalen > SWITCH_RECOMMENDED_BUFFER_SIZE) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Encoded write frame datalen %d greater than recommended size %d\n",
+								  session->enc_write_frame.datalen, SWITCH_RECOMMENDED_BUFFER_SIZE);
+					write_frame = NULL;
+					status = SWITCH_STATUS_FALSE;
+					goto error;
+				}
 
 				session->write_codec->cur_frame = NULL;
 				frame->codec->cur_frame = NULL;
