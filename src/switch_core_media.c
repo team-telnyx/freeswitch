@@ -3772,7 +3772,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 
 
 	if (type == SWITCH_MEDIA_TYPE_TEXT && !switch_test_flag((&engine->read_frame), SFF_CNG)) {
-		if (engine->red_pt) {
+		if (engine->red_pt && engine->tf) {
 			unsigned char *p = engine->read_frame.data;
 
 			*(p + engine->read_frame.datalen) = '\0';
@@ -5091,6 +5091,16 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_INFO, "Activating %s RTCP PASSTHRU PORT %d\n",
 								type2str(type), remote_rtcp_port);
 						switch_rtp_activate_rtcp(engine->rtp_session, -1, remote_rtcp_port, engine->rtcp_mux > 0);
+						if ((val = switch_channel_get_variable(smh->session->channel, (type == SWITCH_MEDIA_TYPE_VIDEO ? "rtcp_video_passthru_timeout_msec" : "rtcp_audio_passthru_timeout_msec")))
+							|| (val = type == SWITCH_MEDIA_TYPE_VIDEO ? smh->mparams->rtcp_video_passthru_timeout_msec : smh->mparams->rtcp_audio_passthru_timeout_msec)) {
+							int interval = atoi(val);
+							if (interval < 100 || interval > 500000) {
+								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_ERROR,
+										"Invalid rtcp passthru timeout spec [%d] must be between 100 and 500000\n", interval);
+								interval = 5000;
+							}
+							switch_rtp_set_rtcp_passthru_timeout(engine->rtp_session, interval);
+						}
 					} else {
 						int interval = atoi(val);
 						if (interval < 100 || interval > 500000) {
@@ -5785,8 +5795,8 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 	int rtcp_auto_audio = 0, rtcp_auto_video = 0;
 	int got_audio_rtcp = 0, got_video_rtcp = 0;
 	switch_port_t audio_port = 0, video_port = 0;
-	int amrwb_offerings_n = 0;
-	int amrwb_offerings_rejected_n = 0;
+	int amrwb_offerings_n = 0, amr_offerings_n = 0;
+	int amrwb_offerings_rejected_n = 0, amr_offerings_rejected_n = 0;
 
 	switch_assert(session);
 
@@ -6452,6 +6462,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 				switch_codec_fmtp_t codec_fmtp = { 0 };
 				int map_channels = map->rm_params ? atoi(map->rm_params) : 1;
 				int amrwb_matched = 0;
+				int amr_matched = 0;
 
 				if (!(rm_encoding = map->rm_encoding)) {
 					rm_encoding = "";
@@ -6528,7 +6539,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 				} else {
 					switch_status_t s = SWITCH_STATUS_FALSE;
 
-					// Count AMR-WB offerings
+					// Count AMR-WB/AMR offerings
 					if (!strcasecmp(map->rm_encoding, "AMR-WB") && !amrwb_offerings_n) {
 						sdp_rtpmap_t *mp = NULL;
 						for (mp = m->m_rtpmaps; mp; mp = mp->rm_next) {
@@ -6538,6 +6549,17 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 						}
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "There is %d AMR-WB rtpmap%s\n",
 								amrwb_offerings_n, amrwb_offerings_n == 1 ? "" : "s");
+					}
+
+					if (!strcasecmp(map->rm_encoding, "AMR") && !amr_offerings_n) {
+						sdp_rtpmap_t *mp = NULL;
+						for (mp = m->m_rtpmaps; mp; mp = mp->rm_next) {
+							if (!strcasecmp(mp->rm_encoding, "AMR")) {
+								++amr_offerings_n;
+							}
+						}
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "There is %d AMR rtpmap%s\n",
+								amr_offerings_n, amr_offerings_n == 1 ? "" : "s");
 					}
 
 					s = switch_core_codec_parse_fmtp(map->rm_encoding, map->rm_fmtp, map->rm_rate, &codec_fmtp);
@@ -6589,14 +6611,22 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 					}
 
 					/*
-					 * Check AMR-WB codec preferences in case multiple offerings are present in incoming fmtp.
+					 * Check AMR-WB/AMR codec preferences in case multiple offerings are present in incoming fmtp.
 					 * Reject match if codec ignores the candidate codec.
 					 * If this is last codec, accept it (in case of multiple, they could have been rejected but last should get matched
-					 * to any AMR-WB implementation loaded).
+					 * to any AMR-WB/AMR implementation loaded).
 					 */
 					if (!strcasecmp(map->rm_encoding, "AMR-WB")) {
 						if (amrwb_offerings_n > 1) {
 							if (amrwb_offerings_rejected_n + 1 < amrwb_offerings_n) {
+								if (SWITCH_STATUS_IGNORE == switch_core_codec_parse_fmtp(map->rm_encoding, map->rm_fmtp, map->rm_rate, &codec_fmtp)) {
+									match = 0;
+								}
+							}
+						}
+					} else if (!strcasecmp(map->rm_encoding, "AMR")) {
+						if (amr_offerings_n > 1) {
+							if (amr_offerings_rejected_n + 1 < amr_offerings_n) {
 								if (SWITCH_STATUS_IGNORE == switch_core_codec_parse_fmtp(map->rm_encoding, map->rm_fmtp, map->rm_rate, &codec_fmtp)) {
 									match = 0;
 								}
@@ -6652,6 +6682,10 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 							amrwb_matched = 1;
 						}
 
+						if (!strcasecmp(map->rm_encoding, "AMR")) {
+							amr_matched = 1;
+						}
+
 						if (m_idx >= MAX_MATCHES) {
 							break;
 						}
@@ -6664,6 +6698,13 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 				if (!amrwb_matched && !strcasecmp(map->rm_encoding, "AMR-WB")) {
 					++amrwb_offerings_rejected_n;
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "AMR-WB codec [%s:%d:%u:%d] rejected\n",
+							rm_encoding, map->rm_pt, (int) remote_codec_rate, codec_ms);
+				}
+
+				// Count rejected AMR-WB offerings
+				if (!amr_matched && !strcasecmp(map->rm_encoding, "AMR")) {
+					++amr_offerings_rejected_n;
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "AMR codec [%s:%d:%u:%d] rejected\n",
 							rm_encoding, map->rm_pt, (int) remote_codec_rate, codec_ms);
 				}
 
@@ -10322,6 +10363,15 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 				if (!strcasecmp(val, "passthru")) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Activating RTCP PASSTHRU PORT %d\n", remote_rtcp_port);
 					switch_rtp_activate_rtcp(a_engine->rtp_session, -1, remote_rtcp_port, a_engine->rtcp_mux > 0);
+					if ((val = switch_channel_get_variable(session->channel, "rtcp_audio_passthru_timeout_msec")) || (val = smh->mparams->rtcp_audio_passthru_timeout_msec)) {
+						int interval = atoi(val);
+						if (interval < 100 || interval > 500000) {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+									"Invalid rtcp passthru timeout spec [%d] must be between 100 and 500000\n", interval);
+							interval = 5000;
+						}
+						switch_rtp_set_rtcp_passthru_timeout(a_engine->rtp_session, interval);
+					}
 				} else {
 					int interval = atoi(val);
 					if (interval < 100 || interval > 500000) {
@@ -10688,6 +10738,16 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 						if (!strcasecmp(val, "passthru")) {
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Activating TEXT RTCP PASSTHRU PORT %d\n", remote_port);
 							switch_rtp_activate_rtcp(t_engine->rtp_session, -1, remote_port, t_engine->rtcp_mux > 0);
+							if ((val = switch_channel_get_variable(session->channel, "rtcp_text_passthru_timeout_msec")) || (val = smh->mparams->rtcp_text_passthru_timeout_msec)) {
+								int interval = atoi(val);
+								if (interval < 100 || interval > 500000) {
+									switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+											"Invalid rtcp passthru timeout spec [%d] must be between 100 and 500000\n", interval);
+									interval = 5000;
+								}
+								switch_rtp_set_rtcp_passthru_timeout(t_engine->rtp_session, interval);
+							}
+							
 						} else {
 							int interval = atoi(val);
 							if (interval < 100 || interval > 500000) {
@@ -11015,6 +11075,15 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 						if (!strcasecmp(val, "passthru")) {
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Activating VIDEO RTCP PASSTHRU PORT %d\n", remote_port);
 							switch_rtp_activate_rtcp(v_engine->rtp_session, -1, remote_port, v_engine->rtcp_mux > 0);
+							if ((val = switch_channel_get_variable(session->channel, "rtcp_video_passthru_timeout_msec")) || (val = smh->mparams->rtcp_video_passthru_timeout_msec)) {
+								int interval = atoi(val);
+								if (interval < 100 || interval > 500000) {
+									switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+											"Invalid rtcp passthru timeout spec [%d] must be between 100 and 500000\n", interval);
+									interval = 5000;
+								}
+								switch_rtp_set_rtcp_passthru_timeout(v_engine->rtp_session, interval);
+							}
 						} else {
 							int interval = atoi(val);
 							if (interval < 100 || interval > 500000) {
