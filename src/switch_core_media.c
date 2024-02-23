@@ -5063,6 +5063,16 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_INFO, "Activating %s RTCP PASSTHRU PORT %d\n",
 								type2str(type), remote_rtcp_port);
 						switch_rtp_activate_rtcp(engine->rtp_session, -1, remote_rtcp_port, engine->rtcp_mux > 0);
+						if ((val = switch_channel_get_variable(smh->session->channel, (type == SWITCH_MEDIA_TYPE_VIDEO ? "rtcp_video_passthru_timeout_msec" : "rtcp_audio_passthru_timeout_msec")))
+							|| (val = type == SWITCH_MEDIA_TYPE_VIDEO ? smh->mparams->rtcp_video_passthru_timeout_msec : smh->mparams->rtcp_audio_passthru_timeout_msec)) {
+							int interval = atoi(val);
+							if (interval < 100 || interval > 500000) {
+								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_ERROR,
+										"Invalid rtcp passthru timeout spec [%d] must be between 100 and 500000\n", interval);
+								interval = 5000;
+							}
+							switch_rtp_set_rtcp_passthru_timeout(engine->rtp_session, interval);
+						}
 					} else {
 						int interval = atoi(val);
 						if (interval < 100 || interval > 500000) {
@@ -10325,6 +10335,15 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 				if (!strcasecmp(val, "passthru")) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Activating RTCP PASSTHRU PORT %d\n", remote_rtcp_port);
 					switch_rtp_activate_rtcp(a_engine->rtp_session, -1, remote_rtcp_port, a_engine->rtcp_mux > 0);
+					if ((val = switch_channel_get_variable(session->channel, "rtcp_audio_passthru_timeout_msec")) || (val = smh->mparams->rtcp_audio_passthru_timeout_msec)) {
+						int interval = atoi(val);
+						if (interval < 100 || interval > 500000) {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+									"Invalid rtcp passthru timeout spec [%d] must be between 100 and 500000\n", interval);
+							interval = 5000;
+						}
+						switch_rtp_set_rtcp_passthru_timeout(a_engine->rtp_session, interval);
+					}
 				} else {
 					int interval = atoi(val);
 					if (interval < 100 || interval > 500000) {
@@ -10691,6 +10710,16 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 						if (!strcasecmp(val, "passthru")) {
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Activating TEXT RTCP PASSTHRU PORT %d\n", remote_port);
 							switch_rtp_activate_rtcp(t_engine->rtp_session, -1, remote_port, t_engine->rtcp_mux > 0);
+							if ((val = switch_channel_get_variable(session->channel, "rtcp_text_passthru_timeout_msec")) || (val = smh->mparams->rtcp_text_passthru_timeout_msec)) {
+								int interval = atoi(val);
+								if (interval < 100 || interval > 500000) {
+									switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+											"Invalid rtcp passthru timeout spec [%d] must be between 100 and 500000\n", interval);
+									interval = 5000;
+								}
+								switch_rtp_set_rtcp_passthru_timeout(t_engine->rtp_session, interval);
+							}
+							
 						} else {
 							int interval = atoi(val);
 							if (interval < 100 || interval > 500000) {
@@ -11018,6 +11047,15 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 						if (!strcasecmp(val, "passthru")) {
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Activating VIDEO RTCP PASSTHRU PORT %d\n", remote_port);
 							switch_rtp_activate_rtcp(v_engine->rtp_session, -1, remote_port, v_engine->rtcp_mux > 0);
+							if ((val = switch_channel_get_variable(session->channel, "rtcp_video_passthru_timeout_msec")) || (val = smh->mparams->rtcp_video_passthru_timeout_msec)) {
+								int interval = atoi(val);
+								if (interval < 100 || interval > 500000) {
+									switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+											"Invalid rtcp passthru timeout spec [%d] must be between 100 and 500000\n", interval);
+									interval = 5000;
+								}
+								switch_rtp_set_rtcp_passthru_timeout(v_engine->rtp_session, interval);
+							}
 						} else {
 							int interval = atoi(val);
 							if (interval < 100 || interval > 500000) {
