@@ -2450,6 +2450,17 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 		rtcp_ok = 1;
 	}
 
+	if (rtp_session->flags[SWITCH_RTP_FLAG_RTCP_PASSTHRU] && rtp_session->rtcp_passthru_timeout
+		&& (rtp_session->rtcp_last_sent && (int)((now - rtp_session->rtcp_last_sent) / 1000) > rtp_session->rtcp_passthru_timeout)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "No RTCP received after %dms. Disabling passthru mode!\n", rtp_session->rtcp_passthru_timeout);
+		rtp_session->rtcp_interval = rtp_session->rtcp_passthru_timeout; // The RTCP timeout will be used as rtcp interval
+		rtcp_cyclic = 1;
+		rtcp_ok = 1;
+		// Remove RTCP Passthru
+		rtp_session->flags[SWITCH_RTP_FLAG_RTCP_PASSTHRU] = 0;
+		rtp_session->rtcp_passthru_timeout = 0;
+	}
+
 	if (rtcp_ok && using_ice(rtp_session)) {
 		if (rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX]) {
 			if (!rtp_session->ice.rready) {
@@ -2460,17 +2471,6 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 				rtcp_ok = 0;
 			}
 		}
-	}
-
-	if (rtp_session->flags[SWITCH_RTP_FLAG_RTCP_PASSTHRU] && rtp_session->rtcp_passthru_timeout
-		&& (rtp_session->rtcp_last_sent && (int)((now - rtp_session->rtcp_last_sent) / 1000) > rtp_session->rtcp_passthru_timeout)) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "No RTCP received after %dms. Disabling passthru mode!\n", rtp_session->rtcp_passthru_timeout);
-		rtp_session->rtcp_interval = rtp_session->rtcp_passthru_timeout; // The RTCP timeout will be used as rtcp interval
-		rtcp_cyclic = 1;
-		rtcp_ok = 1;
-		// Remove RTCP Passthru
-		rtp_session->flags[SWITCH_RTP_FLAG_RTCP_PASSTHRU] = 0;
-		rtp_session->rtcp_passthru_timeout = 0;
 	}
 
 	//switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR, "WTF %d %d %d %d\n", rate, rtp_session->rtcp_sent_packets, rtcp_ok, nack_ttl);
