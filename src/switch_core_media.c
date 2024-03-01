@@ -1328,7 +1328,12 @@ static switch_status_t switch_core_media_build_crypto(switch_media_handle_t *smh
 	if (index == SWITCH_NO_CRYPTO_TAG) index = ctype + 1;
 
 	if (switch_channel_var_true(channel, "rtp_secure_media_mki")) {	
-		engine->ssec[ctype].local_crypto_key = switch_core_session_sprintf(smh->session, "%d %s inline:%s|2^31|1:1", index, (use_alias ? SUITES[ctype].alias : SUITES[ctype].name), b64_key);
+		if (engine->ssec[engine->crypto_type].remote_crypto_key && !strstr(engine->ssec[engine->crypto_type].remote_crypto_key, "|1:1")) {
+			/* Don't add mki index if remote doesn't have mki index */
+			engine->ssec[ctype].local_crypto_key = switch_core_session_sprintf(smh->session, "%d %s inline:%s|2^31", index, (use_alias ? SUITES[ctype].alias : SUITES[ctype].name), b64_key);
+		} else {
+			engine->ssec[ctype].local_crypto_key = switch_core_session_sprintf(smh->session, "%d %s inline:%s|2^31|1:1", index, (use_alias ? SUITES[ctype].alias : SUITES[ctype].name), b64_key);
+		}
 	} else {
 		engine->ssec[ctype].local_crypto_key = switch_core_session_sprintf(smh->session, "%d %s inline:%s", index, (use_alias ? SUITES[ctype].alias : SUITES[ctype].name), b64_key);
 	}
