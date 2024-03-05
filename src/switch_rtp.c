@@ -2452,13 +2452,26 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 
 	if (rtp_session->flags[SWITCH_RTP_FLAG_RTCP_PASSTHRU] && rtp_session->rtcp_passthru_timeout
 		&& (rtp_session->rtcp_last_sent && (int)((now - rtp_session->rtcp_last_sent) / 1000) > rtp_session->rtcp_passthru_timeout)) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "No RTCP received after %dms. Disabling passthru mode!\n", rtp_session->rtcp_passthru_timeout);
+		switch_core_session_t *other_session = NULL;
 		rtp_session->rtcp_interval = rtp_session->rtcp_passthru_timeout; // The RTCP timeout will be used as rtcp interval
 		rtcp_cyclic = 1;
 		rtcp_ok = 1;
 		// Remove RTCP Passthru
-		rtp_session->flags[SWITCH_RTP_FLAG_RTCP_PASSTHRU] = 0;
-		rtp_session->rtcp_passthru_timeout = 0;
+		switch_rtp_clear_flag(rtp_session, SWITCH_RTP_FLAG_RTCP_PASSTHRU);
+
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "No RTCP received after %dms. Disabling passthru mode!\n", rtp_session->rtcp_passthru_timeout);
+		if (rtp_session->session && switch_core_session_get_partner(rtp_session->session, &other_session) == SWITCH_STATUS_SUCCESS) {
+			switch_channel_t *other_channel = switch_core_session_get_channel(other_session);
+			switch_rtp_t* other_rtp_session = NULL;
+			if ((other_rtp_session = switch_channel_get_private(other_channel, "__rtcp_audio_rtp_session")) &&
+				switch_rtp_test_flag(other_rtp_session, SWITCH_RTP_FLAG_RTCP_PASSTHRU)) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(other_rtp_session->session), SWITCH_LOG_WARNING, "Disabling passthru mode for partner session %s -> %s!\n"
+					, switch_core_session_get_name(rtp_session->session), switch_core_session_get_name(other_rtp_session->session));
+				other_rtp_session->rtcp_interval = rtp_session->rtcp_interval;
+				switch_rtp_clear_flag(other_rtp_session, SWITCH_RTP_FLAG_RTCP_PASSTHRU);
+			}
+			switch_core_session_rwunlock(other_session);
+		}
 	}
 
 	if (rtcp_ok && using_ice(rtp_session)) {
@@ -6221,6 +6234,7 @@ SWITCH_DECLARE(void) switch_rtp_clear_flag(switch_rtp_t *rtp_session, switch_rtp
 		if (old_flag) {
 			switch_rtp_pause_jitter_buffer(rtp_session, SWITCH_FALSE);
 		}
+		rtp_session->rtcp_passthru_timeout = 0;
 	} else if (flag == SWITCH_RTP_FLAG_DTMF_ON) {
 		rtp_session->stats.inbound.last_processed_seq = 0;
 	} else if (flag == SWITCH_RTP_FLAG_PAUSE) {
