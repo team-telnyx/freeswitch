@@ -10160,6 +10160,7 @@ void sofia_handle_sip_i_refer(nua_t *nua, sofia_profile_t *profile, nua_handle_t
 		switch_channel_t *channel = switch_core_session_get_channel(session);
 		const char *br = switch_channel_get_partner_uuid(channel);
 		switch_core_session_t *b_session;
+		int notify = 1;
 
 		switch_channel_set_variable_printf(channel, "transfer_to", "blind:%s", br ? br : exten);
 		switch_channel_set_variable_printf(channel, "transfer_destination", "blind:%s", exten);
@@ -10194,7 +10195,28 @@ void sofia_handle_sip_i_refer(nua_t *nua, sofia_profile_t *profile, nua_handle_t
 
 				switch_channel_set_variable(channel, "park_timeout", "600:blind_transfer");
 				switch_channel_set_state(channel, CS_PARK);
-			} else {
+				notify = 0;
+			} 
+
+			if (refer_to->r_url->url_params) {
+				switch_channel_set_variable(b_channel, "sip_h_X-FS-Refer-Params", refer_to->r_url->url_params);
+			}
+
+			if(sofia_test_pflag(profile, PFLAG_FIRE_TRANFER_EVENTS)) {
+				if (switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, MY_EVENT_TRANSFEROR) == SWITCH_STATUS_SUCCESS) {
+					switch_channel_event_set_data(channel_a, event);
+					switch_event_fire(&event);
+				}
+
+				if (switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, MY_EVENT_TRANSFEREE) == SWITCH_STATUS_SUCCESS) {
+					switch_channel_event_set_data(b_channel, event);
+					switch_event_fire(&event);
+				}
+			}
+
+			switch_ivr_session_transfer(b_session, exten, NULL, NULL);
+			switch_core_session_rwunlock(b_session);
+			if (notify) {
 				nua_notify(tech_pvt->nh, NUTAG_NEWSUB(1), SIPTAG_CONTENT_TYPE_STR("message/sipfrag;version=2.0"),
 						   NUTAG_SUBSTATE(nua_substate_terminated),
 						   SIPTAG_SUBSCRIPTION_STATE_STR("terminated;reason=noresource"),
@@ -10202,25 +10224,6 @@ void sofia_handle_sip_i_refer(nua_t *nua, sofia_profile_t *profile, nua_handle_t
 						   TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)),
 						   TAG_END());
 			}
-
-            if (refer_to->r_url->url_params) {
-                switch_channel_set_variable(b_channel, "sip_h_X-FS-Refer-Params", refer_to->r_url->url_params);
-            }
-
-            if(sofia_test_pflag(profile, PFLAG_FIRE_TRANFER_EVENTS)) {
-	            if (switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, MY_EVENT_TRANSFEROR) == SWITCH_STATUS_SUCCESS) {
-	                switch_channel_event_set_data(channel_a, event);
-	                switch_event_fire(&event);
-	            }
-
-				if (switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, MY_EVENT_TRANSFEREE) == SWITCH_STATUS_SUCCESS) {
-	                switch_channel_event_set_data(b_channel, event);
-	                switch_event_fire(&event);
-	            }
-            }
-
-			switch_ivr_session_transfer(b_session, exten, NULL, NULL);
-			switch_core_session_rwunlock(b_session);
 		} else {
 			switch_event_t *event;
 
