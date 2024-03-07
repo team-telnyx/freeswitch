@@ -58,6 +58,7 @@ static void gen_ice(switch_core_session_t *session, switch_media_type_t type, co
 #define TEXT_PERIOD_TIMEOUT 3000
 #define MAX_RED_FRAMES 25
 #define RED_PACKET_SIZE 100
+#define SWITCH_RTCP_AUDIO_PASSTHRU "passthru"
 
 typedef enum {
 	SMF_INIT = (1 << 0),
@@ -5059,6 +5060,10 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 
 			if (switch_channel_var_false(smh->session->channel, "telnyx_disable_rtcp") || !switch_channel_get_variable(smh->session->channel, "telnyx_disable_rtcp")) {
 				if (remote_rtcp_port) {
+					if (switch_channel_var_true(smh->session->channel, "force_rtcp_passthru")) {
+						val = "passthru";
+					}
+
 					if (!strcasecmp(val, "passthru")) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_INFO, "Activating %s RTCP PASSTHRU PORT %d\n",
 								type2str(type), remote_rtcp_port);
@@ -10332,6 +10337,10 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 					remote_rtcp_port = (switch_port_t)atoi(rport);
 				}
 
+				if (switch_channel_var_true(smh->session->channel, "force_rtcp_passthru")) {
+					val = "passthru";
+				}
+
 				if (!strcasecmp(val, "passthru")) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Activating RTCP PASSTHRU PORT %d\n", remote_rtcp_port);
 					switch_rtp_activate_rtcp(a_engine->rtp_session, -1, remote_rtcp_port, a_engine->rtcp_mux > 0);
@@ -11798,10 +11807,16 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 
 	if (!smh->mparams->rtcp_audio_interval_msec) {
 		smh->mparams->rtcp_audio_interval_msec = (char *)switch_channel_get_variable(session->channel, "rtcp_audio_interval_msec");
+		if (switch_channel_var_true(smh->session->channel, "force_rtcp_passthru")) {
+			smh->mparams->rtcp_audio_interval_msec = SWITCH_RTCP_AUDIO_PASSTHRU;
+		}
 	}
 
 	if (!smh->mparams->rtcp_video_interval_msec) {
 		smh->mparams->rtcp_video_interval_msec = (char *)switch_channel_get_variable(session->channel, "rtcp_video_interval_msec");
+		if (switch_channel_var_true(smh->session->channel, "force_rtcp_passthru")) {
+			smh->mparams->rtcp_audio_interval_msec = SWITCH_RTCP_AUDIO_PASSTHRU;
+		}
 	}
 
 	if (dtls_ok(session) && (tmp = switch_channel_get_variable(smh->session->channel, "webrtc_enable_dtls")) && switch_false(tmp)) {
