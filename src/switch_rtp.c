@@ -1139,13 +1139,38 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 		}
 
 		if (!zstr(username)) {
-			if (always_accept) {
-				const char *ufrag = switch_channel_get_variable(channel, "rtp_ice_ufrag");
-				if (!zstr(ufrag)) {
-					if (!strncmp(username, ufrag, strlen(ufrag))) {
+			if (always_accept && !(zstr(ice->user_ice) || zstr(ice->ice_user))) {
+				const char *in_ufrag = switch_channel_get_variable(channel, "rtp_ice_in_ufrag");
+				const char *out_ufrag = switch_channel_get_variable(channel, "rtp_ice_out_ufrag");
+				if (!zstr(out_ufrag) && zstr(in_ufrag)) {
+					if (!strncmp(username, out_ufrag, strlen(out_ufrag))) {
 						ok = 1;
 					} else {
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "Received STUN with incorrect username %s->%s\n", ufrag, username);
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "Received STUN with incorrect username %s->%s\n", out_ufrag, username);
+					}
+				} else if (!zstr(out_ufrag) && !zstr(in_ufrag)) {
+					if (strchr(username, ':')) {
+						char user_ice[STUN_USERNAME_MAX_SIZE];
+						switch_snprintf(user_ice, sizeof(user_ice), "%s:%s", out_ufrag, in_ufrag);
+						if (!strcmp(username, user_ice)) {
+							ok = 1;
+						} else {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "Received STUN with incorrect username %s->%s\n", user_ice, username);
+						}
+					} else {
+						char luser_ice[SDP_UFRAG_MAX_SIZE];
+						switch_snprintf(luser_ice, sizeof(luser_ice), "%s%s", out_ufrag, in_ufrag);
+						if (!strcmp(username, luser_ice)) {
+							ok = 1;
+						} else {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "Received STUN with incorrect username %s->%s\n", luser_ice, username);
+						}
+					}
+
+					if (!strncmp(username, out_ufrag, strlen(out_ufrag))) {
+						ok = 1;
+					} else {
+						
 					}
 				} else {
 					ok = 1;
