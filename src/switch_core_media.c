@@ -4677,6 +4677,7 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 					engine->ice_in.ufrag = switch_core_session_strdup(smh->session, attr->a_value);
 					engine->new_ice = 1;
 				}
+				switch_channel_set_variable(smh->session->channel, "rtp_ice_ufrag", engine->ice_in.ufrag);
 				ice_seen++;
 			} else if (!strcasecmp(attr->a_name, "ice-pwd")) {
 				if (!engine->ice_in.pwd || strcmp(engine->ice_in.pwd, attr->a_value)) {

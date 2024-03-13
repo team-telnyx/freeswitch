@@ -973,13 +973,19 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 	int is_rtcp = ice == &rtp_session->rtcp_ice;
 	uint32_t elapsed;
 	switch_time_t ref_point;
+	switch_channel_t *channel = switch_core_session_get_channel(rtp_session->session);
+	int always_accept = 0;
 
 	//if (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
 	//	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "WTF OK %s CALL\n", rtp_type(rtp_session));
 	//}
 
-	if (!switch_rtp_ready(rtp_session) || zstr(ice->user_ice) || zstr(ice->ice_user)) {
-		return;
+	if (channel && switch_channel_var_true(channel, "rtp_ice_always_accept_stun_request")) {
+		always_accept = 1;
+	} else {
+		if (!switch_rtp_ready(rtp_session) || zstr(ice->user_ice) || zstr(ice->ice_user)) {
+			return;
+		}
 	}
 
 	READ_INC(rtp_session);
@@ -1133,7 +1139,18 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 		}
 
 		if (!zstr(username)) {
-			if (!icecmp(username, ice)) {
+			if (always_accept) {
+				const char *ufrag = switch_channel_get_variable(channel, "rtp_ice_ufrag");
+				if (!zstr(ufrag)) {
+					if (!strncmp(username, ufrag, strlen(ufrag))) {
+						ok = 1;
+					} else {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "Received STUN with incorrect username %s->%s\n", ufrag, username);
+					}
+				} else {
+					ok = 1;
+				}
+			} else if (!icecmp(username, ice)) {
 				ok = 1;
 			} else if(!zstr(rtp_session->rtcp_ice.user_ice) && !icecmp(username, &rtp_session->rtcp_ice)) {
 				ice = &rtp_session->rtcp_ice;
