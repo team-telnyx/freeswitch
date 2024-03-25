@@ -766,7 +766,7 @@ switch_status_t conference_event_add_data_with_member(conference_obj_t *conferen
 			}
 		}
 	}
-	
+
 	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Conference-Name", conference->name);
 	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Conference-Domain", conference->domain);
 	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "Conference-Size", "%u", conference->count);
