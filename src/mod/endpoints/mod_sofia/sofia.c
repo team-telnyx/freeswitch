@@ -8677,6 +8677,8 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 						switch_core_session_rwunlock(other_session);
 						goto done;
 					}
+
+					switch_core_session_rwunlock(other_session);
 				}
 			}
 
