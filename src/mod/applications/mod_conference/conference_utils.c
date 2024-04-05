@@ -223,8 +223,6 @@ void conference_utils_set_cflags(const char *flags, conference_flag_t *f)
 			}
 		}
 
-		f[CFLAG_HAS_MEMBER_ID] = 0;
-		
 		free(dup);
 	}
 }

@@ -242,21 +242,8 @@ switch_status_t conference_member_add_event_data(conference_member_t *member, sw
 
 	if (member->conference) {
 		conference_utils_set_flag(member->conference, CFLAG_HAS_MEMBER_ID);
-		status = conference_event_add_data(member->conference, event);
+		status = conference_event_add_data_with_member(member->conference, event, member);
 		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "Floor", "%s", (member->id == member->conference->floor_holder) ? "true" : "false" );
-	}
-
-	if (member->session) {
-		switch_channel_t *channel = switch_core_session_get_channel(member->session);
-
-		if (member->verbose_events) {
-			switch_channel_event_set_data(channel, event);
-		} else {
-			switch_channel_event_set_basic_data(channel, event);
-		}
-		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "Video", "%s",
-								switch_channel_test_flag(switch_core_session_get_channel(member->session), CF_VIDEO) ? "true" : "false" );
-
 	}
 
 	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "Hear", "%s", conference_utils_member_test_flag(member, MFLAG_CAN_HEAR) ? "true" : "false" );
@@ -270,10 +257,6 @@ switch_status_t conference_member_add_event_data(conference_member_t *member, sw
 	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "Member-Ghost", "%s", conference_utils_member_test_flag(member, MFLAG_GHOST) ? "true" : "false");
 	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "Energy-Level", "%d", member->energy_level);
 	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "Current-Energy", "%d", member->score);
-
-	if (conference_utils_test_flag(member->conference, CFLAG_HAS_MEMBER_ID)) {
-		conference_utils_clear_flag(member->conference, CFLAG_HAS_MEMBER_ID);
-	}
 
 	return status;
 }
