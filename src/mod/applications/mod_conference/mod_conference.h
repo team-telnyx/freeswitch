@@ -257,6 +257,7 @@ typedef enum {
 	CFLAG_NO_MOH,
 	CFLAG_DED_VID_LAYER_AUDIO_FLOOR,
 	CFLAG_BREAKABLE,
+	CFLAG_HAS_MEMBER_ID,
 	/////////////////////////////////
 	CFLAG_MAX
 } conference_flag_t;
