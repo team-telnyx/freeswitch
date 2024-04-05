@@ -241,7 +241,6 @@ switch_status_t conference_member_add_event_data(conference_member_t *member, sw
 		return status;
 
 	if (member->conference) {
-		conference_utils_set_flag(member->conference, CFLAG_HAS_MEMBER_ID);
 		status = conference_event_add_data_with_member(member->conference, event, member);
 		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "Floor", "%s", (member->id == member->conference->floor_holder) ? "true" : "false" );
 	}
