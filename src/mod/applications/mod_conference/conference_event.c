@@ -739,7 +739,7 @@ void conference_event_send_rfc(conference_obj_t *conference)
 
 switch_status_t conference_event_add_data(conference_obj_t *conference, switch_event_t *event)
 {
-   conference_event_add_data_with_member(conference, event, NULL);
+   return conference_event_add_data_with_member(conference, event, NULL);
 }
 
 switch_status_t conference_event_add_data_with_member(conference_obj_t *conference, switch_event_t *event, conference_member_t *member)
