@@ -485,8 +485,19 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_NOTICE, "Audio bridge thread: forward_cng %p\n", (void*)session_a);
 #endif
 		switch_channel_set_flag(chan_b, CF_FORWARD_CNG_ONCE);
-		bridge_forward_cng_interval = switch_channel_get_variable(chan_a, "bridge_forward_cng_interval");
-		sent_cng_interval = atoi(bridge_forward_cng_interval);
+	}
+
+	if ((bridge_forward_cng_interval = switch_channel_get_variable(chan_a, "bridge_forward_cng_interval"))) {
+		if (switch_true(bridge_forward_cng_interval)) {
+			sent_cng_interval = 5000;
+		} else {
+			if ((sent_cng_interval = atoi(bridge_forward_cng_interval)) < 0) {
+				sent_cng_interval = 0;
+			}
+		}
+		if (sent_cng_interval > 0) {
+			switch_channel_set_flag(chan_b, CF_FORWARD_CNG_ONCE);
+		}
 	}
 
 	if ((silence_var = switch_channel_get_variable(chan_a, "bridge_generate_comfort_noise"))) {
