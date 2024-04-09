@@ -245,19 +245,6 @@ switch_status_t conference_member_add_event_data(conference_member_t *member, sw
 		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "Floor", "%s", (member->id == member->conference->floor_holder) ? "true" : "false" );
 	}
 
-	if (member->session) {
-		switch_channel_t *channel = switch_core_session_get_channel(member->session);
-
-		if (member->verbose_events) {
-			switch_channel_event_set_data(channel, event);
-		} else {
-			switch_channel_event_set_basic_data(channel, event);
-		}
-		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "Video", "%s",
-								switch_channel_test_flag(switch_core_session_get_channel(member->session), CF_VIDEO) ? "true" : "false" );
-
-	}
-
 	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "Hear", "%s", conference_utils_member_test_flag(member, MFLAG_CAN_HEAR) ? "true" : "false" );
 	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "See", "%s", conference_utils_member_test_flag(member, MFLAG_CAN_BE_SEEN) ? "true" : "false" );
 	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "Speak", "%s", conference_utils_member_test_flag(member, MFLAG_CAN_SPEAK) ? "true" : "false" );

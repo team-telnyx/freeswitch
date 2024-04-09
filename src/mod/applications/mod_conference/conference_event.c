@@ -746,7 +746,16 @@ switch_status_t conference_event_add_data_with_member(conference_obj_t *conferen
 {
     switch_status_t status = SWITCH_STATUS_SUCCESS;
 
-	if (!member) {
+	if (member && member->session) {
+		switch_channel_t *channel = switch_core_session_get_channel(member->session);
+		if (member->verbose_events) {
+			switch_channel_event_set_data(channel, event);
+		} else {
+			switch_channel_event_set_basic_data(channel, event);
+		}
+		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "Video", "%s",
+								switch_channel_test_flag(switch_core_session_get_channel(member->session), CF_VIDEO) ? "true" : "false" );
+	} else {
 		conference_member_t *first_member = NULL;
 
 		for (first_member = conference->members; first_member; first_member = first_member->next) {
