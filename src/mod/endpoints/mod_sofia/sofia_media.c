@@ -31,7 +31,7 @@
  */
 #include "mod_sofia.h"
 
-
+switch_bool_t allow_sdp;
 
 
 uint8_t sofia_media_negotiate_sdp(switch_core_session_t *session, const char *r_sdp, switch_sdp_type_t type)
@@ -122,8 +122,14 @@ static void process_mp(switch_core_session_t *session, switch_stream_handle_t *s
 	if ((dval = strchr(dname, ':'))) {
 		*dval++ = '\0';
 		
-		if (drop_sdp && (strcasecmp(dname, "application/sdp") == 0)) {
-			return;
+		
+		//if (drop_sdp && (strcasecmp(dname, "application/sdp") == 0)) {
+			//return;
+		//}
+
+		// Allow custom SDP
+		if (strcasecmp(dname, "application/sdp") == 0) {
+			allow_sdp = SWITCH_TRUE;
 		}
 
 		if (strcasecmp(dname, "application/isup") == 0 && isup) {
@@ -150,6 +156,8 @@ char *sofia_media_get_multipart(switch_core_session_t *session, const char *pref
 
 	char * isup = (char*)switch_channel_get_private(channel, "_isup_payload");
 	intptr_t isup_len = (intptr_t)switch_channel_get_private(channel, "_isup_payload_size");
+
+	allow_sdp = SWITCH_FALSE;
 	
 	SWITCH_STANDARD_STREAM(stream);
 	if ((hi = switch_channel_variable_first(channel))) {
@@ -176,7 +184,7 @@ char *sofia_media_get_multipart(switch_core_session_t *session, const char *pref
 
 	if (x) {
 		*mp_type = switch_core_session_sprintf(session, "multipart/mixed; boundary=%s", boundary);
-		if (sdp) {
+		if (sdp && allow_sdp == SWITCH_FALSE) {
 			switch_string_stream_write(&stream, "--%s\r\nContent-Type: application/sdp\r\nContent-Length: %d\r\n\r\n%s\r\n", boundary, strlen(sdp) + 1, sdp);
 		}
 		switch_string_stream_write(&stream, "--%s--\r\n", boundary);

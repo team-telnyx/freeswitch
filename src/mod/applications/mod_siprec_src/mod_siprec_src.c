@@ -37,7 +37,6 @@ typedef struct siprec_session_s {
 	int usecnt;
     switch_audio_resampler_t *read_resampler;
     switch_audio_resampler_t *write_resampler;
-    int mux_streams;
 	switch_call_cause_t cause;
 } siprec_session_t;
 
@@ -49,11 +48,10 @@ typedef enum {
 
 static struct {
 	char local_media_ip[35];
-	char siprec_srs_ip[35];
+	char siprec_srs_host[35];
 	int siprec_srs_port;
 	siprec_stream_type_t stream_type;
 	char *telnyx_subdomain;
-    int mux_streams;
 } globals;
 
 typedef enum {
@@ -343,6 +341,7 @@ static int start_siprec_session(siprec_session_t *siprec, siprec_status_t status
 	switch_port_t remote_rtp_port_r = 0, remote_rtp_port_w = 0;
 	char *originate_str = NULL;
 	const char *sdp_in;
+	uint32_t timeout = 60;
 	int rc = 0;
 
 	channel = switch_core_session_get_channel(session);
@@ -396,8 +395,8 @@ static int start_siprec_session(siprec_session_t *siprec, siprec_status_t status
 		caller_id_number = SIPREC_SRS_NAME;
 	}
 
-	originate_str = switch_mprintf("{sip_h_X-DestHost=%s,sip_multipart[0]=%s,sip_multipart[1]=%s}sofia/outbound/%s@%s:%d", globals.telnyx_subdomain, sdp.data, rs.data, caller_id_number, globals.siprec_srs_ip, globals.siprec_srs_port);
-	switch_ivr_originate(NULL, &siprec->ssession, &siprec->cause, originate_str, 30, NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL);
+	originate_str = switch_mprintf("{sip_h_X-DestHost=%s,sip_multipart[0]=%s,sip_multipart[1]=%s}sofia/outbound/%s@%s:%d", globals.telnyx_subdomain, sdp.data, rs.data, caller_id_number, globals.siprec_srs_host, globals.siprec_srs_port);
+	switch_ivr_originate(NULL, &siprec->ssession, &siprec->cause, originate_str, timeout, NULL, NULL, NULL, caller_profile, NULL, SOF_NONE, NULL, NULL);
 	switch_safe_free(originate_str);
 
 	if (siprec->cause != SWITCH_CAUSE_SUCCESS && siprec->cause != SWITCH_CAUSE_NONE) {
@@ -409,18 +408,17 @@ static int start_siprec_session(siprec_session_t *siprec, siprec_status_t status
 	if (siprec->ssession) {
 		siprec->channel = switch_core_session_get_channel(siprec->ssession);
 
-		if (switch_channel_wait_for_flag(siprec->channel, CF_ANSWERED, SWITCH_TRUE, 10000, NULL) == SWITCH_STATUS_SUCCESS) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(siprec->ssession), SWITCH_LOG_DEBUG, "SIPREC Channel answered\n");
+		if (switch_channel_up(siprec->channel)) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(siprec->ssession), SWITCH_LOG_DEBUG, "SIPREC channel answered\n");
 
-			// Get remote RTP address and port
+			// Get remote RTP address and ports
 			remote_media_ip = switch_channel_get_variable(siprec->channel, SWITCH_REMOTE_MEDIA_IP_VARIABLE);
-			//remote_rtp_port = switch_channel_get_variable(siprec->channel, SWITCH_REMOTE_MEDIA_PORT_VARIABLE);
 			sdp_in = switch_channel_get_variable(siprec->channel, SWITCH_R_SDP_VARIABLE);
 
 			get_r_port(&sdp_in, &remote_rtp_port_r);
 			get_r_port(&sdp_in, &remote_rtp_port_w);
 
-			// Push streams. TODO: check if rtp_stream is pushed
+			// Push streams
 			if (globals.stream_type == FS_SIPREC_READ || globals.stream_type == FS_SIPREC_BOTH) { 
 				create_rtp_stream(siprec, FS_SIPREC_READ, &siprec->read_impl, siprec->read_rtp_port, remote_media_ip, remote_rtp_port_r);
 			}
@@ -432,10 +430,10 @@ static int start_siprec_session(siprec_session_t *siprec, siprec_status_t status
 			fire_siprec_start_event(siprec->session);
 			
 		} else {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(siprec->ssession), SWITCH_LOG_DEBUG, "SIPREC Channel not answered\n");
-			switch_channel_hangup(siprec->channel, SWITCH_CAUSE_NORMAL_CLEARING);
-			switch_core_session_rwunlock(siprec->ssession);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(siprec->ssession), SWITCH_LOG_DEBUG, "Failed to connect SIPREC call\n");
+			switch_channel_hangup(siprec->channel, SWITCH_CAUSE_ORIGINATOR_CANCEL);
 		}
+		switch_core_session_rwunlock(siprec->ssession);
 	}
 
 
@@ -454,7 +452,6 @@ static int start_siprec_session(siprec_session_t *siprec, siprec_status_t status
 					switch_channel_hangup(siprec->channel, SWITCH_CAUSE_NORMAL_CLEARING);
 
 				switch_core_session_rwunlock(siprec->ssession);
-				//switch_core_session_destroy(&siprec->ssession);
 			}
 		}
 
@@ -557,48 +554,10 @@ static switch_bool_t siprec_audio_callback(switch_media_bug_t *bug, void *user_d
 
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Starting SIPREC audio stream\n");
 			start_siprec_session(siprec, FS_SIPREC_START);
-            //if (!siprec->mux_streams) {
-              //  start_siprec_session(siprec, FS_SIPREC_START, FS_SIPREC_WRITE);
-            //}
 		}
 		break;
 	case SWITCH_ABC_TYPE_CLOSE:
 		{
-            if (siprec->mux_streams) {
-                int16_t *data;
-
-                raw_frame.data = raw_data;
-                raw_frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
-
-                while (switch_core_media_bug_read(bug, &raw_frame, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
-                    linear_frame = &raw_frame;
-
-
-                    if (siprec->read_resampler) {
-                        data = (int16_t *) linear_frame->data;
-                        switch_resample_process(siprec->read_resampler, data, (int) linear_frame->datalen / 2);
-                        linear_len = siprec->read_resampler->to_len * 2;
-                        memcpy(resample_data, siprec->read_resampler->to, linear_len);
-                        linear_samples = (int16_t *)resample_data;
-                    } else {
-                        linear_samples = linear_frame->data;
-                        linear_len = linear_frame->datalen;
-                    }
-
-                    memset(&pcmu_frame, 0, sizeof(pcmu_frame));
-                    for (i = 0; i < linear_len / sizeof(int16_t); i++) {
-                        pcmu_data[i] = linear_to_ulaw(linear_samples[i]);
-                    }
-                    pcmu_frame.source = __SWITCH_FUNC__;
-                    pcmu_frame.data = pcmu_data;
-                    pcmu_frame.datalen = i;
-                    pcmu_frame.payload = 0;
-
-                    switch_rtp_write_frame(siprec->read_rtp_stream, &pcmu_frame);
-                }
-            }
-
-
             if (siprec->read_resampler) {
                 switch_resample_destroy(&siprec->read_resampler);
             }
@@ -609,9 +568,6 @@ static switch_bool_t siprec_audio_callback(switch_media_bug_t *bug, void *user_d
 
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Stopping SIPREC audio stream\n");
 			start_siprec_session(siprec, FS_SIPREC_STOP);
-            //if (!siprec->mux_streams) {
-                //start_siprec_session(siprec, FS_SIPREC_STOP, FS_SIPREC_WRITE);
-            //}
 		}
 		break;
 	case SWITCH_ABC_TYPE_READ_REPLACE:
@@ -665,7 +621,6 @@ SWITCH_STANDARD_APP(siprec_start_function)
 	int argc;
     int flags = 0;
 	char *lbuf = NULL;
-    const char *var;
 
 	if ((siprec = (siprec_session_t *) switch_channel_get_private(channel, SIPREC_PRIVATE))) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Cannot run siprec src 2 times on the same session!\n");
@@ -681,8 +636,8 @@ SWITCH_STANDARD_APP(siprec_start_function)
 		if (!params) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "siprec_start INVALID JSON %s\n", parse_end);
 		} else {
-			if ((item = cJSON_GetObjectItem(params, "siprec_srs_ip")) && item->type == cJSON_String) {
-				snprintf(globals.siprec_srs_ip, sizeof(globals.siprec_srs_ip), "%s", item->valuestring);
+			if ((item = cJSON_GetObjectItem(params, "siprec_srs_host")) && item->type == cJSON_String) {
+				snprintf(globals.siprec_srs_host, sizeof(globals.siprec_srs_host), "%s", item->valuestring);
 			} 
 
 			if ((item = cJSON_GetObjectItem(params, "siprec_srs_port")) && item->type == cJSON_Number) {
@@ -705,23 +660,13 @@ SWITCH_STANDARD_APP(siprec_start_function)
 	switch_assert(siprec);
 	memset(siprec, 0, sizeof(*siprec));
 
-    siprec->mux_streams = globals.mux_streams;
-
-    if ((var = switch_channel_get_variable(channel, "siprec_mux_streams"))) {
-        siprec->mux_streams = switch_true(var);
-    }
-
 	if (data && (lbuf = switch_core_session_strdup(session, data))
 		&& (argc = switch_separate_string(lbuf, ' ', argv, (sizeof(argv) / sizeof(argv[0]))))) {
 	}
 
 	siprec->session = session;
 
-    if (siprec->mux_streams) {
-        flags = SMBF_READ_STREAM | SMBF_WRITE_STREAM | SMBF_READ_PING | SMBF_ANSWER_REQ;
-    } else {
-        flags = SMBF_READ_REPLACE | SMBF_WRITE_REPLACE | SMBF_ANSWER_REQ;
-    }
+    flags = SMBF_READ_REPLACE | SMBF_WRITE_REPLACE | SMBF_ANSWER_REQ;
 
 	status = switch_core_media_bug_add(session, SIPREC_BUG_NAME_READ, NULL, siprec_audio_callback, siprec, 0, flags, &bug);
 
@@ -770,12 +715,10 @@ static int load_config(void)
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Found parameter %s=%s\n", var, val);
 			if (!strcasecmp(var, "local-media-ip")) {
 				snprintf(globals.local_media_ip, sizeof(globals.local_media_ip), "%s", val);
-			} else if (!strcasecmp(var, "siprec-srs-ip")) {
-				snprintf(globals.siprec_srs_ip, sizeof(globals.siprec_srs_ip), "%s", val);
+			} else if (!strcasecmp(var, "siprec-srs-host")) {
+				snprintf(globals.siprec_srs_host, sizeof(globals.siprec_srs_host), "%s", val);
 			} else if (!strcasecmp(var, "siprec-srs-port")) {
 				globals.siprec_srs_port = atoi(val);
-			} else if (!strcasecmp(var, "mux-all-streams")) {
-                globals.mux_streams = 1;
 			}
 		}
 	}
@@ -799,8 +742,8 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_siprec_src_load)
 		return SWITCH_STATUS_UNLOAD;
 	}
 
-	if (zstr(globals.siprec_srs_ip)) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "No sip server address specified!\n");
+	if (zstr(globals.siprec_srs_host)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "No siprec srs address specified!\n");
 		return SWITCH_STATUS_UNLOAD;
 	}
 
