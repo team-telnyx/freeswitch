@@ -34,7 +34,6 @@ typedef struct siprec_session_s {
 	uint32_t read_cnt;
 	uint32_t write_cnt;
 	switch_media_bug_t *read_bug;
-	int usecnt;
     switch_audio_resampler_t *read_resampler;
     switch_audio_resampler_t *write_resampler;
 	switch_call_cause_t cause;
@@ -443,6 +442,10 @@ static int start_siprec_session(siprec_session_t *siprec, siprec_status_t status
 			free(sdp.data);
 		}
 
+		if (rs.data) {
+			free(rs.data);
+		}
+
 		if (status == FS_SIPREC_STOP) {
 			siprec_tear_down_rtp(siprec, globals.stream_type);
 			fire_siprec_stop_event(siprec);
@@ -675,9 +678,7 @@ SWITCH_STANDARD_APP(siprec_start_function)
 		return;
 	}
 	siprec->read_bug = bug;
-	siprec->usecnt++;
 	bug = NULL;
-	siprec->usecnt++;
 	switch_channel_set_private(channel, SIPREC_PRIVATE, siprec);
 
 }
