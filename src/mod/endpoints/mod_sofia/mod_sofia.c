@@ -5065,26 +5065,6 @@ static switch_call_cause_t sofia_outgoing_channel(switch_core_session_t *session
 		mod = protect_dest_uri(outbound_profile);
 	}
 
-	if (session) {
-		switch_channel_t *channel = switch_core_session_get_channel(session);
-		const char *rtp_secure_media = NULL;
-		if (switch_channel_direction(channel) == SWITCH_CALL_DIRECTION_INBOUND) {
-			rtp_secure_media = switch_channel_get_variable(channel, "rtp_secure_media_inbound");
-		}
-
-		if (zstr(rtp_secure_media)) {
-			rtp_secure_media = switch_channel_get_variable(channel, "rtp_secure_media");
-		}
-
-		// Validate if inbound session forbids SRTP otherwise lets terminate the call immediately
-		if(!zstr(rtp_secure_media) && !strncasecmp("forbidden", rtp_secure_media, 9)
-			&& switch_channel_var_true(channel, "rtp_remote_use_srtp")) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "SRTP is forbidden, rejecting call\n");
-			cause = SWITCH_CAUSE_INCOMPATIBLE_DESTINATION;
-			goto error;
-		}
-	}
-
 	if (!(nsession = switch_core_session_request_uuid(sofia_endpoint_interface, SWITCH_CALL_DIRECTION_OUTBOUND,
 													  flags, pool, switch_event_get_header(var_event, "origination_uuid")))) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Error Creating Session\n");
