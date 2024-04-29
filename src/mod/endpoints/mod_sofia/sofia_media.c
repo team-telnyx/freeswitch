@@ -177,7 +177,7 @@ char *sofia_media_get_multipart(switch_core_session_t *session, const char *pref
 
 	if (x) {
 		*mp_type = switch_core_session_sprintf(session, "multipart/mixed; boundary=%s", boundary);
-		if (sdp && !allow_sdp) {
+		if (sdp && !allow_custom_sdp) {
 			switch_string_stream_write(&stream, "--%s\r\nContent-Type: application/sdp\r\nContent-Length: %d\r\n\r\n%s\r\n", boundary, strlen(sdp) + 1, sdp);
 		}
 		switch_string_stream_write(&stream, "--%s--\r\n", boundary);
