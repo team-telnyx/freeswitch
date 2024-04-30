@@ -2089,7 +2089,7 @@ SWITCH_DECLARE(int) switch_core_session_check_incoming_crypto(switch_core_sessio
 			const char *a = switch_stristr("AE", engine->ssec[engine->crypto_type].remote_crypto_key);
 			const char *b = switch_stristr("AE", crypto);
 
-			if (sdp_type == SDP_TYPE_REQUEST) {
+			if (sdp_type == SDP_TYPE_REQUEST && switch_channel_test_flag(session->channel, CF_ANSWERED)) {
 				if (!vval) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Unsupported Crypto [%s]\n", crypto);
 					goto end;
