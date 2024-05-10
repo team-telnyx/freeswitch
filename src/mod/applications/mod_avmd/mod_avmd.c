@@ -223,6 +223,7 @@ struct avmd_detector {
 /*! Type that holds avmd detection session information. */
 struct avmd_session {
     char                    *session_uuid;
+    switch_core_session_t   *session;
     switch_mutex_t          *mutex;
     struct avmd_settings    settings;
     uint32_t        rate;
@@ -409,6 +410,7 @@ static switch_status_t init_avmd_session_data(avmd_session_t *avmd_session, swit
         goto end;
     }
     avmd_session->session_uuid = switch_core_session_strdup(fs_session, switch_core_session_get_uuid(fs_session));
+    avmd_session->session = fs_session;
     avmd_session->pos = 0;
     avmd_session->f = 0.0;
     avmd_session->state.last_beep = 0;
@@ -504,15 +506,18 @@ static void avmd_session_close(avmd_session_t *s) {
     while (idx < (s->settings.detectors_n + s->settings.detectors_lagged_n)) {
         d = &s->detectors[idx];
         switch_mutex_lock(d->mutex);
-        d->flag_processing_done = 0;
-        d->flag_should_exit = 1;
-        d->samples = 0;
-        switch_thread_cond_signal(d->cond_start_processing);
-        switch_mutex_unlock(d->mutex);
+        if (d->thread != NULL) {
+            d->flag_processing_done = 0;
+            d->flag_should_exit = 1;
+            d->samples = 0;
+            switch_thread_cond_signal(d->cond_start_processing);
+            switch_mutex_unlock(d->mutex);
 
-        switch_thread_join(&status, d->thread);
-        d->thread = NULL;
-
+            switch_thread_join(&status, d->thread);
+            d->thread = NULL;
+        } else {
+            switch_mutex_unlock(d->mutex);
+        }
         switch_mutex_destroy(d->mutex);
         switch_thread_cond_destroy(d->cond_start_processing);
         ++idx;
@@ -526,19 +531,17 @@ static void avmd_session_close(avmd_session_t *s) {
 static switch_bool_t avmd_media_bug_init(avmd_session_t *avmd_session) {
 	switch_codec_t          *read_codec;
 	switch_codec_t          *write_codec;
-	switch_core_session_t   *session;
+	switch_core_session_t   *session = avmd_session->session;
 	switch_channel_t        *channel = NULL;
 
-	session = switch_core_session_locate(avmd_session->session_uuid);
-	if (session == NULL) {
-		switch_log_printf(SWITCH_CHANNEL_UUID_LOG(avmd_session->session_uuid), SWITCH_LOG_ERROR, "No FreeSWITCH session assigned!\n");
-		return SWITCH_FALSE;
-	}
+    if (session == NULL) {
+        switch_log_printf(SWITCH_CHANNEL_UUID_LOG(avmd_session->session_uuid), SWITCH_LOG_ERROR, "No FreeSWITCH session assigned!\n");
+        return SWITCH_FALSE;
+    }
 
 	channel = switch_core_session_get_channel(session);
 	if (channel == NULL) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "No channel for FreeSWITCH session!\n");
-		switch_core_session_rwunlock(session);
 		return SWITCH_FALSE;
 	}
 
@@ -573,7 +576,6 @@ static switch_bool_t avmd_media_bug_init(avmd_session_t *avmd_session) {
 	avmd_session->start_time = switch_micro_time_now();
 	/* avmd_session->vmd_codec.channels =  read_codec->implementation->number_of_channels; */
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session),SWITCH_LOG_INFO, "Avmd session initialized, [%u] samples/s\n", avmd_session->rate);
-	switch_core_session_rwunlock(session);
 	return SWITCH_TRUE;
 }
 
@@ -588,6 +590,11 @@ static switch_bool_t avmd_callback(switch_media_bug_t *bug, void *user_data, swi
 	switch_frame_t *frame;
 	switch_bool_t ret = SWITCH_TRUE;
 	int lock_flag = (type != SWITCH_ABC_TYPE_INIT) && (type != SWITCH_ABC_TYPE_CLOSE);
+
+    if(type == SWITCH_ABC_TYPE_DESTROY_USER_DATA) {
+        // SKIP this state since avmd_session is allocated via session pool
+        return SWITCH_TRUE;
+    }
 
 	avmd_session = (avmd_session_t *) user_data;
 	if (avmd_session == NULL) {
@@ -1973,7 +1980,7 @@ avmd_decision_freq(const avmd_session_t *s, const struct avmd_buffer *b, double 
 }
 
 static void avmd_report_detection(avmd_session_t *s, enum avmd_detection_mode mode, const struct avmd_detector *d) {
-    switch_core_session_t *session;
+    switch_core_session_t *session = s->session;
     switch_channel_t    *channel;
     switch_time_t       detection_time;
     double      f_sma = 0.0;
@@ -1988,7 +1995,6 @@ static void avmd_report_detection(avmd_session_t *s, enum avmd_detection_mode mo
 
     switch_time_t now = switch_micro_time_now();
 
-    session = switch_core_session_locate(s->session_uuid);
     if(session == NULL) {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Session is NULL.\n");
         return;
@@ -2038,8 +2044,6 @@ static void avmd_report_detection(avmd_session_t *s, enum avmd_detection_mode mo
             break;
     }
     s->state.beep_state = BEEP_DETECTED;
-
-    switch_core_session_rwunlock(session);
 }
 
 static uint8_t
