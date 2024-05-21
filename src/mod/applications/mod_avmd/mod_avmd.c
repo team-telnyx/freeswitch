@@ -2354,6 +2354,8 @@ avmd_detector_func(switch_thread_t *thread, void *arg) {
                 }
                 ++sample_n;
             }
+        } else {
+            switch_mutex_unlock(d->mutex);
         }
         switch_mutex_lock(d->mutex);
 done:
