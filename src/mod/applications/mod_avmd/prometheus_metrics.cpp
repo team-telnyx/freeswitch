@@ -21,6 +21,8 @@ public:
 		{
 			switch_mutex_unlock(_mutex);
 		}
+
+	private:
 		switch_mutex_t* _mutex;
 	};
 	
@@ -88,9 +90,7 @@ void prometheus_init(switch_loadable_module_interface_t **module_interface, swit
 {
 	SWITCH_ADD_API(api_interface, "avmd_prometheus_metrics", "avmd_prometheus_metrics", avmd_prometheus_metrics, "");
 	
-	if (instance) {
-		delete instance;
-	}
+	delete instance;
 	instance = new prometheus_metrics(module_interface, pool);
 }
 
