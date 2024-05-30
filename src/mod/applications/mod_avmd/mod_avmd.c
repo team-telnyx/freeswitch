@@ -908,7 +908,7 @@ static switch_status_t avmd_load_xml_configuration(switch_mutex_t *mutex) {
     uint8_t bad_debug = 1, bad_report = 1, bad_fast = 1, bad_req_cont = 1, bad_sample_n_cont = 1,
             bad_sample_n_to_skip = 1, bad_req_cont_amp = 1, bad_sample_n_cont_amp = 1, bad_simpl = 1,
             bad_inbound = 1, bad_outbound = 1, bad_mode = 1, bad_detectors = 1, bad_lagged = 1, bad = 0,
-            bad_analysis_time = 1;
+            bad_idle_time = 1;
 
     if (mutex != NULL) {
         switch_mutex_lock(mutex);
@@ -978,7 +978,7 @@ static switch_status_t avmd_load_xml_configuration(switch_mutex_t *mutex) {
                     }
                 } else if (!strcmp(name, "detectors_idle_time")) {
                     if(!avmd_parse_u16_user_input(value, &avmd_globals.settings.detectors_idle_time, 0, UINT16_MAX)) {
-                        bad_analysis_time = 0;
+                        bad_idle_time = 0;
                     }
                 }
             } // for
@@ -1071,7 +1071,7 @@ static switch_status_t avmd_load_xml_configuration(switch_mutex_t *mutex) {
         avmd_globals.settings.detectors_lagged_n = 1;
     }
 
-    if (bad_analysis_time) {
+    if (bad_idle_time) {
         bad = 1;
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AVMD config parameter 'detectors_idle_time' missing or invalid - using default\n");
         avmd_globals.settings.detectors_idle_time = 60;
