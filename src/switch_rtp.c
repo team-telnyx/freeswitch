@@ -7600,6 +7600,12 @@ static switch_status_t process_rtcp_xr_report(switch_rtcp_report_data_t *report_
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "Found %d report blocks\n", count);
 
+	if (!count) {
+		/* No report blocks found */
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "No report blocks found\n");
+		return status;
+	}
+
 	report_data->xr_count = count;
 	switch_malloc(report_data->rtcp_data.xr_blocks, sizeof(switch_rtcp_xr_report) * count);
 	header = &packet->rb_header;
