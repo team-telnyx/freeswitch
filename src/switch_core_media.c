@@ -11451,11 +11451,12 @@ static void generate_m(switch_core_session_t *session, char *buf, size_t buflen,
 		if (a_engine->rtcp_mux > 0) {
 			switch_snprintf(buf + strlen(buf), buflen - strlen(buf), "a=rtcp-mux\r\n");
 			switch_snprintf(buf + strlen(buf), buflen - strlen(buf), "a=rtcp:%d IN %s %s\r\n", port, family, ip);
-			switch_snprintf(buf + strlen(buf), buflen - strlen(buf), "a=rtcp-xr:rcvr-rtt=all:10000 stat-summary=loss,dup,jitt,TTL voip-metrics\r\n");
 		} else {
 			switch_snprintf(buf + strlen(buf), buflen - strlen(buf), "a=rtcp:%d IN %s %s\r\n", port + 1, family, ip);
 		}
-	} else {
+	}
+
+	if (switch_channel_var_true(session->channel, "use_rtcp_xr") || (!switch_channel_var_false(session->channel, "use_rtcp_xr") && smh->mparams->offer_rtcp_xr)) {
 		switch_snprintf(buf + strlen(buf), buflen - strlen(buf), "a=rtcp-xr:rcvr-rtt=all:10000 stat-summary=loss,dup,jitt,TTL voip-metrics\r\n");
 	}
 
@@ -12246,11 +12247,13 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 			if (a_engine->rtcp_mux > 0) {
 				switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=rtcp-mux\r\n");
 				switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=rtcp:%d IN %s %s\r\n", port, family, ip);
-				switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=rtcp-xr:rcvr-rtt=all:10000 stat-summary=loss,dup,jitt,TTL voip-metrics\r\n");
 			} else {
 				switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=rtcp:%d IN %s %s\r\n", port + 1, family, ip);
-				switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=rtcp-xr:rcvr-rtt=all:10000 stat-summary=loss,dup,jitt,TTL voip-metrics\r\n");
 			}
+		}
+
+		if (switch_channel_var_true(session->channel, "use_rtcp_xr") || (!switch_channel_var_false(session->channel, "use_rtcp_xr") && smh->mparams->offer_rtcp_xr)) {
+			switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=rtcp-xr:rcvr-rtt=all:10000 stat-summary=loss,dup,jitt,TTL voip-metrics\r\n");
 		}
 
 		//switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=ssrc:%u\r\n", a_engine->ssrc);
