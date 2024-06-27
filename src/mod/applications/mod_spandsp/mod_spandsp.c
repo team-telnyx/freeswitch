@@ -673,6 +673,8 @@ switch_status_t load_configuration(switch_bool_t reload)
 					spandsp_globals.spool = switch_core_strdup(spandsp_globals.config_pool, value);
 				} else if (!strcmp(name, "file-prefix")) {
 					spandsp_globals.prepend_string = switch_core_strdup(spandsp_globals.config_pool, value);
+				} else if (!strcmp(name, "t38-retransmission-delay")) {
+					spandsp_globals.t38_retransmission_delay = atoi(value);
 				} else {
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Unknown parameter %s\n", name);
 				}
