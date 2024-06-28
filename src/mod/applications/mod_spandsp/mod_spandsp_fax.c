@@ -775,7 +775,7 @@ static int t38_tx_packet_handler(t38_core_state_t *s, void *user_data, const uin
 				break;
 			}
 
-			if (spandsp_globals.t38_retransmission_delay > 0) {
+			if (count > 1 && spandsp_globals.t38_retransmission_delay > 0) {
 				switch_yield(spandsp_globals.t38_retransmission_delay * 1000);
 			}
 		}
