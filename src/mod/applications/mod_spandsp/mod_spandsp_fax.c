@@ -780,7 +780,7 @@ static int t38_tx_packet_handler(t38_core_state_t *s, void *user_data, const uin
 			}
 
 			if (count > 1 && pvt->t38_retransmission_delay > 0) {
-				switch_yield(spandsp_globals.t38_retransmission_delay * 1000);
+				switch_yield(pvt->t38_retransmission_delay * 1000);
 			}
 		}
 	} else {
@@ -1532,19 +1532,22 @@ static pvt_t *pvt_init(switch_core_session_t *session, mod_spandsp_fax_applicati
 	}
 
 	if ((tmp = switch_channel_get_variable(channel, "fax_t38_indicator_redundancy_count"))) {
-		pvt->t38_indicator_redundancy_count = atoi(tmp);
+		int count = atoi(tmp);
+		pvt->t38_indicator_redundancy_count = (count > 0 ? count : 1);
 	} else {
 		pvt->t38_indicator_redundancy_count = spandsp_globals.t38_indicator_redundancy_count;
 	}
 
 	if ((tmp = switch_channel_get_variable(channel, "fax_t38_control_data_end_redundancy_count"))) {
-		pvt->t38_control_data_end_redundancy_count = atoi(tmp);
+		int count = atoi(tmp);
+		pvt->t38_control_data_end_redundancy_count = (count > 0 ? count : 1);
 	} else {
 		pvt->t38_control_data_end_redundancy_count = spandsp_globals.t38_control_data_end_redundancy_count;
 	}
 
 	if ((tmp = switch_channel_get_variable(channel, "fax_t38_image_data_end_redundancy_count"))) {
-		pvt->t38_image_data_end_redundancy_count = atoi(tmp);
+		int count = atoi(tmp);
+		pvt->t38_image_data_end_redundancy_count = (count > 0 ? count : 1);
 	} else {
 		pvt->t38_image_data_end_redundancy_count = spandsp_globals.t38_image_data_end_redundancy_count;
 	}

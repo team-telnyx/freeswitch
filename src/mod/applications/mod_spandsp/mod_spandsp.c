@@ -680,11 +680,14 @@ switch_status_t load_configuration(switch_bool_t reload)
 				} else if (!strcmp(name, "t38-retransmission-delay")) {
 					spandsp_globals.t38_retransmission_delay = atoi(value);
 				} else if (!strcmp(name, "t38-indicator-redundancy-count")) {
-					spandsp_globals.t38_indicator_redundancy_count = atoi(value);
+					int count = atoi(value);
+					spandsp_globals.t38_indicator_redundancy_count = (count > 0 ? count : 1);
 				} else if (!strcmp(name, "t38-control-data-redundancy-count")) {
-					spandsp_globals.t38_control_data_end_redundancy_count = atoi(value);
+					int count = atoi(value);
+					spandsp_globals.t38_control_data_end_redundancy_count = (count > 0 ? count : 1);
 				} else if (!strcmp(name, "t38-image-data-redundancy-count")) {
-					spandsp_globals.t38_image_data_end_redundancy_count = atoi(value);
+					int count = atoi(value);
+					spandsp_globals.t38_image_data_end_redundancy_count = (count > 0 ? count : 1);
 				} else {
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Unknown parameter %s\n", name);
 				}
