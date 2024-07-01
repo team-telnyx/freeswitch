@@ -528,6 +528,10 @@ switch_status_t load_configuration(switch_bool_t reload)
 	spandsp_globals.tonedebug = 0;
 	spandsp_globals.t38_tx_reinvite_packet_count = 100;
 	spandsp_globals.t38_rx_reinvite_packet_count = 50;
+	spandsp_globals.t38_retransmission_delay = 0;
+	spandsp_globals.t38_indicator_redundancy_count = 3;
+	spandsp_globals.t38_control_data_end_redundancy_count = 3;
+	spandsp_globals.t38_image_data_end_redundancy_count = 3;
 
 	if ((xml = switch_xml_open_cfg("spandsp.conf", &cfg, NULL)) || (xml = switch_xml_open_cfg("fax.conf", &cfg, NULL))) {
 		status = SWITCH_STATUS_SUCCESS;
@@ -675,6 +679,12 @@ switch_status_t load_configuration(switch_bool_t reload)
 					spandsp_globals.prepend_string = switch_core_strdup(spandsp_globals.config_pool, value);
 				} else if (!strcmp(name, "t38-retransmission-delay")) {
 					spandsp_globals.t38_retransmission_delay = atoi(value);
+				} else if (!strcmp(name, "t38-indicator-redundancy-count")) {
+					spandsp_globals.t38_indicator_redundancy_count = atoi(value);
+				} else if (!strcmp(name, "t38-control-data-redundancy-count")) {
+					spandsp_globals.t38_control_data_end_redundancy_count = atoi(value);
+				} else if (!strcmp(name, "t38-image-data-redundancy-count")) {
+					spandsp_globals.t38_image_data_end_redundancy_count = atoi(value);
 				} else {
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Unknown parameter %s\n", name);
 				}
