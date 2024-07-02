@@ -58,6 +58,7 @@ static void gen_ice(switch_core_session_t *session, switch_media_type_t type, co
 #define TEXT_PERIOD_TIMEOUT 3000
 #define MAX_RED_FRAMES 25
 #define RED_PACKET_SIZE 100
+#define SWITCH_RTCP_AUDIO_PASSTHRU "passthru"
 
 typedef enum {
 	SMF_INIT = (1 << 0),
@@ -1642,8 +1643,20 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_add_crypto(switch_core_session
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Bad MKI found in %s, (parsed as: id %u size %u lifetime base %u exp %u\n", p, mki_id, mki_size, lifetime_base, lifetime_exp);
 				return SWITCH_STATUS_FALSE;
 			} else if (mki_id == 0 || lifetime == 0) {
+				switch_media_handle_t *smh = NULL;
+				const char * skip_empty_mki_var = NULL;
+				int skip_empty_mki = 0;
+				if ((smh = session->media_handle)) {
+					skip_empty_mki = switch_media_handle_test_media_flag(smh, SCMF_SRTP_SKIP_EMPTY_MKI);
+				}
+
+				skip_empty_mki_var = switch_channel_get_variable(session->channel, "skip_empty_rtp_secure_media_mki");
+				if (!zstr(skip_empty_mki_var)) {
+					skip_empty_mki = switch_true(skip_empty_mki_var);
+				}
+
 				if (mki_id == 0) {
-					if (key_material)
+					if (key_material && !skip_empty_mki)
 						goto bad_key_no_mki_index;
 
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "Skipping MKI due to empty index\n");
@@ -1674,8 +1687,10 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_add_crypto(switch_core_session
 
 	if (direction == SWITCH_RTP_CRYPTO_SEND || direction == SWITCH_RTP_CRYPTO_SEND_RTCP) {
 		ssec->local_key_material_next = key_material;
+		ssec->local_key_material_n = *key_material_n;
 	} else {
 		ssec->remote_key_material_next = key_material;
+		ssec->remote_key_material_n = *key_material_n;
 	}
 
 	return SWITCH_STATUS_SUCCESS;
@@ -2030,6 +2045,9 @@ SWITCH_DECLARE(int) switch_core_session_check_incoming_crypto(switch_core_sessio
 	int use_alias = 0;
 	switch_rtp_engine_t *engine;
 	switch_media_handle_t *smh;
+	int mki_set = 0;
+	int skip_empty_mki_set = 0;
+	const char *skip_empty_mki_var = NULL;
 
 	if (!(smh = session->media_handle)) {
 		return 0;
@@ -2055,6 +2073,14 @@ SWITCH_DECLARE(int) switch_core_session_check_incoming_crypto(switch_core_sessio
 		engine->ssec[j].remote_crypto_tag = SWITCH_REMOTE_CRYPTO_TAG_INVALID;
 	}
 **/
+
+	mki_set = switch_channel_var_true(session->channel, "rtp_secure_media_mki");
+	skip_empty_mki_set = switch_media_handle_test_media_flag(smh, SCMF_SRTP_SKIP_EMPTY_MKI);
+
+	skip_empty_mki_var = switch_channel_get_variable(session->channel, "skip_empty_rtp_secure_media_mki");
+	if (!zstr(skip_empty_mki_var)) {
+		skip_empty_mki_set = switch_true(skip_empty_mki_var);
+	}
 
 	for (i = 0; smh->crypto_suite_order[i] != CRYPTO_INVALID; i++) {
 		switch_rtp_crypto_key_type_t j = SUITES[smh->crypto_suite_order[i]].type;
@@ -2088,18 +2114,29 @@ SWITCH_DECLARE(int) switch_core_session_check_incoming_crypto(switch_core_sessio
 		} else {
 			const char *a = switch_stristr("AE", engine->ssec[engine->crypto_type].remote_crypto_key);
 			const char *b = switch_stristr("AE", crypto);
+			switch_bool_t skip_local = SWITCH_FALSE;
 
-			if (sdp_type == SDP_TYPE_REQUEST) {
-				if (!vval) {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Unsupported Crypto [%s]\n", crypto);
-					goto end;
-				}
-				switch_channel_set_variable(session->channel, varname, vval);
+			/* Skip building new local key if only remote mki is added or removed */
+			if (skip_empty_mki_set && (strstr(crypto, engine->ssec[engine->crypto_type].remote_crypto_key) || strstr(engine->ssec[engine->crypto_type].remote_crypto_key, crypto))) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "CRYPTO: Remote key is same as existing key but with or without MKI present\n");
+					skip_local = SWITCH_TRUE;
+			}
 
-				if (switch_channel_test_flag(session->channel, CF_ANSWERED)) {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "CRYPTO: build crypto for tag %d\n", crypto_tag);
-					switch_core_media_build_crypto(session->media_handle, type, crypto_tag, ctype, SWITCH_RTP_CRYPTO_SEND, 1, use_alias);
-					switch_rtp_add_crypto_key(engine->rtp_session, SWITCH_RTP_CRYPTO_SEND, atoi(crypto), &engine->ssec[engine->crypto_type]);
+			if (!skip_local) {
+				if (sdp_type == SDP_TYPE_REQUEST) {
+					if (!vval) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Unsupported Crypto [%s]\n", crypto);
+						goto end;
+					}
+					switch_channel_set_variable(session->channel, varname, vval);
+
+					if (switch_channel_test_flag(session->channel, CF_ANSWERED)) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "CRYPTO: build crypto for tag %d\n", crypto_tag);
+						switch_core_media_build_crypto(session->media_handle, type, crypto_tag, ctype, SWITCH_RTP_CRYPTO_SEND, 1, use_alias);
+						if (mki_set)
+							switch_core_media_add_crypto(session, &engine->ssec[engine->crypto_type], SWITCH_RTP_CRYPTO_SEND);
+						switch_rtp_add_crypto_key(engine->rtp_session, SWITCH_RTP_CRYPTO_SEND, atoi(crypto), &engine->ssec[engine->crypto_type]);
+					}
 				}
 			}
 
@@ -4621,7 +4658,7 @@ static switch_bool_t is_mdns(const char *ip)
 }
 
 //?
-static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t type, sdp_session_t *sdp, sdp_media_t *m)
+static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t type, sdp_session_t *sdp, sdp_media_t *m, switch_sdp_type_t sdp_type)
 {
 	switch_rtp_engine_t *engine = &smh->engines[type];
 	sdp_attribute_t *attr = NULL, *attrs[2] = { 0 };
@@ -4748,6 +4785,11 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 					smh->mparams->rtcp_audio_interval_msec = SWITCH_RTCP_AUDIO_INTERVAL_MSEC;
 				}
 #endif
+			} else if (!strcasecmp(attr->a_name, "ice-lite")) {
+				if (sdp_type == SDP_TYPE_REQUEST && switch_channel_var_true(smh->session->channel, "ice_lite")) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_WARNING, "ice-lite found in sdp offer. Disabling ice-lite for sdp answer!\n");
+					switch_channel_set_variable(smh->session->channel, "ice_lite", "false");
+				}
 			} else if (!strcasecmp(attr->a_name, "candidate")) {
 				switch_channel_set_flag(smh->session->channel, CF_ICE);
 
@@ -5061,10 +5103,24 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 
 			if (switch_channel_var_false(smh->session->channel, "telnyx_disable_rtcp") || !switch_channel_get_variable(smh->session->channel, "telnyx_disable_rtcp")) {
 				if (remote_rtcp_port) {
+					if (switch_channel_var_true(smh->session->channel, "force_rtcp_passthru")) {
+						val = "passthru";
+					}
+
 					if (!strcasecmp(val, "passthru")) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_INFO, "Activating %s RTCP PASSTHRU PORT %d\n",
 								type2str(type), remote_rtcp_port);
 						switch_rtp_activate_rtcp(engine->rtp_session, -1, remote_rtcp_port, engine->rtcp_mux > 0);
+						if ((val = switch_channel_get_variable(smh->session->channel, (type == SWITCH_MEDIA_TYPE_VIDEO ? "rtcp_video_passthru_timeout_msec" : "rtcp_audio_passthru_timeout_msec")))
+							|| (val = type == SWITCH_MEDIA_TYPE_VIDEO ? smh->mparams->rtcp_video_passthru_timeout_msec : smh->mparams->rtcp_audio_passthru_timeout_msec)) {
+							int interval = atoi(val);
+							if (interval < 100 || interval > 500000) {
+								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_ERROR,
+										"Invalid rtcp passthru timeout spec [%d] must be between 100 and 500000\n", interval);
+								interval = 5000;
+							}
+							switch_rtp_set_rtcp_passthru_timeout(engine->rtp_session, interval);
+						}
 					} else {
 						int interval = atoi(val);
 						if (interval < 100 || interval > 500000) {
@@ -5875,9 +5931,9 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 	switch_core_media_find_zrtp_hash(session, sdp);
 	switch_core_media_pass_zrtp_hash(session);
 
-	check_ice(smh, SWITCH_MEDIA_TYPE_AUDIO, sdp, NULL);
-	check_ice(smh, SWITCH_MEDIA_TYPE_VIDEO, sdp, NULL);
-	check_ice(smh, SWITCH_MEDIA_TYPE_TEXT, sdp, NULL);
+	check_ice(smh, SWITCH_MEDIA_TYPE_AUDIO, sdp, NULL, sdp_type);
+	check_ice(smh, SWITCH_MEDIA_TYPE_VIDEO, sdp, NULL, sdp_type);
+	check_ice(smh, SWITCH_MEDIA_TYPE_TEXT, sdp, NULL, sdp_type);
 
 	if ((sdp->sdp_connection && sdp->sdp_connection->c_address && !strcmp(sdp->sdp_connection->c_address, "0.0.0.0"))) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "RFC2543 from March 1999 called; They want their 0.0.0.0 hold method back.....\n");
@@ -6890,7 +6946,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 				}
 
 				if (match) {
-					if (check_ice(smh, SWITCH_MEDIA_TYPE_AUDIO, sdp, m) == SWITCH_STATUS_FALSE) {
+					if (check_ice(smh, SWITCH_MEDIA_TYPE_AUDIO, sdp, m, sdp_type) == SWITCH_STATUS_FALSE) {
 						match = 0;
 						got_audio = 0;
 					} else {
@@ -7094,7 +7150,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 				switch_core_media_choose_port(session, SWITCH_MEDIA_TYPE_TEXT, 1);
 			}
 
-			check_ice(smh, SWITCH_MEDIA_TYPE_TEXT, sdp, m);
+			check_ice(smh, SWITCH_MEDIA_TYPE_TEXT, sdp, m, sdp_type);
 			//parse rtt
 
 		} else if (m->m_type == sdp_media_video) {
@@ -7399,7 +7455,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 				}
 
 				if (switch_core_media_set_video_codec(session, 0) == SWITCH_STATUS_SUCCESS) {
-					if (check_ice(smh, SWITCH_MEDIA_TYPE_VIDEO, sdp, m) == SWITCH_STATUS_FALSE) {
+					if (check_ice(smh, SWITCH_MEDIA_TYPE_VIDEO, sdp, m, sdp_type) == SWITCH_STATUS_FALSE) {
 						vmatch = 0;
 					}
 				}
@@ -10324,9 +10380,22 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 					remote_rtcp_port = (switch_port_t)atoi(rport);
 				}
 
+				if (switch_channel_var_true(smh->session->channel, "force_rtcp_passthru")) {
+					val = "passthru";
+				}
+
 				if (!strcasecmp(val, "passthru")) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Activating RTCP PASSTHRU PORT %d\n", remote_rtcp_port);
 					switch_rtp_activate_rtcp(a_engine->rtp_session, -1, remote_rtcp_port, a_engine->rtcp_mux > 0);
+					if ((val = switch_channel_get_variable(session->channel, "rtcp_audio_passthru_timeout_msec")) || (val = smh->mparams->rtcp_audio_passthru_timeout_msec)) {
+						int interval = atoi(val);
+						if (interval < 100 || interval > 500000) {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+									"Invalid rtcp passthru timeout spec [%d] must be between 100 and 500000\n", interval);
+							interval = 5000;
+						}
+						switch_rtp_set_rtcp_passthru_timeout(a_engine->rtp_session, interval);
+					}
 				} else {
 					int interval = atoi(val);
 					if (interval < 100 || interval > 500000) {
@@ -10693,6 +10762,16 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 						if (!strcasecmp(val, "passthru")) {
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Activating TEXT RTCP PASSTHRU PORT %d\n", remote_port);
 							switch_rtp_activate_rtcp(t_engine->rtp_session, -1, remote_port, t_engine->rtcp_mux > 0);
+							if ((val = switch_channel_get_variable(session->channel, "rtcp_text_passthru_timeout_msec")) || (val = smh->mparams->rtcp_text_passthru_timeout_msec)) {
+								int interval = atoi(val);
+								if (interval < 100 || interval > 500000) {
+									switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+											"Invalid rtcp passthru timeout spec [%d] must be between 100 and 500000\n", interval);
+									interval = 5000;
+								}
+								switch_rtp_set_rtcp_passthru_timeout(t_engine->rtp_session, interval);
+							}
+							
 						} else {
 							int interval = atoi(val);
 							if (interval < 100 || interval > 500000) {
@@ -11020,6 +11099,15 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 						if (!strcasecmp(val, "passthru")) {
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Activating VIDEO RTCP PASSTHRU PORT %d\n", remote_port);
 							switch_rtp_activate_rtcp(v_engine->rtp_session, -1, remote_port, v_engine->rtcp_mux > 0);
+							if ((val = switch_channel_get_variable(session->channel, "rtcp_video_passthru_timeout_msec")) || (val = smh->mparams->rtcp_video_passthru_timeout_msec)) {
+								int interval = atoi(val);
+								if (interval < 100 || interval > 500000) {
+									switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+											"Invalid rtcp passthru timeout spec [%d] must be between 100 and 500000\n", interval);
+									interval = 5000;
+								}
+								switch_rtp_set_rtcp_passthru_timeout(v_engine->rtp_session, interval);
+							}
 						} else {
 							int interval = atoi(val);
 							if (interval < 100 || interval > 500000) {
@@ -11762,10 +11850,16 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 
 	if (!smh->mparams->rtcp_audio_interval_msec) {
 		smh->mparams->rtcp_audio_interval_msec = (char *)switch_channel_get_variable(session->channel, "rtcp_audio_interval_msec");
+		if (switch_channel_var_true(smh->session->channel, "force_rtcp_passthru")) {
+			smh->mparams->rtcp_audio_interval_msec = SWITCH_RTCP_AUDIO_PASSTHRU;
+		}
 	}
 
 	if (!smh->mparams->rtcp_video_interval_msec) {
 		smh->mparams->rtcp_video_interval_msec = (char *)switch_channel_get_variable(session->channel, "rtcp_video_interval_msec");
+		if (switch_channel_var_true(smh->session->channel, "force_rtcp_passthru")) {
+			smh->mparams->rtcp_audio_interval_msec = SWITCH_RTCP_AUDIO_PASSTHRU;
+		}
 	}
 
 	if (dtls_ok(session) && (tmp = switch_channel_get_variable(smh->session->channel, "webrtc_enable_dtls")) && switch_false(tmp)) {
@@ -14661,11 +14755,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_receive_message(switch_core_se
 				switch_channel_set_variable(session->channel, "absolute_codec_string", NULL);
 
 				if (*msg->string_arg == '=') {
-					switch_channel_set_variable(session->channel, "codec_string", msg->string_arg);
-				} else {
-					switch_channel_set_variable_printf(session->channel,
-													   "codec_string", "=%s", switch_channel_get_variable(session->channel, "ep_codec_string"));
+					switch_core_media_merge_sdp_codec_string(session, switch_channel_get_variable(session->channel, SWITCH_R_SDP_VARIABLE), SDP_TYPE_REQUEST, msg->string_arg);
 				}
+
+				switch_channel_set_variable_printf(session->channel,
+													   "codec_string", "=%s", switch_channel_get_variable(session->channel, "ep_codec_string"));
 				
 				a_engine->codec_negotiated = 0;
 				v_engine->codec_negotiated = 0;
@@ -15125,8 +15219,15 @@ static void switch_core_media_set_r_sdp_codec_string(switch_core_session_t *sess
 	switch_core_media_find_zrtp_hash(session, sdp);
 	switch_core_media_pass_zrtp_hash(session);
 
+	// Set Remote flag SRTP to false before parsing the sdp media
+	switch_channel_set_variable(channel, "rtp_remote_use_srtp", "false");
+
 	for (m = sdp->sdp_media; m; m = m->m_next) {
 		ptime = dptime;
+
+		if (m->m_proto == sdp_proto_srtp || m->m_proto == sdp_proto_extended_srtp) {
+			switch_channel_set_variable(channel, "rtp_remote_use_srtp", "true");
+		}
 
 		if ((m->m_type == sdp_media_audio || m->m_type == sdp_media_video) && m->m_port) {
 			for (map = m->m_rtpmaps; map; map = map->rm_next) {
