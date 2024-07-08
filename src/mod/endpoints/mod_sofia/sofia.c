@@ -5576,6 +5576,7 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						int v = atoi(val);
 						if (v >= 0) {
 							profile->rtp_timeout_sec = v;
+							sofia_set_pflag(profile, PFLAG_RTP_TIMEOUT_SEC);
 							switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
 											  "rtp-timeout-sec deprecated use media_timeout variable.\n"); 
 						}

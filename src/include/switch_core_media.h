@@ -186,6 +186,8 @@ typedef struct switch_core_media_params_s {
 
 	switch_thread_t *video_write_thread;
 
+	switch_bool_t rtp_timeout_sec_set;
+
 } switch_core_media_params_t;
 
 static inline const char *switch_media_type2str(switch_media_type_t type)

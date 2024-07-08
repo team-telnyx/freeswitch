@@ -3440,6 +3440,10 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 											  "rtp_timeout_sec deprecated use media_timeout variable.\n"); 
 							rtp_timeout_sec = v;
 						}
+					} else {
+						if (smh->mparams->rtp_timeout_sec_set) {
+							rtp_timeout_sec = smh->mparams->rtp_timeout_sec;
+						}
 					}
 
 					if ((val = switch_channel_get_variable(session->channel, "rtp_hold_timeout_sec"))) {
