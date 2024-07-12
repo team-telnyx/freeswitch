@@ -84,6 +84,8 @@ typedef enum {
 	SCMF_REJECT_IPV6,
 	SCMF_SRTP_HANGUP_ON_ERROR,
 	SCMF_SRTP_SKIP_EMPTY_MKI,
+	SCMF_RTP_TIMEOUT_SEC,
+	SCMF_RTCP_AUDIO_PASSTHRU_TIMEOUT_MSEC,
 	SCMF_MAX
 } switch_core_media_flag_t;
 
@@ -185,8 +187,6 @@ typedef struct switch_core_media_params_s {
 	uint32_t video_key_first;
 
 	switch_thread_t *video_write_thread;
-
-	switch_bool_t rtp_timeout_sec_set;
 
 } switch_core_media_params_t;
 

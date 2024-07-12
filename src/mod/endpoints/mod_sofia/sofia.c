@@ -4933,6 +4933,12 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 					profile->tls_verify_depth = 2;
 					profile->tls_enable_dh = 0;
 					profile->tls_verify_date = SWITCH_TRUE;
+					sofia_clear_pflag(profile, PFLAG_RTCP_AUDIO_INTERVAL_MSEC);
+					sofia_clear_pflag(profile, PFLAG_BRIDGE_ACCEPT_CNG);
+					sofia_clear_pflag(profile, PFLAG_BRIDGE_FORWARD_CNG_INTERVAL);
+					sofia_clear_pflag(profile, PFLAG_BRIDGE_FORWARD_CNG_ONCE);
+					sofia_clear_pflag(profile, PFLAG_FORCE_RTCP_PASSTHRU);
+					sofia_clear_pflag(profile, PFLAG_SIP_COPY_CUSTOM_HEADERS);
 				} else {
 
 					/* you could change profile->foo here if it was a minor change like context or dialplan ... */
@@ -5550,10 +5556,12 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						}
 					} else if (!strcasecmp(var, "rtcp-audio-interval-msec")) {
 						profile->rtcp_audio_interval_msec = switch_core_strdup(profile->pool, val);
+						sofia_set_pflag(profile, PFLAG_RTCP_AUDIO_INTERVAL_MSEC);
 					} else if (!strcasecmp(var, "rtcp-video-interval-msec")) {
 						profile->rtcp_video_interval_msec = switch_core_strdup(profile->pool, val);
 					} else if (!strcasecmp(var, "rtcp-audio-passthru-timeout-msec")) {
 						profile->rtcp_audio_passthru_timeout_msec = switch_core_strdup(profile->pool, val);
+						sofia_set_media_flag(profile, SCMF_RTCP_AUDIO_PASSTHRU_TIMEOUT_MSEC);
 					} else if (!strcasecmp(var, "rtcp-video-passthru-timeout-msec")) {
 						profile->rtcp_video_passthru_timeout_msec = switch_core_strdup(profile->pool, val);
 					} else if (!strcasecmp(var, "session-timeout") && !zstr(val)) {
@@ -5576,7 +5584,7 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						int v = atoi(val);
 						if (v >= 0) {
 							profile->rtp_timeout_sec = v;
-							sofia_set_pflag(profile, PFLAG_RTP_TIMEOUT_SEC);
+							sofia_set_media_flag(profile, SCMF_RTP_TIMEOUT_SEC);
 							switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
 											  "rtp-timeout-sec deprecated use media_timeout variable.\n"); 
 						}
@@ -5708,6 +5716,33 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 							sofia_set_pflag(profile, PFLAG_SECURE);
 						} else {
 							sofia_clear_pflag(profile, PFLAG_SECURE);
+						}
+					} else if (!strcasecmp(var, "bridge-accept-cng")) {
+						if (switch_true(val)) {
+							sofia_set_pflag(profile, PFLAG_BRIDGE_ACCEPT_CNG);
+						} else {
+							sofia_clear_pflag(profile, PFLAG_BRIDGE_ACCEPT_CNG);
+						}
+					} else if (!strcasecmp(var, "bridge-forward-cng-interval") && !zstr(val)) {
+						profile->bridge_forward_cng_interval = switch_core_strdup(profile->pool, val);
+						sofia_set_pflag(profile, PFLAG_BRIDGE_FORWARD_CNG_INTERVAL);
+					} else if (!strcasecmp(var, "bridge-forward-cng-once")) {
+						if (switch_true(val)) {
+							sofia_set_pflag(profile, PFLAG_BRIDGE_FORWARD_CNG_ONCE);
+						} else {
+							sofia_clear_pflag(profile, PFLAG_BRIDGE_FORWARD_CNG_ONCE);
+						}
+					} else if (!strcasecmp(var, "force-rtcp-passthru")) {
+						if (switch_true(val)) {
+							sofia_set_pflag(profile, PFLAG_FORCE_RTCP_PASSTHRU);
+						} else {
+							sofia_clear_pflag(profile, PFLAG_FORCE_RTCP_PASSTHRU);
+						}
+					} else if (!strcasecmp(var, "sip-copy-custom-headers")) {
+						if (switch_true(val)) {
+							sofia_set_pflag(profile, PFLAG_SIP_COPY_CUSTOM_HEADERS);
+						} else {
+							sofia_clear_pflag(profile, PFLAG_SIP_COPY_CUSTOM_HEADERS);
 						}
 					} else if (!strcasecmp(var, "auto-invite-100")) {
 						if (switch_true(val)) {

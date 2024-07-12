@@ -139,6 +139,11 @@ static switch_status_t sofia_on_init(switch_core_session_t *session)
 		}
 	}
 
+	// TEL-6085:
+	if (sofia_test_pflag(tech_pvt->profile, PFLAG_CONFIRM_BLIND_TRANSFER)) {
+		switch_channel_set_variable(channel, "confirm_blind_transfer", "true");
+	}
+
   end:
 
 	switch_mutex_unlock(tech_pvt->sofia_mutex);
@@ -5049,6 +5054,7 @@ static switch_call_cause_t sofia_outgoing_channel(switch_core_session_t *session
 	sofia_profile_t *profile = NULL;
 	switch_caller_profile_t *caller_profile = NULL;
 	private_object_t *tech_pvt = NULL;
+	private_object_t *caller_tech_pvt = NULL;
 	switch_channel_t *nchannel;
 	char *host = NULL, *dest_to = NULL;
 	const char *hval = NULL;
@@ -5061,7 +5067,7 @@ static switch_call_cause_t sofia_outgoing_channel(switch_core_session_t *session
 	*new_session = NULL;
 	
 	// Need to allow for override for outbound calls even when min-idle-cpu fails
-	if(mod_sofia_globals.min_idle_cpu_override_outbound) {
+	if (mod_sofia_globals.min_idle_cpu_override_outbound) {
 		flags |= SOF_NO_CPU_IDLE_LIMITS;
 	}
 
@@ -5092,8 +5098,36 @@ static switch_call_cause_t sofia_outgoing_channel(switch_core_session_t *session
 
 	if (session) {
 		o_channel = switch_core_session_get_channel(session);
+		caller_tech_pvt = switch_core_session_get_private(session);
+		// TEL-6085:
+		if (sofia_test_media_flag(caller_tech_pvt->profile, SCMF_RTP_TIMEOUT_SEC)) {
+			switch_channel_set_variable_printf(nchannel, "rtp_timeout_sec", "%d", caller_tech_pvt->profile->rtp_timeout_sec);
+		}
+		if (sofia_test_media_flag(caller_tech_pvt->profile, SCMF_RTCP_AUDIO_PASSTHRU_TIMEOUT_MSEC)) {
+			switch_channel_set_variable(nchannel, "rtcp_audio_passthru_timeout_msec", caller_tech_pvt->profile->rtcp_audio_passthru_timeout_msec);
+		}
+		if (sofia_test_pflag(caller_tech_pvt->profile, PFLAG_CONFIRM_BLIND_TRANSFER)) {
+			switch_channel_set_variable(nchannel, "confirm_blind_transfer", "true");
+		}
+		if (sofia_test_pflag(caller_tech_pvt->profile, PFLAG_RTCP_AUDIO_INTERVAL_MSEC)) {
+			switch_channel_set_variable(nchannel, "rtcp_audio_interval_msec", caller_tech_pvt->profile->rtcp_audio_interval_msec);
+		}
+		if (sofia_test_pflag(caller_tech_pvt->profile, PFLAG_BRIDGE_ACCEPT_CNG)) {
+			switch_channel_set_variable(nchannel, "bridge_accept_cng", "true");
+		}
+		if (sofia_test_pflag(caller_tech_pvt->profile, PFLAG_BRIDGE_FORWARD_CNG_INTERVAL)) {
+			switch_channel_set_variable(nchannel, "bridge_forward_cng_interval", caller_tech_pvt->profile->bridge_forward_cng_interval);
+		}
+		if (sofia_test_pflag(caller_tech_pvt->profile, PFLAG_BRIDGE_FORWARD_CNG_ONCE)) {
+			switch_channel_set_variable(nchannel, "bridge_forward_cng_interval", "true");
+		}
+		if (sofia_test_pflag(caller_tech_pvt->profile, PFLAG_FORCE_RTCP_PASSTHRU)) {
+			switch_channel_set_variable(nchannel, "force_rtcp_passthru", "true");
+		}
+		if (sofia_test_pflag(caller_tech_pvt->profile, PFLAG_SIP_COPY_CUSTOM_HEADERS)) {
+			switch_channel_set_variable(nchannel, "sip_copy_custom_headers", "true");
+		}
 	}
-
 
 	if ((hval = switch_event_get_header(var_event, "sip_invite_to_uri"))) {
 		dest_to = switch_core_session_strdup(nsession, hval);

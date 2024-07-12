@@ -3440,10 +3440,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 											  "rtp_timeout_sec deprecated use media_timeout variable.\n"); 
 							rtp_timeout_sec = v;
 						}
-					} else {
-						if (smh->mparams->rtp_timeout_sec_set) {
-							rtp_timeout_sec = smh->mparams->rtp_timeout_sec;
-						}
 					}
 
 					if ((val = switch_channel_get_variable(session->channel, "rtp_hold_timeout_sec"))) {
@@ -5129,6 +5125,11 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 								interval = 5000;
 							}
 							switch_rtp_set_rtcp_passthru_timeout(engine->rtp_session, interval);
+						} else {
+							if (switch_media_handle_test_media_flag(smh, SCMF_RTCP_AUDIO_PASSTHRU_TIMEOUT_MSEC)) {
+								int interval = atoi(smh->mparams->rtcp_audio_passthru_timeout_msec);
+								switch_rtp_set_rtcp_passthru_timeout(engine->rtp_session, interval);
+							}
 						}
 					} else {
 						int interval = atoi(val);
