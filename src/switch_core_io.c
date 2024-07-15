@@ -875,6 +875,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 		if (flag & SFF_CNG) {
 			switch_set_flag((*frame), SFF_CNG);
 		}
+		
+		switch_core_session_set_last_read_frame(session, (*frame));
+
 		if (session->bugs) {
 			switch_media_bug_t *bp;
 			switch_bool_t ok = SWITCH_TRUE;
@@ -944,6 +947,49 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 
 	return status;
 }
+
+SWITCH_DECLARE(switch_status_t) switch_core_session_set_last_read_frame(_In_ switch_core_session_t *session, switch_frame_t *frame)
+{
+	switch_status_t result = SWITCH_STATUS_SUCCESS;
+	switch_mutex_lock(session->last_read_frame_mutex);
+	if (session->last_read_frame) {
+		switch_frame_free(&session->last_read_frame);
+		session->last_read_frame = NULL;
+	}
+	
+	if (frame) {
+		result = switch_frame_dup(frame, &session->last_read_frame);
+	}
+	switch_mutex_unlock(session->last_read_frame_mutex);
+	return result;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_session_get_last_read_frame(_In_ switch_core_session_t *session, switch_frame_t **frame)
+{
+	switch_status_t result = SWITCH_STATUS_FALSE;
+	switch_mutex_lock(session->last_read_frame_mutex);
+	if (session->last_read_frame) {
+		result = switch_frame_dup(session->last_read_frame, frame);
+	}
+	switch_mutex_unlock(session->last_read_frame_mutex);
+	return result;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_session_get_last_read_frame_data(_In_ switch_core_session_t *session, void *data, switch_size_t* datalen)
+{
+	switch_status_t result = SWITCH_STATUS_FALSE;
+	switch_mutex_lock(session->last_read_frame_mutex);
+	if (data && session->last_read_frame && session->last_read_frame->data && session->last_read_frame->datalen > 0) {
+		memcpy(data, session->last_read_frame->data, session->last_read_frame->datalen);
+		if (datalen) {
+			*datalen = session->last_read_frame->datalen;
+		}
+		result = SWITCH_STATUS_SUCCESS;
+	}
+	switch_mutex_unlock(session->last_read_frame_mutex);
+	return result;
+}
+
 
 static char *SIG_NAMES[] = {
 	"NONE",
