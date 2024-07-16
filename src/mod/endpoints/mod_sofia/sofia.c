@@ -6451,7 +6451,28 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						}
 					} else if (!strcasecmp(var, "disable_recovery_record_route_fixup")) {
 						profile->disable_recovery_record_route_fixup = atoi(val);
+					} else if (!strcasecmp(var, "ignore_sdp_ice")) {
+						if (switch_true(val)) {
+							sofia_set_media_flag(profile, SCMF_IGNORE_SDP_ICE);
+						} else {
+							sofia_clear_media_flag(profile, SCMF_IGNORE_SDP_ICE);
+						}
+					} else if (!strcasecmp(var, "force_rtcp_passthru")) {
+						if (switch_true(val)) {
+							sofia_set_media_flag(profile, SCMF_FORCE_RTCP_PASSTHRU);
+						} else {
+							sofia_clear_media_flag(profile, SCMF_FORCE_RTCP_PASSTHRU);
+						}
+					} else if (!strcasecmp(var, "rtp_secure_media") && !zstr(val)) {
+						profile->rtp_secure_media = switch_core_strdup(profile->pool, val);
+					} else if (!strcasecmp(var, "rtp_secure_media_mki")) {
+						if (switch_true(val)) {
+							sofia_set_media_flag(profile, SCMF_RTP_SECURE_MEDIA_MKI);
+						} else {
+							sofia_clear_media_flag(profile, SCMF_RTP_SECURE_MEDIA_MKI);
+						}
 					}
+
 				}
 
 				if (!max_recv_requests_per_second_initialized) {

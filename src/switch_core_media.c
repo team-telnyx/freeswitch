@@ -1275,10 +1275,11 @@ static switch_status_t switch_core_media_build_crypto(switch_media_handle_t *smh
 {
 	unsigned char b64_key[512] = "";
 	unsigned char *key;
-	const char *val;
+	const char *val, *rtp_secure_media_mki_var = NULL;
 	switch_channel_t *channel;
 	char *p;
 	switch_rtp_engine_t *engine;
+	int rtp_secure_media_mki_set = 0;
 
 	switch_assert(smh);
 	channel = switch_core_session_get_channel(smh->session);
@@ -1328,7 +1329,14 @@ static switch_status_t switch_core_media_build_crypto(switch_media_handle_t *smh
 
 	if (index == SWITCH_NO_CRYPTO_TAG) index = ctype + 1;
 
-	if (switch_channel_var_true(channel, "rtp_secure_media_mki")) {	
+	rtp_secure_media_mki_set = switch_media_handle_test_media_flag(smh, SCMF_RTP_SECURE_MEDIA_MKI);
+
+	rtp_secure_media_mki_var = switch_channel_get_variable(channel, "rtp_secure_media_mki");
+	if (!zstr(rtp_secure_media_mki_var)) {
+		rtp_secure_media_mki_set = switch_true(rtp_secure_media_mki_var);
+	}
+
+	if (rtp_secure_media_mki_set) {
 		engine->ssec[ctype].local_crypto_key = switch_core_session_sprintf(smh->session, "%d %s inline:%s|2^31|1:1", index, (use_alias ? SUITES[ctype].alias : SUITES[ctype].name), b64_key);
 	} else {
 		engine->ssec[ctype].local_crypto_key = switch_core_session_sprintf(smh->session, "%d %s inline:%s", index, (use_alias ? SUITES[ctype].alias : SUITES[ctype].name), b64_key);
@@ -1805,7 +1813,9 @@ static void switch_core_session_get_recovery_crypto_key(switch_core_session_t *s
 static void switch_core_session_apply_crypto(switch_core_session_t *session, switch_media_type_t type)
 {
 	switch_rtp_engine_t *engine;
-	const char *varname;
+	const char *varname, *rtp_secure_media_mki_var = NULL;
+	switch_media_handle_t *smh;
+	int rtp_secure_media_mki_set = 0;
 
 	if (type == SWITCH_MEDIA_TYPE_AUDIO) {
 		varname = "rtp_secure_audio_confirmed";
@@ -1817,7 +1827,9 @@ static void switch_core_session_apply_crypto(switch_core_session_t *session, swi
 		return;
 	}
 
-	if (!session->media_handle) return;
+	if (!(smh = session->media_handle)) {
+		return;
+	}
 
 	engine = &session->media_handle->engines[type];
 
@@ -1829,8 +1841,16 @@ static void switch_core_session_apply_crypto(switch_core_session_t *session, swi
 
 	if (engine->ssec[engine->crypto_type].remote_crypto_key && switch_channel_test_flag(session->channel, CF_SECURE)) {
 		
-		if (switch_channel_var_true(session->channel, "rtp_secure_media_mki"))
+		rtp_secure_media_mki_set = switch_media_handle_test_media_flag(smh, SCMF_RTP_SECURE_MEDIA_MKI);
+
+		rtp_secure_media_mki_var = switch_channel_get_variable(session->channel, "rtp_secure_media_mki");
+		if (!zstr(rtp_secure_media_mki_var)) {
+			rtp_secure_media_mki_set = switch_true(rtp_secure_media_mki_var);
+		}
+
+		if (rtp_secure_media_mki_set) {
 			switch_core_media_add_crypto(session, &engine->ssec[engine->crypto_type], SWITCH_RTP_CRYPTO_SEND);
+		}
 
 		switch_core_media_add_crypto(session, &engine->ssec[engine->crypto_type], SWITCH_RTP_CRYPTO_RECV);
 
@@ -1871,9 +1891,12 @@ static void switch_core_session_parse_crypto_prefs(switch_core_session_t *sessio
 		var = "rtp_secure_media_outbound";
 	}
 
-	if (!(val = switch_channel_get_variable(session->channel, var))) {
+	if (!(val = switch_channel_get_variable(session->channel, var)) || !zstr(smh->mparams->rtp_secure_media)) {
 		var = "rtp_secure_media";
 		val = switch_channel_get_variable(session->channel, var);
+		if (!val) {
+			val = smh->mparams->rtp_secure_media;
+		}
 	}
 
 	if (!zstr(val) && (suites = strchr(val, ':'))) {
@@ -1939,6 +1962,7 @@ static switch_rtp_crypto_mode_t switch_core_session_check_crypto_prefs(switch_co
 	const char *var = NULL;
 	const char *val = NULL;
 	char *suites = NULL;
+	switch_media_handle_t *smh = session->media_handle;
 
 	if (switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_INBOUND) {
 		var = "rtp_secure_media_inbound";
@@ -1946,9 +1970,12 @@ static switch_rtp_crypto_mode_t switch_core_session_check_crypto_prefs(switch_co
 		var = "rtp_secure_media_outbound";
 	}
 
-	if (!(val = switch_channel_get_variable(session->channel, var))) {
+	if (!(val = switch_channel_get_variable(session->channel, var)) || (!smh && !zstr(smh->mparams->rtp_secure_media))) {
 		var = "rtp_secure_media";
 		val = switch_channel_get_variable(session->channel, var);
+		if (!val) {
+			val = smh->mparams->rtp_secure_media;
+		}
 	}
 
 	if (zstr(val)) {
@@ -2047,7 +2074,7 @@ SWITCH_DECLARE(int) switch_core_session_check_incoming_crypto(switch_core_sessio
 	switch_media_handle_t *smh;
 	int mki_set = 0;
 	int skip_empty_mki_set = 0;
-	const char *skip_empty_mki_var = NULL;
+	const char *skip_empty_mki_var = NULL, *rtp_secure_media_mki_var = NULL;
 
 	if (!(smh = session->media_handle)) {
 		return 0;
@@ -2074,7 +2101,13 @@ SWITCH_DECLARE(int) switch_core_session_check_incoming_crypto(switch_core_sessio
 	}
 **/
 
-	mki_set = switch_channel_var_true(session->channel, "rtp_secure_media_mki");
+	mki_set = switch_media_handle_test_media_flag(smh, SCMF_RTP_SECURE_MEDIA_MKI);
+
+	rtp_secure_media_mki_var = switch_channel_get_variable(session->channel, "rtp_secure_media_mki");
+	if (!zstr(rtp_secure_media_mki_var)) {
+		mki_set = switch_true(rtp_secure_media_mki_var);
+	}
+
 	skip_empty_mki_set = switch_media_handle_test_media_flag(smh, SCMF_SRTP_SKIP_EMPTY_MKI);
 
 	skip_empty_mki_var = switch_channel_get_variable(session->channel, "skip_empty_rtp_secure_media_mki");
@@ -4663,14 +4696,21 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 	switch_rtp_engine_t *engine = &smh->engines[type];
 	sdp_attribute_t *attr = NULL, *attrs[2] = { 0 };
 	int i = 0, got_rtcp_mux = 0;
-	const char *val;
+	const char *val, *ignore_sdp_ice_var = NULL, *force_rtcp_passthru_var = NULL;
 	int ice_seen = 0, cid = 0, ai = 0, attr_idx = 0, cand_seen = 0, relay_ok = 0;
-	int ignore_ice_mdns = 0;
+	int ignore_ice_mdns = 0, ignore_sdp_ice_set = 0, force_rtcp_passthru_set = 0;
 	char con_addr[256];
 	int ice_resolve = 0;
 	ip_t ip;
 
-	if (switch_true(switch_channel_get_variable_dup(smh->session->channel, "ignore_sdp_ice", SWITCH_FALSE, -1))) {
+	ignore_sdp_ice_set = switch_media_handle_test_media_flag(smh, SCMF_IGNORE_SDP_ICE);
+
+	ignore_sdp_ice_var = switch_channel_get_variable(smh->session->channel, "ignore_sdp_ice");
+	if (!zstr(ignore_sdp_ice_var)) {
+		ignore_sdp_ice_set = switch_true(ignore_sdp_ice_var);
+	}
+
+	if (ignore_sdp_ice_set) {
 		return SWITCH_STATUS_BREAK;
 	}
 
@@ -5108,7 +5148,13 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 
 			if (switch_channel_var_false(smh->session->channel, "telnyx_disable_rtcp") || !switch_channel_get_variable(smh->session->channel, "telnyx_disable_rtcp")) {
 				if (remote_rtcp_port) {
-					if (switch_channel_var_true(smh->session->channel, "force_rtcp_passthru")) {
+					force_rtcp_passthru_set = switch_media_handle_test_media_flag(smh, SCMF_FORCE_RTCP_PASSTHRU);
+					force_rtcp_passthru_var = switch_channel_get_variable(smh->session->channel, "force_rtcp_passthru");
+					if (!zstr(force_rtcp_passthru_var)) {
+						force_rtcp_passthru_set = switch_true(force_rtcp_passthru_var);
+					}
+
+					if (force_rtcp_passthru_set) {
 						val = "passthru";
 					}
 
@@ -12297,7 +12343,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 		if (!zstr(sr)) {
 			switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=%s\r\n", sr);
 		}
-		
+
 		if (!audio_mid) {
 			switch_channel_set_variable(session->channel, "rtp_audio_mid", "audio");
 		}

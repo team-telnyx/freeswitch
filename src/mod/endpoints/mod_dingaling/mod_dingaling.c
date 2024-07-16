@@ -1132,11 +1132,11 @@ static void try_secure(struct private_object *tech_pvt, ldl_transport_type_t tty
 static int activate_audio_rtp(struct private_object *tech_pvt)
 {
 	switch_channel_t *channel = switch_core_session_get_channel(tech_pvt->session);
-	const char *err;
+	const char *err, *disable_rtp_auto_adjust_var = NULL;
 	int ms = tech_pvt->transports[LDL_TPORT_RTP].ptime;
 	switch_rtp_flag_t flags[SWITCH_RTP_FLAG_INVALID] = {0};
 	int locked = 0;
-	int r = 1;
+	int r = 1, disable_rtp_auto_adjust_set = 0;
 
 
 	//if (switch_rtp_ready(tech_pvt->transports[LDL_TPORT_RTP].rtp_session)) {
@@ -1250,7 +1250,14 @@ static int activate_audio_rtp(struct private_object *tech_pvt)
 		flags[SWITCH_RTP_FLAG_USE_TIMER]++;
 	}
 
-	if (switch_true(switch_channel_get_variable(channel, "disable_rtp_auto_adjust"))) {
+	disable_rtp_auto_adjust_set = switch_media_handle_test_media_flag(tech_pvt, SCMF_DISABLE_RTP_AUTOADJ);
+
+	disable_rtp_auto_adjust_var = switch_channel_get_variable(channel, "disable_rtp_auto_adjust");
+	if (!zstr(disable_rtp_auto_adjust_var)) {
+		disable_rtp_auto_adjust_set = switch_true(disable_rtp_auto_adjust_var);
+	}
+
+	if (disable_rtp_auto_adjust_set) {
 		flags[SWITCH_RTP_FLAG_AUTOADJ] = 0;
 	}
 
@@ -1330,10 +1337,10 @@ static int activate_audio_rtp(struct private_object *tech_pvt)
 static int activate_video_rtp(struct private_object *tech_pvt)
 {
 	switch_channel_t *channel = switch_core_session_get_channel(tech_pvt->session);
-	const char *err;
+	const char *err, *disable_rtp_auto_adjust_var = NULL;
 	int ms = 0;
 	switch_rtp_flag_t flags[SWITCH_RTP_FLAG_INVALID] = {0};
-	int r = 1, locked = 0;
+	int r = 1, locked = 0, disable_rtp_auto_adjust_set = 0;
 
 
 	if (switch_rtp_ready(tech_pvt->transports[LDL_TPORT_VIDEO_RTP].rtp_session)) {
@@ -1443,7 +1450,14 @@ static int activate_video_rtp(struct private_object *tech_pvt)
 	flags[SWITCH_RTP_FLAG_RAW_WRITE]++;
 	flags[SWITCH_RTP_FLAG_VIDEO]++;
 
-	if (switch_true(switch_channel_get_variable(channel, "disable_rtp_auto_adjust"))) {
+	disable_rtp_auto_adjust_set = switch_media_handle_test_media_flag(tech_pvt, SCMF_DISABLE_RTP_AUTOADJ);
+
+	disable_rtp_auto_adjust_var = switch_channel_get_variable(channel, "disable_rtp_auto_adjust");
+	if (!zstr(disable_rtp_auto_adjust_var)) {
+		disable_rtp_auto_adjust_set = switch_true(disable_rtp_auto_adjust_var);
+	}
+
+	if (disable_rtp_auto_adjust_set) {
 		flags[SWITCH_RTP_FLAG_AUTOADJ] = 0;
 	}
 
