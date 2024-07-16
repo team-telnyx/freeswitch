@@ -87,7 +87,6 @@ typedef enum {
 	SCMF_IGNORE_SDP_ICE,
 	SCMF_FORCE_RTCP_PASSTHRU,
 	SCMF_RTP_SECURE_MEDIA_MKI,
-	SCMF_RTP_SECURE_MEDIA,
 	SCMF_MAX
 } switch_core_media_flag_t;
 
