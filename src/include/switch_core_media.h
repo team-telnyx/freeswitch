@@ -142,7 +142,11 @@ typedef struct switch_core_media_params_s {
 	char *rtcp_audio_passthru_timeout_msec;
 	char *rtcp_video_passthru_timeout_msec;
 	char *rtcp_text_passthru_timeout_msec;
-
+	char *bridge_forward_cng_interval;
+	switch_bool_t bridge_accept_cng;
+	switch_bool_t bridge_forward_cng_once;
+	switch_bool_t force_rtcp_passthru;
+	switch_bool_t sip_copy_custom_headers;
 
 	char *extrtpip;
 	char *rtpip;

@@ -139,11 +139,6 @@ static switch_status_t sofia_on_init(switch_core_session_t *session)
 		}
 	}
 
-	// TEL-6085:
-	if (sofia_test_pflag(tech_pvt->profile, PFLAG_CONFIRM_BLIND_TRANSFER)) {
-		switch_channel_set_variable(channel, "confirm_blind_transfer", "true");
-	}
-
   end:
 
 	switch_mutex_unlock(tech_pvt->sofia_mutex);
@@ -5101,31 +5096,31 @@ static switch_call_cause_t sofia_outgoing_channel(switch_core_session_t *session
 		caller_tech_pvt = switch_core_session_get_private(session);
 		// TEL-6085:
 		if (sofia_test_media_flag(caller_tech_pvt->profile, SCMF_RTP_TIMEOUT_SEC)) {
-			switch_channel_set_variable_printf(nchannel, "rtp_timeout_sec", "%d", caller_tech_pvt->profile->rtp_timeout_sec);
+			tech_pvt->sofia_private->rtp_timeout_sec = caller_tech_pvt->profile->rtp_timeout_sec;
 		}
 		if (sofia_test_media_flag(caller_tech_pvt->profile, SCMF_RTCP_AUDIO_PASSTHRU_TIMEOUT_MSEC)) {
-			switch_channel_set_variable(nchannel, "rtcp_audio_passthru_timeout_msec", caller_tech_pvt->profile->rtcp_audio_passthru_timeout_msec);
+			tech_pvt->sofia_private->rtcp_audio_passthru_timeout_msec = su_strdup(nua_handle_get_home(tech_pvt->nh), caller_tech_pvt->profile->rtcp_audio_passthru_timeout_msec);
 		}
 		if (sofia_test_pflag(caller_tech_pvt->profile, PFLAG_CONFIRM_BLIND_TRANSFER)) {
-			switch_channel_set_variable(nchannel, "confirm_blind_transfer", "true");
+			tech_pvt->sofia_private->confirm_blind_transfer = SWITCH_TRUE;
 		}
 		if (sofia_test_pflag(caller_tech_pvt->profile, PFLAG_RTCP_AUDIO_INTERVAL_MSEC)) {
-			switch_channel_set_variable(nchannel, "rtcp_audio_interval_msec", caller_tech_pvt->profile->rtcp_audio_interval_msec);
+			tech_pvt->sofia_private->rtcp_audio_interval_msec = su_strdup(nua_handle_get_home(tech_pvt->nh), caller_tech_pvt->profile->rtcp_audio_interval_msec);
 		}
 		if (sofia_test_pflag(caller_tech_pvt->profile, PFLAG_BRIDGE_ACCEPT_CNG)) {
-			switch_channel_set_variable(nchannel, "bridge_accept_cng", "true");
+			tech_pvt->sofia_private->bridge_accept_cng = SWITCH_TRUE;
 		}
 		if (sofia_test_pflag(caller_tech_pvt->profile, PFLAG_BRIDGE_FORWARD_CNG_INTERVAL)) {
-			switch_channel_set_variable(nchannel, "bridge_forward_cng_interval", caller_tech_pvt->profile->bridge_forward_cng_interval);
+			tech_pvt->sofia_private->bridge_forward_cng_interval = su_strdup(nua_handle_get_home(tech_pvt->nh), caller_tech_pvt->profile->bridge_forward_cng_interval);
 		}
 		if (sofia_test_pflag(caller_tech_pvt->profile, PFLAG_BRIDGE_FORWARD_CNG_ONCE)) {
-			switch_channel_set_variable(nchannel, "bridge_forward_cng_interval", "true");
+			tech_pvt->sofia_private->bridge_forward_cng_once = SWITCH_TRUE;
 		}
 		if (sofia_test_pflag(caller_tech_pvt->profile, PFLAG_FORCE_RTCP_PASSTHRU)) {
-			switch_channel_set_variable(nchannel, "force_rtcp_passthru", "true");
+			tech_pvt->sofia_private->force_rtcp_passthru = SWITCH_TRUE;
 		}
 		if (sofia_test_pflag(caller_tech_pvt->profile, PFLAG_SIP_COPY_CUSTOM_HEADERS)) {
-			switch_channel_set_variable(nchannel, "sip_copy_custom_headers", "true");
+			tech_pvt->sofia_private->sip_copy_custom_headers = SWITCH_TRUE;
 		}
 	}
 

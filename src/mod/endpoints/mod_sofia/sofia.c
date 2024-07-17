@@ -40,8 +40,8 @@
  *
  */
 #include "mod_sofia.h"
-#include <switch_ssl.h>
 #include "prometheus_metrics.h"
+#include <switch_ssl.h>
 
 
 extern su_log_t tport_log[];
@@ -1066,7 +1066,7 @@ void sofia_handle_sip_i_bye(switch_core_session_t *session, int status,
 	extra_headers = sofia_glue_get_extra_headers(channel, SOFIA_SIP_BYE_HEADER_PREFIX);
 	sofia_glue_set_extra_headers(session, sip, SOFIA_SIP_BYE_HEADER_PREFIX);
 
-	if (!(vval = switch_channel_get_variable(channel, "sip_copy_custom_headers")) || switch_true(vval)) {
+	if (!(vval = switch_channel_get_variable(channel, "sip_copy_custom_headers")) || switch_true(vval) || tech_pvt->mparams.sip_copy_custom_headers) {
 		switch_core_session_t *nsession = NULL;
 
 		switch_core_session_get_partner(session, &nsession);
@@ -1074,8 +1074,9 @@ void sofia_handle_sip_i_bye(switch_core_session_t *session, int status,
 		if (nsession) {
 			const char *vval;
 			switch_channel_t *nchannel = switch_core_session_get_channel(nsession);
+			private_object_t *ntech_pvt = switch_core_session_get_private(nsession);
 
-			if (!(vval = switch_channel_get_variable(nchannel, "sip_copy_custom_headers")) || switch_true(vval)) {
+			if (!(vval = switch_channel_get_variable(nchannel, "sip_copy_custom_headers")) || switch_true(vval) || ntech_pvt->mparams.sip_copy_custom_headers) {
 				switch_ivr_transfer_variable(session, nsession, SOFIA_SIP_BYE_HEADER_PREFIX_T);
 			}
 			switch_core_session_rwunlock(nsession);
@@ -7195,7 +7196,7 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 			}
 
 
-			if (!(vval = switch_channel_get_variable(channel, "sip_copy_custom_headers")) || switch_true(vval)) {
+			if (!(vval = switch_channel_get_variable(channel, "sip_copy_custom_headers")) || switch_true(vval) || tech_pvt->mparams.sip_copy_custom_headers) {
 				switch_core_session_t *other_session;
 
 				if (switch_core_session_get_partner(session, &other_session) == SWITCH_STATUS_SUCCESS) {
@@ -10648,7 +10649,7 @@ void sofia_handle_sip_i_info(nua_t *nua, sofia_profile_t *profile, nua_handle_t 
 				data = sip->sip_payload->pl_data;
 			}
 
-			if ((vval = switch_channel_get_variable(channel, "sip_copy_custom_headers")) && switch_true(vval)) {
+			if (((vval = switch_channel_get_variable(channel, "sip_copy_custom_headers")) && switch_true(vval)) || tech_pvt->mparams.sip_copy_custom_headers) {
 				switch_core_session_t *nsession = NULL;
 
 				switch_core_session_get_partner(session, &nsession);

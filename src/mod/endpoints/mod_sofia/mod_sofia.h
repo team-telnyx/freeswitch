@@ -192,6 +192,15 @@ struct sofia_private {
 	int is_static;
 	switch_time_t ping_sent;
 	char *rfc7989_uuid;
+	int rtp_timeout_sec;
+	char *rtcp_audio_passthru_timeout_msec;
+	switch_bool_t confirm_blind_transfer;
+	char *rtcp_audio_interval_msec;
+	switch_bool_t bridge_accept_cng;
+	char *bridge_forward_cng_interval;
+	switch_bool_t bridge_forward_cng_once;
+	switch_bool_t force_rtcp_passthru;
+	switch_bool_t sip_copy_custom_headers;
 };
 
 #define set_param(ptr,val) if (ptr) {free(ptr) ; ptr = NULL;} if (val) {ptr = strdup(val);}
