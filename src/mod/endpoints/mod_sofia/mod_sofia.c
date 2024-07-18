@@ -5094,7 +5094,7 @@ static switch_call_cause_t sofia_outgoing_channel(switch_core_session_t *session
 	if (session) {
 		o_channel = switch_core_session_get_channel(session);
 		caller_tech_pvt = switch_core_session_get_private(session);
-		// TEL-6085:
+
 		if (sofia_test_media_flag(caller_tech_pvt->profile, SCMF_RTP_TIMEOUT_SEC)) {
 			tech_pvt->sofia_private->rtp_timeout_sec = caller_tech_pvt->profile->rtp_timeout_sec;
 		}
