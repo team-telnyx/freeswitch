@@ -1891,10 +1891,10 @@ static void switch_core_session_parse_crypto_prefs(switch_core_session_t *sessio
 		var = "rtp_secure_media_outbound";
 	}
 
-	if (!(val = switch_channel_get_variable(session->channel, var)) || !zstr(smh->mparams->rtp_secure_media)) {
+	if (!(val = switch_channel_get_variable(session->channel, var))) {
 		var = "rtp_secure_media";
 		val = switch_channel_get_variable(session->channel, var);
-		if (!val) {
+		if (!zstr(smh->mparams->rtp_secure_media)) {
 			val = smh->mparams->rtp_secure_media;
 		}
 	}
@@ -1970,10 +1970,10 @@ static switch_rtp_crypto_mode_t switch_core_session_check_crypto_prefs(switch_co
 		var = "rtp_secure_media_outbound";
 	}
 
-	if (!(val = switch_channel_get_variable(session->channel, var)) || (!smh && !zstr(smh->mparams->rtp_secure_media))) {
+	if (!(val = switch_channel_get_variable(session->channel, var))) {
 		var = "rtp_secure_media";
 		val = switch_channel_get_variable(session->channel, var);
-		if (!val) {
+		if (!zstr(smh->mparams->rtp_secure_media)) {
 			val = smh->mparams->rtp_secure_media;
 		}
 	}
@@ -10431,13 +10431,21 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 		if ((val = switch_channel_get_variable(session->channel, "rtcp_audio_interval_msec")) || (val = smh->mparams->rtcp_audio_interval_msec)) {
 			const char *rport = switch_channel_get_variable(session->channel, "rtp_remote_audio_rtcp_port");
 			switch_port_t remote_rtcp_port = a_engine->remote_rtcp_port;
+			int force_rtcp_passthru_set = 0;
+			const char *force_rtcp_passthru_var = NULL;
 
 			if (switch_channel_var_false(smh->session->channel, "telnyx_disable_rtcp") || !switch_channel_get_variable(smh->session->channel, "telnyx_disable_rtcp")) {
 				if (!remote_rtcp_port && rport) {
 					remote_rtcp_port = (switch_port_t)atoi(rport);
 				}
 
-				if (switch_channel_var_true(smh->session->channel, "force_rtcp_passthru")) {
+				force_rtcp_passthru_set = switch_media_handle_test_media_flag(smh, SCMF_FORCE_RTCP_PASSTHRU);
+				force_rtcp_passthru_var = switch_channel_get_variable(smh->session->channel, "force_rtcp_passthru");
+				if (!zstr(force_rtcp_passthru_var)) {
+					force_rtcp_passthru_set = switch_true(force_rtcp_passthru_var);
+				}
+
+				if (force_rtcp_passthru_set) {
 					val = "passthru";
 				}
 
@@ -11869,6 +11877,8 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 	const char* audio_mid = switch_channel_get_variable_dup(session->channel, "rtp_audio_mid", SWITCH_FALSE, -1);
 	const char* video_mid = switch_channel_get_variable_dup(session->channel, "rtp_video_mid", SWITCH_FALSE, -1);
 	const char *clear_previous_negotiation = NULL;
+	int force_rtcp_passthru_set = 0;
+	const char *force_rtcp_passthru_var = NULL;
 
 	switch_assert(session);
 
@@ -11905,16 +11915,22 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 		v_engine->rtcp_mux = 1;
 	}
 
+	force_rtcp_passthru_set = switch_media_handle_test_media_flag(smh, SCMF_FORCE_RTCP_PASSTHRU);
+	force_rtcp_passthru_var = switch_channel_get_variable(smh->session->channel, "force_rtcp_passthru");
+	if (!zstr(force_rtcp_passthru_var)) {
+		force_rtcp_passthru_set = switch_true(force_rtcp_passthru_var);
+	}
+
 	if (!smh->mparams->rtcp_audio_interval_msec) {
 		smh->mparams->rtcp_audio_interval_msec = (char *)switch_channel_get_variable(session->channel, "rtcp_audio_interval_msec");
-		if (switch_channel_var_true(smh->session->channel, "force_rtcp_passthru")) {
+		if (force_rtcp_passthru_set) {
 			smh->mparams->rtcp_audio_interval_msec = SWITCH_RTCP_AUDIO_PASSTHRU;
 		}
 	}
 
 	if (!smh->mparams->rtcp_video_interval_msec) {
 		smh->mparams->rtcp_video_interval_msec = (char *)switch_channel_get_variable(session->channel, "rtcp_video_interval_msec");
-		if (switch_channel_var_true(smh->session->channel, "force_rtcp_passthru")) {
+		if (force_rtcp_passthru_set) {
 			smh->mparams->rtcp_audio_interval_msec = SWITCH_RTCP_AUDIO_PASSTHRU;
 		}
 	}
