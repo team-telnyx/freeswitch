@@ -804,13 +804,17 @@ static switch_status_t spanfax_init(pvt_t *pvt, transport_mode_t trans_mode)
     const char *tz;
 	int fec_entries = DEFAULT_FEC_ENTRIES;
 	int fec_span = DEFAULT_FEC_SPAN;
+	int fec_scheme = UDPTL_ERROR_CORRECTION_REDUNDANCY;
 	int compressions;
-
+	switch_t38_options_t *t38_options = NULL;
+	
 	session = (switch_core_session_t *) pvt->session;
 	switch_assert(session);
 
 	channel = switch_core_session_get_channel(session);
 	switch_assert(channel);
+
+	t38_options = switch_channel_get_private(channel, "t38_options");
 
 	if ((tmp = switch_channel_get_variable(channel, "t38_gateway_redundancy"))) {
 		int tmp_value;
@@ -930,7 +934,23 @@ static switch_status_t spanfax_init(pvt_t *pvt, transport_mode_t trans_mode)
 
 		pvt->t38_core = t38_gateway_get_t38_core_state(pvt->t38_gateway_state);
 
-		if (udptl_init(pvt->udptl_state, UDPTL_ERROR_CORRECTION_REDUNDANCY, fec_span, fec_entries,
+		if (!zstr(t38_options->T38FaxUdpEC)) {
+			if (!strcasecmp(t38_options->T38FaxRateManagement, "t38UDPRedundancy")) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "UDP EC Scheme is redundant\n");
+				fec_scheme = UDPTL_ERROR_CORRECTION_REDUNDANCY;
+			} else if (!strcasecmp(t38_options->T38FaxRateManagement, "t38UDPFEC")) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "UDP EC Scheme is FEC\n");
+				fec_scheme = UDPTL_ERROR_CORRECTION_FEC;
+			} else {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "No UDP EC Scheme\n");
+				fec_scheme = UDPTL_ERROR_CORRECTION_NONE;
+			}
+		} else {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "No UDP EC Scheme\n");
+			fec_scheme = UDPTL_ERROR_CORRECTION_NONE;
+		}
+
+		if (udptl_init(pvt->udptl_state, fec_scheme, fec_span, fec_entries,
 						(udptl_rx_packet_handler_t *) t38_core_rx_ifp_packet, (void *) pvt->t38_core) == NULL) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Cannot initialize my UDPTL structs\n");
 			t38_gateway_free(pvt->t38_gateway_state);
@@ -960,7 +980,7 @@ static switch_status_t spanfax_init(pvt_t *pvt, transport_mode_t trans_mode)
 			span_log_set_message_handler(t38_gateway_get_logging_state(pvt->t38_gateway_state), mod_spandsp_log_message, log_data);
 			span_log_set_message_handler(t38_core_get_logging_state(pvt->t38_core), mod_spandsp_log_message, log_data);
 		}
-
+		
 		if (pvt->verbose) {
 			span_log_set_level(t38_gateway_get_logging_state(pvt->t38_gateway_state), SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL | SPAN_LOG_FLOW);
 			span_log_set_level(t38_core_get_logging_state(pvt->t38_core), SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL | SPAN_LOG_FLOW);
