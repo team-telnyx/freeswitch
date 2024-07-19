@@ -1081,11 +1081,18 @@ void sofia_handle_sip_i_bye(switch_core_session_t *session, int status,
 		switch_core_session_get_partner(session, &nsession);
 
 		if (nsession) {
-			const char *vval;
 			switch_channel_t *nchannel = switch_core_session_get_channel(nsession);
 			private_object_t *ntech_pvt = switch_core_session_get_private(nsession);
+			sip_copy_custom_headers_set = SWITCH_FALSE;
 
-			if (!(vval = switch_channel_get_variable(nchannel, "sip_copy_custom_headers")) || switch_true(vval) || ntech_pvt->mparams.sip_copy_custom_headers) {
+			sip_copy_custom_headers = switch_channel_get_variable(nchannel, "sip_copy_custom_headers");
+			if (!zstr(sip_copy_custom_headers)) {
+				sip_copy_custom_headers_set = switch_true(sip_copy_custom_headers);
+			} else {
+				sip_copy_custom_headers_set = ntech_pvt->mparams.sip_copy_custom_headers;
+			}
+
+			if (sip_copy_custom_headers_set) {
 				switch_ivr_transfer_variable(session, nsession, SOFIA_SIP_BYE_HEADER_PREFIX_T);
 			}
 			switch_core_session_rwunlock(nsession);
