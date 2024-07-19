@@ -40,8 +40,8 @@
  *
  */
 #include "mod_sofia.h"
-#include "prometheus_metrics.h"
 #include <switch_ssl.h>
+#include "prometheus_metrics.h"
 
 
 extern su_log_t tport_log[];
@@ -947,10 +947,8 @@ void sofia_handle_sip_i_bye(switch_core_session_t *session, int status,
 	private_object_t *tech_pvt;
 	char *extra_headers;
 	const char *call_info = NULL;
+	const char *vval = NULL;
 	const char *session_id_header = sofia_glue_session_id_header(session, profile);
-	const char *sip_copy_custom_headers;
-	switch_bool_t sip_copy_custom_headers_set = SWITCH_FALSE;
-
 #ifdef MANUAL_BYE
 	int cause;
 	char st[80] = "";
@@ -1068,31 +1066,16 @@ void sofia_handle_sip_i_bye(switch_core_session_t *session, int status,
 	extra_headers = sofia_glue_get_extra_headers(channel, SOFIA_SIP_BYE_HEADER_PREFIX);
 	sofia_glue_set_extra_headers(session, sip, SOFIA_SIP_BYE_HEADER_PREFIX);
 
-	sip_copy_custom_headers = switch_channel_get_variable(channel, "sip_copy_custom_headers");
-	if (!zstr(sip_copy_custom_headers)) {
-		sip_copy_custom_headers_set = switch_true(sip_copy_custom_headers);
-	} else {
-		sip_copy_custom_headers_set = tech_pvt->mparams.sip_copy_custom_headers;
-	}
-
-	if (sip_copy_custom_headers_set) {
+	if (!(vval = switch_channel_get_variable(channel, "sip_copy_custom_headers")) || switch_true(vval)) {
 		switch_core_session_t *nsession = NULL;
 
 		switch_core_session_get_partner(session, &nsession);
 
 		if (nsession) {
+			const char *vval;
 			switch_channel_t *nchannel = switch_core_session_get_channel(nsession);
-			private_object_t *ntech_pvt = switch_core_session_get_private(nsession);
-			sip_copy_custom_headers_set = SWITCH_FALSE;
 
-			sip_copy_custom_headers = switch_channel_get_variable(nchannel, "sip_copy_custom_headers");
-			if (!zstr(sip_copy_custom_headers)) {
-				sip_copy_custom_headers_set = switch_true(sip_copy_custom_headers);
-			} else {
-				sip_copy_custom_headers_set = ntech_pvt->mparams.sip_copy_custom_headers;
-			}
-
-			if (sip_copy_custom_headers_set) {
+			if (!(vval = switch_channel_get_variable(nchannel, "sip_copy_custom_headers")) || switch_true(vval)) {
 				switch_ivr_transfer_variable(session, nsession, SOFIA_SIP_BYE_HEADER_PREFIX_T);
 			}
 			switch_core_session_rwunlock(nsession);
@@ -4950,12 +4933,6 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 					profile->tls_verify_depth = 2;
 					profile->tls_enable_dh = 0;
 					profile->tls_verify_date = SWITCH_TRUE;
-					sofia_clear_pflag(profile, PFLAG_RTCP_AUDIO_INTERVAL_MSEC);
-					sofia_clear_pflag(profile, PFLAG_BRIDGE_ACCEPT_CNG);
-					sofia_clear_pflag(profile, PFLAG_BRIDGE_FORWARD_CNG_INTERVAL);
-					sofia_clear_pflag(profile, PFLAG_BRIDGE_FORWARD_CNG_ONCE);
-					sofia_clear_pflag(profile, PFLAG_FORCE_RTCP_PASSTHRU);
-					sofia_clear_pflag(profile, PFLAG_SIP_COPY_CUSTOM_HEADERS);
 				} else {
 
 					/* you could change profile->foo here if it was a minor change like context or dialplan ... */
@@ -5573,12 +5550,10 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						}
 					} else if (!strcasecmp(var, "rtcp-audio-interval-msec")) {
 						profile->rtcp_audio_interval_msec = switch_core_strdup(profile->pool, val);
-						sofia_set_pflag(profile, PFLAG_RTCP_AUDIO_INTERVAL_MSEC);
 					} else if (!strcasecmp(var, "rtcp-video-interval-msec")) {
 						profile->rtcp_video_interval_msec = switch_core_strdup(profile->pool, val);
 					} else if (!strcasecmp(var, "rtcp-audio-passthru-timeout-msec")) {
 						profile->rtcp_audio_passthru_timeout_msec = switch_core_strdup(profile->pool, val);
-						sofia_set_media_flag(profile, SCMF_RTCP_AUDIO_PASSTHRU_TIMEOUT_MSEC);
 					} else if (!strcasecmp(var, "rtcp-video-passthru-timeout-msec")) {
 						profile->rtcp_video_passthru_timeout_msec = switch_core_strdup(profile->pool, val);
 					} else if (!strcasecmp(var, "session-timeout") && !zstr(val)) {
@@ -5601,7 +5576,6 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						int v = atoi(val);
 						if (v >= 0) {
 							profile->rtp_timeout_sec = v;
-							sofia_set_media_flag(profile, SCMF_RTP_TIMEOUT_SEC);
 							switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
 											  "rtp-timeout-sec deprecated use media_timeout variable.\n"); 
 						}
@@ -5733,33 +5707,6 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 							sofia_set_pflag(profile, PFLAG_SECURE);
 						} else {
 							sofia_clear_pflag(profile, PFLAG_SECURE);
-						}
-					} else if (!strcasecmp(var, "bridge-accept-cng")) {
-						if (switch_true(val)) {
-							sofia_set_pflag(profile, PFLAG_BRIDGE_ACCEPT_CNG);
-						} else {
-							sofia_clear_pflag(profile, PFLAG_BRIDGE_ACCEPT_CNG);
-						}
-					} else if (!strcasecmp(var, "bridge-forward-cng-interval") && !zstr(val)) {
-						profile->bridge_forward_cng_interval = switch_core_strdup(profile->pool, val);
-						sofia_set_pflag(profile, PFLAG_BRIDGE_FORWARD_CNG_INTERVAL);
-					} else if (!strcasecmp(var, "bridge-forward-cng-once")) {
-						if (switch_true(val)) {
-							sofia_set_pflag(profile, PFLAG_BRIDGE_FORWARD_CNG_ONCE);
-						} else {
-							sofia_clear_pflag(profile, PFLAG_BRIDGE_FORWARD_CNG_ONCE);
-						}
-					} else if (!strcasecmp(var, "force-rtcp-passthru")) {
-						if (switch_true(val)) {
-							sofia_set_pflag(profile, PFLAG_FORCE_RTCP_PASSTHRU);
-						} else {
-							sofia_clear_pflag(profile, PFLAG_FORCE_RTCP_PASSTHRU);
-						}
-					} else if (!strcasecmp(var, "sip-copy-custom-headers")) {
-						if (switch_true(val)) {
-							sofia_set_pflag(profile, PFLAG_SIP_COPY_CUSTOM_HEADERS);
-						} else {
-							sofia_clear_pflag(profile, PFLAG_SIP_COPY_CUSTOM_HEADERS);
 						}
 					} else if (!strcasecmp(var, "auto-invite-100")) {
 						if (switch_true(val)) {
@@ -7015,8 +6962,6 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 		int has_t38 = 0;
 		const char *drrrf_chanvar_str = switch_channel_get_variable(channel, "disable_recovery_record_route_fixup"); // disable_recovery_record_route_fixup as a chanvar
 		switch_bool_t drrrf_chanvar_zstr = zstr(drrrf_chanvar_str), drrrf_chanvar = switch_true(drrrf_chanvar_str);
-		const char *sip_copy_custom_headers = switch_channel_get_variable(channel, "sip_copy_custom_headers");
-		switch_bool_t sip_copy_custom_headers_set = SWITCH_FALSE;
 
 		if (status == 100 && !sofia_test_flag(tech_pvt, TFLAG_100_UEPOCH_SET)) {
 			sofia_set_flag(tech_pvt, TFLAG_100_UEPOCH_SET);
@@ -7203,6 +7148,8 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 		}
 		
 		if ((status == 180 || status == 183 || status > 199)) {
+			const char *vval;
+
 			sofia_set_accept_language_channel_variable(channel, sip);
 
 			if (status > 199) {
@@ -7211,13 +7158,8 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 				sofia_glue_set_extra_headers(session, sip, SOFIA_SIP_PROGRESS_HEADER_PREFIX);
 			}
 
-			if (!zstr(sip_copy_custom_headers)) {
-				sip_copy_custom_headers_set = switch_true(sip_copy_custom_headers);
-			} else {
-				sip_copy_custom_headers_set = tech_pvt->mparams.sip_copy_custom_headers;
-			}
 
-			if (sip_copy_custom_headers_set) {
+			if (!(vval = switch_channel_get_variable(channel, "sip_copy_custom_headers")) || switch_true(vval)) {
 				switch_core_session_t *other_session;
 
 				if (switch_core_session_get_partner(session, &other_session) == SWITCH_STATUS_SUCCESS) {
@@ -10624,6 +10566,8 @@ void sofia_handle_sip_i_info(nua_t *nua, sofia_profile_t *profile, nua_handle_t 
 	}
 
 	if (session) {
+		const char *vval;
+
 		/* Barf if we didn't get our private */
 		assert(switch_core_session_get_private(session));
 
@@ -10663,20 +10607,12 @@ void sofia_handle_sip_i_info(nua_t *nua, sofia_profile_t *profile, nua_handle_t 
 
 		if (sip && sip->sip_content_type && sip->sip_content_type->c_type && !strcasecmp(sip->sip_content_type->c_type, "freeswitch/data")) {
 			char *data = NULL;
-			const char *sip_copy_custom_headers = switch_channel_get_variable(channel, "sip_copy_custom_headers");
-			switch_bool_t sip_copy_custom_headers_set = SWITCH_FALSE;
 
 			if (sip->sip_payload && sip->sip_payload->pl_data) {
 				data = sip->sip_payload->pl_data;
 			}
 
-			if (!zstr(sip_copy_custom_headers)) {
-				sip_copy_custom_headers_set = switch_true(sip_copy_custom_headers);
-			} else {
-				sip_copy_custom_headers_set = tech_pvt->mparams.sip_copy_custom_headers;
-			}
-
-			if (sip_copy_custom_headers_set) {
+			if ((vval = switch_channel_get_variable(channel, "sip_copy_custom_headers")) && switch_true(vval)) {
 				switch_core_session_t *nsession = NULL;
 
 				switch_core_session_get_partner(session, &nsession);

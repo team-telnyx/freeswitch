@@ -386,8 +386,6 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 	int sent_cng = 0, sent_cng_interval = 0;
 	switch_time_t last_sent_cng = 0;
 	const char *bridge_forward_cng_interval = NULL;
-	switch_media_handle_t *smh;
-	switch_core_media_params_t *mparams;
 
 #ifdef SWITCH_VIDEO_IN_THREADS
 	struct vid_helper vh = { 0 };
@@ -475,32 +473,21 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 		}
 	}
 
-	if (!(smh = switch_core_session_get_media_handle(session_a))) {
-		return NULL;
-	}
-	if (!(mparams = switch_core_media_get_mparams(smh))) {
-		return NULL;
-	}
-
-	if (switch_channel_var_true(chan_a, "bridge_accept_cng") || mparams->bridge_accept_cng) {
+	if (switch_channel_var_true(chan_a, "bridge_accept_cng")) {
 #if DEBUG_RTP
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_NOTICE, "Audio bridge thread: accept_cng %p\n", (void*)session_a);
 #endif
 		switch_channel_set_flag(chan_b, CF_ACCEPT_CNG);
 	}
 
-	if (switch_channel_var_true(chan_a, "bridge_forward_cng_once") || mparams->bridge_forward_cng_once) {
+	if (switch_channel_var_true(chan_a, "bridge_forward_cng_once")) {
 #if DEBUG_RTP
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_NOTICE, "Audio bridge thread: forward_cng %p\n", (void*)session_a);
 #endif
 		switch_channel_set_flag(chan_b, CF_FORWARD_CNG_ONCE);
 	}
 
-	bridge_forward_cng_interval = switch_channel_get_variable(chan_a, "bridge_forward_cng_interval");
-	if (zstr(bridge_forward_cng_interval)) {
-		bridge_forward_cng_interval = mparams->bridge_forward_cng_interval;
-	}
-	if (!zstr(bridge_forward_cng_interval)) {
+	if ((bridge_forward_cng_interval = switch_channel_get_variable(chan_a, "bridge_forward_cng_interval"))) {
 		if (switch_true(bridge_forward_cng_interval)) {
 			sent_cng_interval = 5000;
 		} else {
