@@ -5108,7 +5108,15 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 
 			if (switch_channel_var_false(smh->session->channel, "telnyx_disable_rtcp") || !switch_channel_get_variable(smh->session->channel, "telnyx_disable_rtcp")) {
 				if (remote_rtcp_port) {
-					if (switch_channel_var_true(smh->session->channel, "force_rtcp_passthru")) {
+					// Check if we should force rtcp passthru; the var can be set in the dial plan to 'false', hence the explicit check
+					switch_bool_t force_rtcp_passthru_set = SWITCH_FALSE;
+					const char *force_rtcp_passthru = switch_channel_get_variable(smh->session->channel, "force_rtcp_passthru");
+					if (!zstr(force_rtcp_passthru)) {
+						force_rtcp_passthru_set = switch_true(force_rtcp_passthru);
+					} else {
+						force_rtcp_passthru_set = smh->mparams->force_rtcp_passthru;
+					}
+					if (force_rtcp_passthru_set) {
 						val = "passthru";
 					}
 
@@ -5125,6 +5133,11 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 								interval = 5000;
 							}
 							switch_rtp_set_rtcp_passthru_timeout(engine->rtp_session, interval);
+						} else {
+							if (switch_media_handle_test_media_flag(smh, SCMF_RTCP_AUDIO_PASSTHRU_TIMEOUT_MSEC)) {
+								int interval = atoi(smh->mparams->rtcp_audio_passthru_timeout_msec);
+								switch_rtp_set_rtcp_passthru_timeout(engine->rtp_session, interval);
+							}
 						}
 					} else {
 						int interval = atoi(val);
@@ -10387,11 +10400,20 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 			switch_port_t remote_rtcp_port = a_engine->remote_rtcp_port;
 
 			if (switch_channel_var_false(smh->session->channel, "telnyx_disable_rtcp") || !switch_channel_get_variable(smh->session->channel, "telnyx_disable_rtcp")) {
+				switch_bool_t force_rtcp_passthru_set = SWITCH_FALSE;
+				const char *force_rtcp_passthru = switch_channel_get_variable(smh->session->channel, "force_rtcp_passthru");
+
+				if (!zstr(force_rtcp_passthru)) {
+					force_rtcp_passthru_set = switch_true(force_rtcp_passthru);
+				} else {
+					force_rtcp_passthru_set = smh->mparams->force_rtcp_passthru;
+				}
+
 				if (!remote_rtcp_port && rport) {
 					remote_rtcp_port = (switch_port_t)atoi(rport);
 				}
 
-				if (switch_channel_var_true(smh->session->channel, "force_rtcp_passthru")) {
+				if (force_rtcp_passthru_set) {
 					val = "passthru";
 				}
 
@@ -11823,11 +11845,19 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 	const char* audio_mid = switch_channel_get_variable_dup(session->channel, "rtp_audio_mid", SWITCH_FALSE, -1);
 	const char* video_mid = switch_channel_get_variable_dup(session->channel, "rtp_video_mid", SWITCH_FALSE, -1);
 	const char *clear_previous_negotiation = NULL;
+	const char *force_rtcp_passthru = switch_channel_get_variable(session->channel, "force_rtcp_passthru");
+	switch_bool_t force_rtcp_passthru_set = SWITCH_FALSE;
 
 	switch_assert(session);
 
 	if (!(smh = session->media_handle)) {
 		return;
+	}
+
+	if (!zstr(force_rtcp_passthru)) {
+		force_rtcp_passthru_set = switch_true(force_rtcp_passthru);
+	} else {
+		force_rtcp_passthru_set = smh->mparams->force_rtcp_passthru;
 	}
 
 	a_engine = &smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
@@ -11861,14 +11891,14 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 
 	if (!smh->mparams->rtcp_audio_interval_msec) {
 		smh->mparams->rtcp_audio_interval_msec = (char *)switch_channel_get_variable(session->channel, "rtcp_audio_interval_msec");
-		if (switch_channel_var_true(smh->session->channel, "force_rtcp_passthru")) {
+		if (force_rtcp_passthru_set) {
 			smh->mparams->rtcp_audio_interval_msec = SWITCH_RTCP_AUDIO_PASSTHRU;
 		}
 	}
 
 	if (!smh->mparams->rtcp_video_interval_msec) {
 		smh->mparams->rtcp_video_interval_msec = (char *)switch_channel_get_variable(session->channel, "rtcp_video_interval_msec");
-		if (switch_channel_var_true(smh->session->channel, "force_rtcp_passthru")) {
+		if (force_rtcp_passthru_set) {
 			smh->mparams->rtcp_audio_interval_msec = SWITCH_RTCP_AUDIO_PASSTHRU;
 		}
 	}

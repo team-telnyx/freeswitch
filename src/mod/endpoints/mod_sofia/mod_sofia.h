@@ -192,6 +192,15 @@ struct sofia_private {
 	int is_static;
 	switch_time_t ping_sent;
 	char *rfc7989_uuid;
+	int rtp_timeout_sec;
+	char *rtcp_audio_passthru_timeout_msec;
+	switch_bool_t confirm_blind_transfer;
+	char *rtcp_audio_interval_msec;
+	switch_bool_t bridge_accept_cng;
+	char *bridge_forward_cng_interval;
+	switch_bool_t bridge_forward_cng_once;
+	switch_bool_t force_rtcp_passthru;
+	switch_bool_t sip_copy_custom_headers;
 };
 
 #define set_param(ptr,val) if (ptr) {free(ptr) ; ptr = NULL;} if (val) {ptr = strdup(val);}
@@ -322,6 +331,12 @@ typedef enum {
 	PFLAG_SDP_MEDIA_STRICT_FMT,
 	PFLAG_ALWAYS_BRIDGE_EARLY_MEDIA,
 	PFLAG_ENABLE_100REL_SYNC,
+	PFLAG_RTCP_AUDIO_INTERVAL_MSEC,
+	PFLAG_BRIDGE_ACCEPT_CNG,
+	PFLAG_BRIDGE_FORWARD_CNG_INTERVAL,
+	PFLAG_BRIDGE_FORWARD_CNG_ONCE,
+	PFLAG_FORCE_RTCP_PASSTHRU,
+	PFLAG_SIP_COPY_CUSTOM_HEADERS,
 	/* No new flags below this line */
 	PFLAG_MAX
 } PFLAGS;
@@ -851,6 +866,7 @@ struct sofia_profile {
 	sofia_auth_algs_t auth_algs[SOFIA_MAX_REG_ALGS];
 	uint8_t disable_recovery_record_route_fixup;
 	switch_call_cause_t telnyx_sip_proxy_timeout_hangup_cause;
+	char *bridge_forward_cng_interval;
 };
 
 
