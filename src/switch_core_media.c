@@ -597,6 +597,24 @@ static switch_t38_options_t * switch_core_media_process_udptl(switch_core_sessio
 		}
 	}
 
+	if (zstr(t38_options->T38FaxUdpEC)) {
+		const char* udpfec = switch_channel_get_variable(session->channel, "fax_t38_udpfec_default");
+		if (!zstr(udpfec)) {
+			if (!strcasecmp(udpfec, "t38UDPRedundancy")) {
+				t38_options->T38FaxUdpEC = switch_core_session_strdup(session, "t38UDPRedundancy");
+			} else if (!strcasecmp(udpfec, "t38UDPFEC")) {
+				t38_options->T38FaxUdpEC = switch_core_session_strdup(session, "t38UDPFEC");
+			} else if (!strcasecmp(udpfec, "none") || !strcasecmp(udpfec, "null")) {
+				t38_options->T38FaxUdpEC = NULL;
+			} else {
+				switch_log_printf(SWITCH_CHANNEL_CHANNEL_LOG(session->channel), SWITCH_LOG_DEBUG, "Unrecognized t38 default udpfec: %s\n", udpfec);
+			}
+		} else {
+			// Default behavior is default to t38UDPRedundancy
+			t38_options->T38FaxUdpEC = switch_core_session_strdup(session, "t38UDPRedundancy");
+		}
+	}
+
 	switch_channel_set_variable(session->channel, "has_t38", "true");
 	switch_channel_set_private(session->channel, "t38_options", t38_options);
 	switch_channel_set_app_flag_key("T38", session->channel, CF_APP_T38);

@@ -890,7 +890,19 @@ static switch_status_t spanfax_init(pvt_t *pvt, transport_mode_t trans_mode)
 
 			pvt->t38_core = t38_terminal_get_t38_core_state(pvt->t38_state);
 
-			if (udptl_init(pvt->udptl_state, UDPTL_ERROR_CORRECTION_REDUNDANCY, fec_span, fec_entries,
+			if (!zstr(t38_options->T38FaxUdpEC)) {
+				if (!strcasecmp(t38_options->T38FaxRateManagement, "t38UDPRedundancy")) {
+					fec_scheme = UDPTL_ERROR_CORRECTION_REDUNDANCY;
+				} else if (!strcasecmp(t38_options->T38FaxRateManagement, "t38UDPFEC")) {
+					fec_scheme = UDPTL_ERROR_CORRECTION_FEC;
+				} else {
+					fec_scheme = UDPTL_ERROR_CORRECTION_NONE;
+				}
+			} else {
+				fec_scheme = UDPTL_ERROR_CORRECTION_NONE;
+			}
+
+			if (udptl_init(pvt->udptl_state, fec_scheme, fec_span, fec_entries,
 					(udptl_rx_packet_handler_t *) t38_core_rx_ifp_packet, (void *) pvt->t38_core) == NULL) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Cannot initialize my UDPTL structs\n");
 				return SWITCH_STATUS_FALSE;
@@ -936,17 +948,13 @@ static switch_status_t spanfax_init(pvt_t *pvt, transport_mode_t trans_mode)
 
 		if (!zstr(t38_options->T38FaxUdpEC)) {
 			if (!strcasecmp(t38_options->T38FaxRateManagement, "t38UDPRedundancy")) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "UDP EC Scheme is redundant\n");
 				fec_scheme = UDPTL_ERROR_CORRECTION_REDUNDANCY;
 			} else if (!strcasecmp(t38_options->T38FaxRateManagement, "t38UDPFEC")) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "UDP EC Scheme is FEC\n");
 				fec_scheme = UDPTL_ERROR_CORRECTION_FEC;
 			} else {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "No UDP EC Scheme\n");
 				fec_scheme = UDPTL_ERROR_CORRECTION_NONE;
 			}
 		} else {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "No UDP EC Scheme\n");
 			fec_scheme = UDPTL_ERROR_CORRECTION_NONE;
 		}
 
@@ -1320,6 +1328,7 @@ static t38_mode_t request_t38(pvt_t *pvt)
 	if (enabled) {
 
         if (!(t38_options = switch_channel_get_private(channel, "_preconfigured_t38_options"))) {
+			const char* udpfec = switch_channel_get_variable(channel, "fax_t38_udpfec_default");
             t38_options = switch_core_session_alloc(session, sizeof(*t38_options));
             t38_options->T38MaxBitRate = (pvt->disable_v17) ? 9600 : 14400;
             t38_options->T38FaxVersion = 0;
@@ -1329,11 +1338,26 @@ static t38_mode_t request_t38(pvt_t *pvt)
             t38_options->T38FaxRateManagement = "transferredTCF";
             t38_options->T38FaxMaxBuffer = 2000;
             t38_options->T38FaxMaxDatagram = LOCAL_FAX_MAX_DATAGRAM;
-            t38_options->T38FaxUdpEC = "t38UDPRedundancy";
+            t38_options->T38FaxUdpEC = NULL;
             t38_options->T38VendorInfo = "0 0 0";
+
+			if (!zstr(udpfec)) {
+				if (!strcasecmp(udpfec, "t38UDPRedundancy")) {
+					t38_options->T38FaxUdpEC = switch_core_session_strdup(session, "t38UDPRedundancy");
+				} else if (!strcasecmp(udpfec, "t38UDPFEC")) {
+					t38_options->T38FaxUdpEC = switch_core_session_strdup(session, "t38UDPFEC");
+				} else if (!strcasecmp(udpfec, "none") || !strcasecmp(udpfec, "null")) {
+					t38_options->T38FaxUdpEC = NULL;
+				} else {
+					switch_log_printf(SWITCH_CHANNEL_CHANNEL_LOG(channel), SWITCH_LOG_DEBUG, "Unrecognized t38 default udpfec: %s\n", udpfec);
+				}
+			} else {
+				// Default behavior is default to t38UDPRedundancy
+				t38_options->T38FaxUdpEC = switch_core_session_strdup(session, "t38UDPRedundancy");
+			}
         }
 
-	switch_channel_set_private(channel, "t38_options", t38_options);
+		switch_channel_set_private(channel, "t38_options", t38_options);
         switch_channel_set_private(channel, "_preconfigured_t38_options", NULL);
 
 		pvt->t38_mode = T38_MODE_REQUESTED;
