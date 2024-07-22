@@ -988,7 +988,7 @@ static switch_status_t spanfax_init(pvt_t *pvt, transport_mode_t trans_mode)
 			span_log_set_message_handler(t38_gateway_get_logging_state(pvt->t38_gateway_state), mod_spandsp_log_message, log_data);
 			span_log_set_message_handler(t38_core_get_logging_state(pvt->t38_core), mod_spandsp_log_message, log_data);
 		}
-		
+
 		if (pvt->verbose) {
 			span_log_set_level(t38_gateway_get_logging_state(pvt->t38_gateway_state), SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL | SPAN_LOG_FLOW);
 			span_log_set_level(t38_core_get_logging_state(pvt->t38_core), SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL | SPAN_LOG_FLOW);
@@ -1327,38 +1327,38 @@ static t38_mode_t request_t38(pvt_t *pvt)
 
 	if (enabled) {
 
-        if (!(t38_options = switch_channel_get_private(channel, "_preconfigured_t38_options"))) {
+		if (!(t38_options = switch_channel_get_private(channel, "_preconfigured_t38_options"))) {
 			const char* udpfec = switch_channel_get_variable(channel, "fax_t38_udpfec_default");
-            t38_options = switch_core_session_alloc(session, sizeof(*t38_options));
-            t38_options->T38MaxBitRate = (pvt->disable_v17) ? 9600 : 14400;
-            t38_options->T38FaxVersion = 0;
-            t38_options->T38FaxFillBitRemoval = 1;
-            t38_options->T38FaxTranscodingMMR = 0;
-            t38_options->T38FaxTranscodingJBIG = 0;
-            t38_options->T38FaxRateManagement = "transferredTCF";
-            t38_options->T38FaxMaxBuffer = 2000;
-            t38_options->T38FaxMaxDatagram = LOCAL_FAX_MAX_DATAGRAM;
-            t38_options->T38FaxUdpEC = NULL;
-            t38_options->T38VendorInfo = "0 0 0";
+			t38_options = switch_core_session_alloc(session, sizeof(*t38_options));
+			t38_options->T38MaxBitRate = (pvt->disable_v17) ? 9600 : 14400;
+			t38_options->T38FaxVersion = 0;
+			t38_options->T38FaxFillBitRemoval = 1;
+			t38_options->T38FaxTranscodingMMR = 0;
+			t38_options->T38FaxTranscodingJBIG = 0;
+			t38_options->T38FaxRateManagement = "transferredTCF";
+			t38_options->T38FaxMaxBuffer = 2000;
+			t38_options->T38FaxMaxDatagram = LOCAL_FAX_MAX_DATAGRAM;
+			t38_options->T38FaxUdpEC = NULL;
+			t38_options->T38VendorInfo = "0 0 0";
 
-            if (!zstr(udpfec)) {
-                if (!strcasecmp(udpfec, "t38UDPRedundancy")) {
-                    t38_options->T38FaxUdpEC = switch_core_session_strdup(session, "t38UDPRedundancy");
-                } else if (!strcasecmp(udpfec, "t38UDPFEC")) {
-                    t38_options->T38FaxUdpEC = switch_core_session_strdup(session, "t38UDPFEC");
-                } else if (!strcasecmp(udpfec, "none") || !strcasecmp(udpfec, "null")) {
-                    t38_options->T38FaxUdpEC = NULL;
-                } else {
-                    switch_log_printf(SWITCH_CHANNEL_CHANNEL_LOG(channel), SWITCH_LOG_DEBUG, "Unrecognized t38 default udpfec: %s\n", udpfec);
-                }
-            } else {
-                // Default behavior is default to t38UDPRedundancy
-                t38_options->T38FaxUdpEC = switch_core_session_strdup(session, "t38UDPRedundancy");
-            }
-        }
+			if (!zstr(udpfec)) {
+				if (!strcasecmp(udpfec, "t38UDPRedundancy")) {
+					t38_options->T38FaxUdpEC = switch_core_session_strdup(session, "t38UDPRedundancy");
+				} else if (!strcasecmp(udpfec, "t38UDPFEC")) {
+					t38_options->T38FaxUdpEC = switch_core_session_strdup(session, "t38UDPFEC");
+				} else if (!strcasecmp(udpfec, "none") || !strcasecmp(udpfec, "null")) {
+					t38_options->T38FaxUdpEC = NULL;
+				} else {
+					switch_log_printf(SWITCH_CHANNEL_CHANNEL_LOG(channel), SWITCH_LOG_DEBUG, "Unrecognized t38 default udpfec: %s\n", udpfec);
+				}
+			} else {
+				// Default behavior is default to t38UDPRedundancy
+				t38_options->T38FaxUdpEC = switch_core_session_strdup(session, "t38UDPRedundancy");
+			}
+		}
 
 		switch_channel_set_private(channel, "t38_options", t38_options);
-        switch_channel_set_private(channel, "_preconfigured_t38_options", NULL);
+		switch_channel_set_private(channel, "_preconfigured_t38_options", NULL);
 
 		pvt->t38_mode = T38_MODE_REQUESTED;
 		switch_channel_set_app_flag_key("T38", channel, CF_APP_T38_REQ);
