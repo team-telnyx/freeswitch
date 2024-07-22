@@ -1260,11 +1260,9 @@ static t38_mode_t negotiate_t38(pvt_t *pvt)
             t38_options->T38FaxMaxBuffer = 2000;
         }
 		t38_options->T38FaxMaxDatagram = LOCAL_FAX_MAX_DATAGRAM;
-		if (!zstr(t38_options->T38FaxUdpEC) &&
-				(strcasecmp(t38_options->T38FaxUdpEC, "t38UDPRedundancy") == 0 ||
+		if (zstr(t38_options->T38FaxUdpEC) ||
+				!(strcasecmp(t38_options->T38FaxUdpEC, "t38UDPRedundancy") == 0 ||
 				strcasecmp(t38_options->T38FaxUdpEC, "t38UDPFEC") == 0)) {
-			t38_options->T38FaxUdpEC = "t38UDPRedundancy";
-		} else {
 			t38_options->T38FaxUdpEC = NULL;
 		}
 		t38_options->T38VendorInfo = "0 0 0";
@@ -1332,7 +1330,7 @@ static t38_mode_t request_t38(pvt_t *pvt)
 	if (enabled) {
 
 		if (!(t38_options = switch_channel_get_private(channel, "_preconfigured_t38_options"))) {
-			const char* udpfec = switch_channel_get_variable(channel, "fax_t38_udpfec_default");
+			const char* udpfec = NULL;
 			t38_options = switch_core_session_alloc(session, sizeof(*t38_options));
 			t38_options->T38MaxBitRate = (pvt->disable_v17) ? 9600 : 14400;
 			t38_options->T38FaxVersion = 0;
@@ -1344,6 +1342,11 @@ static t38_mode_t request_t38(pvt_t *pvt)
 			t38_options->T38FaxMaxDatagram = LOCAL_FAX_MAX_DATAGRAM;
 			t38_options->T38FaxUdpEC = NULL;
 			t38_options->T38VendorInfo = "0 0 0";
+
+			udpfec = switch_channel_get_variable(channel, "fax_t38_udpfec_offer_default");
+			if (zstr(udpfec)) {
+				udpfec = switch_channel_get_variable(channel, "fax_t38_udpfec_default");
+			}
 
 			if (!zstr(udpfec)) {
 				if (!strcasecmp(udpfec, "t38UDPRedundancy")) {

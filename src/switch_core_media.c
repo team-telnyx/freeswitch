@@ -598,7 +598,11 @@ static switch_t38_options_t * switch_core_media_process_udptl(switch_core_sessio
 	}
 
 	if (zstr(t38_options->T38FaxUdpEC)) {
-		const char* udpfec = switch_channel_get_variable(session->channel, "fax_t38_udpfec_default");
+		const char* udpfec = switch_channel_get_variable(session->channel, "fax_t38_udpfec_answer_default");
+		if (zstr(udpfec)) {
+			udpfec = switch_channel_get_variable(session->channel, "fax_t38_udpfec_default");
+		}
+
 		if (!zstr(udpfec)) {
 			if (!strcasecmp(udpfec, "t38UDPRedundancy")) {
 				t38_options->T38FaxUdpEC = switch_core_session_strdup(session, "t38UDPRedundancy");
