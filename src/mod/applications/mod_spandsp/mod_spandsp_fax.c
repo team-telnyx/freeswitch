@@ -890,16 +890,18 @@ static switch_status_t spanfax_init(pvt_t *pvt, transport_mode_t trans_mode)
 
 			pvt->t38_core = t38_terminal_get_t38_core_state(pvt->t38_state);
 
-			if (!zstr(t38_options->T38FaxUdpEC)) {
-				if (!strcasecmp(t38_options->T38FaxRateManagement, "t38UDPRedundancy")) {
-					fec_scheme = UDPTL_ERROR_CORRECTION_REDUNDANCY;
-				} else if (!strcasecmp(t38_options->T38FaxRateManagement, "t38UDPFEC")) {
-					fec_scheme = UDPTL_ERROR_CORRECTION_FEC;
+			if (t38_options) {
+				if (!zstr(t38_options->T38FaxUdpEC)) {
+					if (!strcasecmp(t38_options->T38FaxRateManagement, "t38UDPRedundancy")) {
+						fec_scheme = UDPTL_ERROR_CORRECTION_REDUNDANCY;
+					} else if (!strcasecmp(t38_options->T38FaxRateManagement, "t38UDPFEC")) {
+						fec_scheme = UDPTL_ERROR_CORRECTION_FEC;
+					} else {
+						fec_scheme = UDPTL_ERROR_CORRECTION_NONE;
+					}
 				} else {
 					fec_scheme = UDPTL_ERROR_CORRECTION_NONE;
 				}
-			} else {
-				fec_scheme = UDPTL_ERROR_CORRECTION_NONE;
 			}
 
 			if (udptl_init(pvt->udptl_state, fec_scheme, fec_span, fec_entries,
@@ -946,16 +948,18 @@ static switch_status_t spanfax_init(pvt_t *pvt, transport_mode_t trans_mode)
 
 		pvt->t38_core = t38_gateway_get_t38_core_state(pvt->t38_gateway_state);
 
-		if (!zstr(t38_options->T38FaxUdpEC)) {
-			if (!strcasecmp(t38_options->T38FaxRateManagement, "t38UDPRedundancy")) {
-				fec_scheme = UDPTL_ERROR_CORRECTION_REDUNDANCY;
-			} else if (!strcasecmp(t38_options->T38FaxRateManagement, "t38UDPFEC")) {
-				fec_scheme = UDPTL_ERROR_CORRECTION_FEC;
+		if (t38_options) {
+			if (!zstr(t38_options->T38FaxUdpEC)) {
+				if (!strcasecmp(t38_options->T38FaxRateManagement, "t38UDPRedundancy")) {
+					fec_scheme = UDPTL_ERROR_CORRECTION_REDUNDANCY;
+				} else if (!strcasecmp(t38_options->T38FaxRateManagement, "t38UDPFEC")) {
+					fec_scheme = UDPTL_ERROR_CORRECTION_FEC;
+				} else {
+					fec_scheme = UDPTL_ERROR_CORRECTION_NONE;
+				}
 			} else {
 				fec_scheme = UDPTL_ERROR_CORRECTION_NONE;
 			}
-		} else {
-			fec_scheme = UDPTL_ERROR_CORRECTION_NONE;
 		}
 
 		if (udptl_init(pvt->udptl_state, fec_scheme, fec_span, fec_entries,
