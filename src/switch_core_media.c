@@ -4696,9 +4696,9 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 	switch_rtp_engine_t *engine = &smh->engines[type];
 	sdp_attribute_t *attr = NULL, *attrs[2] = { 0 };
 	int i = 0, got_rtcp_mux = 0;
-	const char *val, *ignore_sdp_ice_var = NULL, *force_rtcp_passthru_var = NULL;
+	const char *val, *ignore_sdp_ice_var = NULL;
 	int ice_seen = 0, cid = 0, ai = 0, attr_idx = 0, cand_seen = 0, relay_ok = 0;
-	int ignore_ice_mdns = 0, ignore_sdp_ice_set = 0, force_rtcp_passthru_set = 0;
+	int ignore_ice_mdns = 0, ignore_sdp_ice_set = 0;
 	char con_addr[256];
 	int ice_resolve = 0;
 	ip_t ip;
@@ -5148,10 +5148,13 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 
 			if (switch_channel_var_false(smh->session->channel, "telnyx_disable_rtcp") || !switch_channel_get_variable(smh->session->channel, "telnyx_disable_rtcp")) {
 				if (remote_rtcp_port) {
-					force_rtcp_passthru_set = switch_media_handle_test_media_flag(smh, SCMF_FORCE_RTCP_PASSTHRU);
-					force_rtcp_passthru_var = switch_channel_get_variable(smh->session->channel, "force_rtcp_passthru");
-					if (!zstr(force_rtcp_passthru_var)) {
-						force_rtcp_passthru_set = switch_true(force_rtcp_passthru_var);
+					// Check if we should force rtcp passthru; the var can be set in the dial plan to 'false', hence the explicit check
+					switch_bool_t force_rtcp_passthru_set = SWITCH_FALSE;
+					const char *force_rtcp_passthru = switch_channel_get_variable(smh->session->channel, "force_rtcp_passthru");
+					if (!zstr(force_rtcp_passthru)) {
+						force_rtcp_passthru_set = switch_true(force_rtcp_passthru);
+					} else {
+						force_rtcp_passthru_set = smh->mparams->force_rtcp_passthru;
 					}
 
 					if (force_rtcp_passthru_set) {
@@ -5171,6 +5174,11 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 								interval = 5000;
 							}
 							switch_rtp_set_rtcp_passthru_timeout(engine->rtp_session, interval);
+						} else {
+							if (switch_media_handle_test_media_flag(smh, SCMF_RTCP_AUDIO_PASSTHRU_TIMEOUT_MSEC)) {
+								int interval = atoi(smh->mparams->rtcp_audio_passthru_timeout_msec);
+								switch_rtp_set_rtcp_passthru_timeout(engine->rtp_session, interval);
+							}
 						}
 					} else {
 						int interval = atoi(val);
@@ -10431,18 +10439,19 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 		if ((val = switch_channel_get_variable(session->channel, "rtcp_audio_interval_msec")) || (val = smh->mparams->rtcp_audio_interval_msec)) {
 			const char *rport = switch_channel_get_variable(session->channel, "rtp_remote_audio_rtcp_port");
 			switch_port_t remote_rtcp_port = a_engine->remote_rtcp_port;
-			int force_rtcp_passthru_set = 0;
-			const char *force_rtcp_passthru_var = NULL;
 
 			if (switch_channel_var_false(smh->session->channel, "telnyx_disable_rtcp") || !switch_channel_get_variable(smh->session->channel, "telnyx_disable_rtcp")) {
-				if (!remote_rtcp_port && rport) {
-					remote_rtcp_port = (switch_port_t)atoi(rport);
+				switch_bool_t force_rtcp_passthru_set = SWITCH_FALSE;
+				const char *force_rtcp_passthru = switch_channel_get_variable(smh->session->channel, "force_rtcp_passthru");
+
+				if (!zstr(force_rtcp_passthru)) {
+					force_rtcp_passthru_set = switch_true(force_rtcp_passthru);
+				} else {
+					force_rtcp_passthru_set = smh->mparams->force_rtcp_passthru;
 				}
 
-				force_rtcp_passthru_set = switch_media_handle_test_media_flag(smh, SCMF_FORCE_RTCP_PASSTHRU);
-				force_rtcp_passthru_var = switch_channel_get_variable(smh->session->channel, "force_rtcp_passthru");
-				if (!zstr(force_rtcp_passthru_var)) {
-					force_rtcp_passthru_set = switch_true(force_rtcp_passthru_var);
+				if (!remote_rtcp_port && rport) {
+					remote_rtcp_port = (switch_port_t)atoi(rport);
 				}
 
 				if (force_rtcp_passthru_set) {
@@ -11877,13 +11886,19 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 	const char* audio_mid = switch_channel_get_variable_dup(session->channel, "rtp_audio_mid", SWITCH_FALSE, -1);
 	const char* video_mid = switch_channel_get_variable_dup(session->channel, "rtp_video_mid", SWITCH_FALSE, -1);
 	const char *clear_previous_negotiation = NULL;
-	int force_rtcp_passthru_set = 0;
-	const char *force_rtcp_passthru_var = NULL;
+	const char *force_rtcp_passthru = switch_channel_get_variable(session->channel, "force_rtcp_passthru");
+	switch_bool_t force_rtcp_passthru_set = SWITCH_FALSE;
 
 	switch_assert(session);
 
 	if (!(smh = session->media_handle)) {
 		return;
+	}
+
+	if (!zstr(force_rtcp_passthru)) {
+		force_rtcp_passthru_set = switch_true(force_rtcp_passthru);
+	} else {
+		force_rtcp_passthru_set = smh->mparams->force_rtcp_passthru;
 	}
 
 	a_engine = &smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
@@ -11913,12 +11928,6 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 	if ((a_engine->rtcp_mux != -1 && v_engine->rtcp_mux != -1) && (sdp_type == SDP_TYPE_REQUEST)) {
 		a_engine->rtcp_mux = 1;
 		v_engine->rtcp_mux = 1;
-	}
-
-	force_rtcp_passthru_set = switch_media_handle_test_media_flag(smh, SCMF_FORCE_RTCP_PASSTHRU);
-	force_rtcp_passthru_var = switch_channel_get_variable(smh->session->channel, "force_rtcp_passthru");
-	if (!zstr(force_rtcp_passthru_var)) {
-		force_rtcp_passthru_set = switch_true(force_rtcp_passthru_var);
 	}
 
 	if (!smh->mparams->rtcp_audio_interval_msec) {
