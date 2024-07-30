@@ -6752,7 +6752,7 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 		if (rtp_session->fork.fork_rx.active && rtp_session->last_read_time > 0) {
 			switch_size_t last_datalen = 0;
 			rtp_session->last_recv_msg = rtp_session->recv_msg;
-			switch_core_session_get_last_read_frame_data(rtp_session->session, (void*) &rtp_session->last_recv_msg.body, &last_datalen);
+			switch_core_session_get_fork_read_frame_data(rtp_session->session, (void*) &rtp_session->last_recv_msg.body, &last_datalen);
 			// The last frame size should have a minimum header length
 			if (rtp_session->last_recv_bytes >= 12) {
 				rtp_session->last_recv_bytes = 12 + last_datalen;
@@ -9181,6 +9181,10 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_zerocopy_read_frame(switch_rtp_t *rtp
 		frame->seq = (uint16_t) ntohs((uint16_t) rtp_session->last_rtp_hdr.seq);
 		frame->ssrc = ntohl(rtp_session->last_rtp_hdr.ssrc);
 		frame->m = rtp_session->last_rtp_hdr.m ? SWITCH_TRUE : SWITCH_FALSE;
+	}
+
+	if (rtp_session->fork.fork_rx.active) {
+		switch_set_flag(frame, SFF_FORK_RTP);
 	}
 
 #ifdef ENABLE_ZRTP

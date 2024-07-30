@@ -1346,9 +1346,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(_In_ switch_core_
 SWITCH_DECLARE(switch_bool_t) switch_core_session_transcoding(switch_core_session_t *session_a, switch_core_session_t *session_b, switch_media_type_t type);
 SWITCH_DECLARE(void) switch_core_session_passthru(switch_core_session_t *session, switch_media_type_t type, switch_bool_t on);
 
-SWITCH_DECLARE(switch_status_t) switch_core_session_set_last_read_frame(_In_ switch_core_session_t *session, switch_frame_t *frame);
-SWITCH_DECLARE(switch_status_t) switch_core_session_get_last_read_frame(_In_ switch_core_session_t *session, switch_frame_t **frame);
-SWITCH_DECLARE(switch_status_t) switch_core_session_get_last_read_frame_data(_In_ switch_core_session_t *session, void *data, switch_size_t* datalen);
+SWITCH_DECLARE(switch_status_t) switch_core_session_set_fork_read_frame(_In_ switch_core_session_t *session, switch_frame_t *frame);
+SWITCH_DECLARE(switch_status_t) switch_core_session_get_fork_read_frame(_In_ switch_core_session_t *session, switch_frame_t **frame);
+SWITCH_DECLARE(switch_status_t) switch_core_session_get_fork_read_frame_data(_In_ switch_core_session_t *session, void *data, switch_size_t* datalen);
 
 
 /*!
