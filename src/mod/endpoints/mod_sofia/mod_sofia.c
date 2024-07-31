@@ -5049,6 +5049,7 @@ static switch_call_cause_t sofia_outgoing_channel(switch_core_session_t *session
 	sofia_profile_t *profile = NULL;
 	switch_caller_profile_t *caller_profile = NULL;
 	private_object_t *tech_pvt = NULL;
+	private_object_t *caller_tech_pvt = NULL;
 	switch_channel_t *nchannel;
 	char *host = NULL, *dest_to = NULL;
 	const char *hval = NULL;
@@ -5061,7 +5062,7 @@ static switch_call_cause_t sofia_outgoing_channel(switch_core_session_t *session
 	*new_session = NULL;
 	
 	// Need to allow for override for outbound calls even when min-idle-cpu fails
-	if(mod_sofia_globals.min_idle_cpu_override_outbound) {
+	if (mod_sofia_globals.min_idle_cpu_override_outbound) {
 		flags |= SOF_NO_CPU_IDLE_LIMITS;
 	}
 
@@ -5092,8 +5093,33 @@ static switch_call_cause_t sofia_outgoing_channel(switch_core_session_t *session
 
 	if (session) {
 		o_channel = switch_core_session_get_channel(session);
-	}
+		caller_tech_pvt = switch_core_session_get_private(session);
 
+		if (sofia_test_pflag(caller_tech_pvt->profile, PFLAG_CONFIRM_BLIND_TRANSFER)) {
+			tech_pvt->sofia_private->confirm_blind_transfer = SWITCH_TRUE;
+		}
+		if (sofia_test_pflag(caller_tech_pvt->profile, PFLAG_RTCP_AUDIO_INTERVAL_MSEC)) {
+			tech_pvt->sofia_private->rtcp_audio_interval_msec = su_strdup(nua_handle_get_home(tech_pvt->nh), caller_tech_pvt->profile->rtcp_audio_interval_msec);
+		}
+		if (sofia_test_media_flag(caller_tech_pvt->profile, SCMF_PARTNER_RTCP_AUDIO_PASSTHRU_TIMEOUT_MSEC)) {
+			tech_pvt->sofia_private->rtcp_audio_passthru_timeout_msec = su_strdup(nua_handle_get_home(tech_pvt->nh), caller_tech_pvt->profile->partner_rtcp_audio_passthru_timeout_msec);
+		}
+		if (sofia_test_pflag(caller_tech_pvt->profile, PFLAG_PARTNER_BRIDGE_ACCEPT_CNG)) {
+			tech_pvt->sofia_private->bridge_accept_cng = SWITCH_TRUE;
+		}
+		if (sofia_test_pflag(caller_tech_pvt->profile, PFLAG_PARTNER_BRIDGE_FORWARD_CNG_INTERVAL)) {
+			tech_pvt->sofia_private->bridge_forward_cng_interval = su_strdup(nua_handle_get_home(tech_pvt->nh), caller_tech_pvt->profile->partner_bridge_forward_cng_interval);
+		}
+		if (sofia_test_pflag(caller_tech_pvt->profile, PFLAG_PARTNER_BRIDGE_FORWARD_CNG_ONCE)) {
+			tech_pvt->sofia_private->bridge_forward_cng_once = SWITCH_TRUE;
+		}
+		if (sofia_test_pflag(caller_tech_pvt->profile, PFLAG_PARTNER_FORCE_RTCP_PASSTHRU)) {
+			tech_pvt->sofia_private->force_rtcp_passthru = SWITCH_TRUE;
+		}
+		if (sofia_test_pflag(caller_tech_pvt->profile, PFLAG_PARTNER_RTP_MEDIA_TIMEOUT_MSEC)) {
+			tech_pvt->sofia_private->rtp_media_timeout_msec = caller_tech_pvt->profile->partner_rtp_media_timeout_msec;
+		}
+	}
 
 	if ((hval = switch_event_get_header(var_event, "sip_invite_to_uri"))) {
 		dest_to = switch_core_session_strdup(nsession, hval);

@@ -84,6 +84,9 @@ typedef enum {
 	SCMF_REJECT_IPV6,
 	SCMF_SRTP_HANGUP_ON_ERROR,
 	SCMF_SRTP_SKIP_EMPTY_MKI,
+	SCMF_IGNORE_SDP_ICE,
+	SCMF_RTP_SECURE_MEDIA_MKI,
+	SCMF_PARTNER_RTCP_AUDIO_PASSTHRU_TIMEOUT_MSEC,
 	SCMF_MAX
 } switch_core_media_flag_t;
 
@@ -102,6 +105,8 @@ typedef enum {
 
 typedef struct switch_core_media_params_s {
 	uint32_t rtp_timeout_sec;
+	uint32_t rtp_media_timeout_msec;
+	uint32_t partner_rtp_media_timeout_msec;
 	uint32_t rtp_hold_timeout_sec;
 	uint32_t dtmf_delay;
 	uint32_t codec_flags;
@@ -135,11 +140,23 @@ typedef struct switch_core_media_params_s {
 	switch_rtp_bug_flag_t manual_text_rtp_bugs;
 
 	char *rtcp_audio_interval_msec;
+	char *partner_rtcp_audio_interval_msec;
 	char *rtcp_video_interval_msec;
 	char *rtcp_text_interval_msec;
 	char *rtcp_audio_passthru_timeout_msec;
+	char *partner_rtcp_audio_passthru_timeout_msec;
 	char *rtcp_video_passthru_timeout_msec;
 	char *rtcp_text_passthru_timeout_msec;
+
+	char *rtp_secure_media;
+	char *bridge_forward_cng_interval;
+	char *partner_bridge_forward_cng_interval;
+	switch_bool_t bridge_accept_cng;
+	switch_bool_t partner_bridge_accept_cng;
+	switch_bool_t bridge_forward_cng_once;
+	switch_bool_t partner_bridge_forward_cng_once;
+	switch_bool_t force_rtcp_passthru;
+	switch_bool_t partner_force_rtcp_passthru;
 
 
 	char *extrtpip;
