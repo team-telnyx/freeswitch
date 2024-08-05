@@ -181,14 +181,79 @@ void sofia_glue_attach_private(switch_core_session_t *session, sofia_profile_t *
 	tech_pvt->mparams.local_network = profile->local_network;
 	tech_pvt->mparams.sipip = profile->sipip;
 	tech_pvt->mparams.jb_msec = profile->jb_msec;
-	tech_pvt->mparams.rtcp_audio_interval_msec = profile->rtcp_audio_interval_msec;
+
+	if (!zstr(tech_pvt->sofia_private->rtcp_audio_interval_msec))
+		tech_pvt->mparams.rtcp_audio_interval_msec = tech_pvt->sofia_private->rtcp_audio_interval_msec;
+	else if (sofia_test_pflag(profile, PFLAG_RTCP_AUDIO_INTERVAL_MSEC))
+		tech_pvt->mparams.rtcp_audio_interval_msec = profile->rtcp_audio_interval_msec;
+
 	tech_pvt->mparams.rtcp_video_interval_msec = profile->rtcp_video_interval_msec;
-	tech_pvt->mparams.rtcp_audio_passthru_timeout_msec = profile->rtcp_audio_passthru_timeout_msec;
+
+	if (!zstr(tech_pvt->sofia_private->rtcp_audio_passthru_timeout_msec))
+		tech_pvt->mparams.rtcp_audio_passthru_timeout_msec = tech_pvt->sofia_private->rtcp_audio_passthru_timeout_msec;
+
+	if (!zstr(tech_pvt->sofia_private->partner_rtcp_audio_passthru_timeout_msec))
+		tech_pvt->mparams.partner_rtcp_audio_passthru_timeout_msec = tech_pvt->sofia_private->partner_rtcp_audio_passthru_timeout_msec;
+	else
+		tech_pvt->mparams.partner_rtcp_audio_passthru_timeout_msec = profile->partner_rtcp_audio_passthru_timeout_msec;
+
 	tech_pvt->mparams.rtcp_video_passthru_timeout_msec = profile->rtcp_video_passthru_timeout_msec;
 	tech_pvt->mparams.sdp_username = profile->sdp_username;
 	tech_pvt->mparams.cng_pt = tech_pvt->cng_pt;
-	tech_pvt->mparams.rtp_timeout_sec = profile->rtp_timeout_sec;
+
+	if (tech_pvt->sofia_private->rtp_media_timeout_msec > 0)
+		tech_pvt->mparams.rtp_media_timeout_msec = tech_pvt->sofia_private->rtp_media_timeout_msec;
+	else
+		tech_pvt->mparams.rtp_media_timeout_msec = profile->rtp_media_timeout_msec;
+	if (tech_pvt->sofia_private->partner_rtp_media_timeout_msec > 0)
+		tech_pvt->mparams.partner_rtp_media_timeout_msec = tech_pvt->sofia_private->partner_rtp_media_timeout_msec;
+	else
+		tech_pvt->mparams.partner_rtp_media_timeout_msec = profile->partner_rtp_media_timeout_msec;
 	tech_pvt->mparams.rtp_hold_timeout_sec = profile->rtp_hold_timeout_sec;
+	tech_pvt->mparams.rtp_secure_media = profile->rtp_secure_media;
+
+	if (tech_pvt->sofia_private->confirm_blind_transfer == SWITCH_TRUE)
+		switch_channel_set_state_flag(tech_pvt->channel, CF_CONFIRM_BLIND_TRANSFER);
+
+	if (tech_pvt->sofia_private->bridge_accept_cng == SWITCH_TRUE)
+		tech_pvt->mparams.bridge_accept_cng = SWITCH_TRUE;
+	else
+		tech_pvt->mparams.bridge_accept_cng = sofia_test_pflag(profile, PFLAG_BRIDGE_ACCEPT_CNG);
+
+	if (tech_pvt->sofia_private->partner_bridge_accept_cng == SWITCH_TRUE)
+		tech_pvt->mparams.partner_bridge_accept_cng = SWITCH_TRUE;
+	else
+		tech_pvt->mparams.partner_bridge_accept_cng = sofia_test_pflag(profile, PFLAG_PARTNER_BRIDGE_ACCEPT_CNG);
+
+	if (!zstr(tech_pvt->sofia_private->bridge_forward_cng_interval))
+		tech_pvt->mparams.bridge_forward_cng_interval = tech_pvt->sofia_private->bridge_forward_cng_interval;
+	else if (sofia_test_pflag(profile, PFLAG_BRIDGE_FORWARD_CNG_INTERVAL))
+		tech_pvt->mparams.bridge_forward_cng_interval = profile->bridge_forward_cng_interval;
+
+	if (!zstr(tech_pvt->sofia_private->partner_bridge_forward_cng_interval))
+		tech_pvt->mparams.partner_bridge_forward_cng_interval = tech_pvt->sofia_private->partner_bridge_forward_cng_interval;
+	else if (sofia_test_pflag(profile, PFLAG_PARTNER_BRIDGE_FORWARD_CNG_INTERVAL))
+		tech_pvt->mparams.partner_bridge_forward_cng_interval = profile->partner_bridge_forward_cng_interval;
+
+	if (tech_pvt->sofia_private->bridge_forward_cng_once == SWITCH_TRUE)
+		tech_pvt->mparams.bridge_forward_cng_once = SWITCH_TRUE;
+	else
+		tech_pvt->mparams.bridge_forward_cng_once = sofia_test_pflag(profile, PFLAG_BRIDGE_FORWARD_CNG_ONCE);
+
+	if (tech_pvt->sofia_private->partner_bridge_forward_cng_once == SWITCH_TRUE)
+		tech_pvt->mparams.partner_bridge_forward_cng_once = SWITCH_TRUE;
+	else
+		tech_pvt->mparams.partner_bridge_forward_cng_once = sofia_test_pflag(profile, PFLAG_PARTNER_BRIDGE_FORWARD_CNG_ONCE);
+
+	if (tech_pvt->sofia_private->force_rtcp_passthru == SWITCH_TRUE)
+		tech_pvt->mparams.force_rtcp_passthru = SWITCH_TRUE;
+	else
+		tech_pvt->mparams.force_rtcp_passthru = sofia_test_pflag(profile, PFLAG_FORCE_RTCP_PASSTHRU);
+
+	if (tech_pvt->sofia_private->partner_force_rtcp_passthru == SWITCH_TRUE)
+		tech_pvt->mparams.partner_force_rtcp_passthru = SWITCH_TRUE;
+	else
+		tech_pvt->mparams.partner_force_rtcp_passthru = sofia_test_pflag(profile, PFLAG_PARTNER_FORCE_RTCP_PASSTHRU);
 
 	if (profile->rtp_digit_delay) {
 		tech_pvt->mparams.dtmf_delay = profile->rtp_digit_delay;

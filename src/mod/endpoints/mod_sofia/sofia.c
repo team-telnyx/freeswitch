@@ -40,8 +40,8 @@
  *
  */
 #include "mod_sofia.h"
-#include <switch_ssl.h>
 #include "prometheus_metrics.h"
+#include <switch_ssl.h>
 
 
 extern su_log_t tport_log[];
@@ -4933,6 +4933,15 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 					profile->tls_verify_depth = 2;
 					profile->tls_enable_dh = 0;
 					profile->tls_verify_date = SWITCH_TRUE;
+					sofia_clear_pflag(profile, PFLAG_RTCP_AUDIO_INTERVAL_MSEC);
+					sofia_clear_pflag(profile, PFLAG_BRIDGE_ACCEPT_CNG);
+					sofia_clear_pflag(profile, PFLAG_PARTNER_BRIDGE_ACCEPT_CNG);
+					sofia_clear_pflag(profile, PFLAG_BRIDGE_FORWARD_CNG_INTERVAL);
+					sofia_clear_pflag(profile, PFLAG_PARTNER_BRIDGE_FORWARD_CNG_INTERVAL);
+					sofia_clear_pflag(profile, PFLAG_BRIDGE_FORWARD_CNG_ONCE);
+					sofia_clear_pflag(profile, PFLAG_PARTNER_BRIDGE_FORWARD_CNG_ONCE);
+					sofia_clear_pflag(profile, PFLAG_FORCE_RTCP_PASSTHRU);
+					sofia_clear_pflag(profile, PFLAG_PARTNER_FORCE_RTCP_PASSTHRU);
 				} else {
 
 					/* you could change profile->foo here if it was a minor change like context or dialplan ... */
@@ -5550,10 +5559,14 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						}
 					} else if (!strcasecmp(var, "rtcp-audio-interval-msec")) {
 						profile->rtcp_audio_interval_msec = switch_core_strdup(profile->pool, val);
+						sofia_set_pflag(profile, PFLAG_RTCP_AUDIO_INTERVAL_MSEC);
 					} else if (!strcasecmp(var, "rtcp-video-interval-msec")) {
 						profile->rtcp_video_interval_msec = switch_core_strdup(profile->pool, val);
 					} else if (!strcasecmp(var, "rtcp-audio-passthru-timeout-msec")) {
 						profile->rtcp_audio_passthru_timeout_msec = switch_core_strdup(profile->pool, val);
+					} else if (!strcasecmp(var, "partner-rtcp-audio-passthru-timeout-msec")) {
+						profile->partner_rtcp_audio_passthru_timeout_msec = switch_core_strdup(profile->pool, val);
+						sofia_set_media_flag(profile, SCMF_PARTNER_RTCP_AUDIO_PASSTHRU_TIMEOUT_MSEC);
 					} else if (!strcasecmp(var, "rtcp-video-passthru-timeout-msec")) {
 						profile->rtcp_video_passthru_timeout_msec = switch_core_strdup(profile->pool, val);
 					} else if (!strcasecmp(var, "session-timeout") && !zstr(val)) {
@@ -5577,7 +5590,17 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						if (v >= 0) {
 							profile->rtp_timeout_sec = v;
 							switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-											  "rtp-timeout-sec deprecated use media_timeout variable.\n"); 
+											  "rtp-timeout-sec deprecated use rtp-media_timeout variable.\n");
+						}
+					} else if (!strcasecmp(var, "rtp-media-timeout-msec") && !zstr(val)) {
+						int v = atoi(val);
+						if (v >= 0) {
+							profile->rtp_media_timeout_msec = v;
+						}
+					} else if (!strcasecmp(var, "partner-rtp-media-timeout-msec") && !zstr(val)) {
+						int v = atoi(val);
+						if (v >= 0) {
+							profile->partner_rtp_media_timeout_msec = v;
 						}
 					} else if (!strcasecmp(var, "rtp-hold-timeout-sec") && !zstr(val)) {
 						int v = atoi(val);
@@ -5707,6 +5730,48 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 							sofia_set_pflag(profile, PFLAG_SECURE);
 						} else {
 							sofia_clear_pflag(profile, PFLAG_SECURE);
+						}
+					} else if (!strcasecmp(var, "bridge-accept-cng")) {
+						if (switch_true(val)) {
+							sofia_set_pflag(profile, PFLAG_BRIDGE_ACCEPT_CNG);
+						} else {
+							sofia_clear_pflag(profile, PFLAG_BRIDGE_ACCEPT_CNG);
+						}
+					} else if (!strcasecmp(var, "partner-bridge-accept-cng")) {
+						if (switch_true(val)) {
+							sofia_set_pflag(profile, PFLAG_PARTNER_BRIDGE_ACCEPT_CNG);
+						} else {
+							sofia_clear_pflag(profile, PFLAG_PARTNER_BRIDGE_ACCEPT_CNG);
+						}
+					} else if (!strcasecmp(var, "bridge-forward-cng-interval") && !zstr(val)) {
+						profile->bridge_forward_cng_interval = switch_core_strdup(profile->pool, val);
+						sofia_set_pflag(profile, PFLAG_BRIDGE_FORWARD_CNG_INTERVAL);
+					} else if (!strcasecmp(var, "partner-bridge-forward-cng-interval") && !zstr(val)) {
+						profile->partner_bridge_forward_cng_interval = switch_core_strdup(profile->pool, val);
+						sofia_set_pflag(profile, PFLAG_PARTNER_BRIDGE_FORWARD_CNG_INTERVAL);
+					} else if (!strcasecmp(var, "bridge-forward-cng-once")) {
+						if (switch_true(val)) {
+							sofia_set_pflag(profile, PFLAG_BRIDGE_FORWARD_CNG_ONCE);
+						} else {
+							sofia_clear_pflag(profile, PFLAG_BRIDGE_FORWARD_CNG_ONCE);
+						}
+					} else if (!strcasecmp(var, "partner-bridge-forward-cng-once")) {
+						if (switch_true(val)) {
+							sofia_set_pflag(profile, PFLAG_PARTNER_BRIDGE_FORWARD_CNG_ONCE);
+						} else {
+							sofia_clear_pflag(profile, PFLAG_PARTNER_BRIDGE_FORWARD_CNG_ONCE);
+						}
+					} else if (!strcasecmp(var, "force-rtcp-passthru")) {
+						if (switch_true(val)) {
+							sofia_set_pflag(profile, PFLAG_FORCE_RTCP_PASSTHRU);
+						} else {
+							sofia_clear_pflag(profile, PFLAG_FORCE_RTCP_PASSTHRU);
+						}
+					} else if (!strcasecmp(var, "partner-force-rtcp-passthru")) {
+						if (switch_true(val)) {
+							sofia_set_pflag(profile, PFLAG_PARTNER_FORCE_RTCP_PASSTHRU);
+						} else {
+							sofia_clear_pflag(profile, PFLAG_PARTNER_FORCE_RTCP_PASSTHRU);
 						}
 					} else if (!strcasecmp(var, "auto-invite-100")) {
 						if (switch_true(val)) {
@@ -6451,6 +6516,20 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						}
 					} else if (!strcasecmp(var, "disable_recovery_record_route_fixup")) {
 						profile->disable_recovery_record_route_fixup = atoi(val);
+					} else if (!strcasecmp(var, "ignore-sdp-ice")) {
+						if (switch_true(val)) {
+							sofia_set_media_flag(profile, SCMF_IGNORE_SDP_ICE);
+						} else {
+							sofia_clear_media_flag(profile, SCMF_IGNORE_SDP_ICE);
+						}
+					} else if (!strcasecmp(var, "rtp-secure-media") && !zstr(val)) {
+						profile->rtp_secure_media = switch_core_strdup(profile->pool, val);
+					} else if (!strcasecmp(var, "rtp-secure-media-mki")) {
+						if (switch_true(val)) {
+							sofia_set_media_flag(profile, SCMF_RTP_SECURE_MEDIA_MKI);
+						} else {
+							sofia_clear_media_flag(profile, SCMF_RTP_SECURE_MEDIA_MKI);
+						}
 					}
 				}
 
