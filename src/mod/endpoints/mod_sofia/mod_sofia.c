@@ -5377,6 +5377,9 @@ static switch_call_cause_t sofia_outgoing_channel(switch_core_session_t *session
 		switch_core_session_set_ice(nsession);
 	}
 
+	if (!tech_pvt->sofia_private) {
+		tech_pvt->sofia_private = (sofia_private_t*) switch_core_session_alloc(nsession, sizeof(sofia_private_t));
+	}
 
 	sofia_glue_attach_private(nsession, profile, tech_pvt, dest);
 

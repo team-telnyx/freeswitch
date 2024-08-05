@@ -80,6 +80,7 @@ void sofia_glue_attach_private(switch_core_session_t *session, sofia_profile_t *
 	switch_assert(session != NULL);
 	switch_assert(profile != NULL);
 	switch_assert(tech_pvt != NULL);
+	switch_assert(tech_pvt->sofia_private != NULL);
 
 	switch_core_session_add_stream(session, NULL);
 
@@ -2541,6 +2542,10 @@ int sofia_recover_callback(switch_core_session_t *session)
 	}
 
 	tech_pvt->dest_to = tech_pvt->dest;
+
+	if (!tech_pvt->sofia_private) {
+		tech_pvt->sofia_private = (sofia_private_t*) switch_core_session_alloc(session, sizeof(sofia_private_t));
+	}
 
 	sofia_glue_attach_private(session, profile, tech_pvt, NULL);
 	switch_channel_set_name(tech_pvt->channel, switch_channel_get_variable(channel, "channel_name"));

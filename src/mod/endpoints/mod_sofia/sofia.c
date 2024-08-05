@@ -2757,6 +2757,10 @@ void sofia_event_callback(nua_event_t event,
 				channel_name = url_set_chanvars(session, sip->sip_referred_by->b_url, sip_referred_by);
 			}
 
+			if (!tech_pvt->sofia_private) {
+				tech_pvt->sofia_private = (sofia_private_t*) switch_core_session_alloc(session, sizeof(sofia_private_t));
+			}
+
 			sofia_glue_attach_private(session, profile, tech_pvt, channel_name);
 
 			set_call_id(tech_pvt, sip);
