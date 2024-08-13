@@ -18119,7 +18119,6 @@ SWITCH_DECLARE(void) switch_core_media_do_2833(switch_core_session_t *session)
 		return;
 	}
 
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Core media do 2833 (%p)\n", (void*) session);
 	do_2833(a_engine->rtp_session);
 }
 
