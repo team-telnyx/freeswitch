@@ -2138,6 +2138,7 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 			if (ok) {
 				char *headers = sofia_glue_get_extra_headers(channel, SOFIA_SIP_INFO_HEADER_PREFIX);
 				const char *pl = NULL;
+				switch_event_t *event;
 
 				if (!zstr(msg->string_array_arg[0]) && !zstr(msg->string_array_arg[1])) {
 					switch_snprintf(ct, sizeof(ct), "%s/%s", msg->string_array_arg[0], msg->string_array_arg[1]);
@@ -2156,6 +2157,14 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 						 TAG_END());
 
 				switch_safe_free(headers);
+
+				if (switch_event_create(&event, SWITCH_EVENT_SEND_INFO) == SWITCH_STATUS_SUCCESS) {
+					switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "content-type", ct);
+					switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "message-indicate-info-event", "true");
+					switch_event_add_body(event, "%s", pl);
+					switch_channel_event_set_data(channel, event);
+					switch_event_fire(&event);
+				}
 			} else {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s send_info is not supported.\n", switch_channel_get_name(channel));
 			}
@@ -6100,6 +6109,10 @@ void general_event_handler(switch_event_t *event)
 			char buf[1024] = "";
 			char *p;
 
+			if (switch_true(switch_event_get_header(event, "message-indicate-info-event"))) {
+				goto done;
+			}
+			
 			if (!profile_name) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Missing Profile Name\n");
 				goto done;
