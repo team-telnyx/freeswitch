@@ -914,7 +914,6 @@ struct private_object {
 	char *user_via;
 	char *redirected;
 	sofia_cid_type_t cid_type;
-	sofia_cid_type_t force_cid_type;
 	uint32_t session_timeout;
 	enum nua_session_refresher session_refresher;
 	int update_refresher;
