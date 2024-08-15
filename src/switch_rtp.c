@@ -7567,7 +7567,8 @@ static void handle_nack(switch_rtp_t *rtp_session, uint32_t nack)
 		}
 	}
 }
-/*
+
+#ifdef SWITCH_RTCP_PROCESS_XR
 static switch_status_t process_rtcp_xr_report(switch_rtcp_report_data_t *report_data, switch_rtp_t *rtp_session, rtcp_msg_t *msg, switch_size_t bytes)
 {
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
@@ -7656,7 +7657,8 @@ static switch_status_t process_rtcp_xr_report(switch_rtcp_report_data_t *report_
 	}
 	return status;
 }
-*/
+#endif
+
 static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t *msg, switch_size_t bytes)
 {
 	switch_status_t status = SWITCH_STATUS_FALSE;
@@ -7736,8 +7738,11 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 			lsr_now = calc_local_lsr_now();
 
 			if (msg->header.type == _RTCP_PT_XR) {
-				// status = process_rtcp_xr_report(&report_data, rtp_session, msg, bytes);
+#ifdef SWITCH_RTCP_PROCESS_XR
+				status = process_rtcp_xr_report(&report_data, rtp_session, msg, bytes);
+#else
 				return SWITCH_STATUS_SUCCESS;
+#endif
 			} else if (msg->header.type == _RTCP_PT_SR) { /* Sender report */
 				struct switch_rtcp_sender_report* sr = (struct switch_rtcp_sender_report*)msg->body;
 
