@@ -7567,7 +7567,7 @@ static void handle_nack(switch_rtp_t *rtp_session, uint32_t nack)
 		}
 	}
 }
-
+/*
 static switch_status_t process_rtcp_xr_report(switch_rtcp_report_data_t *report_data, switch_rtp_t *rtp_session, rtcp_msg_t *msg, switch_size_t bytes)
 {
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
@@ -7589,7 +7589,7 @@ static switch_status_t process_rtcp_xr_report(switch_rtcp_report_data_t *report_
 		return SWITCH_STATUS_FALSE;
 	}
 
-	/* Count the number of report blocks */
+	// Count the number of report blocks
 	while ((int32_t *)header < (int32_t *)msg->body + plen) {
 		blen = ntohs(header->length);
 		if (blen) {
@@ -7601,7 +7601,7 @@ static switch_status_t process_rtcp_xr_report(switch_rtcp_report_data_t *report_
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "Found %d report blocks\n", count);
 
 	if (!count) {
-		/* No report blocks found */
+		// No report blocks found
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "No report blocks found\n");
 		return status;
 	}
@@ -7611,11 +7611,11 @@ static switch_status_t process_rtcp_xr_report(switch_rtcp_report_data_t *report_
 	header = &packet->rb_header;
 	count = 0;
 
-	/* Parse the report blocks */
+	// Parse the report blocks
 	while ((int32_t *)header < (int32_t *)msg->body + plen) {
 		blen = ntohs(header->length);
 
-		/* Skip any block with length == 0 */
+		// Skip any block with length == 0
 		if (blen) {
 			switch (header->bt) {
 				case XR_RR_TIME: {
@@ -7656,7 +7656,7 @@ static switch_status_t process_rtcp_xr_report(switch_rtcp_report_data_t *report_
 	}
 	return status;
 }
-
+*/
 static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t *msg, switch_size_t bytes)
 {
 	switch_status_t status = SWITCH_STATUS_FALSE;
@@ -7736,7 +7736,8 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 			lsr_now = calc_local_lsr_now();
 
 			if (msg->header.type == _RTCP_PT_XR) {
-				status = process_rtcp_xr_report(&report_data, rtp_session, msg, bytes);
+				// status = process_rtcp_xr_report(&report_data, rtp_session, msg, bytes);
+				return SWITCH_STATUS_SUCCESS;
 			} else if (msg->header.type == _RTCP_PT_SR) { /* Sender report */
 				struct switch_rtcp_sender_report* sr = (struct switch_rtcp_sender_report*)msg->body;
 
