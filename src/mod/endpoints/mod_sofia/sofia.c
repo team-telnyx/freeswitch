@@ -1668,7 +1668,19 @@ static void our_sofia_event_callback(nua_event_t event,
 	switch (event) {
 	case nua_r_get_params:
 	case nua_i_fork:
+		break;
 	case nua_r_info:
+		if (channel) {
+			switch_event_t *s_event;
+
+			if (switch_event_create(&s_event, SWITCH_EVENT_SEND_INFO) == SWITCH_STATUS_SUCCESS) {
+				switch_channel_event_set_data(channel, s_event);
+				switch_event_add_header_string(s_event, SWITCH_STACK_BOTTOM, "message-indicate-info-event", "true");
+				switch_event_add_header_string(s_event, SWITCH_STACK_BOTTOM, "content-type", switch_channel_get_variable(channel, "sip_info_content_type"));
+				switch_event_add_body(s_event, "%s", switch_channel_get_variable(channel, "sip_info_pl_data"));
+				switch_event_fire(&s_event);
+			}
+		}
 		break;
 	case nua_r_unregister:
 		if (gateway && status != 401 && status != 407 && status >= 200) {

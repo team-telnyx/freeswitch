@@ -2158,13 +2158,8 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 
 				switch_safe_free(headers);
 
-				if (switch_event_create(&event, SWITCH_EVENT_SEND_INFO) == SWITCH_STATUS_SUCCESS) {
-					switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "content-type", ct);
-					switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "message-indicate-info-event", "true");
-					switch_event_add_body(event, "%s", pl);
-					switch_channel_event_set_data(channel, event);
-					switch_event_fire(&event);
-				}
+				switch_channel_set_variable(channel, "sip_info_content_type", ct);
+				switch_channel_set_variable(channel, "sip_info_pl_data", pl);
 			} else {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s send_info is not supported.\n", switch_channel_get_name(channel));
 			}
@@ -6112,7 +6107,7 @@ void general_event_handler(switch_event_t *event)
 			if (switch_true(switch_event_get_header(event, "message-indicate-info-event"))) {
 				goto done;
 			}
-			
+
 			if (!profile_name) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Missing Profile Name\n");
 				goto done;
