@@ -1475,8 +1475,8 @@ switch_status_t sofia_glue_do_invite(switch_core_session_t *session)
 			switch_channel_set_variable(channel, "sip_nat_detected", "true");
 		}
 
-		if (tech_pvt->profile->force_cid_type == CID_TYPE_PID) {
-			cid_type = CID_TYPE_PID;
+		if (tech_pvt->profile->force_cid_type != CID_TYPE_NONE) {
+			cid_type = tech_pvt->profile->force_cid_type;
 		} else {
 			if ((val = switch_channel_get_variable(channel, "sip_cid_type"))) {
 				cid_type = sofia_cid_name2type(val);
