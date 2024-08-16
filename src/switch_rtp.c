@@ -7607,7 +7607,6 @@ static switch_status_t process_rtcp_xr_report(switch_rtcp_report_data_t *report_
 		return status;
 	}
 
-	report_data->xr_count = count;
 	switch_malloc(report_data->rtcp_data.xr_blocks, sizeof(switch_rtcp_xr_report) * count);
 	header = &packet->rb_header;
 	count = 0;
@@ -7633,6 +7632,7 @@ static switch_status_t process_rtcp_xr_report(switch_rtcp_report_data_t *report_
 					}
 					report_data->rtcp_data.xr_blocks[count].xr_pt = header->bt;
 					report_data->rtcp_data.xr_blocks[count].report_data.rr_time = rr_time;
+					++count;
 					}
 					break;
 				case XR_VOIP_METRICS: {
@@ -7641,20 +7641,26 @@ static switch_status_t process_rtcp_xr_report(switch_rtcp_report_data_t *report_
 						"RTCP XR VoIP metrics: loss rate: %02x rt delay: %d es delay: %d \n", voip_metrics->loss_rate, voip_metrics->round_trip_delay, voip_metrics->end_system_delay);
 					report_data->rtcp_data.xr_blocks[count].xr_pt = header->bt;
 					report_data->rtcp_data.xr_blocks[count].report_data.voip_metrics = voip_metrics;
+					++count;
 				}
 				break;
 				case XR_STATS: {
 					switch_rtcp_xr_rb_stats *stats = (switch_rtcp_xr_rb_stats *) header;
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+						"RTCP XR Statistics summary: begin seq %d, end seq %d, lost packets %d\n", stats->begin_seq, stats->end_seq, stats->lost_packets);
 					report_data->rtcp_data.xr_blocks[count].xr_pt = header->bt;
 					report_data->rtcp_data.xr_blocks[count].report_data.stats = stats;
+					++count;
 				}
 				default:
 					break;
 			}
-			++count;
 		}
 		header = (switch_rtcp_xr_rb_header *)((int32_t *)header + blen + 1);
 	}
+	report_data->xr_count = count;
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "Parsed %d report blocks\n", count);
+
 	return status;
 }
 #endif
