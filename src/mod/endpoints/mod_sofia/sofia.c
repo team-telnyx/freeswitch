@@ -4933,6 +4933,7 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 					profile->tls_verify_depth = 2;
 					profile->tls_enable_dh = 0;
 					profile->tls_verify_date = SWITCH_TRUE;
+					profile->force_cid_type = CID_TYPE_NONE;
 				} else {
 
 					/* you could change profile->foo here if it was a minor change like context or dialplan ... */
@@ -5263,8 +5264,6 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 					} else if (!strcasecmp(var, "force-caller-id-type")) {
 						if (!strcasecmp(val, "pai")) {
 							profile->force_cid_type = CID_TYPE_PID;
-						} else {
-							profile->force_cid_type = CID_TYPE_NONE;
 						}
 					} else if (!strcasecmp(var, "record-template")) {
 						profile->record_template = switch_core_strdup(profile->pool, val);
