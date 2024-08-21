@@ -161,34 +161,39 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 
 
     const char  *local_addr = switch_event_get_header_nil(var_event, kLOCALADDR),
-                *szlocal_port = switch_event_get_header_nil(var_event, kLOCALPORT),
                 *remote_addr = switch_event_get_header_nil(var_event, kREMOTEADDR),
                 *szremote_port = switch_event_get_header_nil(var_event, kREMOTEPORT),
                 *codec  = switch_event_get_header_nil(var_event, kCODEC),
                 *szptime  = switch_event_get_header_nil(var_event, kPTIME),
-                //*mode  = switch_event_get_header_nil(var_event, kMODE),
+                *mode  = switch_event_get_header_nil(var_event, kMODE),
                 //*szrfc2833_pt = switch_event_get_header_nil(var_event, kRFC2833PT),
                 *szrate = switch_event_get_header_nil(var_event, kRATE),
                 *szpt = switch_event_get_header_nil(var_event, kPT);
 
 
-    switch_port_t local_port = !zstr(szlocal_port) ? (switch_port_t)atoi(szlocal_port) : 0,
-                 remote_port = !zstr(szremote_port) ? (switch_port_t)atoi(szremote_port) : 0;
+    switch_port_t local_port = 0;
+    switch_port_t remote_port = !zstr(szremote_port) ? (switch_port_t)atoi(szremote_port) : 0;
 
     int ptime  = !zstr(szptime) ? atoi(szptime) : 0,
         //rfc2833_pt = !zstr(szrfc2833_pt) ? atoi(szrfc2833_pt) : 0,
         rate = !zstr(szrate) ? atoi(szrate) : 8000,
         pt = !zstr(szpt) ? atoi(szpt) : 0;
 
-        if (
-            ((zstr(remote_addr) || remote_port == 0) && (zstr(local_addr) || local_port == 0)) ||
-            zstr(codec) ||
-            zstr(szpt)) {
+    if (zstr(local_addr)) {
+        local_addr = switch_core_get_variable("local_ip_v4");
+    }
 
+    if ((zstr(remote_addr) || remote_port == 0) && (zstr(local_addr) || zstr(codec) || zstr(szpt))) {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Missing required arguments\n");
         goto fail;
     }
 
+    local_port = switch_rtp_request_port(local_addr);
+
+    if (local_port == 0) {
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Unable to allocate local port\n");
+        goto fail;
+    }
 
     if (!(*new_session = switch_core_session_request(crtp.endpoint_interface, SWITCH_CALL_DIRECTION_OUTBOUND, 0, pool))) {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Couldn't request session.\n");
@@ -215,6 +220,16 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
         tech_pvt->mode = RTP_RECVONLY;
     } else {
         tech_pvt->mode = RTP_SENDRECV;
+    }
+
+    if(!zstr(mode)) {
+        if (!strcasecmp(mode, "recvonly")) {
+            tech_pvt->mode = RTP_RECVONLY;
+        } else if (!strcasecmp(mode, "sendonly")) {
+            tech_pvt->mode = RTP_SENDONLY;
+        } else {
+            tech_pvt->mode = RTP_SENDRECV;
+        }
     }
 
     switch_core_session_set_private(*new_session, tech_pvt);
@@ -263,6 +278,9 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Can't set write codec?\n");
         goto fail;
     }
+
+    switch_channel_set_variable(channel, "local_media_ip", local_addr);
+    switch_channel_set_variable_printf(channel, "local_media_port", "%d", local_port);
 
     if (!(tech_pvt->rtp_session = switch_rtp_new(local_addr, local_port, remote_addr, remote_port, tech_pvt->agreed_pt,
 												 tech_pvt->read_codec.implementation->samples_per_packet, ptime * 1000,
@@ -321,6 +339,10 @@ static switch_status_t channel_on_destroy(switch_core_session_t *session)
 			switch_core_codec_destroy(&tech_pvt->write_codec);
 		}
 	}
+
+    if (tech_pvt->local_port != 0) {
+        switch_rtp_release_port(tech_pvt->local_address, tech_pvt->local_port);
+    }
 
     return SWITCH_STATUS_SUCCESS;
 }
