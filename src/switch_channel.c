@@ -417,6 +417,47 @@ SWITCH_DECLARE(switch_call_cause_t) switch_channel_get_cause_q850(switch_channel
 	return switch_channel_cause_q850(channel->hangup_cause);
 }
 
+SWITCH_DECLARE(switch_bool_t) switch_channel_is_custom_q850_code(switch_call_cause_t cause)
+{
+	switch(cause)
+	{
+	case SWITCH_CAUSE_SUCCESS:                  break;
+	case SWITCH_CAUSE_ORIGINATOR_CANCEL:        break;
+	case SWITCH_CAUSE_CRASH:                    break;
+	case SWITCH_CAUSE_SYSTEM_SHUTDOWN:          break;
+	case SWITCH_CAUSE_LOSE_RACE:                break;
+	case SWITCH_CAUSE_MANAGER_REQUEST:          break;
+	case SWITCH_CAUSE_BLIND_TRANSFER:           break;
+	case SWITCH_CAUSE_ATTENDED_TRANSFER:        break;
+	case SWITCH_CAUSE_ALLOTTED_TIMEOUT:         break;
+	case SWITCH_CAUSE_USER_CHALLENGE:           break;
+	case SWITCH_CAUSE_MEDIA_TIMEOUT:            break;
+	case SWITCH_CAUSE_PICKED_OFF:               break;
+	case SWITCH_CAUSE_USER_NOT_REGISTERED:      break;
+	case SWITCH_CAUSE_PROGRESS_TIMEOUT:         break;
+	case SWITCH_CAUSE_INVALID_GATEWAY:          break;
+	case SWITCH_CAUSE_GATEWAY_DOWN:             break;
+	case SWITCH_CAUSE_INVALID_URL:              break;
+	case SWITCH_CAUSE_INVALID_PROFILE:          break;
+	case SWITCH_CAUSE_NO_PICKUP:                break;
+	case SWITCH_CAUSE_SRTP_READ_ERROR:          break;
+	case SWITCH_CAUSE_BOWOUT:                   break;
+	case SWITCH_CAUSE_BUSY_EVERYWHERE:          break;
+	case SWITCH_CAUSE_DECLINE:                  break;
+	case SWITCH_CAUSE_DOES_NOT_EXIST_ANYWHERE:  break;
+	case SWITCH_CAUSE_NOT_ACCEPTABLE:           break;
+	case SWITCH_CAUSE_UNWANTED:                 break;
+	case SWITCH_CAUSE_NO_IDENTITY:              break;
+	case SWITCH_CAUSE_BAD_IDENTITY_INFO:        break;
+	case SWITCH_CAUSE_UNSUPPORTED_CERTIFICATE:  break;
+	case SWITCH_CAUSE_INVALID_IDENTITY:         break;
+	case SWITCH_CAUSE_STALE_DATE:               break;
+	default:
+		return SWITCH_FALSE;
+	}
+	return SWITCH_TRUE;
+}
+
 SWITCH_DECLARE(switch_channel_timetable_t *) switch_channel_get_timetable(switch_channel_t *channel)
 {
 	switch_channel_timetable_t *times = NULL;

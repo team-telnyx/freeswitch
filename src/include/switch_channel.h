@@ -143,6 +143,13 @@ SWITCH_DECLARE(switch_call_cause_t) switch_channel_get_cause_q850(switch_channel
 SWITCH_DECLARE(switch_call_cause_t *) switch_channel_get_cause_ptr(switch_channel_t *channel);
 
 /*!
+  \brief Determines whether the cause code is an internal Q.850 code to FS
+  \param cause the code to check
+  \return true if the code is internal
+*/
+SWITCH_DECLARE(switch_bool_t) switch_channel_is_custom_q850_code(switch_call_cause_t cause);
+
+/*!
   \brief return a cause string for a given cause
   \param cause the code to check
   \return the string

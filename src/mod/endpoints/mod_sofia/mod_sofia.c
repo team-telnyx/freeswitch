@@ -539,10 +539,10 @@ switch_status_t sofia_on_hangup(switch_core_session_t *session)
 				if ((switch_channel_test_flag(channel, CF_INTERCEPT) || cause == SWITCH_CAUSE_PICKED_OFF || cause == SWITCH_CAUSE_LOSE_RACE)
 					&& !switch_true(switch_channel_get_variable(channel, "ignore_completed_elsewhere"))) {
 					reason = switch_core_session_strdup(session, "SIP;cause=200;text=\"Call completed elsewhere\"");
-				} else if (cause > 0 && cause < 128) {
+				} else if ((cause > 0 && cause < 128) || switch_channel_is_custom_q850_code(cause)) {
 					reason = switch_core_session_sprintf(session, "Q.850;cause=%d;text=\"%s\"", cause, switch_channel_cause2str(cause));
 				} else {
-					reason = switch_core_session_sprintf(session, "SIP;cause=%d;text=\"%s\"", cause, switch_channel_cause2str(cause));
+					reason = switch_core_session_sprintf(session, "SIP;cause=%d;text=\"%s\"", sip_cause, switch_channel_cause2str(cause));
 				}
 			}
 		}
