@@ -2428,8 +2428,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 			if (zstr(svar) || (atoi(svar) == 0)) {
 				// Eavesdrop whisper will not work during PARK if not sending any silence.
 				switch_channel_set_variable(tchannel, SWITCH_SEND_SILENCE_WHEN_IDLE_VARIABLE, "-1");
-				switch_channel_set_flag(tchannel, CF_PARK_CHECK_SEND_SILENCE);
 			}
+			switch_channel_set_flag(tchannel, CF_PARK_CHECK_SEND_SILENCE);
 		}
 
 		switch_core_session_get_read_impl(tsession, &tread_impl);
