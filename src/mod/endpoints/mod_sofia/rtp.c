@@ -134,7 +134,7 @@ switch_io_routines_t crtp_io_routines = {
 SWITCH_STANDARD_API(crtp_media_modify_function)
 {
 	switch_core_session_t *psession = NULL;
-    char *mycmd = NULL, *argv[3] = { 0 };
+	char *mycmd = NULL, *argv[3] = { 0 };
 	int argc = 0;
 
 	if (!zstr(cmd) && (mycmd = strdup(cmd))) {
@@ -145,34 +145,33 @@ SWITCH_STANDARD_API(crtp_media_modify_function)
 			char *port = argv[2];
 
 			if ((psession = switch_core_session_locate(uuid))) {
-                switch_event_t *event;
-                if (switch_event_create(&event, SWITCH_EVENT_COMMAND) == SWITCH_STATUS_SUCCESS) {
-                    switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "command", "media_modify");
-                    switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, kREMOTEADDR, ip);
-                    switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, kREMOTEPORT, port);
-                    if (switch_core_session_receive_event(psession, &event) != SWITCH_STATUS_SUCCESS) {
-                        switch_event_destroy(&event);
-                        stream->write_function(stream, "-ERR Send failed\n");
-                    } else {
-                        stream->write_function(stream, "+OK\n");
-                    }
-                }
-                switch_core_session_rwunlock(psession);
-            } else {
-                stream->write_function(stream, "-ERR No such channel %s!\n", uuid);
-            }
-            goto done;
+				switch_event_t *event;
+				if (switch_event_create(&event, SWITCH_EVENT_COMMAND) == SWITCH_STATUS_SUCCESS) {
+					switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "command", "media_modify");
+					switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, kREMOTEADDR, ip);
+					switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, kREMOTEPORT, port);
+					if (switch_core_session_receive_event(psession, &event) != SWITCH_STATUS_SUCCESS) {
+						switch_event_destroy(&event);
+						stream->write_function(stream, "-ERR Send failed\n");
+					} else {
+						stream->write_function(stream, "+OK\n");
+					}
+				}
+				switch_core_session_rwunlock(psession);
+			} else {
+				stream->write_function(stream, "-ERR No such channel %s!\n", uuid);
+			}
+			goto done;
 		}
 	}
 
-    stream->write_function(stream, "-USAGE: %s\n", CRTP_MEDIA_MODIFY_SYNTAX);
+	stream->write_function(stream, "-USAGE: %s\n", CRTP_MEDIA_MODIFY_SYNTAX);
 
 done:
 
 	switch_safe_free(mycmd);
 	return SWITCH_STATUS_SUCCESS;
 }
-
 
 static void crtp_config()
 {
@@ -214,7 +213,7 @@ static void crtp_config()
 
 				if (!zstr(ip)) {
 					crtp.default_local_ip = switch_core_strdup(crtp.pool, ip);
-                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "RTP Endpoint will be using default ip: %s\n", ip);
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "RTP Endpoint will be using default ip: %s\n", ip);
 				}
 			}
 		}
@@ -222,10 +221,10 @@ static void crtp_config()
 
 done:
     
-    if (zstr(crtp.default_local_ip)) {
-        crtp.default_local_ip = switch_core_strdup(crtp.pool, mod_sofia_globals.guess_ip);
-        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "RTP Endpoint will be using default ip: %s\n", mod_sofia_globals.guess_ip);
-    }
+	if (zstr(crtp.default_local_ip)) {
+		crtp.default_local_ip = switch_core_strdup(crtp.pool, mod_sofia_globals.guess_ip);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "RTP Endpoint will be using default ip: %s\n", mod_sofia_globals.guess_ip);
+	}
 
 	if (xml) {
 		switch_xml_free(xml);
@@ -330,7 +329,7 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
         tech_pvt->mode = RTP_SENDRECV;
     }
 
-    if(!zstr(mode)) {
+    if (!zstr(mode)) {
         if (!strcasecmp(mode, "recvonly")) {
             tech_pvt->mode = RTP_RECVONLY;
         } else if (!strcasecmp(mode, "sendonly")) {
@@ -564,7 +563,7 @@ static switch_bool_t compare_var(switch_event_t *event, switch_channel_t *channe
     const char *event_val = switch_event_get_header(event, varname);
 
     if (zstr(chan_val) || zstr(event_val)) {
-	    return 0;
+        return 0;
     }
 
     return strcasecmp(chan_val, event_val);
@@ -609,7 +608,7 @@ static switch_status_t channel_receive_event(switch_core_session_t *session, swi
         if (compare_var(event, channel, kCODEC) ||
             compare_var(event, channel, kPTIME) ||
             compare_var(event, channel, kPT) ||
-	        compare_var(event, channel, kRATE)) {
+            compare_var(event, channel, kRATE)) {
 		/* Reset codec */
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT, "Switching codec updating \n");
 
