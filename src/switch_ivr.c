@@ -1011,7 +1011,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_park(switch_core_session_t *session, 
 			rate = read_impl.actual_samples_per_second;
 			bpf = read_impl.decoded_bytes_per_packet;
 
-			if (rate && (var = switch_channel_get_variable(channel, SWITCH_SEND_SILENCE_WHEN_IDLE_VARIABLE)) && (sval = atoi(var))) {
+			if (rate) {
 				switch_core_session_get_read_impl(session, &imp);
 
 				if (switch_core_codec_init(&codec,
@@ -1039,6 +1039,10 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_park(switch_core_session_t *session, 
 				write_frame.datalen = imp.decoded_bytes_per_packet;
 				write_frame.samples = write_frame.datalen / sizeof(int16_t);
 			}
+
+			if ((var = switch_channel_get_variable(channel, SWITCH_SEND_SILENCE_WHEN_IDLE_VARIABLE))) {
+				sval = atoi(var);
+			}
 		}
 
 		if (rate) {
@@ -1061,6 +1065,13 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_park(switch_core_session_t *session, 
 
 		if (!SWITCH_READ_ACCEPTABLE(status)) {
 			break;
+		}
+
+		if (switch_channel_test_flag(channel, CF_PARK_CHECK_SEND_SILENCE)) {
+			if ((var = switch_channel_get_variable(channel, SWITCH_SEND_SILENCE_WHEN_IDLE_VARIABLE))) {
+				sval = atoi(var);
+			}
+			switch_channel_clear_flag(channel, CF_PARK_CHECK_SEND_SILENCE);
 		}
 
 		if (rate && write_frame.data && sval) {
