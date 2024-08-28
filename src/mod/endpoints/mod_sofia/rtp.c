@@ -46,6 +46,7 @@
 static struct {
     switch_memory_pool_t *pool;
     switch_endpoint_interface_t *endpoint_interface;
+    char *default_local_ip;
 } crtp;
 
 typedef struct {
@@ -129,20 +130,126 @@ switch_io_routines_t crtp_io_routines = {
 
 };
 
-
-void crtp_init(switch_loadable_module_interface_t *module_interface)
+#define CRTP_MEDIA_MODIFY_SYNTAX "<uuid> <remote ip> <remote port>"
+SWITCH_STANDARD_API(crtp_media_modify_function)
 {
-    switch_endpoint_interface_t *endpoint_interface;
-    //switch_api_interface_t *api_interface;
+	switch_core_session_t *psession = NULL;
+	char *mycmd = NULL, *argv[3] = { 0 };
+	int argc = 0;
 
-    crtp.pool = module_interface->pool;
-    endpoint_interface = switch_loadable_module_create_interface(module_interface, SWITCH_ENDPOINT_INTERFACE);
+	if (!zstr(cmd) && (mycmd = strdup(cmd))) {
+		argc = switch_separate_string(mycmd, ' ', argv, (sizeof(argv) / sizeof(argv[0])));
+		if (argc == 3 && !(zstr(argv[0]) || zstr(argv[1]) || zstr(argv[2]))) {
+			char *uuid = argv[0];
+			char *ip = argv[1];
+			char *port = argv[2];
+
+			if ((psession = switch_core_session_locate(uuid))) {
+				switch_event_t *event;
+				if (switch_event_create(&event, SWITCH_EVENT_COMMAND) == SWITCH_STATUS_SUCCESS) {
+					switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "command", "media_modify");
+					switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, kREMOTEADDR, ip);
+					switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, kREMOTEPORT, port);
+					if (switch_core_session_receive_event(psession, &event) != SWITCH_STATUS_SUCCESS) {
+						switch_event_destroy(&event);
+						stream->write_function(stream, "-ERR Send failed\n");
+					} else {
+						stream->write_function(stream, "+OK\n");
+					}
+				}
+				switch_core_session_rwunlock(psession);
+			} else {
+				stream->write_function(stream, "-ERR No such channel %s!\n", uuid);
+			}
+			goto done;
+		}
+	}
+
+	stream->write_function(stream, "-USAGE: %s\n", CRTP_MEDIA_MODIFY_SYNTAX);
+
+done:
+
+	switch_safe_free(mycmd);
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static void crtp_config()
+{
+	switch_xml_t xml = NULL, cfg, param, settings;
+
+	if (!(xml = switch_xml_open_cfg("sofia.conf", &cfg, NULL))) {
+		goto done;
+	}
+
+	crtp.default_local_ip = NULL;
+
+	if ((settings = switch_xml_child(cfg, "crtp_settings"))) {
+		for (param = switch_xml_child(settings, "param"); param; param = param->next) {
+			char *var = (char *) switch_xml_attr_soft(param, "name");
+			char *val = (char *) switch_xml_attr_soft(param, "value");
+			if (!strcasecmp(var, "local-ip")) {
+				char *ip = NULL;
+				char buf[64] = { 0 };
+
+				if (zstr(val)) {
+					ip = mod_sofia_globals.guess_ip;
+				} else if (!strcmp(val, "0.0.0.0")) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid IP 0.0.0.0 replaced with %s\n", mod_sofia_globals.guess_ip);
+				} else if (!strncasecmp(val, "interface:", 10)) {
+					char *ifname = val+10;
+					int family = AF_UNSPEC;
+					if (!strncasecmp(ifname, "auto/", 5)) { ifname += 5; family = AF_UNSPEC; }
+					if (!strncasecmp(ifname, "ipv4/", 5)) { ifname += 5; family = AF_INET;   }
+					if (!strncasecmp(ifname, "ipv6/", 5)) { ifname += 5; family = AF_INET6;  }
+					if (switch_find_interface_ip(buf, sizeof(buf), NULL, ifname, family) == SWITCH_STATUS_SUCCESS) {
+						ip = buf;
+						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Using %s IP for interface %s for rtp-ip\n", ip, val+10);
+					} else {
+						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Unknown IP for interface %s for rtp-ip\n", val+10);
+					}
+				} else {
+					ip = strcasecmp(val, "auto") ? val : mod_sofia_globals.guess_ip;
+				}
+
+				if (!zstr(ip)) {
+					crtp.default_local_ip = switch_core_strdup(crtp.pool, ip);
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "RTP Endpoint will be using default ip: %s\n", ip);
+				}
+			}
+		}
+	}
+
+done:
+    
+	if (zstr(crtp.default_local_ip)) {
+		crtp.default_local_ip = switch_core_strdup(crtp.pool, mod_sofia_globals.guess_ip);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "RTP Endpoint will be using default ip: %s\n", mod_sofia_globals.guess_ip);
+	}
+
+	if (xml) {
+		switch_xml_free(xml);
+	}
+}
+
+void crtp_init(switch_loadable_module_interface_t *mod_interface)
+{
+    switch_loadable_module_interface_t **module_interface = &mod_interface;
+    switch_endpoint_interface_t *endpoint_interface;
+    switch_api_interface_t *api_interface;
+
+    crtp.pool = mod_interface->pool;
+    crtp_config();
+
+    endpoint_interface = switch_loadable_module_create_interface(mod_interface, SWITCH_ENDPOINT_INTERFACE);
     endpoint_interface->interface_name = "rtp";
     endpoint_interface->io_routines = &crtp_io_routines;
     endpoint_interface->state_handler = &crtp_state_handlers;
     crtp.endpoint_interface = endpoint_interface;
 
     //SWITCH_ADD_API(api_interface, "rtp_test", "test", test_function, "");
+    SWITCH_ADD_API(api_interface, "crtp_media_modify", "Modify CRTP remote media address", crtp_media_modify_function, CRTP_MEDIA_MODIFY_SYNTAX);
+    switch_console_set_complete("add crtp_media_modify ::console::list_uuid");
+
 }
 
 static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *session, switch_event_t *var_event,
@@ -161,34 +268,39 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 
 
     const char  *local_addr = switch_event_get_header_nil(var_event, kLOCALADDR),
-                *szlocal_port = switch_event_get_header_nil(var_event, kLOCALPORT),
                 *remote_addr = switch_event_get_header_nil(var_event, kREMOTEADDR),
                 *szremote_port = switch_event_get_header_nil(var_event, kREMOTEPORT),
                 *codec  = switch_event_get_header_nil(var_event, kCODEC),
                 *szptime  = switch_event_get_header_nil(var_event, kPTIME),
-                //*mode  = switch_event_get_header_nil(var_event, kMODE),
+                *mode  = switch_event_get_header_nil(var_event, kMODE),
                 //*szrfc2833_pt = switch_event_get_header_nil(var_event, kRFC2833PT),
                 *szrate = switch_event_get_header_nil(var_event, kRATE),
                 *szpt = switch_event_get_header_nil(var_event, kPT);
 
 
-    switch_port_t local_port = !zstr(szlocal_port) ? (switch_port_t)atoi(szlocal_port) : 0,
-                 remote_port = !zstr(szremote_port) ? (switch_port_t)atoi(szremote_port) : 0;
+    switch_port_t local_port = 0;
+    switch_port_t remote_port = !zstr(szremote_port) ? (switch_port_t)atoi(szremote_port) : 0;
 
     int ptime  = !zstr(szptime) ? atoi(szptime) : 0,
         //rfc2833_pt = !zstr(szrfc2833_pt) ? atoi(szrfc2833_pt) : 0,
         rate = !zstr(szrate) ? atoi(szrate) : 8000,
         pt = !zstr(szpt) ? atoi(szpt) : 0;
 
-        if (
-            ((zstr(remote_addr) || remote_port == 0) && (zstr(local_addr) || local_port == 0)) ||
-            zstr(codec) ||
-            zstr(szpt)) {
+    if (zstr(local_addr)) {
+        local_addr = crtp.default_local_ip;
+    }
 
+    if ((zstr(remote_addr) || remote_port == 0) && (zstr(local_addr) || zstr(codec) || zstr(szpt))) {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Missing required arguments\n");
         goto fail;
     }
 
+    local_port = switch_rtp_request_port(local_addr);
+
+    if (local_port == 0) {
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Unable to allocate local port\n");
+        goto fail;
+    }
 
     if (!(*new_session = switch_core_session_request(crtp.endpoint_interface, SWITCH_CALL_DIRECTION_OUTBOUND, 0, pool))) {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Couldn't request session.\n");
@@ -215,6 +327,16 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
         tech_pvt->mode = RTP_RECVONLY;
     } else {
         tech_pvt->mode = RTP_SENDRECV;
+    }
+
+    if (!zstr(mode)) {
+        if (!strcasecmp(mode, "recvonly")) {
+            tech_pvt->mode = RTP_RECVONLY;
+        } else if (!strcasecmp(mode, "sendonly")) {
+            tech_pvt->mode = RTP_SENDONLY;
+        } else {
+            tech_pvt->mode = RTP_SENDRECV;
+        }
     }
 
     switch_core_session_set_private(*new_session, tech_pvt);
@@ -263,6 +385,9 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Can't set write codec?\n");
         goto fail;
     }
+
+    switch_channel_set_variable(channel, "local_media_ip", local_addr);
+    switch_channel_set_variable_printf(channel, "local_media_port", "%d", local_port);
 
     if (!(tech_pvt->rtp_session = switch_rtp_new(local_addr, local_port, remote_addr, remote_port, tech_pvt->agreed_pt,
 												 tech_pvt->read_codec.implementation->samples_per_packet, ptime * 1000,
@@ -321,6 +446,10 @@ static switch_status_t channel_on_destroy(switch_core_session_t *session)
 			switch_core_codec_destroy(&tech_pvt->write_codec);
 		}
 	}
+
+    if (tech_pvt->local_port != 0) {
+        switch_rtp_release_port(tech_pvt->local_address, tech_pvt->local_port);
+    }
 
     return SWITCH_STATUS_SUCCESS;
 }
@@ -434,7 +563,7 @@ static switch_bool_t compare_var(switch_event_t *event, switch_channel_t *channe
     const char *event_val = switch_event_get_header(event, varname);
 
     if (zstr(chan_val) || zstr(event_val)) {
-	return 1;
+        return 0;
     }
 
     return strcasecmp(chan_val, event_val);
@@ -459,10 +588,10 @@ static switch_status_t channel_receive_event(switch_core_session_t *session, swi
         /* Compare parameters */
         if (compare_var(event, channel, kREMOTEADDR) ||
             compare_var(event, channel, kREMOTEPORT)) {
-		char *remote_addr = switch_event_get_header(event, kREMOTEADDR);
-		char *szremote_port = switch_event_get_header(event, kREMOTEPORT);
-		switch_port_t remote_port = !zstr(szremote_port) ? (switch_port_t)atoi(szremote_port) : 0;
-		const char *err;
+            char *remote_addr = switch_event_get_header(event, kREMOTEADDR);
+            char *szremote_port = switch_event_get_header(event, kREMOTEPORT);
+            switch_port_t remote_port = !zstr(szremote_port) ? (switch_port_t)atoi(szremote_port) : 0;
+            const char *err;
 
 
             switch_channel_set_variable(channel, kREMOTEADDR, remote_addr);
@@ -479,7 +608,7 @@ static switch_status_t channel_receive_event(switch_core_session_t *session, swi
         if (compare_var(event, channel, kCODEC) ||
             compare_var(event, channel, kPTIME) ||
             compare_var(event, channel, kPT) ||
-	    compare_var(event, channel, kRATE)) {
+            compare_var(event, channel, kRATE)) {
 		/* Reset codec */
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT, "Switching codec updating \n");
 
