@@ -13936,6 +13936,9 @@ SWITCH_DECLARE(void) switch_core_media_start_udptl(switch_core_session_t *sessio
 			return;
 		}
 
+		a_engine->cur_payload_map->remote_sdp_ip = switch_core_session_strdup(session, t38_options->remote_ip);
+		a_engine->cur_payload_map->remote_sdp_port = t38_options->remote_port;
+
 		if (switch_rtp_set_remote_address(a_engine->rtp_session, t38_options->remote_ip,
 										  t38_options->remote_port, 0, SWITCH_TRUE, &err) != SWITCH_STATUS_SUCCESS) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "IMAGE UDPTL REPORTS ERROR: [%s]\n", err);

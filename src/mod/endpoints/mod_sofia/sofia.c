@@ -8165,6 +8165,8 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 				}
 			}
 
+			sofia_clear_flag(tech_pvt, TFLAG_NEW_SDP);
+
 			if (!switch_channel_test_flag(channel, CF_ANSWERED)) {
 				const char *wait_for_ack = switch_channel_get_variable(channel, "sip_wait_for_aleg_ack");
 
@@ -9090,6 +9092,8 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 
 			}
 		}
+
+		sofia_clear_flag(tech_pvt, TFLAG_NEW_SDP);
 
 		if (r_sdp && sofia_test_flag(tech_pvt, TFLAG_NOSDP_REINVITE)) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Received SDP in ACK. NOSDP Re-INVITE process completion.\n");
