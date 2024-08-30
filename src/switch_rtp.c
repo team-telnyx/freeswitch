@@ -6755,8 +6755,8 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 			switch_core_session_get_fork_read_frame_data(rtp_session->session, (void*) &rtp_session->last_recv_msg.body
 				, (sizeof(rtp_session->last_recv_msg.body) / sizeof(rtp_session->last_recv_msg.body[0])), &last_datalen);
 			// The last frame size should have a minimum header length
-			if (rtp_session->last_recv_bytes >= 12) {
-				rtp_session->last_recv_bytes = 12 + last_datalen;
+			if (rtp_session->last_recv_bytes >= rtp_header_len) {
+				rtp_session->last_recv_bytes = rtp_header_len + last_datalen;
 			}
 			rtp_session->last_recv_msg.ebody = NULL;
 		}

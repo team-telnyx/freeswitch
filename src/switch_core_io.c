@@ -914,7 +914,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 			switch_core_session_set_fork_read_frame(session, fork_frame ? fork_frame : (*frame));
 		}
 		
-
 		if (session->bugs) {
 			switch_media_bug_t *bp;
 			switch_bool_t ok = SWITCH_TRUE;
@@ -1026,7 +1025,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_get_fork_read_frame_data(_In
 	switch_mutex_unlock(session->fork_read_frame_mutex);
 	return result;
 }
-
 
 static char *SIG_NAMES[] = {
 	"NONE",
