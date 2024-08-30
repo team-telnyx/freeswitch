@@ -1597,6 +1597,8 @@ SWITCH_DECLARE(void) switch_core_session_reset(switch_core_session_t *session, s
 	switch_buffer_destroy(&session->raw_read_buffer);
 	switch_mutex_unlock(session->codec_read_mutex);
 
+	switch_core_session_set_fork_read_frame(session, NULL);
+
 	if (flush_dtmf) {
 		while ((has = switch_channel_has_dtmf(channel))) {
 			switch_channel_flush_dtmf(channel);
@@ -2660,6 +2662,8 @@ SWITCH_DECLARE(switch_core_session_t *) switch_core_session_request_uuid(switch_
 	session->enc_write_frame.buflen = sizeof(session->enc_write_buf);
 	session->enc_read_frame.data = session->enc_read_buf;
 	session->enc_read_frame.buflen = sizeof(session->enc_read_buf);
+	session->fork_enc_read_frame.data = session->fork_enc_read_buf;
+	session->fork_enc_read_frame.buflen = sizeof(session->fork_enc_read_buf);
 
 	switch_mutex_init(&session->mutex, SWITCH_MUTEX_NESTED, session->pool);
 	switch_mutex_init(&session->stack_count_mutex, SWITCH_MUTEX_NESTED, session->pool);
@@ -2668,6 +2672,7 @@ SWITCH_DECLARE(switch_core_session_t *) switch_core_session_request_uuid(switch_
 	switch_mutex_init(&session->codec_read_mutex, SWITCH_MUTEX_NESTED, session->pool);
 	switch_mutex_init(&session->codec_write_mutex, SWITCH_MUTEX_NESTED, session->pool);
 	switch_mutex_init(&session->frame_read_mutex, SWITCH_MUTEX_NESTED, session->pool);
+	switch_mutex_init(&session->fork_read_frame_mutex, SWITCH_MUTEX_NESTED, session->pool);
 	switch_thread_rwlock_create(&session->bug_rwlock, session->pool);
 	switch_thread_cond_create(&session->cond, session->pool);
 	switch_thread_rwlock_create(&session->rwlock, session->pool);

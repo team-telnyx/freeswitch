@@ -55,6 +55,7 @@ SWITCH_DECLARE(void) switch_core_session_unset_read_codec(switch_core_session_t 
 	session->raw_write_frame.codec = session->read_codec;
 	session->enc_read_frame.codec = session->read_codec;
 	session->enc_write_frame.codec = session->read_codec;
+	session->fork_enc_read_frame.codec = session->read_codec;
 	if (mutex) switch_mutex_unlock(mutex);
 	switch_mutex_unlock(session->codec_read_mutex);
 }
@@ -182,6 +183,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_set_real_read_codec(switch_c
 		session->raw_write_frame.codec = session->read_codec;
 		session->enc_read_frame.codec = session->read_codec;
 		session->enc_write_frame.codec = session->read_codec;
+		session->fork_enc_read_frame.codec = session->read_codec;
 	}
 
   end:
@@ -289,6 +291,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_set_read_codec(switch_core_s
 		session->raw_write_frame.codec = session->read_codec;
 		session->enc_read_frame.codec = session->read_codec;
 		session->enc_write_frame.codec = session->read_codec;
+		session->fork_enc_read_frame.codec = session->read_codec;
 	}
 
   end:

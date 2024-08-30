@@ -71,6 +71,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 	switch_status_t status = SWITCH_STATUS_FALSE;
 	int need_codec, perfect, do_bugs = 0, do_resample = 0, is_cng = 0, tap_only = 0;
 	switch_codec_implementation_t codec_impl;
+	switch_frame_t *fork_frame = NULL;
 	unsigned int flag = 0;
 	int i;
 
@@ -215,6 +216,10 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 
 	if (!(*frame)) {
 		goto done;
+	}
+
+	if (switch_test_flag(*frame, SFF_FORK_RTP)) {
+		flag |= SFF_FORK_RTP;
 	}
 
 	switch_assert(*frame != NULL);
@@ -817,6 +822,33 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 												  session->enc_read_frame.data, &session->enc_read_frame.datalen, &session->enc_read_frame.rate, &flag);
 				switch_assert(session->enc_read_frame.datalen <= SWITCH_RECOMMENDED_BUFFER_SIZE);
 
+				if ((flag & SFF_FORK_RTP) && session->read_codec->implementation->impl_id != codec_impl.impl_id) {
+					unsigned int fork_flag = 0;
+
+					session->fork_enc_read_frame.datalen = session->fork_enc_read_frame.buflen;
+					if (switch_core_codec_encode((*frame)->codec, enc_frame->codec,
+										enc_frame->data, enc_frame->datalen,
+										codec_impl.actual_samples_per_second,
+										session->fork_enc_read_frame.data, &session->fork_enc_read_frame.datalen,
+										&session->fork_enc_read_frame.rate, &fork_flag) == SWITCH_STATUS_SUCCESS) {
+						session->fork_enc_read_frame.samples = codec_impl.decoded_bytes_per_packet / sizeof(int16_t) / codec_impl.number_of_channels;
+						session->fork_enc_read_frame.channels = codec_impl.number_of_channels;
+						if (perfect) {
+							if (enc_frame->codec->implementation->samples_per_packet != codec_impl.samples_per_packet) {
+								session->fork_enc_read_frame.timestamp = 0;
+							} else {
+								session->fork_enc_read_frame.timestamp = read_frame->timestamp;
+							}
+							session->fork_enc_read_frame.rate = read_frame->rate;
+							session->fork_enc_read_frame.ssrc = read_frame->ssrc;
+							session->fork_enc_read_frame.seq = read_frame->seq;
+							session->fork_enc_read_frame.m = read_frame->m;
+							session->fork_enc_read_frame.payload = codec_impl.ianacode;
+						}
+						fork_frame = &session->fork_enc_read_frame;
+					}
+				}
+
 				session->read_codec->cur_frame = NULL;
 				enc_frame->codec->cur_frame = NULL;
 				switch (status) {
@@ -838,6 +870,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 						session->enc_read_frame.payload = session->read_impl.ianacode;
 					}
 					*frame = &session->enc_read_frame;
+					if (!fork_frame) fork_frame = &session->enc_read_frame;
 					break;
 				case SWITCH_STATUS_NOOP:
 					session->raw_read_frame.samples = enc_frame->codec->implementation->samples_per_packet;
@@ -848,6 +881,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 					session->raw_read_frame.ssrc = read_frame->ssrc;
 					session->raw_read_frame.seq = read_frame->seq;
 					*frame = enc_frame;
+					if (!fork_frame) fork_frame = enc_frame;
 					status = SWITCH_STATUS_SUCCESS;
 					break;
 				case SWITCH_STATUS_NOT_INITALIZED:
@@ -875,6 +909,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 		if (flag & SFF_CNG) {
 			switch_set_flag((*frame), SFF_CNG);
 		}
+
+		if ((flag & SFF_FORK_RTP)) {
+			switch_core_session_set_fork_read_frame(session, fork_frame ? fork_frame : (*frame));
+		}
+		
 		if (session->bugs) {
 			switch_media_bug_t *bp;
 			switch_bool_t ok = SWITCH_TRUE;
@@ -943,6 +982,48 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 
 
 	return status;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_session_set_fork_read_frame(_In_ switch_core_session_t *session, switch_frame_t *frame)
+{
+	switch_status_t result = SWITCH_STATUS_SUCCESS;
+	switch_mutex_lock(session->fork_read_frame_mutex);
+	if (session->fork_read_frame) {
+		switch_frame_free(&session->fork_read_frame);
+		session->fork_read_frame = NULL;
+	}
+	
+	if (frame) {
+		result = switch_frame_dup(frame, &session->fork_read_frame);
+	}
+	switch_mutex_unlock(session->fork_read_frame_mutex);
+	return result;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_session_get_fork_read_frame(_In_ switch_core_session_t *session, switch_frame_t **frame)
+{
+	switch_status_t result = SWITCH_STATUS_FALSE;
+	switch_mutex_lock(session->fork_read_frame_mutex);
+	if (session->fork_read_frame) {
+		result = switch_frame_dup(session->fork_read_frame, frame);
+	}
+	switch_mutex_unlock(session->fork_read_frame_mutex);
+	return result;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_session_get_fork_read_frame_data(_In_ switch_core_session_t *session, void *data, switch_size_t datalen, switch_size_t* outlen)
+{
+	switch_status_t result = SWITCH_STATUS_FALSE;
+	switch_mutex_lock(session->fork_read_frame_mutex);
+	if (data && session->fork_read_frame && session->fork_read_frame->data && session->fork_read_frame->datalen > 0 && session->fork_read_frame->datalen <= datalen) {
+		memcpy(data, session->fork_read_frame->data, session->fork_read_frame->datalen);
+		if (outlen) {
+			*outlen = session->fork_read_frame->datalen;
+		}
+		result = SWITCH_STATUS_SUCCESS;
+	}
+	switch_mutex_unlock(session->fork_read_frame_mutex);
+	return result;
 }
 
 static char *SIG_NAMES[] = {
