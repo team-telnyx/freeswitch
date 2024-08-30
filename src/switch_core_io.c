@@ -1012,14 +1012,14 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_get_fork_read_frame(_In_ swi
 	return result;
 }
 
-SWITCH_DECLARE(switch_status_t) switch_core_session_get_fork_read_frame_data(_In_ switch_core_session_t *session, void *data, switch_size_t* datalen)
+SWITCH_DECLARE(switch_status_t) switch_core_session_get_fork_read_frame_data(_In_ switch_core_session_t *session, void *data, switch_size_t datalen, switch_size_t* outlen)
 {
 	switch_status_t result = SWITCH_STATUS_FALSE;
 	switch_mutex_lock(session->fork_read_frame_mutex);
-	if (data && session->fork_read_frame && session->fork_read_frame->data && session->fork_read_frame->datalen > 0) {
+	if (data && session->fork_read_frame && session->fork_read_frame->data && session->fork_read_frame->datalen > 0 && session->fork_read_frame->datalen <= datalen) {
 		memcpy(data, session->fork_read_frame->data, session->fork_read_frame->datalen);
-		if (datalen) {
-			*datalen = session->fork_read_frame->datalen;
+		if (outlen) {
+			*outlen = session->fork_read_frame->datalen;
 		}
 		result = SWITCH_STATUS_SUCCESS;
 	}

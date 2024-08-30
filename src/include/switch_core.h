@@ -1348,7 +1348,7 @@ SWITCH_DECLARE(void) switch_core_session_passthru(switch_core_session_t *session
 
 SWITCH_DECLARE(switch_status_t) switch_core_session_set_fork_read_frame(_In_ switch_core_session_t *session, switch_frame_t *frame);
 SWITCH_DECLARE(switch_status_t) switch_core_session_get_fork_read_frame(_In_ switch_core_session_t *session, switch_frame_t **frame);
-SWITCH_DECLARE(switch_status_t) switch_core_session_get_fork_read_frame_data(_In_ switch_core_session_t *session, void *data, switch_size_t* datalen);
+SWITCH_DECLARE(switch_status_t) switch_core_session_get_fork_read_frame_data(_In_ switch_core_session_t *session, void *data, switch_size_t datalen, switch_size_t* outlen);
 
 
 /*!
