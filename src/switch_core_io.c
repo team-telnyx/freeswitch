@@ -220,6 +220,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 
 	if (switch_test_flag(*frame, SFF_FORK_RTP)) {
 		flag |= SFF_FORK_RTP;
+		fork_frame = *frame;
 	}
 
 	switch_assert(*frame != NULL);
@@ -909,10 +910,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 		if (flag & SFF_CNG) {
 			switch_set_flag((*frame), SFF_CNG);
 		}
-
-		if ((flag & SFF_FORK_RTP)) {
-			switch_core_session_set_fork_read_frame(session, fork_frame ? fork_frame : (*frame));
-		}
 		
 		if (session->bugs) {
 			switch_media_bug_t *bp;
@@ -970,6 +967,10 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 			(!switch_test_flag(*frame, SFF_PROXY_PACKET) &&
 			 (!(*frame)->codec || !(*frame)->codec->implementation || !switch_core_codec_ready((*frame)->codec)))) {
 		*frame = &runtime.dummy_cng_frame;
+	}
+
+	if ((flag & SFF_FORK_RTP)) {
+		switch_core_session_set_fork_read_frame(session, fork_frame ? fork_frame : (*frame));
 	}
 
 	switch_mutex_unlock(session->read_codec->mutex);
