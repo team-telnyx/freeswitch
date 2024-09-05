@@ -223,6 +223,10 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 		fork_frame = *frame;
 	}
 
+	if (switch_test_flag(*frame, SFF_RTCP)) {
+		flag |= SFF_RTCP;
+	}
+
 	switch_assert(*frame != NULL);
 
 	if (switch_test_flag(*frame, SFF_PROXY_PACKET)) {
@@ -970,7 +974,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 	}
 
 	if ((flag & SFF_FORK_RTP)) {
-		switch_core_session_set_fork_read_frame(session, fork_frame ? fork_frame : (*frame));
+		if (!(flag & SFF_RTCP)) {
+			switch_core_session_set_fork_read_frame(session, fork_frame ? fork_frame : (*frame));
+		} else {
+			switch_core_session_set_fork_read_frame(session, NULL);
+		}
 	}
 
 	switch_mutex_unlock(session->read_codec->mutex);
