@@ -86,6 +86,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 	} else {
 		switch_cond_next();
 		*frame = &runtime.dummy_cng_frame;
+		if (switch_test_flag(*frame, SFF_FORK_RTP)) {
+			switch_core_session_set_fork_read_frame(session, *frame);
+		}
 		return SWITCH_STATUS_SUCCESS;
 	}
 
@@ -95,12 +98,18 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 							  switch_channel_get_name(session->channel));
 			switch_cond_next();
 			*frame = &runtime.dummy_cng_frame;
+			if (switch_test_flag(*frame, SFF_FORK_RTP)) {
+				switch_core_session_set_fork_read_frame(session, *frame);
+			}
 			return SWITCH_STATUS_SUCCESS;
 		}
 
 		if (switch_channel_test_flag(session->channel, CF_AUDIO_PAUSE_READ)) {
 			switch_yield(20000);
 			*frame = &runtime.dummy_cng_frame;
+			if (switch_test_flag(*frame, SFF_FORK_RTP)) {
+				switch_core_session_set_fork_read_frame(session, *frame);
+			}
 			// switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Media Paused!!!!\n");
 			return SWITCH_STATUS_SUCCESS;
 		}
@@ -117,6 +126,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "%s has no read codec.\n", switch_channel_get_name(session->channel));
 		switch_channel_hangup(session->channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
 		*frame = &runtime.dummy_cng_frame;
+		if (switch_test_flag(*frame, SFF_FORK_RTP)) {
+			switch_core_session_set_fork_read_frame(session, *frame);
+		}
 		return SWITCH_STATUS_FALSE;
 	}
 
@@ -183,12 +195,18 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 
 		if (status == SWITCH_STATUS_INUSE) {
 			*frame = &runtime.dummy_cng_frame;
+			if (switch_test_flag(*frame, SFF_FORK_RTP)) {
+				switch_core_session_set_fork_read_frame(session, *frame);
+			}
 			switch_yield(20000);
 			return SWITCH_STATUS_SUCCESS;
 		}
 
 		if (!SWITCH_READ_ACCEPTABLE(status) || !session->read_codec || !switch_core_codec_ready(session->read_codec)) {
 			*frame = NULL;
+			if (switch_test_flag(*frame, SFF_FORK_RTP)) {
+				switch_core_session_set_fork_read_frame(session, NULL);
+			}
 			return SWITCH_STATUS_FALSE;
 		}
 
@@ -199,6 +217,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "%s has no read codec.\n", switch_channel_get_name(session->channel));
 			switch_channel_hangup(session->channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
 			*frame = &runtime.dummy_cng_frame;
+			if (switch_test_flag(*frame, SFF_FORK_RTP)) {
+				switch_core_session_set_fork_read_frame(session, *frame);
+			}
 			return SWITCH_STATUS_FALSE;
 		}
 
@@ -971,11 +992,12 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 			(!switch_test_flag(*frame, SFF_PROXY_PACKET) &&
 			 (!(*frame)->codec || !(*frame)->codec->implementation || !switch_core_codec_ready((*frame)->codec)))) {
 		*frame = &runtime.dummy_cng_frame;
+		fork_frame = &runtime.dummy_cng_frame;
 	}
 
 	if ((flag & SFF_FORK_RTP)) {
 		if (!(flag & SFF_RTCP)) {
-			switch_core_session_set_fork_read_frame(session, fork_frame ? fork_frame : (*frame));
+			switch_core_session_set_fork_read_frame(session, fork_frame);
 		} else {
 			switch_core_session_set_fork_read_frame(session, NULL);
 		}
