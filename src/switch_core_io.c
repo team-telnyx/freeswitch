@@ -203,10 +203,10 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 		}
 
 		if (!SWITCH_READ_ACCEPTABLE(status) || !session->read_codec || !switch_core_codec_ready(session->read_codec)) {
-			*frame = NULL;
-			if (switch_test_flag(*frame, SFF_FORK_RTP)) {
+			if ((*frame) && switch_test_flag(*frame, SFF_FORK_RTP)) {
 				switch_core_session_set_fork_read_frame(session, NULL);
 			}
+			*frame = NULL;
 			return SWITCH_STATUS_FALSE;
 		}
 
