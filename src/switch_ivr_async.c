@@ -2423,13 +2423,17 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 			}
 		}
 
-		if (switch_channel_test_flag(tchannel, CF_PARK) && ((flags & ED_MUX_READ) || (flags & ED_MUX_WRITE))) {
+		if ((flags & ED_MUX_READ) || (flags & ED_MUX_WRITE)) {
 			const char *svar = switch_channel_get_variable(tchannel, SWITCH_SEND_SILENCE_WHEN_IDLE_VARIABLE);
 			if (zstr(svar) || (atoi(svar) == 0)) {
 				// Eavesdrop whisper will not work during PARK if not sending any silence.
 				switch_channel_set_variable(tchannel, SWITCH_SEND_SILENCE_WHEN_IDLE_VARIABLE, "-1");
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Eavesdrop setting channel var %s=-1 to %s\n", SWITCH_SEND_SILENCE_WHEN_IDLE_VARIABLE, uuid);
 			}
-			switch_channel_set_flag(tchannel, CF_PARK_CHECK_SEND_SILENCE);
+
+			if (switch_channel_test_flag(tchannel, CF_PARK)) {
+				switch_channel_set_flag(tchannel, CF_PARK_CHECK_SEND_SILENCE);
+			}
 		}
 
 		switch_core_session_get_read_impl(tsession, &tread_impl);
