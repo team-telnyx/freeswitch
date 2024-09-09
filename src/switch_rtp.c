@@ -384,6 +384,7 @@ struct switch_rtp {
 	rtcp_msg_t rtcp_recv_msg;
 	rtcp_msg_t *rtcp_recv_msg_p;
 	rtp_msg_t last_recv_msg;
+	switch_status_t last_poll_status;
 	switch_size_t last_recv_bytes;
 
 	uint32_t autoadj_window;
@@ -5140,6 +5141,8 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_create(switch_rtp_t **new_rtp_session
 	rtp_session->last_recv_msg.header.x = 0;
 	rtp_session->last_recv_msg.header.cc = 0;
 
+	rtp_session->last_poll_status = SWITCH_STATUS_FALSE;
+
 	rtp_session->payload = payload;
 	rtp_session->rtcp_last_sent = switch_micro_time_now();
 
@@ -6749,20 +6752,29 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 	}
 	memset(&rtp_session->last_rtp_hdr, 0, sizeof(rtp_session->last_rtp_hdr));
 
-	if (poll_status == SWITCH_STATUS_SUCCESS) {
+	if (rtp_session->fork.fork_rx.active) {
 		// To apply media bug modification to fork stream
 		// get the last read frame data instead
-		if (rtp_session->fork.fork_rx.active && rtp_session->last_read_time > 0) {
+		if (rtp_session->last_poll_status == SWITCH_STATUS_SUCCESS)  {
 			switch_size_t last_datalen = 0;
 			rtp_session->last_recv_msg = rtp_session->recv_msg;
-			switch_core_session_get_fork_read_frame_data(rtp_session->session, (void*) &rtp_session->last_recv_msg.body
-				, (sizeof(rtp_session->last_recv_msg.body) / sizeof(rtp_session->last_recv_msg.body[0])), &last_datalen);
-			// The last frame size should have a minimum header length
-			if (rtp_session->last_recv_bytes >= rtp_header_len) {
-				rtp_session->last_recv_bytes = rtp_header_len + last_datalen;
+			if (switch_core_session_get_fork_read_frame_data(rtp_session->session, (void*) &rtp_session->last_recv_msg.body
+				, (sizeof(rtp_session->last_recv_msg.body) / sizeof(rtp_session->last_recv_msg.body[0])), &last_datalen) == SWITCH_STATUS_SUCCESS) {
+				// The last frame size should have a minimum header length
+				if (rtp_session->last_recv_bytes >= rtp_header_len) {
+					rtp_session->last_recv_bytes = rtp_header_len + last_datalen;
+				}
+			} else {
+				rtp_session->last_recv_bytes = 0;
 			}
 			rtp_session->last_recv_msg.ebody = NULL;
+		} else {
+			rtp_session->last_recv_bytes = 0;
 		}
+		rtp_session->last_poll_status = poll_status;
+	}
+
+	if (poll_status == SWITCH_STATUS_SUCCESS) {
 		status = switch_socket_recvfrom(rtp_session->from_addr, rtp_session->sock_input, 0, (void *) &rtp_session->recv_msg, bytes);
 	} else {
 		*bytes = 0;
