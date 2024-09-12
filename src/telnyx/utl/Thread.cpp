@@ -77,9 +77,7 @@ typedef boost::function<int(thread_task)> thread_schedule_func;
 class thread_pool_runnable : public Poco::Runnable
 {
 public:
-  thread_pool_runnable()
-  {
-  }
+  thread_pool_runnable() = default;
   void run()
   {
     if (_voidArgTask)
@@ -113,12 +111,12 @@ thread_pool::thread_pool(
 
 thread_pool::~thread_pool()
 {
-  delete static_cast<Poco::ThreadPool*>(_threadPool);
+  delete _threadPool;
 }
 
 void thread_pool::join()
 {
-  static_cast<Poco::ThreadPool*>(_threadPool)->joinAll();
+  _threadPool->joinAll();
 }
 
 int thread_pool::schedule(boost::function<void()> task)
@@ -127,8 +125,8 @@ int thread_pool::schedule(boost::function<void()> task)
   runnable->_task = task;
   try
   {
-    static_cast<Poco::ThreadPool*>(_threadPool)->start(*runnable);
-    return static_cast<Poco::ThreadPool*>(_threadPool)->used();
+    _threadPool->start(*runnable);
+    return _threadPool->used();
   }
   catch(...)
   {
@@ -146,8 +144,8 @@ int thread_pool::schedule_with_arg(boost::function<void(argument_place_holder)> 
   runnable->_arg = arg;
   try
   {
-    static_cast<Poco::ThreadPool*>(_threadPool)->start(*runnable);
-    return static_cast<Poco::ThreadPool*>(_threadPool)->used();
+    _threadPool->start(*runnable);
+    return _threadPool->used();
   }
   catch(...)
   {
@@ -164,8 +162,8 @@ int thread_pool::schedule_with_arg(boost::function<void(void*)> task, void* arg)
   runnable->_voidArg = arg;
   try
   {
-    static_cast<Poco::ThreadPool*>(_threadPool)->start(*runnable);
-    return static_cast<Poco::ThreadPool*>(_threadPool)->used();
+    _threadPool->start(*runnable);
+    return _threadPool->used();
   }
   catch(...)
   {

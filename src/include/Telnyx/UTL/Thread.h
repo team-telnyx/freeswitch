@@ -15,6 +15,11 @@
 
 #include "Telnyx/Telnyx.h"
 
+// Forward declaration
+namespace Poco
+{
+class ThreadPool;
+}
 
 namespace Telnyx {
 
@@ -104,7 +109,6 @@ private:
   TELNYX_HANDLE _sem;
 };
 
-
 #define POOL_THREAD_STACK_SIZE 0
 
 class TELNYX_API thread_pool : boost::noncopyable
@@ -129,7 +133,6 @@ public:
     /// Schedule a task for execution.  Returns the number of
     /// currently used thread if successful or -1 if unsuccessful.
 
-
   int schedule_with_arg(boost::function<void(argument_place_holder)> task, argument_place_holder arg);
     /// Schedule a task with a placeholder argument.  Returns the number of
     /// currently used thread if successful or -1 if unsuccessful.
@@ -149,7 +152,7 @@ public:
     /// Schedule a task with a placeholder argument using the default thread pool.  Returns the number of
     /// currently used thread if successful or 0 if unsuccessful.
 private:
-  void* _threadPool;
+  Poco::ThreadPool* _threadPool;
 };
 
 
