@@ -16,8 +16,7 @@
 #include "Telnyx/Telnyx.h"
 
 // Forward declaration
-namespace Poco
-{
+namespace Poco {
 class ThreadPool;
 }
 
