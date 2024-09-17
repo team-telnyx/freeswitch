@@ -7,6 +7,13 @@
 #ifndef TELNYX_THREAD_H_INCLUDED
 #define TELNYX_THREAD_H_INCLUDED
 
+#include <condition_variable>
+#include <deque>
+#include <future>
+#include <mutex>
+#include <thread>
+#include <vector>
+
 #include <boost/thread.hpp>
 #include <boost/noncopyable.hpp>
 #include <boost/function.hpp>
@@ -14,11 +21,6 @@
 #include <boost/interprocess/sync/named_mutex.hpp>
 
 #include "Telnyx/Telnyx.h"
-
-// Forward declaration
-namespace Poco {
-class ThreadPool;
-}
 
 namespace Telnyx {
 
@@ -108,52 +110,77 @@ private:
   TELNYX_HANDLE _sem;
 };
 
-#define POOL_THREAD_STACK_SIZE 0
-
 class TELNYX_API thread_pool : boost::noncopyable
 {
 public:
-  typedef boost::any argument_place_holder;
-  
-  thread_pool(int minCapacity = 2,
-		int maxCapacity = 1024,
-		int idleTime = 60,
-		int stackSize = POOL_THREAD_STACK_SIZE);
+  explicit thread_pool(int num_threads = 2, int max_num_threads = 1024)
+  : max_threads(max_num_threads)
+  {
+    for (int i = 0; i < num_threads; ++i) {
+      pool.emplace_back(&thread_pool::run, this);
+    }
+  }
     /// Creates a new thread pool
+  ~thread_pool() {
+    is_active = false;
+    cv.notify_all();
+  	join();
+  }
+	/// Destroys the threadpool.
+	/// This will wait for all worker to terminate
 
-  ~thread_pool();
-    /// Destroys the threadpool.  
-    /// This will wait for all worker to terminate
+  void join() {
+	for (auto& th : pool) {
+	  th.join();
+	}
+  }
+	/// Waits for all threads to complete.
 
-  void join();
-		/// Waits for all threads to complete.
-
-  int schedule(boost::function<void()> task);
+  template <class Fn>
+  int schedule(Fn&& func) {
+    using return_type = decltype(func());
+    static_assert(std::is_void_v<return_type>, "Cannot schedule functions which do not retun void.");
+    std::packaged_task<void()> task(std::forward<Fn>(func));
+    return this->post(std::move(task));
+  }
     /// Schedule a task for execution.  Returns the number of
-    /// currently used thread if successful or -1 if unsuccessful.
+    /// currently used threads if successful or -1 if unsuccessful.
 
-  int schedule_with_arg(boost::function<void(argument_place_holder)> task, argument_place_holder arg);
-    /// Schedule a task with a placeholder argument.  Returns the number of
-    /// currently used thread if successful or -1 if unsuccessful.
-  
-  int schedule_with_arg(boost::function<void(void*)> task, void* arg);
-    /// Schedule a task with a void* argument.  Returns the number of
-    /// currently used thread if successful or -1 if unsuccessful.
-
-  static void static_join();
-    /// Waits for all threads in the deafult thread pool to complete.
-
-  static int static_schedule(boost::function<void()> task);
-    /// Schedule a task using the default thread pool.  Returns the number of
-    /// currently used thread if successful or 0 if unsuccessful.
-
-  static int static_schedule_with_arg(boost::function<void(argument_place_holder)> task, argument_place_holder arg);
-    /// Schedule a task with a placeholder argument using the default thread pool.  Returns the number of
-    /// currently used thread if successful or 0 if unsuccessful.
 private:
-  Poco::ThreadPool* _threadPool;
-};
+  int post(std::packaged_task<void()> job) {
+    int ret;
+    {
+      std::unique_lock lock(guard);
+      pending_jobs.emplace_back(std::move(job));
+      if (pool.size() < max_threads) {
+        pool.emplace_back(&thread_pool::run, this);
+      }
+      ret = pool.size();
+    }
+    cv.notify_one();
+    return ret;
+  }
 
+  void run() {
+    while (is_active) {
+      thread_local std::packaged_task<void()> job;
+      {
+        std::unique_lock lock(guard);
+        cv.wait(lock, [&]{ return !pending_jobs.empty() || !is_active; });
+        if (!is_active) break;
+        job.swap(pending_jobs.front());
+        pending_jobs.pop_front();
+      }
+      job();
+    }
+  }
+  std::atomic_bool is_active {true};
+  std::vector<std::thread> pool;
+  std::condition_variable cv;
+  std::mutex guard;
+  std::deque<std::packaged_task<void()>> pending_jobs;
+  int max_threads;
+};
 
 class Thread : public boost::noncopyable
 {
@@ -192,4 +219,3 @@ void TELNYX_API thread_sleep( unsigned long milliseconds );
 
 
 #endif //TELNYX_THREAD_H_INCLUDED
-
