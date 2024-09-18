@@ -130,9 +130,9 @@ public:
 	/// This will wait for all worker to terminate
 
   void join() {
-  for (auto& th : pool) {
-    th.join();
-  }
+    for (auto& th : pool) {
+      th.join();
+    }
   }
   /// Waits for all threads to complete.
 
