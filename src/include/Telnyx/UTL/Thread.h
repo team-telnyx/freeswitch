@@ -124,17 +124,17 @@ public:
   ~thread_pool() {
     is_active = false;
     cv.notify_all();
-  	join();
+    join();
   }
 	/// Destroys the threadpool.
 	/// This will wait for all worker to terminate
 
   void join() {
-	for (auto& th : pool) {
-	  th.join();
-	}
+  for (auto& th : pool) {
+    th.join();
   }
-	/// Waits for all threads to complete.
+  }
+  /// Waits for all threads to complete.
 
   template <class Fn>
   int schedule(Fn&& func) {
