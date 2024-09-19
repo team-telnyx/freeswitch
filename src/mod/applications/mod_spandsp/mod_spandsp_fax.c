@@ -1319,18 +1319,14 @@ static t38_mode_t request_t38(pvt_t *pvt)
 		insist = spandsp_globals.enable_t38_insist;
 	}
 
-	if ((t38_options = switch_channel_get_private(channel, "t38_options"))) {
+	if (switch_channel_get_private(channel, "t38_options")) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
 				"%s already has T.38 data\n", switch_channel_get_name(channel));
 		enabled = 0;
 	}
 
-
-
 	if (enabled) {
-
 		if (!(t38_options = switch_channel_get_private(channel, "_preconfigured_t38_options"))) {
-			const char* udpfec = NULL;
 			t38_options = switch_core_session_alloc(session, sizeof(*t38_options));
 			t38_options->T38MaxBitRate = (pvt->disable_v17) ? 9600 : 14400;
 			t38_options->T38FaxVersion = 0;
@@ -1340,7 +1336,7 @@ static t38_mode_t request_t38(pvt_t *pvt)
 			t38_options->T38FaxRateManagement = "transferredTCF";
 			t38_options->T38FaxMaxBuffer = 2000;
 			t38_options->T38FaxMaxDatagram = LOCAL_FAX_MAX_DATAGRAM;
-			t38_options->T38FaxUdpEC = NULL;
+			t38_options->T38FaxUdpEC = "t38UDPRedundancy";
 			t38_options->T38VendorInfo = "0 0 0";
 
 			udpfec = switch_channel_get_variable(channel, "fax_t38_udpfec_offer_default");

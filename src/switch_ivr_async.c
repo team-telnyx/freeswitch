@@ -1022,7 +1022,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_displace_session(switch_core_session_
 		return SWITCH_STATUS_FALSE;
 	}
 
-	if ((status = switch_channel_pre_answer(channel)) != SWITCH_STATUS_SUCCESS) {
+	if (switch_channel_pre_answer(channel) != SWITCH_STATUS_SUCCESS) {
 		return SWITCH_STATUS_FALSE;
 	}
 
@@ -3042,7 +3042,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 		hangup_on_error = switch_true(p);
 	}
 
-	if ((status = switch_channel_pre_answer(channel)) != SWITCH_STATUS_SUCCESS) {
+	if (switch_channel_pre_answer(channel) != SWITCH_STATUS_SUCCESS) {
 		return SWITCH_STATUS_FALSE;
 	}
 
@@ -3212,6 +3212,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 
 			if (switch_dir_make_recursive(path, SWITCH_DEFAULT_DIR_PERMS, switch_core_session_get_pool(session)) != SWITCH_STATUS_SUCCESS) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error creating %s\n", path);
+				set_completion_cause(rh, "uri-failure");
 				switch_goto_status(SWITCH_STATUS_GENERR, err);
 			}
 
@@ -3235,6 +3236,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 				switch_core_session_reset(session, SWITCH_TRUE, SWITCH_TRUE);
 			}
 			send_record_error_event(channel, file, "Error opening file");
+			set_completion_cause(rh, "uri-failure");
 			switch_goto_status(SWITCH_STATUS_GENERR, err);
 		}
 
@@ -3288,6 +3290,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 				switch_core_session_reset(session, SWITCH_TRUE, SWITCH_TRUE);
 			}
 			send_record_error_event(channel, in_file, "Error opening file");
+			set_completion_cause(rh, "uri-failure");
 			switch_goto_status(SWITCH_STATUS_GENERR, err);
 		}
 
@@ -3299,6 +3302,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 				switch_core_session_reset(session, SWITCH_TRUE, SWITCH_TRUE);
 			}
 			send_record_error_event(channel, out_file, "Error opening file");
+			set_completion_cause(rh, "uri-failure");
 			switch_goto_status(SWITCH_STATUS_GENERR, err);
 		}
 
@@ -3441,6 +3445,9 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 	return SWITCH_STATUS_SUCCESS;
 
 err:
+	if (!zstr(rh->completion_cause)) {
+		switch_channel_set_variable_printf(channel, "record_completion_cause", "%s", rh->completion_cause);
+	}
 	record_helper_destroy(&rh, session);
 
 	return status;
@@ -3904,7 +3911,6 @@ static switch_bool_t inband_dtmf_callback(switch_media_bug_t *bug, void *user_da
 	switch_inband_dtmf_t *pvt = (switch_inband_dtmf_t *) user_data;
 	switch_frame_t *frame = NULL;
 	switch_channel_t *channel = switch_core_session_get_channel(pvt->session);
-	teletone_hit_type_t hit;
 
 	switch (type) {
 	case SWITCH_ABC_TYPE_INIT:
@@ -3913,7 +3919,7 @@ static switch_bool_t inband_dtmf_callback(switch_media_bug_t *bug, void *user_da
 		break;
 	case SWITCH_ABC_TYPE_READ_REPLACE:
 		if ((frame = switch_core_media_bug_get_read_replace_frame(bug))) {
-			if ((hit = teletone_dtmf_detect(&pvt->dtmf_detect, frame->data, frame->samples)) == TT_HIT_END) {
+			if (teletone_dtmf_detect(&pvt->dtmf_detect, frame->data, frame->samples) == TT_HIT_END) {
 				switch_dtmf_t dtmf = {0};
 
 				teletone_dtmf_get(&pvt->dtmf_detect, &dtmf.digit, &dtmf.duration);
@@ -5588,7 +5594,6 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_detect_speech(switch_core_session_t *
 														 const char *grammar, const char *name, const char *dest, switch_asr_handle_t *ah)
 {
 	switch_channel_t *channel = switch_core_session_get_channel(session);
-	switch_status_t status;
 	struct speech_thread_handle *sth = switch_channel_get_private(channel, SWITCH_SPEECH_KEY);
 	const char *p;
 	int resume = 0;

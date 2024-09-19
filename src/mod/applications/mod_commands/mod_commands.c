@@ -1176,7 +1176,6 @@ SWITCH_STANDARD_API(group_call_function)
 SWITCH_STANDARD_API(in_group_function)
 {
 	switch_xml_t x_domain, xml = NULL, x_group;
-	int argc;
 	char *mydata = NULL, *argv[2], *user, *domain, *dup_domain = NULL;
 	char delim = ',';
 	switch_event_t *params = NULL;
@@ -1187,7 +1186,7 @@ SWITCH_STANDARD_API(in_group_function)
 		goto end;
 	}
 
-	if ((argc = switch_separate_string(mydata, delim, argv, (sizeof(argv) / sizeof(argv[0])))) < 2) {
+	if (switch_separate_string(mydata, delim, argv, (sizeof(argv) / sizeof(argv[0]))) < 2) {
 		goto end;
 	}
 
@@ -1230,7 +1229,6 @@ SWITCH_STANDARD_API(in_group_function)
 SWITCH_STANDARD_API(domain_data_function)
 {
 	switch_xml_t x_domain = NULL, xml_root = NULL, x_param, x_params;
-	int argc;
 	char *mydata = NULL, *argv[3], *key = NULL, *type = NULL, *domain, *dup_domain = NULL;
 	char delim = ' ';
 	const char *container = "params", *elem = "param";
@@ -1241,7 +1239,7 @@ SWITCH_STANDARD_API(domain_data_function)
 		goto end;
 	}
 
-	if ((argc = switch_separate_string(mydata, delim, argv, (sizeof(argv) / sizeof(argv[0])))) < 3) {
+	if (switch_separate_string(mydata, delim, argv, (sizeof(argv) / sizeof(argv[0]))) < 3) {
 		goto end;
 	}
 
@@ -1300,7 +1298,6 @@ end:
 SWITCH_STANDARD_API(user_data_function)
 {
 	switch_xml_t x_user = NULL, x_param, x_params;
-	int argc;
 	char *mydata = NULL, *argv[3], *key = NULL, *type = NULL, *user, *domain, *dup_domain = NULL;
 	char delim = ' ';
 	const char *container = "params", *elem = "param";
@@ -1311,7 +1308,7 @@ SWITCH_STANDARD_API(user_data_function)
 		goto end;
 	}
 
-	if ((argc = switch_separate_string(mydata, delim, argv, (sizeof(argv) / sizeof(argv[0])))) < 3) {
+	if (switch_separate_string(mydata, delim, argv, (sizeof(argv) / sizeof(argv[0]))) < 3) {
 		goto end;
 	}
 
@@ -1565,7 +1562,6 @@ SWITCH_STANDARD_API(expand_function)
 	char *dup;
 	char *arg = NULL;
 	char *mycmd;
-	switch_status_t status;
 	const char *p;
 	switch_core_session_t *xsession;
 	char uuid[80] = "";
@@ -1604,7 +1600,7 @@ SWITCH_STANDARD_API(expand_function)
 	}
 
 	expanded = arg ? switch_event_expand_headers(stream->param_event, arg) : arg;
-	if ((status = switch_api_execute(mycmd, expanded, session, stream)) != SWITCH_STATUS_SUCCESS) {
+	if (switch_api_execute(mycmd, expanded, session, stream) != SWITCH_STATUS_SUCCESS) {
 		stream->write_function(stream, "-ERR Cannot execute command\n");
 	}
 
@@ -3117,7 +3113,6 @@ SWITCH_STANDARD_API(dual_transfer_function)
 SWITCH_STANDARD_API(tone_detect_session_function)
 {
 	char *argv[8] = { 0 };
-	int argc;
 	char *mydata = NULL;
 	time_t to = 0;
 	switch_core_session_t *rsession;
@@ -3131,7 +3126,7 @@ SWITCH_STANDARD_API(tone_detect_session_function)
 	mydata = strdup(cmd);
 	switch_assert(mydata != NULL);
 
-	if ((argc = switch_separate_string(mydata, ' ', argv, sizeof(argv) / sizeof(argv[0]))) < 3 || !argv[0]) {
+	if (switch_separate_string(mydata, ' ', argv, sizeof(argv) / sizeof(argv[0])) < 3 || !argv[0]) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "-ERR INVALID ARGS!\n");
 		return SWITCH_STATUS_SUCCESS;
 	}
@@ -4853,7 +4848,6 @@ SWITCH_STANDARD_API(session_displace_function)
 	switch_core_session_t *rsession = NULL;
 	char *mycmd = NULL, *argv[5] = { 0 };
 	char *uuid = NULL, *action = NULL, *path = NULL;
-	int argc = 0;
 	uint32_t limit = 0;
 	char *flags = NULL;
 
@@ -4861,7 +4855,7 @@ SWITCH_STANDARD_API(session_displace_function)
 		goto usage;
 	}
 
-	if ((argc = switch_separate_string(mycmd, ' ', argv, (sizeof(argv) / sizeof(argv[0])))) < 3) {
+	if (switch_separate_string(mycmd, ' ', argv, (sizeof(argv) / sizeof(argv[0]))) < 3) {
 		goto usage;
 	}
 
@@ -5396,7 +5390,6 @@ static void *SWITCH_THREAD_FUNC bgapi_exec(switch_thread_t *thread, void *obj)
 {
 	struct bg_job *job = (struct bg_job *) obj;
 	switch_stream_handle_t stream = { 0 };
-	switch_status_t status;
 	char *reply, *freply = NULL;
 	switch_event_t *event;
 	char *arg;
@@ -5676,9 +5669,7 @@ static int show_callback(void *pArg, int argc, char **argv, char **columnNames)
 #define COMPLETE_SYNTAX "add <word>|del [<word>|*]"
 SWITCH_STANDARD_API(complete_function)
 {
-	switch_status_t status;
-
-	if ((status = switch_console_set_complete(cmd)) == SWITCH_STATUS_SUCCESS) {
+	if (switch_console_set_complete(cmd) == SWITCH_STATUS_SUCCESS) {
 		stream->write_function(stream, "+OK\n");
 	} else {
 		stream->write_function(stream, "-USAGE: %s\n", COMPLETE_SYNTAX);
@@ -5690,9 +5681,7 @@ SWITCH_STANDARD_API(complete_function)
 #define ALIAS_SYNTAX "[add|stickyadd] <alias> <command> | del [<alias>|*]"
 SWITCH_STANDARD_API(alias_function)
 {
-	switch_status_t status;
-
-	if ((status = switch_console_set_alias(cmd)) == SWITCH_STATUS_SUCCESS) {
+	if (switch_console_set_alias(cmd) == SWITCH_STATUS_SUCCESS) {
 		stream->write_function(stream, "+OK\n");
 	} else {
 		stream->write_function(stream, "-USAGE: %s\n", ALIAS_SYNTAX);
@@ -6400,7 +6389,6 @@ SWITCH_STANDARD_API(uuid_send_dtmf_function)
 	switch_core_session_t *psession = NULL;
 	char *mycmd = NULL, *argv[2] = { 0 };
 	char *uuid = NULL, *dtmf_data = NULL;
-	int argc = 0;
 
 	if (zstr(cmd)) {
 		goto usage;
@@ -6410,7 +6398,7 @@ SWITCH_STANDARD_API(uuid_send_dtmf_function)
 		goto usage;
 	}
 
-	if ((argc = switch_separate_string(mycmd, ' ', argv, (sizeof(argv) / sizeof(argv[0])))) < 2) {
+	if (switch_separate_string(mycmd, ' ', argv, (sizeof(argv) / sizeof(argv[0]))) < 2) {
 		goto usage;
 	}
 
@@ -6453,7 +6441,6 @@ SWITCH_STANDARD_API(uuid_recv_dtmf_function)
 	switch_core_session_t *psession = NULL;
 	char *mycmd = NULL, *argv[2] = { 0 };
 	char *uuid = NULL, *dtmf_data = NULL;
-	int argc = 0;
 
 	if (zstr(cmd)) {
 		goto usage;
@@ -6463,7 +6450,7 @@ SWITCH_STANDARD_API(uuid_recv_dtmf_function)
 		goto usage;
 	}
 
-	if ((argc = switch_separate_string(mycmd, ' ', argv, (sizeof(argv) / sizeof(argv[0])))) < 2) {
+	if (switch_separate_string(mycmd, ' ', argv, (sizeof(argv) / sizeof(argv[0]))) < 2) {
 		goto usage;
 	}
 
