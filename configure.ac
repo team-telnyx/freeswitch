@@ -2333,6 +2333,7 @@ if test "$use_system_apr" != "yes"; then
    AC_CONFIG_SUBDIRS([libs/apr])
 fi
 AC_CONFIG_SUBDIRS([libs/iksemel])
+AC_CONFIG_SUBDIRS([libs/unimrcp])
 if test "x${enable_zrtp}" = "xyes"; then
    AC_CONFIG_SUBDIRS([libs/libzrtp])
 fi
