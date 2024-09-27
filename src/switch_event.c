@@ -654,7 +654,6 @@ SWITCH_DECLARE(void) switch_event_launch_dispatch_threads(uint32_t max)
 {
 	switch_threadattr_t *thd_attr;
 	uint32_t index = 0;
-	int launched = 0;
 	uint32_t sanity = 200;
 
 	switch_memory_pool_t *pool = RUNTIME_POOL;
@@ -685,7 +684,6 @@ SWITCH_DECLARE(void) switch_event_launch_dispatch_threads(uint32_t max)
 		} else {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Create additional event dispatch thread %d\n", index);
 		}
-		launched++;
 	}
 
 	SOFT_MAX_DISPATCH = index;
@@ -1912,6 +1910,8 @@ SWITCH_DECLARE(switch_xml_t) switch_event_xmlize(switch_event_t *event, const ch
 		data = (char *) malloc(2048);
 		if (!data) {
 			va_end(ap);
+			switch_xml_free(xml);
+
 			return NULL;
 		}
 		ret = vsnprintf(data, 2048, fmt, ap);
@@ -1921,6 +1921,8 @@ SWITCH_DECLARE(switch_xml_t) switch_event_xmlize(switch_event_t *event, const ch
 #ifndef HAVE_VASPRINTF
 			free(data);
 #endif
+			switch_xml_free(xml);
+
 			return NULL;
 		}
 	}
@@ -2072,15 +2074,18 @@ SWITCH_DECLARE(switch_status_t) switch_event_bind_removable(const char *id, swit
 		switch_mutex_lock(CUSTOM_HASH_MUTEX);
 
 		if (!(subclass = switch_core_hash_find(CUSTOM_HASH, subclass_name))) {
-			switch_event_reserve_subclass_detailed(id, subclass_name);
-			subclass = switch_core_hash_find(CUSTOM_HASH, subclass_name);
-			subclass->bind = 1;
+			if (switch_event_reserve_subclass_detailed(id, subclass_name) == SWITCH_STATUS_SUCCESS) {
+				if ((subclass = switch_core_hash_find(CUSTOM_HASH, subclass_name))) {
+					subclass->bind = 1;
+				}
+			}
 		}
 
 		switch_mutex_unlock(CUSTOM_HASH_MUTEX);
 
 		if (!subclass) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Could not reserve subclass. '%s'\n", subclass_name);
+
 			return SWITCH_STATUS_FALSE;
 		}
 	}
@@ -2095,6 +2100,7 @@ SWITCH_DECLARE(switch_status_t) switch_event_bind_removable(const char *id, swit
 		if (subclass_name) {
 			event_node->subclass_name = DUP(subclass_name);
 		}
+
 		event_node->callback = callback;
 		event_node->user_data = user_data;
 
@@ -2953,14 +2959,17 @@ static void ecd_deliver(event_channel_data_t **ecdP)
 		int x_argc = switch_separate_string_string(key, (char*) sep, x_argv, SWITCH_CHANNEL_DISPATCH_MAX_KEY_PARTS);
 		char buf[1024];
 		int i, r;
+
 		for(i=x_argc - 1; i > 0; i--) {
 			int z;
+
 			memset(buf, 0, 1024);
-			sprintf(buf, "%s", x_argv[0]);
+			switch_snprintf(buf, sizeof(buf), "%s", x_argv[0]);
 			for(z=1; z < i; z++) {
 				strcat(buf, sep);
-				strcat(buf, x_argv[z]);
+				strncat(buf, x_argv[z], sizeof(buf) - strlen(buf) - 1);
 			}
+
 			r = _switch_event_channel_broadcast(buf, ecd->event_channel, ecd->json, ecd->key, ecd->id);
 			t += r;
 			if (r && switch_core_test_flag(SCF_EVENT_CHANNEL_HIERARCHY_DELIVERY_ONCE)) {
@@ -2969,11 +2978,13 @@ static void ecd_deliver(event_channel_data_t **ecdP)
 		}
 	} else {
 		char *p = NULL;
+
 		if ((p = strchr(key, '.'))) {
 			*p = '\0';
 			t += _switch_event_channel_broadcast(key, ecd->event_channel, ecd->json, ecd->key, ecd->id);
 		}
 	}
+
 	switch_safe_free(key);
 
 	t += _switch_event_channel_broadcast(SWITCH_EVENT_CHANNEL_GLOBAL, ecd->event_channel, ecd->json, ecd->key, ecd->id);
@@ -2981,6 +2992,7 @@ static void ecd_deliver(event_channel_data_t **ecdP)
 	if(t == 0) {
 		if (switch_core_test_flag(SCF_EVENT_CHANNEL_LOG_UNDELIVERABLE_JSON)) {
 			char *json = cJSON_Print(ecd->json);
+
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "no subscribers for %s , %s => %s\n", ecd->event_channel, ecd->key, json);
 			switch_safe_free(json);
 		} else {
