@@ -994,7 +994,7 @@ static switch_status_t sofia_answer_channel(switch_core_session_t *session)
 	}
 
 	if (sofia_test_flag(tech_pvt, TFLAG_NAT) ||
-		(val = switch_channel_get_variable(channel, "sip-force-contact")) ||
+		switch_channel_get_variable(channel, "sip-force-contact") ||
 		((val = switch_channel_get_variable(channel, "sip_sticky_contact")) && switch_true(val))) {
 		sticky = tech_pvt->record_route;
 		session_timeout = SOFIA_NAT_SESSION_TIMEOUT;
@@ -2305,6 +2305,7 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 									  (switch_stristr("cisco/spa50", ua) ||
 									  switch_stristr("cisco/spa525", ua)) ||
 									  switch_stristr("cisco/spa30", ua) ||
+									  switch_stristr("Fanvil", ua) ||
 									  switch_stristr("Grandstream", ua) ||
 									  switch_stristr("Yealink", ua) ||
 									  switch_stristr("Mitel", ua) ||
@@ -2862,7 +2863,7 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 
 
 				if (sofia_test_flag(tech_pvt, TFLAG_NAT) ||
-					(val = switch_channel_get_variable(channel, "sip-force-contact")) ||
+					switch_channel_get_variable(channel, "sip-force-contact") ||
 					((val = switch_channel_get_variable(channel, "sip_sticky_contact")) && switch_true(val))) {
 					sticky = tech_pvt->record_route;
 					switch_channel_set_variable(channel, "sip_nat_detected", "true");
@@ -3186,9 +3187,9 @@ static switch_status_t cmd_status(char **argv, int argc, switch_stream_handle_t 
 												   gp->ib_failed_calls, gp->ib_calls, gp->ob_failed_calls, gp->ob_calls);
 							free(pkey);
 
-							if (gp->state == REG_STATE_FAILED || gp->state == REG_STATE_TRYING) {
+							if (gp->state == REG_STATE_FAILED || gp->state == REG_STATE_FAIL_WAIT || gp->state == REG_STATE_TRYING) {
 								time_t now = switch_epoch_time_now(NULL);
-								if (gp->reg_timeout > now) {
+								if (gp->reg_timeout >= now) {
 									stream->write_function(stream, " (retry: %ds)", gp->reg_timeout - now);
 								} else {
 									stream->write_function(stream, " (retry: NEVER)");
@@ -3437,9 +3438,9 @@ static switch_status_t cmd_status(char **argv, int argc, switch_stream_handle_t 
 					stream->write_function(stream, "%25s\t%s\t  %40s\t%s", pkey, "gateway", gp->register_to, sofia_state_names[gp->state]);
 					free(pkey);
 
-					if (gp->state == REG_STATE_FAILED || gp->state == REG_STATE_TRYING) {
+					if (gp->state == REG_STATE_FAILED || gp->state == REG_STATE_FAIL_WAIT || gp->state == REG_STATE_TRYING) {
 						time_t now = switch_epoch_time_now(NULL);
-						if (gp->retry > now) {
+						if (gp->retry >= now) {
 							stream->write_function(stream, " (retry: %ds)", gp->retry - now);
 						} else {
 							stream->write_function(stream, " (retry: NEVER)");
@@ -3491,9 +3492,9 @@ static void xml_gateway_status(sofia_gateway_t *gp, switch_stream_handle_t *stre
 	stream->write_function(stream, "    <failed-calls-in>%u</failed-calls-in>\n", gp->ib_failed_calls);
 	stream->write_function(stream, "    <failed-calls-out>%u</failed-calls-out>\n", gp->ob_failed_calls);
 
-	if (gp->state == REG_STATE_FAILED || gp->state == REG_STATE_TRYING) {
+	if (gp->state == REG_STATE_FAILED || gp->state == REG_STATE_FAIL_WAIT || gp->state == REG_STATE_TRYING) {
 		time_t now = switch_epoch_time_now(NULL);
-		if (gp->retry > now) {
+		if (gp->retry >= now) {
 			stream->write_function(stream, "    <retry>%ds</retry>\n", gp->retry - now);
 		} else {
 			stream->write_function(stream, "    <retry>NEVER</retry>\n");
@@ -3755,9 +3756,9 @@ static switch_status_t cmd_xml_status(char **argv, int argc, switch_stream_handl
 					switch_assert(gp->state < REG_STATE_LAST);
 					stream->write_function(stream, "<gateway>\n<name>%s</name>\n<type>%s</type>\n<data>%s</data>\n<state>%s</state>\n</gateway>\n",
 										   gp->name, "gateway", gp->register_to, sofia_state_names[gp->state]);
-					if (gp->state == REG_STATE_FAILED || gp->state == REG_STATE_TRYING) {
+					if (gp->state == REG_STATE_FAILED || gp->state == REG_STATE_FAIL_WAIT || gp->state == REG_STATE_TRYING) {
 						time_t now = switch_epoch_time_now(NULL);
-						if (gp->retry > now) {
+						if (gp->retry >= now) {
 							stream->write_function(stream, " (retry: %ds)", gp->retry - now);
 						} else {
 							stream->write_function(stream, " (retry: NEVER)");
@@ -4710,7 +4711,6 @@ SWITCH_STANDARD_API(sofia_gateway_data_function)
 {
 	char *argv[4];
 	char *mydata;
-	int argc;
 	sofia_gateway_t *gateway;
 	char *gwname, *param, *varname;
 	const char *val = NULL;
@@ -4723,7 +4723,7 @@ SWITCH_STANDARD_API(sofia_gateway_data_function)
 		return SWITCH_STATUS_FALSE;
 	}
 
-	if (!(argc = switch_separate_string(mydata, ' ', argv, (sizeof(argv) / sizeof(argv[0])))) || !argv[0]) {
+	if (!switch_separate_string(mydata, ' ', argv, (sizeof(argv) / sizeof(argv[0]))) || !argv[0]) {
 		goto end;
 	}
 
@@ -4990,7 +4990,7 @@ static int protect_dest_uri(switch_caller_profile_t *cp)
 	switch_size_t enclen = 0;
 	int mod = 0;
 
-	if (!(e = strchr(p, '@'))) {
+	if (!strchr(p, '@')) {
 		return 0;
 	}
 
@@ -6507,7 +6507,12 @@ static switch_status_t sofia_stir_shaken_vs_create(stir_shaken_context_t *contex
 		return SWITCH_STATUS_FALSE;
 	}
 	if (mod_sofia_globals.stir_shaken_vs_ca_dir) {
-		stir_shaken_vs_load_ca_dir(context, sofia_stir_shaken_vs, mod_sofia_globals.stir_shaken_vs_ca_dir);
+		if (stir_shaken_vs_load_ca_dir(context, sofia_stir_shaken_vs, mod_sofia_globals.stir_shaken_vs_ca_dir) != STIR_SHAKEN_STATUS_OK) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to load trusted root certificates from %s\n", mod_sofia_globals.stir_shaken_vs_ca_dir);
+			return SWITCH_STATUS_FALSE;
+		} else {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Loaded trusted root certificates from %s\n", mod_sofia_globals.stir_shaken_vs_ca_dir);
+		}
 	}
 	stir_shaken_vs_set_x509_cert_path_check(context, sofia_stir_shaken_vs, mod_sofia_globals.stir_shaken_vs_cert_path_check);
 	stir_shaken_vs_set_connect_timeout(context, sofia_stir_shaken_vs, 3);
@@ -7169,7 +7174,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_sofia_load)
 	SWITCH_ADD_API(api_interface, "sofia", "Sofia Controls", sofia_function, "<cmd> <args>");
 	SWITCH_ADD_API(api_interface, "sofia_gateway_data", "Get data from a sofia gateway", sofia_gateway_data_function, "<gateway_name> [ivar|ovar|var] <name>");
 	switch_console_set_complete("add sofia ::[help:status");
-	switch_console_set_complete("add sofia status profile ::sofia::list_profiles reg");
+	switch_console_set_complete("add sofia status profile ::sofia::list_profiles ::[reg:user:pres");
 	switch_console_set_complete("add sofia status gateway ::sofia::list_gateways");
 
 	switch_console_set_complete("add sofia count profiles");
