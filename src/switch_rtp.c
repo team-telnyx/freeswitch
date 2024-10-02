@@ -87,6 +87,7 @@
 #define RTP_MOS_JITTER_PENALTY 2.0
 #define RTP_PUBLISH_STATS_INTERVAL_MS 5000
 #define NTP_TIME_OFFSET 2208988800UL
+#define PP_MOS_PACKET_COUNTER_MAX_SIZE 256
 static const switch_payload_t INVALID_PT = 255;
 
 #define DTMF_SANITY (rtp_session->one_second * 30)
