@@ -2385,13 +2385,13 @@ void sofia_glue_del_profile(sofia_profile_t *profile)
 
 int sofia_recover_callback(switch_core_session_t *session)
 {
-
 	switch_channel_t *channel = switch_core_session_get_channel(session);
 	private_object_t *tech_pvt = NULL;
 	sofia_profile_t *profile = NULL;
 	const char *tmp;
 	const char *rr;
 	const char *tt;
+	const char *use_uuid;
 	switch_call_direction_t direction = SWITCH_CALL_DIRECTION_OUTBOUND;
 	int r = 0;
 	const char *profile_name = switch_channel_get_variable_dup(channel, "recovery_profile_name", SWITCH_FALSE, -1);
