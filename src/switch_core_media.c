@@ -10127,7 +10127,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 
 
 	if (switch_channel_up(session->channel)) {
-		uint32_t codec_ms = a_engine->cur_payload_map->codec_ms * (flags[SWITCH_RTP_FLAG_USE_MILLISECONDS_PER_PACKET] ? 1 : 1000);
 		switch_channel_set_variable(session->channel, "rtp_use_timer_name", timer_name);
 
 		a_engine->rtp_session = switch_rtp_new(a_engine->local_sdp_ip,
