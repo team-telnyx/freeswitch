@@ -1168,23 +1168,26 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_avmd_load) {
     int     ret;
 #endif
 
-    switch_application_interface_t *app_interface;
-    switch_api_interface_t *api_interface;
-    /* connect my internal structure to the blank pointer passed to me */
-    *module_interface = switch_loadable_module_create_module_interface(pool, modname);
+	switch_application_interface_t *app_interface;
+	switch_api_interface_t *api_interface;
+
+	if (pool == NULL) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "No memory pool assigned!\n");
+
+		return SWITCH_STATUS_TERM;
+	}
+
+	/* connect my internal structure to the blank pointer passed to me */
+	*module_interface = switch_loadable_module_create_module_interface(pool, modname);
 
     if (avmd_register_all_events() != SWITCH_STATUS_SUCCESS) {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Couldn't register avmd events!\n");
         return SWITCH_STATUS_TERM;
     }
 
-    memset(&avmd_globals, 0, sizeof(avmd_globals));
-    if (pool == NULL) {
-        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "No memory pool assigned!\n");
-        return SWITCH_STATUS_TERM;
-    }
-    switch_mutex_init(&avmd_globals.mutex, SWITCH_MUTEX_NESTED, pool);
-    avmd_globals.pool = pool;
+	memset(&avmd_globals, 0, sizeof(avmd_globals));
+	switch_mutex_init(&avmd_globals.mutex, SWITCH_MUTEX_NESTED, pool);
+	avmd_globals.pool = pool;
 
     if (avmd_load_xml_configuration(NULL) != SWITCH_STATUS_SUCCESS) {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Couldn't load XML configuration! Loading default settings\n");
