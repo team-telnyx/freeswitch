@@ -537,7 +537,7 @@ static switch_status_t switch_amrwb_decode(switch_codec_t *codec,
 	memcpy(buf, encoded_data, encoded_data_len);
 
 	switch_mutex_lock(global_lock);
-	if (globals.debug) {
+	if (global_debug) {
 		switch_amrwb_info(codec, buf, encoded_data_len, switch_test_flag(context, AMRWB_OPT_OCTET_ALIGN) ? 1 : 0, "AMRWB decoder");
 	}
 	switch_mutex_unlock(global_lock);
