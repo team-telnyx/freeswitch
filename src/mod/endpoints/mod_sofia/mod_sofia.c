@@ -868,7 +868,7 @@ static switch_status_t sofia_answer_channel(switch_core_session_t *session)
 			switch_core_media_prepare_codecs(tech_pvt->session, SWITCH_TRUE);
 			tech_pvt->mparams.local_sdp_str = NULL;
 			switch_core_media_choose_port(tech_pvt->session, SWITCH_MEDIA_TYPE_AUDIO, 0);
-			switch_core_media_gen_local_sdp(session, SDP_TYPE_RESPONSE, NULL, 0, NULL, 0);
+			switch_core_media_gen_local_sdp(session, SDP_ANSWER, NULL, 0, NULL, 0);
 			switch_channel_set_flag(channel, CF_3PCC);
 		} else if (is_3pcc_proxy) {
 			if (b_sdp && is_proxy && !switch_channel_var_true(channel, "3pcc_always_gen_sdp")) {
@@ -876,7 +876,7 @@ static switch_status_t sofia_answer_channel(switch_core_session_t *session)
 			} else {
 				switch_core_media_choose_port(tech_pvt->session, SWITCH_MEDIA_TYPE_AUDIO, 0);
 				switch_core_media_prepare_codecs(session, 1);
-				switch_core_media_gen_local_sdp(session, SDP_TYPE_REQUEST, NULL, 0, NULL, 1);
+				switch_core_media_gen_local_sdp(session, SDP_OFFER, NULL, 0, NULL, 1);
 				sofia_set_flag_locked(tech_pvt, TFLAG_3PCC);
 			}
 
@@ -965,7 +965,7 @@ static switch_status_t sofia_answer_channel(switch_core_session_t *session)
 
 				switch_core_media_prepare_codecs(tech_pvt->session, SWITCH_TRUE);
 
-				if (zstr(r_sdp) || sofia_media_tech_media(tech_pvt, r_sdp, SDP_TYPE_REQUEST) != SWITCH_STATUS_SUCCESS) {
+				if (zstr(r_sdp) || sofia_media_tech_media(tech_pvt, r_sdp, SDP_OFFER) != SWITCH_STATUS_SUCCESS) {
 					switch_channel_set_variable(channel, SWITCH_ENDPOINT_DISPOSITION_VARIABLE, "CODEC NEGOTIATION ERROR");
 					//switch_mutex_lock(tech_pvt->sofia_mutex);
 					//nua_respond(tech_pvt->nh, SIP_488_NOT_ACCEPTABLE, TAG_END());
@@ -980,7 +980,7 @@ static switch_status_t sofia_answer_channel(switch_core_session_t *session)
 			return status;
 		}
 
-		switch_core_media_gen_local_sdp(session, SDP_TYPE_RESPONSE, NULL, 0, NULL, 0);
+		switch_core_media_gen_local_sdp(session, SDP_ANSWER, NULL, 0, NULL, 0);
 		if (sofia_media_activate_rtp(tech_pvt) != SWITCH_STATUS_SUCCESS) {
 			switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
 		}
@@ -1829,7 +1829,7 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 			ip = switch_channel_get_variable(channel, SWITCH_REMOTE_MEDIA_IP_VARIABLE);
 			port = switch_channel_get_variable(channel, SWITCH_REMOTE_MEDIA_PORT_VARIABLE);
 			if (ip && port) {
-				switch_core_media_gen_local_sdp(session, SDP_TYPE_REQUEST, ip, (switch_port_t)atoi(port), msg->string_arg, 1);
+				switch_core_media_gen_local_sdp(session, SDP_OFFER, ip, (switch_port_t)atoi(port), msg->string_arg, 1);
 			}
 
 			if (!sofia_test_flag(tech_pvt, TFLAG_BYE)) {
@@ -2018,7 +2018,7 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 				if (switch_channel_direction(tech_pvt->channel) == SWITCH_CALL_DIRECTION_INBOUND) {
 
 					switch_core_media_prepare_codecs(tech_pvt->session, SWITCH_TRUE);
-					if (sofia_media_tech_media(tech_pvt, r_sdp, SDP_TYPE_REQUEST) != SWITCH_STATUS_SUCCESS) {
+					if (sofia_media_tech_media(tech_pvt, r_sdp, SDP_OFFER) != SWITCH_STATUS_SUCCESS) {
 						switch_channel_set_variable(channel, SWITCH_ENDPOINT_DISPOSITION_VARIABLE, "CODEC NEGOTIATION ERROR");
 						status = SWITCH_STATUS_FALSE;
 						goto end_lock;
@@ -2028,7 +2028,7 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 			}
 
 
-			switch_core_media_set_sdp_codec_string(tech_pvt->session, r_sdp, SDP_TYPE_RESPONSE);
+			switch_core_media_set_sdp_codec_string(tech_pvt->session, r_sdp, SDP_ANSWER);
 			switch_channel_set_variable(tech_pvt->channel, "absolute_codec_string", switch_channel_get_variable(tech_pvt->channel, "ep_codec_string"));
 			switch_core_media_prepare_codecs(tech_pvt->session, SWITCH_TRUE);
 
@@ -2037,7 +2037,7 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 				goto end_lock;
 			}
 
-			switch_core_media_gen_local_sdp(session, SDP_TYPE_REQUEST, NULL, 0, NULL, 1);
+			switch_core_media_gen_local_sdp(session, SDP_OFFER, NULL, 0, NULL, 1);
 
 			if (!msg->numeric_arg) {
 				if (send_invite) {
@@ -2491,7 +2491,7 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 				switch_channel_clear_flag(tech_pvt->channel, CF_AWAITING_STREAM_CHANGE);
 
 				switch_core_session_local_crypto_key(tech_pvt->session, SWITCH_MEDIA_TYPE_AUDIO);
-				switch_core_media_gen_local_sdp(session, SDP_TYPE_RESPONSE, NULL, 0, NULL, 0);
+				switch_core_media_gen_local_sdp(session, SDP_ANSWER, NULL, 0, NULL, 0);
 						
 				if (sofia_use_soa(tech_pvt)) {
 					nua_respond(tech_pvt->nh, SIP_200_OK,
@@ -2832,7 +2832,7 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 
 
 							switch_core_media_prepare_codecs(tech_pvt->session, SWITCH_TRUE);
-							if (zstr(r_sdp) || sofia_media_tech_media(tech_pvt, r_sdp, SDP_TYPE_REQUEST) != SWITCH_STATUS_SUCCESS) {
+							if (zstr(r_sdp) || sofia_media_tech_media(tech_pvt, r_sdp, SDP_OFFER) != SWITCH_STATUS_SUCCESS) {
 								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
 												  "CODEC NEGOTIATION ERROR.  SDP:\n%s\n", r_sdp ? r_sdp : "NO SDP!");
 								switch_channel_set_variable(channel, SWITCH_ENDPOINT_DISPOSITION_VARIABLE, "CODEC NEGOTIATION ERROR");
@@ -2847,7 +2847,7 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 						switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
 						goto end_lock;
 					}
-					switch_core_media_gen_local_sdp(session, SDP_TYPE_RESPONSE, NULL, 0, NULL, 0);
+					switch_core_media_gen_local_sdp(session, SDP_ANSWER, NULL, 0, NULL, 0);
 					if (sofia_media_activate_rtp(tech_pvt) != SWITCH_STATUS_SUCCESS) {
 						switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
 					}

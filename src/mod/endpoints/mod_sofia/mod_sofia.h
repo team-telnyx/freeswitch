@@ -806,7 +806,7 @@ struct sofia_profile {
 	switch_mutex_t *gw_mutex;
 	switch_mutex_t *gw_deleting_mutex;
 	uint32_t queued_events;
-	uint32_t last_cseq;
+	switch_uint31_t last_cseq;
 	int tls_only;
 	int tls_verify_date;
 	enum tport_tls_verify_policy tls_verify_policy;
