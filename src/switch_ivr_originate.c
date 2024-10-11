@@ -1861,6 +1861,8 @@ struct early_state {
 	int ready;
 	ringback_t *ringback;
 	int ttl;
+	switch_frame_t *write_frame;
+	switch_codec_t *write_codec;
 };
 typedef struct early_state early_state_t;
 
@@ -3591,6 +3593,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 								early_state.ready = 1;
 								early_state.ringback = &ringback;
 								early_state.ttl = and_argc;
+								early_state.write_frame = &write_frame;
+								early_state.write_codec = &write_codec;
 								switch_mutex_init(&early_state.mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 								switch_buffer_create_dynamic(&early_state.buffer, 1024, 1024, 0);
 								switch_thread_create(&oglobals.ethread, thd_attr, early_thread_run, &early_state, switch_core_session_get_pool(session));
