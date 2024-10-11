@@ -1931,6 +1931,43 @@ static void *SWITCH_THREAD_FUNC early_thread_run(switch_thread_t *thread, void *
 				}
 
 				if (!state->ringback->asis) {
+					switch_codec_implementation_t peer_read_impl = { 0 }, write_impl = { 0 };
+
+					if (switch_core_session_get_read_impl(originate_status[array_pos].peer_session, &peer_read_impl) == SWITCH_STATUS_SUCCESS 
+						&& switch_core_session_get_write_impl(state->oglobals->session, &write_impl) == SWITCH_STATUS_SUCCESS) {
+
+						// sync sample rate mismatch for bridge_early_media
+						if ((peer_read_impl.actual_samples_per_second != write_impl.actual_samples_per_second && peer_read_impl.actual_samples_per_second != state->write_frame->codec->implementation->actual_samples_per_second)
+								|| (state->write_frame->codec->implementation->actual_samples_per_second > write_impl.actual_samples_per_second)) {
+							
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(state->oglobals->session), SWITCH_LOG_DEBUG,
+												"Changing sampling rate from %uhz to %uhz\n", write_impl.actual_samples_per_second, peer_read_impl.actual_samples_per_second);
+							
+							if (switch_core_codec_ready(state->write_codec)) {
+								switch_core_codec_destroy(state->write_codec);
+							}
+
+							if (switch_core_codec_init(state->write_codec,
+													"L16",
+													NULL,
+													NULL,
+													peer_read_impl.actual_samples_per_second,
+													peer_read_impl.microseconds_per_packet / 1000,
+													peer_read_impl.number_of_channels, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, NULL,
+													switch_core_session_get_pool(state->oglobals->session)) == SWITCH_STATUS_SUCCESS) {
+
+								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(state->oglobals->session), SWITCH_LOG_DEBUG,
+												"Raw Codec Activation Success L16@%uhz %d channel %dms\n",
+												peer_read_impl.actual_samples_per_second, peer_read_impl.number_of_channels, peer_read_impl.microseconds_per_packet / 1000);
+								state->write_frame->codec = state->write_codec;
+								state->write_frame->datalen = peer_read_impl.decoded_bytes_per_packet;
+								state->write_frame->samples = state->write_frame->datalen / 2;
+								memset(state->write_frame->data, 255, state->write_frame->datalen);
+								switch_core_session_set_read_codec(state->oglobals->session, state->write_codec);
+							}
+						}
+					}
+
 					if (!switch_core_codec_ready((&read_codecs[i]))) {
 						if (switch_core_codec_init(&read_codecs[i],
 												   "L16",
