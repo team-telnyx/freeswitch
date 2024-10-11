@@ -4933,6 +4933,7 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 					profile->tls_verify_depth = 2;
 					profile->tls_enable_dh = 0;
 					profile->tls_verify_date = SWITCH_TRUE;
+					profile->force_cid_type = CID_TYPE_NONE;
 				} else {
 
 					/* you could change profile->foo here if it was a minor change like context or dialplan ... */
@@ -5260,6 +5261,10 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						profile->presence_hosts = switch_core_strdup(profile->pool, val);
 					} else if (!strcasecmp(var, "caller-id-type")) {
 						profile->cid_type = sofia_cid_name2type(val);
+					} else if (!strcasecmp(var, "force-caller-id-type")) {
+						if (!strcasecmp(val, "pai")) {
+							profile->force_cid_type = CID_TYPE_PID;
+						}
 					} else if (!strcasecmp(var, "record-template")) {
 						profile->record_template = switch_core_strdup(profile->pool, val);
 					} else if (!strcasecmp(var, "record-path")) {
@@ -8160,6 +8165,8 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 				}
 			}
 
+			sofia_clear_flag(tech_pvt, TFLAG_NEW_SDP);
+
 			if (!switch_channel_test_flag(channel, CF_ANSWERED)) {
 				const char *wait_for_ack = switch_channel_get_variable(channel, "sip_wait_for_aleg_ack");
 
@@ -9085,6 +9092,8 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 
 			}
 		}
+
+		sofia_clear_flag(tech_pvt, TFLAG_NEW_SDP);
 
 		if (r_sdp && sofia_test_flag(tech_pvt, TFLAG_NOSDP_REINVITE)) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Received SDP in ACK. NOSDP Re-INVITE process completion.\n");

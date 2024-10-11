@@ -383,6 +383,9 @@ struct switch_rtp {
 	rtp_msg_t recv_msg;
 	rtcp_msg_t rtcp_recv_msg;
 	rtcp_msg_t *rtcp_recv_msg_p;
+	rtp_msg_t last_recv_msg;
+	switch_status_t last_poll_status;
+	switch_size_t last_recv_bytes;
 
 	uint32_t autoadj_window;
 	uint32_t autoadj_threshold;
@@ -5128,6 +5131,18 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_create(switch_rtp_t **new_rtp_session
 	rtp_session->recv_msg.header.x = 0;
 	rtp_session->recv_msg.header.cc = 0;
 
+	rtp_session->last_recv_msg.header.ssrc = 0;
+	rtp_session->last_recv_msg.header.ts = 0;
+	rtp_session->last_recv_msg.header.seq = 0;
+	rtp_session->last_recv_msg.header.m = 0;
+	rtp_session->last_recv_msg.header.pt = (switch_payload_t) htonl(payload);
+	rtp_session->last_recv_msg.header.version = 2;
+	rtp_session->last_recv_msg.header.p = 0;
+	rtp_session->last_recv_msg.header.x = 0;
+	rtp_session->last_recv_msg.header.cc = 0;
+
+	rtp_session->last_poll_status = SWITCH_STATUS_FALSE;
+
 	rtp_session->payload = payload;
 	rtp_session->rtcp_last_sent = switch_micro_time_now();
 
@@ -6737,6 +6752,28 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 	}
 	memset(&rtp_session->last_rtp_hdr, 0, sizeof(rtp_session->last_rtp_hdr));
 
+	if (rtp_session->fork.fork_rx.active) {
+		// To apply media bug modification to fork stream
+		// get the last read frame data instead
+		if (rtp_session->last_poll_status == SWITCH_STATUS_SUCCESS)  {
+			switch_size_t last_datalen = 0;
+			rtp_session->last_recv_msg = rtp_session->recv_msg;
+			if (switch_core_session_get_fork_read_frame_data(rtp_session->session, (void*) &rtp_session->last_recv_msg.body
+				, (sizeof(rtp_session->last_recv_msg.body) / sizeof(rtp_session->last_recv_msg.body[0])), &last_datalen) == SWITCH_STATUS_SUCCESS) {
+				// The last frame size should have a minimum header length
+				if (rtp_session->last_recv_bytes >= rtp_header_len) {
+					rtp_session->last_recv_bytes = rtp_header_len + last_datalen;
+				}
+			} else {
+				rtp_session->last_recv_bytes = 0;
+			}
+			rtp_session->last_recv_msg.ebody = NULL;
+		} else {
+			rtp_session->last_recv_bytes = 0;
+		}
+		rtp_session->last_poll_status = poll_status;
+	}
+
 	if (poll_status == SWITCH_STATUS_SUCCESS) {
 		status = switch_socket_recvfrom(rtp_session->from_addr, rtp_session->sock_input, 0, (void *) &rtp_session->recv_msg, bytes);
 	} else {
@@ -7199,60 +7236,61 @@ fork_done:
 #endif
 		}
 
-			if (rtp_session->fork.fork_rx.active) {
-				if (rtp_session->sock_output && (*bytes > 0)) {
+		if (rtp_session->fork.fork_rx.active) {
+			if (rtp_session->sock_output && (rtp_session->last_recv_bytes > 0)) {
 
-					size_t lbytes = *bytes;
-					switch_fork_state_t *fork = &rtp_session->fork;
-					char payload_in[2048] = { 0};
-					char payload_out[2048] = { 0};
-					char packet[2048] = { 0};
-					int pt = rtp_session->recv_msg.header.pt;
-					int recv_pt = get_recv_payload(rtp_session);
-					//switch_channel_t *channel = switch_core_session_get_channel(rtp_session->session);
+				size_t lbytes = rtp_session->last_recv_bytes;
+				switch_fork_state_t *fork = &rtp_session->fork;
+				char payload_in[2048] = { 0 };
+				char payload_out[2048] = { 0 };
+				char packet[2048] = { 0 };
+				int pt = rtp_session->last_recv_msg.header.pt;
+				int recv_pt = get_recv_payload(rtp_session);
+				//switch_channel_t *channel = switch_core_session_get_channel(rtp_session->session);
 
-					// IF Send only SSRC that was fired in event ?
-					if (FORK_SSRC_CHECK && (rtp_session->remote_ssrc != fork->fork_rx.ssrc)) {
-						uint32_t ssrc = rtp_session->remote_ssrc;
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "Fork (rx): skip transmit %zu bytes as ssrc %u does not match fork ssrc %u\n", lbytes, ssrc, fork->fork_rx.ssrc);
-						goto fork_end;
-					}
+				// IF Send only SSRC that was fired in event ?
+				if (FORK_SSRC_CHECK && (rtp_session->remote_ssrc != fork->fork_rx.ssrc)) {
+					uint32_t ssrc = rtp_session->remote_ssrc;
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "Fork (rx): skip transmit %zu bytes as ssrc %u does not match fork ssrc %u\n", lbytes, ssrc, fork->fork_rx.ssrc);
+					goto fork_end;
+				}
 
-					memcpy(packet, (void*) &rtp_session->recv_msg.header, lbytes);
+				memcpy(packet, (void*) &rtp_session->last_recv_msg.header, lbytes);
 
-					if (pt == recv_pt) {
+				if (pt == recv_pt) {
 
-						// Transcode audio to requested fork codec if necessary
-						if (fork->fork_rx.transcoding) {
+					// Transcode audio to requested fork codec if necessary
+					if (fork->fork_rx.transcoding) {
 
-							uint32_t len_in = lbytes;
-							uint32_t len_out = 2048 - 12;
-							uint32_t rate_in = 8000, rate_out = 8000;
+						uint32_t len_in = lbytes;
+						uint32_t len_out = 2048 - 12;
+						uint32_t rate_in = 8000, rate_out = 8000;
 
-							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG1, "Fork (rx): transcoding to %s\n", fork->fork_rx.codec_iananame);
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG1, "Fork (rx): transcoding to %s\n", fork->fork_rx.codec_iananame);
 
-							if (lbytes > 12) {
-								len_in = lbytes - 12 > 2048 - 12 ? 2048 - 12 : lbytes - 12;
-								memcpy(payload_in, ((char*) &rtp_session->recv_msg.header) + 12, len_in);
-								if (SWITCH_STATUS_SUCCESS != switch_rtp_transcode(&fork->fork_rx.codec_in, &fork->fork_rx.codec_out, payload_in, len_in, payload_out, &len_out, rate_in, rate_out)) {
-									switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR, "Fork (rx): failed to transcode %d bytes of payload\n", len_in);
-									goto fork_end;
-								}
-								packet[1] = fork->fork_rx.transcoding_pt;
-								memcpy(&packet[12], payload_out, len_out);
-								lbytes = len_out + 12;
+						if (lbytes > 12) {
+							len_in = lbytes - 12 > 2048 - 12 ? 2048 - 12 : lbytes - 12;
+							memcpy(payload_in, ((char*) &rtp_session->last_recv_msg.header) + 12, len_in);
+							if (SWITCH_STATUS_SUCCESS != switch_rtp_transcode(&fork->fork_rx.codec_in, &fork->fork_rx.codec_out, payload_in, len_in, payload_out, &len_out, rate_in, rate_out)) {
+								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR, "Fork (rx): failed to transcode %d bytes of payload\n", len_in);
+								goto fork_end;
 							}
+							packet[1] = fork->fork_rx.transcoding_pt;
+							memcpy(&packet[12], payload_out, len_out);
+							lbytes = len_out + 12;
 						}
 					}
+				}
 
-					if (switch_socket_sendto(rtp_session->sock_output, fork->fork_rx.addr, 0, (void *) &packet, &lbytes) != SWITCH_STATUS_SUCCESS) {
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR, "Fork (rx): failed to transmit %zu bytes\n", lbytes);
-					}
+				if (switch_socket_sendto(rtp_session->sock_output, fork->fork_rx.addr, 0, (void *) &packet, &lbytes) != SWITCH_STATUS_SUCCESS) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR, "Fork (rx): failed to transmit %zu bytes\n", lbytes);
 				}
 			}
+		}
 
 fork_end:
 
+		rtp_session->last_recv_bytes = *bytes;
 		if (rtp_session->has_rtp) {
 			if (rtp_session->recv_msg.header.cc > 0) { /* Contributing Source Identifiers (4 bytes = sizeof CSRC header)*/
 				rtp_session->recv_msg.ebody = RTP_BODY(rtp_session) + (rtp_session->recv_msg.header.cc * 4);
@@ -7568,6 +7606,7 @@ static void handle_nack(switch_rtp_t *rtp_session, uint32_t nack)
 	}
 }
 
+#ifdef SWITCH_RTCP_PROCESS_XR
 static switch_status_t process_rtcp_xr_report(switch_rtcp_report_data_t *report_data, switch_rtp_t *rtp_session, rtcp_msg_t *msg, switch_size_t bytes)
 {
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
@@ -7589,7 +7628,7 @@ static switch_status_t process_rtcp_xr_report(switch_rtcp_report_data_t *report_
 		return SWITCH_STATUS_FALSE;
 	}
 
-	/* Count the number of report blocks */
+	// Count the number of report blocks
 	while ((int32_t *)header < (int32_t *)msg->body + plen) {
 		blen = ntohs(header->length);
 		if (blen) {
@@ -7601,7 +7640,7 @@ static switch_status_t process_rtcp_xr_report(switch_rtcp_report_data_t *report_
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "Found %d report blocks\n", count);
 
 	if (!count) {
-		/* No report blocks found */
+		// No report blocks found
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "No report blocks found\n");
 		return status;
 	}
@@ -7611,11 +7650,11 @@ static switch_status_t process_rtcp_xr_report(switch_rtcp_report_data_t *report_
 	header = &packet->rb_header;
 	count = 0;
 
-	/* Parse the report blocks */
+	// Parse the report blocks
 	while ((int32_t *)header < (int32_t *)msg->body + plen) {
 		blen = ntohs(header->length);
 
-		/* Skip any block with length == 0 */
+		// Skip any block with length == 0
 		if (blen) {
 			switch (header->bt) {
 				case XR_RR_TIME: {
@@ -7656,6 +7695,7 @@ static switch_status_t process_rtcp_xr_report(switch_rtcp_report_data_t *report_
 	}
 	return status;
 }
+#endif
 
 static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t *msg, switch_size_t bytes)
 {
@@ -7714,9 +7754,8 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 		}
 		
 	} else {
-		struct switch_rtcp_report_block *report;
-
 		if (msg->header.type == _RTCP_PT_SR || msg->header.type == _RTCP_PT_RR || msg->header.type == _RTCP_PT_XR) {
+			struct switch_rtcp_report_block *report = NULL;
 			int i;
 #ifdef DEBUG_RTCP
 			switch_time_t now = switch_micro_time_now();
@@ -7737,7 +7776,11 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 			lsr_now = calc_local_lsr_now();
 
 			if (msg->header.type == _RTCP_PT_XR) {
+#ifdef SWITCH_RTCP_PROCESS_XR
 				status = process_rtcp_xr_report(&report_data, rtp_session, msg, bytes);
+#else
+				return SWITCH_STATUS_SUCCESS;
+#endif
 			} else if (msg->header.type == _RTCP_PT_SR) { /* Sender report */
 				struct switch_rtcp_sender_report* sr = (struct switch_rtcp_sender_report*)msg->body;
 
@@ -7814,7 +7857,7 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 							rtp_type(rtp_session), msg->header.type, ntohl(report->jitter), ntohl(report_data.ssrc), RTCP_BUG_SSRC);
 #endif
 					} else {
-						if (ntohl(report->jitter) > HIGH_JITTER_LOG_THRESHOLD) {
+						if (report && ntohl(report->jitter) > HIGH_JITTER_LOG_THRESHOLD) {
 #ifdef DEBUG_HOMER
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "(huge jitter) [not ours] RTCP probe report block (pt=%u, ssrc=%u, ia_jitter=%u) [type=%s remote_ssrc=%u peer_ssrc=%u local ssrc=%u]\n",
 								msg->header.type, ntohl(report_data.ssrc), ntohl(report->jitter), rtp_type(rtp_session), rtp_session->remote_ssrc, rtp_session->stats.rtcp.peer_ssrc, rtp_session->ssrc);
@@ -7827,6 +7870,10 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 
 			if (report_data.xr_count > 0) {
 				switch_safe_free(report_data.rtcp_data.xr_blocks)
+			}
+
+			if (!report) {
+				return status; // we received only XR report in this packet, do not calculate internal stats
 			}
 
 			for (i = 0; i < (int)msg->header.count && i < MAX_REPORT_BLOCKS ; i++) {
@@ -9260,6 +9307,10 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_zerocopy_read_frame(switch_rtp_t *rtp
 		frame->seq = (uint16_t) ntohs((uint16_t) rtp_session->last_rtp_hdr.seq);
 		frame->ssrc = ntohl(rtp_session->last_rtp_hdr.ssrc);
 		frame->m = rtp_session->last_rtp_hdr.m ? SWITCH_TRUE : SWITCH_FALSE;
+	}
+
+	if (rtp_session->fork.fork_rx.active) {
+		switch_set_flag(frame, SFF_FORK_RTP);
 	}
 
 #ifdef ENABLE_ZRTP

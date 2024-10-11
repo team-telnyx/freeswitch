@@ -1554,6 +1554,7 @@ typedef enum {
 	CF_FS_RTP,
 	CF_REPORTING,
 	CF_PARK,
+	CF_PARK_CHECK_SEND_SILENCE,
 	CF_TIMESTAMP_SET,
 	CF_ORIGINATOR,
 	CF_XFER_ZOMBIE,
@@ -1761,7 +1762,8 @@ typedef enum {
 	SFF_ENCODED = (1 << 17),
 	SFF_TEXT_LINE_BREAK = (1 << 18),
 	SFF_IS_KEYFRAME = (1 << 19),
-	SFF_EXTERNAL = (1 << 20)
+	SFF_EXTERNAL = (1 << 20),
+	SFF_FORK_RTP = (1 << 21)
 } switch_frame_flag_enum_t;
 typedef uint32_t switch_frame_flag_t;
 
