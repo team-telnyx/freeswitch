@@ -1943,7 +1943,7 @@ static void *SWITCH_THREAD_FUNC early_thread_run(switch_thread_t *thread, void *
 								|| (state->write_frame->codec->implementation->actual_samples_per_second > write_impl.actual_samples_per_second)) {
 							
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(state->oglobals->session), SWITCH_LOG_DEBUG,
-												"Changing sampling rate from %uhz to %uhz\n", write_impl.actual_samples_per_second, peer_read_impl.actual_samples_per_second);
+												"Changing sampling rate from %uHz to %uHz\n", write_impl.actual_samples_per_second, peer_read_impl.actual_samples_per_second);
 							
 							if (switch_core_codec_ready(state->write_codec)) {
 								switch_core_codec_destroy(state->write_codec);
@@ -1959,7 +1959,7 @@ static void *SWITCH_THREAD_FUNC early_thread_run(switch_thread_t *thread, void *
 													switch_core_session_get_pool(state->oglobals->session)) == SWITCH_STATUS_SUCCESS) {
 
 								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(state->oglobals->session), SWITCH_LOG_DEBUG,
-												"Raw Codec Activation Success L16@%uhz %d channel %dms\n",
+												"Raw Codec Activation Success L16@%uHz %d channel %dms\n",
 												peer_read_impl.actual_samples_per_second, peer_read_impl.number_of_channels, peer_read_impl.microseconds_per_packet / 1000);
 								state->write_frame->codec = state->write_codec;
 								state->write_frame->datalen = peer_read_impl.decoded_bytes_per_packet;
