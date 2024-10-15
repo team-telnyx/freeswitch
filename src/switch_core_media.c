@@ -4505,6 +4505,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_add_ice_acl(switch_core_sessio
 SWITCH_DECLARE(void) switch_core_media_check_video_codecs(switch_core_session_t *session)
 {
 	switch_media_handle_t *smh;
+	const char *disable_video;
 
 	switch_assert(session);
 
@@ -4512,16 +4513,20 @@ SWITCH_DECLARE(void) switch_core_media_check_video_codecs(switch_core_session_t 
 		return;
 	}
 
-	if (smh->mparams->num_codecs && !switch_channel_test_flag(session->channel, CF_VIDEO_POSSIBLE)) {
+	if (!zstr(disable_video = switch_channel_get_variable(session->channel, "disable_video_codecs"))) {
+		if (switch_true(disable_video)) {
+			switch_channel_set_flag(session->channel, CF_NOVIDEO);
+		}
+	} else if (smh->mparams->disable_video_codecs) {
+		switch_channel_set_flag(session->channel, CF_NOVIDEO);
+	}
+
+	if (smh->mparams->num_codecs && !switch_channel_test_flag(session->channel, CF_VIDEO_POSSIBLE) && !switch_channel_test_flag(session->channel, CF_NOVIDEO)) {
 		int i;
 		smh->video_count = 0;
 		for (i = 0; i < smh->mparams->num_codecs; i++) {
 
 			if (smh->codecs[i]->codec_type == SWITCH_CODEC_TYPE_VIDEO) {
-				if (switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_INBOUND &&
-					switch_channel_test_flag(session->channel, CF_NOVIDEO)) {
-					continue;
-				}
 				smh->video_count++;
 			}
 		}

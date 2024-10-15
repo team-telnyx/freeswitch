@@ -111,6 +111,7 @@ typedef struct switch_core_media_params_s {
 
 	char *inbound_codec_string;
 	char *outbound_codec_string;
+	switch_bool_t disable_video_codecs;
 
 	char *timer_name;
 
