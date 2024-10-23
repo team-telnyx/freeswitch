@@ -2704,7 +2704,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 	switch_epoch_time_now(&global_start);
 	last_retry_start = switch_micro_time_now();
 	
-	switch_event_create_subclass(&post_originate_event, SWITCH_EVENT_CUSTOM, "post_originate_event");
+	switch_event_create(&post_originate_event, SWITCH_EVENT_CLONE);
 
 	for (try = 0; try < retries; try++) {
 
@@ -3249,7 +3249,6 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 					
 					if (!fire_post_originate_event) {
 						const char* telnyx_session_uuid = switch_channel_get_variable(oglobals.originate_status[i].peer_channel, "telnyx_session_uuid");
-						const char* telnyx_uuid = switch_channel_get_variable(oglobals.originate_status[i].peer_channel, "telnyx_uuid");
 						const char* logical_leg_uuid = switch_channel_get_variable(oglobals.originate_status[i].peer_channel, "logical_leg_uuid");
 						const char* call_control = switch_channel_get_variable(oglobals.originate_status[i].peer_channel, "call_control");
 						const char* telnyx_fax = switch_channel_get_variable(oglobals.originate_status[i].peer_channel, "telnyx_fax");
@@ -3266,10 +3265,17 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 							switch_event_add_header_string(post_originate_event, SWITCH_STACK_BOTTOM, "logical_leg_uuid", logical_leg_uuid);
 						}
 
-						if (!zstr(telnyx_session_uuid) && !zstr(telnyx_uuid)) {
+						if (!zstr(telnyx_session_uuid)) {
 							switch_event_add_header_string(post_originate_event, SWITCH_STACK_BOTTOM, "telnyx_session_uuid", telnyx_session_uuid);
-							switch_event_add_header_string(post_originate_event, SWITCH_STACK_BOTTOM, "telnyx_uuid", telnyx_uuid);
 							fire_post_originate_event = 1;
+						}
+					}
+
+					if (fire_post_originate_event) {
+						const char* telnyx_uuid = switch_channel_get_variable(oglobals.originate_status[i].peer_channel, "telnyx_uuid");
+						if (!zstr(telnyx_uuid)) {
+							switch_event_del_header(post_originate_event, "telnyx_uuid");
+							switch_event_add_header_string(post_originate_event, SWITCH_STACK_BOTTOM, "telnyx_uuid", telnyx_uuid);
 						}
 					}
 				}
@@ -4298,11 +4304,17 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 	switch_safe_free(oglobals.error_file);
 	
 	if (post_originate_event && fire_post_originate_event) {
+		switch_event_t* fire_custom_event = NULL;
 		if (!zstr(current_session_uuid)) {
 			switch_event_add_header_string(post_originate_event, SWITCH_STACK_BOTTOM, "Last-Channel-Unique-ID", current_session_uuid);
 		}
-		switch_event_fire(&post_originate_event);
-	} else if (post_originate_event) {
+		if (switch_event_create_subclass(&fire_custom_event, SWITCH_EVENT_CUSTOM, "post_originate_event") == SWITCH_STATUS_SUCCESS) {
+			switch_event_merge(fire_custom_event, post_originate_event);
+			switch_event_fire(&fire_custom_event);
+		}
+	}
+	
+	if (post_originate_event) {
 		switch_event_destroy(&post_originate_event);
 	}
 
