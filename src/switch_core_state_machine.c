@@ -333,6 +333,7 @@ static void switch_core_standard_on_execute(switch_core_session_t *session)
 	const char *uuid;
 	const char *next_application_on_execute = NULL; 
 	const char *next_application_data_on_execute = NULL;
+	const char *post_dialplan_execute = NULL;
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s Standard EXECUTE\n", switch_channel_get_name(session->channel));
 
@@ -370,9 +371,7 @@ static void switch_core_standard_on_execute(switch_core_session_t *session)
 		switch_channel_set_variable(session->channel, "next_application_on_execute", "");
 		switch_channel_set_variable(session->channel, "next_application_data_on_execute", "");
 	}
-	
-	
-	
+
 	while (switch_channel_get_state(session->channel) == CS_EXECUTE && extension->current_application) {
 		switch_caller_application_t *current_application = extension->current_application;
 
@@ -388,6 +387,15 @@ static void switch_core_standard_on_execute(switch_core_session_t *session)
 			goto top;
 		}
 
+	}
+
+	post_dialplan_execute = switch_channel_get_variable(session->channel, "post_dialplan_execute");
+
+	if (!zstr(post_dialplan_execute)) {
+		switch_application_function_t func = switch_channel_get_post_dialplan_function(session->channel);
+		if (func) {
+			func(session, post_dialplan_execute);
+		}
 	}
 
 	if (switch_channel_ready(session->channel) && switch_channel_get_state(session->channel) == CS_EXECUTE &&
