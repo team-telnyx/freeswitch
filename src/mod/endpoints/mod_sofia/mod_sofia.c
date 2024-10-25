@@ -2138,6 +2138,7 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 			if (ok) {
 				char *headers = sofia_glue_get_extra_headers(channel, SOFIA_SIP_INFO_HEADER_PREFIX);
 				const char *pl = NULL;
+				switch_event_t *event;
 
 				if (!zstr(msg->string_array_arg[0]) && !zstr(msg->string_array_arg[1])) {
 					switch_snprintf(ct, sizeof(ct), "%s/%s", msg->string_array_arg[0], msg->string_array_arg[1]);
