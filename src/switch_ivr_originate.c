@@ -4277,7 +4277,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 
 			if (status == SWITCH_STATUS_SUCCESS || oglobals.idx == IDX_XFER) {
 				goto outer_for;
-			} else if (status == SWITCH_STATUS_FALSE || oglobals.idx == IDX_INCOMPATIBLE) {
+			} else if (status == SWITCH_STATUS_FALSE && oglobals.idx == IDX_INCOMPATIBLE) {
 				goto outer_for;
 			} else {
 				int ok = 1;
