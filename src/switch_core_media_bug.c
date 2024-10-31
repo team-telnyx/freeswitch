@@ -378,10 +378,10 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_read(switch_media_bug_t *b
 	wlen = datalen / 2;
 	blen = (uint32_t)(bytes / 2);
 
-	if (switch_test_flag(bug, SMBF_STEREO) || !switch_test_flag(bug, SMBF_STEREO_NO_DOWN_MIX)) {
+	if (switch_test_flag(bug, SMBF_STEREO) || switch_test_flag(bug, SMBF_REAL_STEREO)) {
 		int16_t *left, *right;
 		size_t left_len, right_len;
-		if (!switch_test_flag(bug, SMBF_STEREO_NO_DOWN_MIX)) {
+		if (!switch_test_flag(bug, SMBF_STEREO_NO_DOWN_MIX) && switch_test_flag(bug, SMBF_REAL_STEREO)) {
 			switch_mux_channels(dp, wlen, read_impl.number_of_channels, 1);
 			switch_mux_channels(fp, rlen, read_impl.number_of_channels, 1);
 		}
