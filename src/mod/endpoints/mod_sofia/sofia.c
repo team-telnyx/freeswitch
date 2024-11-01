@@ -4059,7 +4059,7 @@ static void parse_gateways(sofia_profile_t *profile, switch_xml_t gateways_tag, 
 			gateway->ob_calls = 0;
 			gateway->ib_failed_calls = 0;
 			gateway->ob_failed_calls = 0;
-			gateway->auto_delete_inactive = 1;
+			gateway->auto_delete_inactive = 0;
 			gateway->max_inactive_seconds = 1800; // 30 mins
 			gateway->last_inactive = 0;
 			gateway->destination_prefix = "";
