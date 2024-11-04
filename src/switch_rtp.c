@@ -7877,9 +7877,8 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 				}
 			}
 
-			switch_safe_free(report_data.rtcp_data.xr_blocks)
-
 			if (!report) {
+				switch_safe_free(report_data.rtcp_data.xr_blocks)
 				return status; // we received only XR report in this packet, do not calculate internal stats
 			}
 
