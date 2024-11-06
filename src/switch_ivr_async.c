@@ -3129,6 +3129,18 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 		}
 	} else if (channels == 2) {
 		flags |= SMBF_REAL_STEREO;
+		if (recording_var_true(channel, vars, "RECORD_STEREO")) {
+			flags |= SMBF_STEREO;
+			flags &= ~SMBF_STEREO_SWAP;
+		}
+
+		if (recording_var_true(channel, vars, "RECORD_STEREO_SWAP")) {
+			flags |= SMBF_STEREO;
+			flags |= SMBF_STEREO_SWAP;
+		}
+		if (!(flags & SMBF_STEREO)) {
+			channels = 1;
+		}
 	}
 
 	if (recording_var_true(channel, vars, "RECORD_ANSWER_REQ")) {
