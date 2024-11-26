@@ -67,36 +67,24 @@ static void text_bridge_thread(switch_core_session_t *session, void *obj)
 
 	vh->up = 1;
 
-	if (!vh->session_a) {
-		if (!zstr(vh->session_a_uuid)) {
-			if (!(vh->session_a = switch_core_session_locate(vh->session_a_uuid))) {
-				vh->up = 0;
-				return;
-			}
-		} else {
+	if (!zstr(vh->session_a_uuid)) {
+		if (!(vh->session_a = switch_core_session_locate(vh->session_a_uuid))) {
 			vh->up = 0;
 			return;
 		}
-	} else if (switch_core_session_read_lock(vh->session_a) != SWITCH_STATUS_SUCCESS) {
+	} else {
 		vh->up = 0;
 		return;
 	}
 	channel = switch_core_session_get_channel(vh->session_a);
 
-	if (!vh->session_b) {
-		if (!zstr(vh->session_b_uuid)) {
-			if (!(vh->session_b = switch_core_session_locate(vh->session_b_uuid))) {
-				vh->up = 0;
-				switch_core_session_rwunlock(vh->session_a);
-				return;
-			}
-		} else {
+	if (!zstr(vh->session_b_uuid)) {
+		if (!(vh->session_b = switch_core_session_locate(vh->session_b_uuid))) {
 			vh->up = 0;
 			switch_core_session_rwunlock(vh->session_a);
 			return;
 		}
-
-	} else if (switch_core_session_read_lock(vh->session_b) != SWITCH_STATUS_SUCCESS) {
+	} else {
 		vh->up = 0;
 		switch_core_session_rwunlock(vh->session_a);
 		return;
@@ -199,36 +187,24 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 
 	vh->up = 1;
 
-	if (!vh->session_a) {
-		if (!zstr(vh->session_a_uuid)) {
-			if (!(vh->session_a = switch_core_session_locate(vh->session_a_uuid))) {
-				vh->up = 0;
-				return;
-			}
-		} else {
+	if (!zstr(vh->session_a_uuid)) {
+		if (!(vh->session_a = switch_core_session_locate(vh->session_a_uuid))) {
 			vh->up = 0;
 			return;
 		}
-	} else if (switch_core_session_read_lock(vh->session_a) != SWITCH_STATUS_SUCCESS) {
+	} else {
 		vh->up = 0;
 		return;
 	}
 	channel = switch_core_session_get_channel(vh->session_a);
 
-	if (!vh->session_b) {
-		if (!zstr(vh->session_b_uuid)) {
-			if (!(vh->session_b = switch_core_session_locate(vh->session_b_uuid))) {
-				vh->up = 0;
-				switch_core_session_rwunlock(vh->session_a);
-				return;
-			}
-		} else {
+	if (!zstr(vh->session_b_uuid)) {
+		if (!(vh->session_b = switch_core_session_locate(vh->session_b_uuid))) {
 			vh->up = 0;
 			switch_core_session_rwunlock(vh->session_a);
 			return;
 		}
-
-	} else if (switch_core_session_read_lock(vh->session_b) != SWITCH_STATUS_SUCCESS) {
+	} else {
 		vh->up = 0;
 		switch_core_session_rwunlock(vh->session_a);
 		return;
@@ -844,8 +820,6 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 #ifdef SWITCH_VIDEO_IN_THREADS
 		if (switch_channel_test_flag(chan_a, CF_VIDEO) && switch_channel_test_flag(chan_b, CF_VIDEO) && !vid_launch) {
 			vid_launch++;
-			vh.session_a = session_a;
-			vh.session_b = session_b;
 			strcpy(vh.session_a_uuid, switch_core_session_get_uuid(session_a));
 			strcpy(vh.session_b_uuid, switch_core_session_get_uuid(session_b));
 			switch_channel_clear_flag(chan_a, CF_VIDEO_BLANK);
