@@ -69,25 +69,21 @@ static void text_bridge_thread(switch_core_session_t *session, void *obj)
 
 	if (!zstr(vh->session_a_uuid)) {
 		if (!(vh->session_a = switch_core_session_locate(vh->session_a_uuid))) {
-			vh->up = 0;
-			return;
+			goto cleanup;
 		}
 	} else {
-		vh->up = 0;
-		return;
+		goto cleanup;
 	}
 	channel = switch_core_session_get_channel(vh->session_a);
 
 	if (!zstr(vh->session_b_uuid)) {
 		if (!(vh->session_b = switch_core_session_locate(vh->session_b_uuid))) {
-			vh->up = 0;
 			switch_core_session_rwunlock(vh->session_a);
-			return;
+			goto cleanup;
 		}
 	} else {
-		vh->up = 0;
 		switch_core_session_rwunlock(vh->session_a);
-		return;
+		goto cleanup;
 	}
 	b_channel = switch_core_session_get_channel(vh->session_b);
 
@@ -165,6 +161,7 @@ static void text_bridge_thread(switch_core_session_t *session, void *obj)
 	switch_core_session_rwunlock(vh->session_a);
 	switch_core_session_rwunlock(vh->session_b);
 
+cleanup:
 	vh->up = 0;
 
 	switch_buffer_destroy(&text_buffer);
