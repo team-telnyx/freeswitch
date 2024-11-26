@@ -69,12 +69,7 @@ static void text_bridge_thread(switch_core_session_t *session, void *obj)
 
 	if (!vh->session_a) {
 		if (!zstr(vh->session_a_uuid)) {
-			if ((vh->session_a = switch_core_session_locate(vh->session_a_uuid))) {
-				if (switch_core_session_read_lock(vh->session_a) != SWITCH_STATUS_SUCCESS) {
-					vh->up = 0;
-					return;
-				}
-			} else {
+			if (!(vh->session_a = switch_core_session_locate(vh->session_a_uuid))) {
 				vh->up = 0;
 				return;
 			}
@@ -90,13 +85,7 @@ static void text_bridge_thread(switch_core_session_t *session, void *obj)
 
 	if (!vh->session_b) {
 		if (!zstr(vh->session_b_uuid)) {
-			if ((vh->session_b = switch_core_session_locate(vh->session_b_uuid))) {
-				if (switch_core_session_read_lock(vh->session_b) != SWITCH_STATUS_SUCCESS) {
-					vh->up = 0;
-					switch_core_session_rwunlock(vh->session_a);
-					return;
-				}
-			} else {
+			if (!(vh->session_b = switch_core_session_locate(vh->session_b_uuid))) {
 				vh->up = 0;
 				switch_core_session_rwunlock(vh->session_a);
 				return;
@@ -212,12 +201,7 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 
 	if (!vh->session_a) {
 		if (!zstr(vh->session_a_uuid)) {
-			if ((vh->session_a = switch_core_session_locate(vh->session_a_uuid))) {
-				if (switch_core_session_read_lock(vh->session_a) != SWITCH_STATUS_SUCCESS) {
-					vh->up = 0;
-					return;
-				}
-			} else {
+			if (!(vh->session_a = switch_core_session_locate(vh->session_a_uuid))) {
 				vh->up = 0;
 				return;
 			}
@@ -233,13 +217,7 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 
 	if (!vh->session_b) {
 		if (!zstr(vh->session_b_uuid)) {
-			if ((vh->session_b = switch_core_session_locate(vh->session_b_uuid))) {
-				if (switch_core_session_read_lock(vh->session_b) != SWITCH_STATUS_SUCCESS) {
-					vh->up = 0;
-					switch_core_session_rwunlock(vh->session_a);
-					return;
-				}
-			} else {
+			if (!(vh->session_b = switch_core_session_locate(vh->session_b_uuid))) {
 				vh->up = 0;
 				switch_core_session_rwunlock(vh->session_a);
 				return;
