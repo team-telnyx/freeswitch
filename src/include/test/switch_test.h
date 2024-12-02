@@ -260,7 +260,10 @@ static switch_status_t fst_init_core_and_modload(const char *confdir, const char
 		switch_time_t fst_time_start = 0; \
 		switch_timer_t fst_timer = { 0 }; \
 		switch_memory_pool_t *fst_pool = NULL; \
+		switch_memory_pool_t *telnyx_pool = NULL; \
 		int fst_timer_started = 0; \
+		switch_core_new_memory_pool(&telnyx_pool); \
+		switch_telnyx_init(telnyx_pool); \
 		fst_getenv_default("FST_SUPPRESS_UNUSED_STATIC_WARNING", NULL, SWITCH_FALSE); \
 		if (fst_core) { \
 			fst_init_core_and_modload(NULL, NULL, 0, 0); /* shuts up compiler */ \
@@ -288,7 +291,10 @@ static switch_status_t fst_init_core_and_modload(const char *confdir, const char
 		switch_time_t fst_time_start = 0; \
 		switch_timer_t fst_timer = { 0 }; \
 		switch_memory_pool_t *fst_pool = NULL; \
+		switch_memory_pool_t *telnyx_pool = NULL; \
 		int fst_timer_started = 0; \
+		switch_core_new_memory_pool(&telnyx_pool); \
+		switch_telnyx_init(telnyx_pool); \
 		fst_getenv_default("FST_SUPPRESS_UNUSED_STATIC_WARNING", NULL, SWITCH_FALSE); \
 		if (fst_init_core_and_modload(confdir, confdir, 0, flags | SCF_LOG_DISABLE) == SWITCH_STATUS_SUCCESS) { \
 			fst_core = 2; \
@@ -309,6 +315,7 @@ static switch_status_t fst_init_core_and_modload(const char *confdir, const char
 			/* shut up compiler */ \
 			fst_time_start = 0; \
 		} \
+		switch_core_destroy_memory_pool(&telnyx_pool); \
 	} \
 	FCT_END()
 
@@ -325,7 +332,10 @@ static switch_status_t fst_init_core_and_modload(const char *confdir, const char
 		switch_time_t fst_time_start = 0; \
 		switch_timer_t fst_timer = { 0 }; \
 		switch_memory_pool_t *fst_pool = NULL; \
+		switch_memory_pool_t *telnyx_pool = NULL; \
 		int fst_timer_started = 0; \
+		switch_core_new_memory_pool(&telnyx_pool); \
+		switch_telnyx_init(telnyx_pool); \
 		fst_getenv_default("FST_SUPPRESS_UNUSED_STATIC_WARNING", NULL, SWITCH_FALSE); \
 		if (fst_init_core_and_modload(confdir, NULL, 1, 0 | SCF_LOG_DISABLE) == SWITCH_STATUS_SUCCESS) { /* minimal load */ \
 			fst_core = 1; \
