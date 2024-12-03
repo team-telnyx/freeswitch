@@ -43,6 +43,8 @@ static void cleanup_proxy_mode_b(switch_core_session_t *session);
 struct vid_helper {
 	switch_core_session_t *session_a;
 	switch_core_session_t *session_b;
+	char session_a_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1];
+	char session_b_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1];
 	int up;
 };
 
@@ -52,8 +54,8 @@ static void text_bridge_thread(switch_core_session_t *session, void *obj)
 	struct vid_helper *vh = obj;
 	switch_status_t status;
 	switch_frame_t *read_frame = 0;
-	switch_channel_t *channel = switch_core_session_get_channel(vh->session_a);
-	switch_channel_t *b_channel = switch_core_session_get_channel(vh->session_b);
+	switch_channel_t *channel = NULL;
+	switch_channel_t *b_channel = NULL; 
 	switch_buffer_t *text_buffer = NULL;
 	switch_size_t text_framesize = 1024, inuse = 0;
 	unsigned char *text_framedata = NULL;
@@ -64,6 +66,26 @@ static void text_bridge_thread(switch_core_session_t *session, void *obj)
 	text_framesize = 1024;
 
 	vh->up = 1;
+
+	if (!zstr(vh->session_a_uuid)) {
+		if (!(vh->session_a = switch_core_session_locate(vh->session_a_uuid))) {
+			goto cleanup;
+		}
+	} else {
+		goto cleanup;
+	}
+	channel = switch_core_session_get_channel(vh->session_a);
+
+	if (!zstr(vh->session_b_uuid)) {
+		if (!(vh->session_b = switch_core_session_locate(vh->session_b_uuid))) {
+			switch_core_session_rwunlock(vh->session_a);
+			goto cleanup;
+		}
+	} else {
+		switch_core_session_rwunlock(vh->session_a);
+		goto cleanup;
+	}
+	b_channel = switch_core_session_get_channel(vh->session_b);
 
 	while (switch_channel_up_nosig(channel) && switch_channel_up_nosig(b_channel) && vh->up == 1) {
 		status = switch_core_session_read_text_frame(vh->session_a, &read_frame, SWITCH_IO_FLAG_NONE, 0);
@@ -136,6 +158,10 @@ static void text_bridge_thread(switch_core_session_t *session, void *obj)
 		switch_core_session_write_text_frame(vh->session_a, NULL, 0, 0);
 	}
 
+	switch_core_session_rwunlock(vh->session_a);
+	switch_core_session_rwunlock(vh->session_b);
+
+cleanup:
 	vh->up = 0;
 
 	switch_buffer_destroy(&text_buffer);
@@ -148,8 +174,8 @@ static void text_bridge_thread(switch_core_session_t *session, void *obj)
 static void video_bridge_thread(switch_core_session_t *session, void *obj)
 {
 	struct vid_helper *vh = obj;
-	switch_channel_t *channel = switch_core_session_get_channel(vh->session_a);
-	switch_channel_t *b_channel = switch_core_session_get_channel(vh->session_b);
+	switch_channel_t *channel = NULL; 
+	switch_channel_t *b_channel = NULL; 
 	switch_status_t status;
 	switch_frame_t *read_frame = 0;
 	int set_decoded_read = 0, refresh_timer = 0;
@@ -158,16 +184,29 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 
 	vh->up = 1;
 
-	if (switch_core_session_read_lock(vh->session_a) != SWITCH_STATUS_SUCCESS) {
+	if (!zstr(vh->session_a_uuid)) {
+		if (!(vh->session_a = switch_core_session_locate(vh->session_a_uuid))) {
+			vh->up = 0;
+			return;
+		}
+	} else {
 		vh->up = 0;
 		return;
 	}
+	channel = switch_core_session_get_channel(vh->session_a);
 
-	if (switch_core_session_read_lock(vh->session_b) != SWITCH_STATUS_SUCCESS) {
+	if (!zstr(vh->session_b_uuid)) {
+		if (!(vh->session_b = switch_core_session_locate(vh->session_b_uuid))) {
+			vh->up = 0;
+			switch_core_session_rwunlock(vh->session_a);
+			return;
+		}
+	} else {
 		vh->up = 0;
 		switch_core_session_rwunlock(vh->session_a);
 		return;
 	}
+	b_channel = switch_core_session_get_channel(vh->session_b);
 
 	switch_core_session_request_video_refresh(vh->session_a);
 	switch_core_session_request_video_refresh(vh->session_b);
@@ -778,8 +817,8 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 #ifdef SWITCH_VIDEO_IN_THREADS
 		if (switch_channel_test_flag(chan_a, CF_VIDEO) && switch_channel_test_flag(chan_b, CF_VIDEO) && !vid_launch) {
 			vid_launch++;
-			vh.session_a = session_a;
-			vh.session_b = session_b;
+			strcpy(vh.session_a_uuid, switch_core_session_get_uuid(session_a));
+			strcpy(vh.session_b_uuid, switch_core_session_get_uuid(session_b));
 			switch_channel_clear_flag(chan_a, CF_VIDEO_BLANK);
 			switch_channel_clear_flag(chan_b, CF_VIDEO_BLANK);
 			launch_video(&vh);
