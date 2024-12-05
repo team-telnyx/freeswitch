@@ -238,6 +238,7 @@ static void switch_core_standard_on_routing(switch_core_session_t *session)
 	switch_caller_extension_t *extension = NULL;
 	char *expanded = NULL;
 	char *dpstr = NULL;
+	const char *post_dialplan_execute = NULL;
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s Standard ROUTING\n", switch_channel_get_name(session->channel));
 
@@ -297,6 +298,14 @@ static void switch_core_standard_on_routing(switch_core_session_t *session)
 			}
 		}
 
+		post_dialplan_execute = switch_channel_get_variable(session->channel, "post_dialplan_execute");
+		if (!zstr(post_dialplan_execute)) {
+			switch_application_function_t func = switch_channel_get_post_dialplan_function(session->channel);
+			if (func) {
+				func(session, post_dialplan_execute);
+			}
+		}
+
 		if (!count) {
 			if (switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_OUTBOUND) {
 				if (switch_channel_test_flag(session->channel, CF_ANSWERED)) {
@@ -333,7 +342,6 @@ static void switch_core_standard_on_execute(switch_core_session_t *session)
 	const char *uuid;
 	const char *next_application_on_execute = NULL; 
 	const char *next_application_data_on_execute = NULL;
-	const char *post_dialplan_execute = NULL;
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s Standard EXECUTE\n", switch_channel_get_name(session->channel));
 
@@ -387,15 +395,6 @@ static void switch_core_standard_on_execute(switch_core_session_t *session)
 			goto top;
 		}
 
-	}
-
-	post_dialplan_execute = switch_channel_get_variable(session->channel, "post_dialplan_execute");
-
-	if (!zstr(post_dialplan_execute)) {
-		switch_application_function_t func = switch_channel_get_post_dialplan_function(session->channel);
-		if (func) {
-			func(session, post_dialplan_execute);
-		}
 	}
 
 	if (switch_channel_ready(session->channel) && switch_channel_get_state(session->channel) == CS_EXECUTE &&
