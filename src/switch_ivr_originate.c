@@ -1861,6 +1861,8 @@ struct early_state {
 	int ready;
 	ringback_t *ringback;
 	int ttl;
+	switch_frame_t *write_frame;
+	switch_codec_t *write_codec;
 };
 typedef struct early_state early_state_t;
 
@@ -1931,6 +1933,44 @@ static void *SWITCH_THREAD_FUNC early_thread_run(switch_thread_t *thread, void *
 				}
 
 				if (!state->ringback->asis) {
+					switch_codec_implementation_t peer_read_impl = { 0 }, write_impl = { 0 };
+
+					if (switch_core_session_get_read_impl(originate_status[array_pos].peer_session, &peer_read_impl) == SWITCH_STATUS_SUCCESS 
+						&& switch_core_session_get_write_impl(state->oglobals->session, &write_impl) == SWITCH_STATUS_SUCCESS) {
+
+						// sync sample rate mismatch for bridge_early_media
+						if ((state->write_frame && state->write_frame->codec && state->write_frame->codec->implementation)
+							&& ((peer_read_impl.actual_samples_per_second != write_impl.actual_samples_per_second && peer_read_impl.actual_samples_per_second != state->write_frame->codec->implementation->actual_samples_per_second)
+								|| state->write_frame->codec->implementation->actual_samples_per_second > write_impl.actual_samples_per_second)) {
+
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(state->oglobals->session), SWITCH_LOG_DEBUG,
+												"Changing sampling rate from %uHz to %uHz\n", write_impl.actual_samples_per_second, peer_read_impl.actual_samples_per_second);
+							
+							if (switch_core_codec_ready(state->write_codec)) {
+								switch_core_codec_destroy(state->write_codec);
+							}
+
+							if (switch_core_codec_init(state->write_codec,
+													"L16",
+													NULL,
+													NULL,
+													peer_read_impl.actual_samples_per_second,
+													peer_read_impl.microseconds_per_packet / 1000,
+													peer_read_impl.number_of_channels, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, NULL,
+													switch_core_session_get_pool(state->oglobals->session)) == SWITCH_STATUS_SUCCESS) {
+
+								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(state->oglobals->session), SWITCH_LOG_DEBUG,
+												"Raw Codec Activation Success L16@%uHz %d channel %dms\n",
+												peer_read_impl.actual_samples_per_second, peer_read_impl.number_of_channels, peer_read_impl.microseconds_per_packet / 1000);
+								state->write_frame->codec = state->write_codec;
+								state->write_frame->datalen = peer_read_impl.decoded_bytes_per_packet;
+								state->write_frame->samples = state->write_frame->datalen / 2;
+								memset(state->write_frame->data, 255, state->write_frame->datalen);
+								switch_core_session_set_read_codec(state->oglobals->session, state->write_codec);
+							}
+						}
+					}
+
 					if (!switch_core_codec_ready((&read_codecs[i]))) {
 						if (switch_core_codec_init(&read_codecs[i],
 												   "L16",
@@ -2551,12 +2591,12 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 		oglobals.ignore_ring_ready = 1;
 	}
 
-	if ((var_val = switch_event_get_header(var_event, "monitor_early_media_ring"))) {
+	if ((var_val = switch_event_get_header(var_event, "monitor_early_media_ring")) && switch_true(var_val)) {
 		oglobals.early_ok = 0;
 		oglobals.monitor_early_media_ring = 1;
 	}
 
-	if ((var_val = switch_event_get_header(var_event, "monitor_early_media_fail"))) {
+	if ((var_val = switch_event_get_header(var_event, "monitor_early_media_fail")) && switch_true(var_val)) {
 		oglobals.early_ok = 0;
 		oglobals.monitor_early_media_fail = 1;
 	}
@@ -2704,7 +2744,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 	switch_epoch_time_now(&global_start);
 	last_retry_start = switch_micro_time_now();
 	
-	switch_event_create_subclass(&post_originate_event, SWITCH_EVENT_CUSTOM, "post_originate_event");
+	switch_event_create(&post_originate_event, SWITCH_EVENT_CLONE);
 
 	for (try = 0; try < retries; try++) {
 
@@ -3249,7 +3289,6 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 					
 					if (!fire_post_originate_event) {
 						const char* telnyx_session_uuid = switch_channel_get_variable(oglobals.originate_status[i].peer_channel, "telnyx_session_uuid");
-						const char* telnyx_uuid = switch_channel_get_variable(oglobals.originate_status[i].peer_channel, "telnyx_uuid");
 						const char* logical_leg_uuid = switch_channel_get_variable(oglobals.originate_status[i].peer_channel, "logical_leg_uuid");
 						const char* call_control = switch_channel_get_variable(oglobals.originate_status[i].peer_channel, "call_control");
 						const char* telnyx_fax = switch_channel_get_variable(oglobals.originate_status[i].peer_channel, "telnyx_fax");
@@ -3266,10 +3305,17 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 							switch_event_add_header_string(post_originate_event, SWITCH_STACK_BOTTOM, "logical_leg_uuid", logical_leg_uuid);
 						}
 
-						if (!zstr(telnyx_session_uuid) && !zstr(telnyx_uuid)) {
+						if (!zstr(telnyx_session_uuid)) {
 							switch_event_add_header_string(post_originate_event, SWITCH_STACK_BOTTOM, "telnyx_session_uuid", telnyx_session_uuid);
-							switch_event_add_header_string(post_originate_event, SWITCH_STACK_BOTTOM, "telnyx_uuid", telnyx_uuid);
 							fire_post_originate_event = 1;
+						}
+					}
+
+					if (fire_post_originate_event) {
+						const char* telnyx_uuid = switch_channel_get_variable(oglobals.originate_status[i].peer_channel, "telnyx_uuid");
+						if (!zstr(telnyx_uuid)) {
+							switch_event_del_header(post_originate_event, "telnyx_uuid");
+							switch_event_add_header_string(post_originate_event, SWITCH_STACK_BOTTOM, "telnyx_uuid", telnyx_uuid);
 						}
 					}
 				}
@@ -3554,6 +3600,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 								early_state.ready = 1;
 								early_state.ringback = &ringback;
 								early_state.ttl = and_argc;
+								early_state.write_frame = &write_frame;
+								early_state.write_codec = &write_codec;
 								switch_mutex_init(&early_state.mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 								switch_buffer_create_dynamic(&early_state.buffer, 1024, 1024, 0);
 								switch_thread_create(&oglobals.ethread, thd_attr, early_thread_run, &early_state, switch_core_session_get_pool(session));
@@ -4298,11 +4346,17 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 	switch_safe_free(oglobals.error_file);
 	
 	if (post_originate_event && fire_post_originate_event) {
+		switch_event_t* fire_custom_event = NULL;
 		if (!zstr(current_session_uuid)) {
 			switch_event_add_header_string(post_originate_event, SWITCH_STACK_BOTTOM, "Last-Channel-Unique-ID", current_session_uuid);
 		}
-		switch_event_fire(&post_originate_event);
-	} else if (post_originate_event) {
+		if (switch_event_create_subclass(&fire_custom_event, SWITCH_EVENT_CUSTOM, "post_originate_event") == SWITCH_STATUS_SUCCESS) {
+			switch_event_merge(fire_custom_event, post_originate_event);
+			switch_event_fire(&fire_custom_event);
+		}
+	}
+	
+	if (post_originate_event) {
 		switch_event_destroy(&post_originate_event);
 	}
 

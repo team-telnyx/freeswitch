@@ -333,6 +333,34 @@ static void send_display(switch_core_session_t *session, switch_core_session_t *
 
 }
 
+static switch_bool_t is_silence_frame(switch_frame_t *frame, int silence_threshold, switch_codec_implementation_t *codec_impl)
+{
+	int16_t *fdata = (int16_t *) frame->data;
+	uint32_t samples = frame->datalen / sizeof(*fdata);
+	switch_bool_t is_silence = SWITCH_TRUE;
+	uint32_t channel_num = 0;
+
+	int divisor = 0;
+	if (!(divisor = codec_impl->actual_samples_per_second / 8000)) {
+		divisor = 1;
+	}
+
+	/* is silence only if every channel is silent */
+	for (channel_num = 0; channel_num < codec_impl->number_of_channels && is_silence; channel_num++) {
+		uint32_t count = 0, j = channel_num;
+		double energy = 0;
+		double noise = 0;
+		for (count = 0; count < samples; count++) {
+			energy += abs(fdata[j]);
+			j += codec_impl->number_of_channels;
+		}
+		noise = (energy / (frame->samples / divisor));
+		is_silence &= (uint32_t) (noise < silence_threshold);
+	}
+
+	return is_silence;
+}
+
 
 SWITCH_DECLARE(void) switch_ivr_bridge_display(switch_core_session_t *session, switch_core_session_t *peer_session)
 {
@@ -364,14 +392,15 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 	switch_channel_t *chan_a, *chan_b;
 	switch_frame_t *read_frame;
 	switch_core_session_t *session_a, *session_b;
-	uint32_t read_frame_count = 0;
+	uint32_t read_frame_count = 0, per_read_frame_ms = 0, total_silence_frame_ms = 0;
 	const char *app_name = NULL, *app_arg = NULL;
 	int inner_bridge = 0, exec_check = 0;
 	switch_codec_t silence_codec = { 0 };
 	switch_frame_t silence_frame = { 0 };
 	int16_t silence_data[SWITCH_RECOMMENDED_BUFFER_SIZE / 2] = { 0 };
 	const char *silence_var;
-	int silence_val = 0, bypass_media_after_bridge = 0;
+	const char *continuous_silence_var;
+	int silence_val = 0, bypass_media_after_bridge = 0, max_continuous_silence_ms = 0, silence_threshold = 0;
 	const char *bridge_answer_timeout = NULL;
 	int bridge_filter_dtmf, answer_timeout, sent_update = 0;
 	time_t answer_limit = 0;
@@ -405,6 +434,8 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 	input_callback = data->input_callback;
 	user_data = data->session_data;
 	stream_id = data->stream_id;
+
+	per_read_frame_ms = 1000 / (read_impl.actual_samples_per_second / read_impl.samples_per_packet);
 
 	chan_a = switch_core_session_get_channel(session_a);
 	chan_b = switch_core_session_get_channel(session_b);
@@ -475,6 +506,45 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_NOTICE, "Audio bridge thread: accept_cng %p\n", (void*)session_a);
 #endif
 		switch_channel_set_flag(chan_b, CF_ACCEPT_CNG);
+	}
+
+	if ((continuous_silence_var = switch_channel_get_variable(chan_a, "bridge_warn_continuous_silence"))) {
+#if DEBUG_RTP
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_NOTICE, "Audio bridge thread: bridge_warn_continuous_silence - %s %p\n", continuous_silence_var, (void*)session_a);
+#endif
+		char *argv[2] = { 0 };
+		int argc = 0;
+		char * tmp_var = switch_core_session_strdup(session_a, continuous_silence_var);
+
+		argc = switch_separate_string(tmp_var, ':', argv, sizeof(argv) / sizeof(argv[0]));
+		if (argc >= 1) {
+			if (switch_true(argv[0])) {
+				if (switch_is_number(argv[0])) {
+					max_continuous_silence_ms = atoi(argv[0]);
+					if (max_continuous_silence_ms < 0) {
+						max_continuous_silence_ms = 0; // We can't have negative value here
+					}
+				} else {
+					max_continuous_silence_ms = 15000; // Default to 15 seconds
+				}
+			}
+		}
+
+		// max_continuous_silence_ms must have a value to set a silence_threshold
+		if (argc == 2 && max_continuous_silence_ms > 0) {
+			if (max_continuous_silence_ms > 0) {
+				if (switch_is_number(argv[1])) {
+					silence_threshold = atoi(argv[1]);
+				} else {
+					silence_threshold = 256; // Default silence threshold
+				}
+			}
+		}
+
+		// max_continuous_silence_ms should be atleast 5 seconds
+		if (max_continuous_silence_ms > 0 && max_continuous_silence_ms < 5000) {
+			max_continuous_silence_ms = 5000; 
+		}
 	}
 
 	if ((silence_var = switch_channel_get_variable(chan_a, "bridge_generate_comfort_noise"))) {
@@ -982,6 +1052,12 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 		if (SWITCH_READ_ACCEPTABLE(status)) {
 			read_frame_count++;
 			if (switch_test_flag(read_frame, SFF_CNG)) {
+				total_silence_frame_ms += per_read_frame_ms;
+				if (max_continuous_silence_ms && (total_silence_frame_ms >= max_continuous_silence_ms)) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_WARNING, "%s is continuously receiving cng for %d ms\n", switch_channel_get_name(chan_a), max_continuous_silence_ms);
+					total_silence_frame_ms = 0;
+				}
+
 				if (silence_val) {
 					switch_generate_sln_silence((int16_t *) silence_frame.data, silence_frame.samples,
 												read_impl.number_of_channels, silence_val);
@@ -991,6 +1067,16 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_NOTICE, "Audio bridge thread: skip write frame, reason: CF_ACCEPT_CNG %p %p -> %p\n", (void*)session_b, (void*)session_a, (void*)session_b);
 #endif
 					continue;
+				}
+			} else {
+				if (silence_threshold && is_silence_frame(read_frame, silence_threshold, &read_impl)) {
+					total_silence_frame_ms += per_read_frame_ms;
+					if (total_silence_frame_ms >= max_continuous_silence_ms) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_WARNING, "%s is continuously receiving silence frame (<%d) for %d ms\n", switch_channel_get_name(chan_a), silence_threshold, max_continuous_silence_ms);
+						total_silence_frame_ms = 0;
+					}
+				} else {
+					total_silence_frame_ms = 0;
 				}
 			}
 
@@ -1148,14 +1234,13 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 
 static void transfer_after_bridge(switch_core_session_t *session, const char *where)
 {
-	int argc;
 	char *argv[4] = { 0 };
 	char *mydata;
 
 	switch_channel_set_variable(switch_core_session_get_channel(session), SWITCH_TRANSFER_AFTER_BRIDGE_VARIABLE, NULL);
 
 	if (!zstr(where) && (mydata = switch_core_session_strdup(session, where))) {
-		if ((argc = switch_separate_string(mydata, ':', argv, (sizeof(argv) / sizeof(argv[0])))) >= 1) {
+		if (switch_separate_string(mydata, ':', argv, (sizeof(argv) / sizeof(argv[0]))) >= 1) {
 			switch_ivr_session_transfer(session, argv[0], argv[1], argv[2]);
 		} else {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "No extension specified.\n");

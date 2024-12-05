@@ -1319,16 +1319,13 @@ static t38_mode_t request_t38(pvt_t *pvt)
 		insist = spandsp_globals.enable_t38_insist;
 	}
 
-	if ((t38_options = switch_channel_get_private(channel, "t38_options"))) {
+	if (switch_channel_get_private(channel, "t38_options")) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
 				"%s already has T.38 data\n", switch_channel_get_name(channel));
 		enabled = 0;
 	}
 
-
-
 	if (enabled) {
-
 		if (!(t38_options = switch_channel_get_private(channel, "_preconfigured_t38_options"))) {
 			const char* udpfec = NULL;
 			t38_options = switch_core_session_alloc(session, sizeof(*t38_options));
