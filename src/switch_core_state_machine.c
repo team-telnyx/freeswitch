@@ -290,19 +290,19 @@ static void switch_core_standard_on_routing(switch_core_session_t *session)
 					UNPROTECT_INTERFACE(dialplan_interface);
 
 					if (extension) {
+						post_dialplan_execute = switch_channel_get_variable(session->channel, "post_dialplan_execute");
+						if (!zstr(post_dialplan_execute)) {
+							switch_post_dialplan_function_t func = switch_channel_get_post_dialplan_function(session->channel);
+							if (func) {
+								func(session, extension, post_dialplan_execute);
+							}
+						}
+
 						switch_channel_set_caller_extension(session->channel, extension);
 						switch_channel_set_state(session->channel, CS_EXECUTE);
 						goto end;
 					}
 				}
-			}
-		}
-
-		post_dialplan_execute = switch_channel_get_variable(session->channel, "post_dialplan_execute");
-		if (!zstr(post_dialplan_execute)) {
-			switch_application_function_t func = switch_channel_get_post_dialplan_function(session->channel);
-			if (func) {
-				func(session, post_dialplan_execute);
 			}
 		}
 

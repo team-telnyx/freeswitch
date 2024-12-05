@@ -2571,6 +2571,8 @@ typedef switch_status_t (*switch_input_callback_function_t) (switch_core_session
 typedef switch_status_t (*switch_read_frame_callback_function_t) (switch_core_session_t *session, switch_frame_t *frame, void *user_data);
 typedef struct switch_say_interface switch_say_interface_t;
 
+typedef void (*switch_post_dialplan_function_t) (switch_core_session_t *, switch_caller_extension_t *, const char *);
+
 #define DMACHINE_MAX_DIGIT_LEN 512
 
 typedef enum {

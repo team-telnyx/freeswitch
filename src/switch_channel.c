@@ -189,7 +189,7 @@ struct switch_channel {
 	switch_device_node_t *device_node;
 	char *device_id;
 	switch_event_t *log_tags;
-	switch_application_function_t post_dialplan_function;
+	switch_post_dialplan_function_t post_dialplan_function;
 };
 
 static void process_device_hup(switch_channel_t *channel);
@@ -5847,7 +5847,7 @@ SWITCH_DECLARE(switch_status_t) switch_channel_pass_sdp(switch_channel_t *from_c
 	return status;
 }
 
-SWITCH_DECLARE(void) switch_channel_set_post_dialplan_function(switch_channel_t *channel, switch_application_function_t function)
+SWITCH_DECLARE(void) switch_channel_set_post_dialplan_function(switch_channel_t *channel, switch_post_dialplan_function_t function)
 {
 	assert(function != NULL);
 	if (channel) {
@@ -5855,7 +5855,7 @@ SWITCH_DECLARE(void) switch_channel_set_post_dialplan_function(switch_channel_t 
 	}
 }
 
-SWITCH_DECLARE(switch_application_function_t) switch_channel_get_post_dialplan_function(switch_channel_t *channel)
+SWITCH_DECLARE(switch_post_dialplan_function_t) switch_channel_get_post_dialplan_function(switch_channel_t *channel)
 {
 	if (channel) {
 		return channel->post_dialplan_function;
