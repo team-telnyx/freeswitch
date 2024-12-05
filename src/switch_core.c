@@ -2388,6 +2388,10 @@ static void switch_load_core_config(const char *file)
 					switch_rtp_set_start_port((switch_port_t) atoi(val));
 				} else if (!strcasecmp(var, "rtp-end-port") && !zstr(val)) {
 					switch_rtp_set_end_port((switch_port_t) atoi(val));
+				} else if (!strcasecmp(var, "rtp-start-seq") && !zstr(val)) {
+					switch_rtp_set_start_sequence(atoi(val));
+				} else if (!strcasecmp(var, "rtp-end-seq") && !zstr(val)) {
+					switch_rtp_set_end_sequence(atoi(val));
 				} else if (!strcasecmp(var, "rtp-mos-packet-loss-penalty") && !zstr(val)) {
 					switch_rtp_set_mos_packet_loss_penalty(atof(val));
 				} else if (!strcasecmp(var, "rtp-mos-jitter-penalty") && !zstr(val)) {
