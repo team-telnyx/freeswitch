@@ -330,14 +330,14 @@ SWITCH_DECLARE(switch_port_t) switch_rtp_set_end_port(switch_port_t port);
 
 /*!
   \brief Set/Get RTP start sequence
-  \param port new value (if > 0)
+  \param sequence new value (if > 0)
   \return the current RTP start sequence
 */
 SWITCH_DECLARE(uint16_t) switch_rtp_set_start_sequence(uint16_t sequence);
 
 /*!
   \brief Set/Get RTP end sequence
-  \param port new value (if > 0)
+  \param sequence new value (if > 0)
   \return the current RTP end sequence
 */
 SWITCH_DECLARE(uint16_t) switch_rtp_set_end_sequence(uint16_t sequence);
