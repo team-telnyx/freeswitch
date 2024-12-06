@@ -238,7 +238,7 @@ static void switch_core_standard_on_routing(switch_core_session_t *session)
 	switch_caller_extension_t *extension = NULL;
 	char *expanded = NULL;
 	char *dpstr = NULL;
-	const char *post_dialplan_execute = NULL;
+	const char *profile_name = NULL;
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s Standard ROUTING\n", switch_channel_get_name(session->channel));
 
@@ -290,11 +290,11 @@ static void switch_core_standard_on_routing(switch_core_session_t *session)
 					UNPROTECT_INTERFACE(dialplan_interface);
 
 					if (extension) {
-						post_dialplan_execute = switch_channel_get_variable(session->channel, "post_dialplan_execute");
-						if (!zstr(post_dialplan_execute)) {
+						profile_name = switch_channel_get_variable(session->channel, "sofia_profile_name");
+						if (!zstr(profile_name)) {
 							switch_post_dialplan_function_t func = switch_channel_get_post_dialplan_function(session->channel);
 							if (func) {
-								func(session, extension, post_dialplan_execute);
+								func(session, extension, profile_name);
 							}
 						}
 
