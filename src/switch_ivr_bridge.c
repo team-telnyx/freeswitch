@@ -817,6 +817,8 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 #ifdef SWITCH_VIDEO_IN_THREADS
 		if (switch_channel_test_flag(chan_a, CF_VIDEO) && switch_channel_test_flag(chan_b, CF_VIDEO) && !vid_launch) {
 			vid_launch++;
+			vh.session_a = session_a;
+			vh.session_b = session_b;
 			strcpy(vh.session_a_uuid, switch_core_session_get_uuid(session_a));
 			strcpy(vh.session_b_uuid, switch_core_session_get_uuid(session_b));
 			switch_channel_clear_flag(chan_a, CF_VIDEO_BLANK);
