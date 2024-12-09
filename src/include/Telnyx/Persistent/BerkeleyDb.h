@@ -3,20 +3,17 @@
 // to be republished as part of the freeswitch project under 
 // MOZILLA PUBLIC LICENSE Version 1.1 and above.
 
-
 #ifndef TELNYX_BERKELEYDB_H_INCLUDED
 #define	TELNYX_BERKELEYDB_H_INCLUDED
 
-
 #include <db_cxx.h>
+#include <cstdio>
 #include <string>
 #include <sstream>
 
 #include "Telnyx/UTL/CoreUtils.h"
 
-
 namespace Telnyx {
-
 
 class BerkeleyDb
 {
@@ -40,6 +37,8 @@ public:
     if (_isOpen || _pDb || _pCursor)
       return false;
 
+	verify();
+
     _pDb = new Db(0, DB_CXX_NO_EXCEPTIONS);
     int ret = _pDb->open(0, path.c_str(), 0, DB_BTREE, DB_CREATE | DB_THREAD,0);
     if (ret != 0)
@@ -50,7 +49,7 @@ public:
       return false;
     }
 
-    _pDb->cursor(0,&_pCursor,0);
+    _pDb->cursor(0, &_pCursor, 0);
     if (!_pCursor)
     {
       _pDb->close(0);
@@ -222,10 +221,21 @@ protected:
 private:
   BerkeleyDb(const BerkeleyDb&){};
   BerkeleyDb& operator = (const BerkeleyDb&){return *this;};
+  void verify()
+  {
+    Db dbTemp(0, DB_CXX_NO_EXCEPTIONS);
+    int verifyRet = dbTemp.verify(_path.c_str(), nullptr, nullptr, 0);
+    if (verifyRet != 0) {
+      dbTemp.close(0);
+
+      // Remove the corrupted database file
+      if (std::remove(_path.c_str()) != 0) {
+        std::cerr << "Fatal: could not remote corrupted db '" << _path << "'\n";
+      }
+    }
+  }
 };
 
 } // Telnyx
 
-
-#endif	/* BERKELEYDB_H */
-
+#endif  /* BERKELEYDB_H */
