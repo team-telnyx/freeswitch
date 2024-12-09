@@ -230,7 +230,7 @@ private:
 
       // Remove the corrupted database file
       if (std::remove(_path.c_str()) != 0) {
-        std::cerr << "Fatal: could not remote corrupted db '" << _path << "'\n";
+        std::cerr << "Fatal: could not remove corrupted db '" << _path << "'\n";
       }
     }
   }
