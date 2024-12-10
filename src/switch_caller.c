@@ -587,64 +587,90 @@ SWITCH_DECLARE(void) switch_caller_extension_add_application(switch_core_session
 	}
 }
 
-SWITCH_DECLARE(void) switch_caller_extension_insert_application(switch_core_session_t *session,
+SWITCH_DECLARE(void) switch_caller_extension_insert_applications(switch_core_session_t *session,
 																switch_caller_extension_t *caller_extension,
-																const char *application_name,
-																const char *application_data,
+																const char **application_names,
+																const char **application_data,
+																size_t app_count,
 																char **low_priority_applications,
 																size_t low_priority_count)
 {
-    switch_caller_application_t *caller_application = NULL;
-    switch_caller_application_t *prev = NULL, *current = NULL;
+    switch_caller_application_t *new_applications = NULL, *last_new_application = NULL;
+	switch_caller_application_t *prev = NULL, *current;
 
-    switch_assert(session != NULL);
+	switch_assert(session != NULL);
+    switch_assert(application_names != NULL);
+    switch_assert(application_data != NULL);
 
-    if ((caller_application = switch_core_session_alloc(session, sizeof(switch_caller_application_t))) != 0) {
-        caller_application->application_name = switch_core_session_strdup(session, application_name);
-        caller_application->application_data = switch_core_session_strdup(session, application_data);
+    // Allocate memory for all applications upfront
+    for (size_t i = 0; i < app_count; ++i) {
+    	switch_caller_application_t *caller_application;
+
+    	if (!application_names[i] || !application_data[i]) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                              "Skipping null application name or data at index [%zu]\n", i);
+            continue;
+        }
+
+        // Allocate and populate new application
+        caller_application = switch_core_session_alloc(session, sizeof(switch_caller_application_t));
+        caller_application->application_name = switch_core_session_strdup(session, application_names[i]);
+        caller_application->application_data = switch_core_session_strdup(session, application_data[i]);
 
         if (caller_application->application_data && strstr(caller_application->application_data, "\\'")) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-                              "App not added, Invalid character sequence in data string [%s]\n",
+                              "Skipping invalid character sequence in application data [%s]\n",
                               caller_application->application_data);
-            return;
+            continue;
         }
 
-        // Traverse the list of existing applications
-        current = caller_extension->applications;
-        while (current) {
-            // Check if the current application's name matches any in the priority list
-            for (size_t i = 0; i < low_priority_count; ++i) {
-                if (low_priority_applications[i] && strcmp(current->application_name, low_priority_applications[i]) == 0) {
-                    // Insert caller_application before current
-                    if (prev) {
-                        prev->next = caller_application;
-                    } else {
-                        caller_extension->applications = caller_application;
-                    }
-                    caller_application->next = current;
-
-                    // Update last_application if added at the end
-                    if (current == caller_extension->last_application) {
-                        caller_extension->last_application = caller_application;
-                    }
-                    return;
-                }
-            }
-            prev = current;
-            current = current->next;
+        // Append to the local new applications list
+        if (!new_applications) {
+            new_applications = caller_application;
+        } else {
+            last_new_application->next = caller_application;
         }
-
-        // If no priority match found, append to the end
-        if (!caller_extension->applications) {
-            caller_extension->applications = caller_application;
-        } else if (caller_extension->last_application) {
-            caller_extension->last_application->next = caller_application;
-        }
-
-        caller_extension->last_application = caller_application;
-        caller_extension->current_application = caller_extension->applications;
+        last_new_application = caller_application;
     }
+
+    if (!new_applications) {
+        // No valid applications to insert
+        return;
+    }
+
+    // Traverse the existing applications list to find the insertion point
+    current = caller_extension->applications;
+    while (current) {
+        for (size_t i = 0; i < low_priority_count; ++i) {
+            if (low_priority_applications[i] && strcmp(current->application_name, low_priority_applications[i]) == 0) {
+                // Insert the new applications before the current application
+                if (prev) {
+                    prev->next = new_applications;
+                } else {
+                    caller_extension->applications = new_applications;
+                }
+                last_new_application->next = current;
+
+                // Update the last_application if needed
+                if (current == caller_extension->last_application) {
+                    caller_extension->last_application = last_new_application;
+                }
+                return;
+            }
+        }
+        prev = current;
+        current = current->next;
+    }
+
+    // Append to the end if no priority match was found
+    if (!caller_extension->applications) {
+        caller_extension->applications = new_applications;
+    } else if (caller_extension->last_application) {
+        caller_extension->last_application->next = new_applications;
+    }
+
+    caller_extension->last_application = last_new_application;
+    caller_extension->current_application = caller_extension->applications;
 }
 
 /* For Emacs:

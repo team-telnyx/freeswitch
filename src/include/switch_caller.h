@@ -189,15 +189,17 @@ SWITCH_DECLARE(void) switch_caller_extension_add_application(_In_ switch_core_se
   \brief Insert an application (instruction) to the given extension, before any of the low priority applications
   \param session session associated with the extension (bound by scope)
   \param caller_extension extension to add the application to
-  \param application_name the name of the application
-  \param extra_data optional argument to the application
+  \param application_names the name of the applications
+  \param application_data optional argument to the applications
+  \param app_count number of applications in the array
   \param low_priority_applications array of application names to insert before
   \param low_priority_count number of applications in the array
 */
-SWITCH_DECLARE(void) switch_caller_extension_insert_application(_In_ switch_core_session_t *session,
+SWITCH_DECLARE(void) switch_caller_extension_insert_applications(_In_ switch_core_session_t *session,
 															 _In_ switch_caller_extension_t *caller_extension,
-															 _In_z_ const char *application_name, _In_z_ const char *extra_data,
-															 _In_opt_ char **low_priority_applications, _In_z_ size_t low_priority_count);
+															 _In_z_ const char **application_names, _In_z_ const char **application_data,
+															 _In_z_ size_t app_count, _In_opt_ char **low_priority_applications,
+															 _In_z_ size_t low_priority_count);
 
 /*!
   \brief Add an application (instruction) to the given extension
