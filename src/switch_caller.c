@@ -608,7 +608,7 @@ SWITCH_DECLARE(void) switch_caller_extension_insert_applications(switch_core_ses
 
 		if (zstr(application_names[i])) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-				"Skipping null application name or data at index [%zu]\n", i);
+				"Skipping null or empty application name at index [%zu]\n", i);
 			continue;
 		}
 
