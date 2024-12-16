@@ -4912,6 +4912,7 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 					profile->auto_restart = 1;
 					sofia_set_media_flag(profile, SCMF_AUTOFIX_TIMING);
 					sofia_set_media_flag(profile, SCMF_RTP_AUTOFLUSH_DURING_BRIDGE);
+					sofia_set_media_flag(profile, SCMF_MERGE_INBOUND_OUTBOUND_CODEC);
 					profile->contact_user = SOFIA_DEFAULT_CONTACT_USER;
 					sofia_set_pflag(profile, PFLAG_PASS_CALLEE_ID);
 					sofia_set_pflag(profile, PFLAG_ALLOW_UPDATE);
@@ -5852,6 +5853,12 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 							sofia_set_media_flag(profile, SCMF_SRTP_SKIP_EMPTY_MKI);
 						} else {
 							sofia_clear_media_flag(profile, SCMF_SRTP_SKIP_EMPTY_MKI);
+						}
+					} else if (!strcasecmp(var, "sdp-merge-inbound-outbound-codec")) {
+						if (switch_true(val)) {
+							sofia_set_media_flag(profile, SCMF_MERGE_INBOUND_OUTBOUND_CODEC);
+						} else {
+							sofia_clear_media_flag(profile, SCMF_MERGE_INBOUND_OUTBOUND_CODEC);
 						}
 					} else if (!strcasecmp(var, "auth-calls")) {
 						if (switch_true(val)) {
