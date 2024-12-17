@@ -5314,12 +5314,6 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						} else {
 							sofia_clear_flag(profile, TFLAG_PROXY_MEDIA);
 						}
-					} else if (!strcasecmp(var, "inbound-zrtp-passthru")) {
-						if (switch_true(val)) {
-							sofia_set_flag(profile, TFLAG_ZRTP_PASSTHRU);
-						} else {
-							sofia_clear_flag(profile, TFLAG_ZRTP_PASSTHRU);
-						}
 					} else if (!strcasecmp(var, "force-subscription-expires") && !zstr(val)) {
 						int tmp = atoi(val);
 						if (tmp > 0) {
@@ -6492,11 +6486,6 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 					}
 				}
 
-				if (sofia_test_flag(profile, TFLAG_ZRTP_PASSTHRU) && !sofia_test_flag(profile, TFLAG_LATE_NEGOTIATION)) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "ZRTP passthrough implictly enables inbound-late-negotiation\n");
-					sofia_set_flag(profile, TFLAG_LATE_NEGOTIATION);
-				}
-
 				if (sofia_test_flag(profile, TFLAG_INB_NOMEDIA) && !sofia_test_flag(profile, TFLAG_LATE_NEGOTIATION)) {
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "inbound-bypass-media  implictly enables inbound-late-negotiation\n");
 					sofia_set_flag(profile, TFLAG_LATE_NEGOTIATION);
@@ -6631,10 +6620,6 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 			if (profile) {
 				if (profile_already_started) {
 					switch_xml_t gateways_tag, domain_tag, domains_tag, aliases_tag, alias_tag;
-
-					if (sofia_test_flag(profile, TFLAG_ZRTP_PASSTHRU)) {
-						sofia_set_flag(profile, TFLAG_LATE_NEGOTIATION);
-					}
 
 					if ((gateways_tag = switch_xml_child(xprofile, "gateways"))) {
 						parse_gateways(profile, gateways_tag, NULL);
@@ -9262,7 +9247,6 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 					sofia_set_flag_locked(tech_pvt, TFLAG_ANS);
 
 					if (match) {
-						switch_channel_check_zrtp(channel);
 
 						if (switch_core_media_choose_port(tech_pvt->session, SWITCH_MEDIA_TYPE_AUDIO, 0) == SWITCH_STATUS_SUCCESS) {
 							if (sofia_media_activate_rtp(tech_pvt) == SWITCH_STATUS_SUCCESS) {
@@ -10902,6 +10886,7 @@ void sofia_handle_sip_i_reinvite(switch_core_session_t *session,
 			}
 		}
 
+		sofia_glue_set_extra_headers(session, sip, SOFIA_SIP_HEADER_PREFIX);
 		switch_channel_execute_on(channel, "execute_on_sip_reinvite");
 	}
 
@@ -11768,10 +11753,6 @@ void sofia_handle_sip_i_invite(switch_core_session_t *session, nua_t *nua, sofia
 		switch_channel_set_flag(channel, CF_PROXY_MEDIA);
 	}
 
-	if (sofia_test_flag(tech_pvt, TFLAG_ZRTP_PASSTHRU)) {
-		switch_channel_set_flag(channel, CF_ZRTP_PASSTHRU_REQ);
-	}
-
 	if (sip->sip_subject && sip->sip_subject->g_string) {
 		switch_channel_set_variable(channel, "sip_subject", sip->sip_subject->g_string);
 	}
@@ -12141,11 +12122,16 @@ void sofia_handle_sip_i_invite(switch_core_session_t *session, nua_t *nua, sofia
 
 		if (sip->sip_identity) {
 			sip_identity_t *id;
+
 			for (id = sip->sip_identity; id; id = id->id_next) {
-				if(!zstr(id->id_value)) {
+				if (!zstr(id->id_value)) {
 					switch_channel_add_variable_var_check(channel, "sip_identity", id->id_value, SWITCH_FALSE, SWITCH_STACK_PUSH);
 				}
 			}
+		}
+
+		if (sip->sip_identity && sip->sip_identity->id_value) {
+			switch_channel_set_variable(channel, "sip_h_identity", sip->sip_identity->id_value);
 		}
 		if (sip->sip_date && sip->sip_date->d_time > 0) {
 			// This INVITE has a SIP Date header.
