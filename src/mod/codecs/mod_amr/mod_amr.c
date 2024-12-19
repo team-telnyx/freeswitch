@@ -467,7 +467,10 @@ static switch_status_t switch_amr_encode(switch_codec_t *codec,
 	int n;
 	unsigned char *shift_buf = encoded_data;
 
-	if (!context) {
+	if (!context || !context->encoder_state || !decoded_data || !encoded_data) {
+		return SWITCH_STATUS_FALSE;
+	}
+	if (sizeof(decoded_data) != decoded_data_len) {
 		return SWITCH_STATUS_FALSE;
 	}
 
