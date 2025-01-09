@@ -10128,6 +10128,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 
 
 	if (switch_channel_up(session->channel)) {
+		uint32_t codec_ms = a_engine->cur_payload_map->codec_ms * (flags[SWITCH_RTP_FLAG_USE_MILLISECONDS_PER_PACKET] ? 1 : 1000);
 		switch_channel_set_variable(session->channel, "rtp_use_timer_name", timer_name);
 
 		a_engine->rtp_session = switch_rtp_new(a_engine->local_sdp_ip,
@@ -10137,7 +10138,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 											   a_engine->cur_payload_map->pt,
 											   strcasecmp("opus", a_engine->read_impl.iananame) ? a_engine->read_impl.samples_per_packet : 
 											   a_engine->read_impl.samples_per_second * (a_engine->read_impl.microseconds_per_packet / 1000) / 1000,
-											   a_engine->cur_payload_map->codec_ms * 1000,
+											   codec_ms,
 											   flags, timer_name, &err, switch_core_session_get_pool(session));
 		{
 			const char *val = NULL;
