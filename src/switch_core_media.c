@@ -6551,15 +6551,16 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 							if (!switch_true(switch_channel_get_variable(session->channel, "telnyx-strict-ptime"))) {
 								match = 0;
 
-								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-												  "Audio Codec Compare [%s:%d:%u:%d:%u:%d] is saved as a near-match\n",
-												  imp->iananame, imp->ianacode, codec_rate, imp->microseconds_per_packet / 1000, bit_rate, imp->number_of_channels);
 								if (nm_idx >= MAX_MATCHES) {
 									switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 													  "Audio Codec Compare [%s:%d:%u:%u:%d:%u:%d] was not saved as a near-match. Too many. Ignoring.\n",
 													  imp->iananame, imp->ianacode, codec_rate, imp->actual_samples_per_second, imp->microseconds_per_packet / 1000, bit_rate, imp->number_of_channels);
 									continue;
 								}
+
+								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+											  "Audio Codec Compare [%s:%d:%u:%d:%u:%d] is saved as a near-match\n",
+											  imp->iananame, imp->ianacode, codec_rate, imp->microseconds_per_packet / 1000, bit_rate, imp->number_of_channels);
 
 								near_matches[nm_idx].codec_idx = i;
 								near_matches[nm_idx].rate = remote_codec_rate;
