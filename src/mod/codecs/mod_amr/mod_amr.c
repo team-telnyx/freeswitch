@@ -470,9 +470,6 @@ static switch_status_t switch_amr_encode(switch_codec_t *codec,
 	if (!context || !context->encoder_state || !decoded_data || !encoded_data) {
 		return SWITCH_STATUS_FALSE;
 	}
-	if (sizeof(decoded_data) != decoded_data_len) {
-		return SWITCH_STATUS_FALSE;
-	}
 
 	n = Encoder_Interface_Encode(context->encoder_state, context->enc_mode, (int16_t *) decoded_data, (switch_byte_t *) encoded_data + 1, 0);
 	if (n < 0) {
