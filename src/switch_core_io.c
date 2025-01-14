@@ -81,6 +81,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 
 	switch_os_yield();
 
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
+
 	if (switch_mutex_trylock(session->codec_read_mutex) == SWITCH_STATUS_SUCCESS) {
 		switch_mutex_unlock(session->codec_read_mutex);
 	} else {
@@ -131,6 +133,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 		}
 		return SWITCH_STATUS_FALSE;
 	}
+
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Read codec addr: %p\n", (void *)&session->read_codec);
 
 	switch_mutex_lock(session->read_codec->mutex);
 
@@ -185,9 +189,13 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 	if (session->endpoint_interface->io_routines->read_frame) {
 		switch_mutex_unlock(session->read_codec->mutex);
 		switch_mutex_unlock(session->codec_read_mutex);
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 		if ((status = session->endpoint_interface->io_routines->read_frame(session, frame, flags, stream_id)) == SWITCH_STATUS_SUCCESS) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 			for (ptr = session->event_hooks.read_frame; ptr; ptr = ptr->next) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 				if ((status = ptr->read_frame(session, frame, flags, stream_id)) != SWITCH_STATUS_SUCCESS) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 					break;
 				}
 			}
@@ -295,7 +303,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 					}
 					if (bp->callback) {
 						bp->native_read_frame = *frame;
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 						ok = bp->callback(bp, bp->user_data, SWITCH_ABC_TYPE_TAP_NATIVE_READ);
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 						bp->native_read_frame = NULL;
 					}
 				}
@@ -362,7 +372,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 							switch_core_gen_encoded_silence(data, (*frame)->codec->implementation, tmp_frame.datalen);
 
 							bp->native_read_frame = &tmp_frame;
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 							ok = bp->callback(bp, bp->user_data, SWITCH_ABC_TYPE_TAP_NATIVE_READ);
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 							bp->native_read_frame = NULL;
 						}
 					}
@@ -508,7 +520,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 					session->raw_read_frame.datalen = read_frame->codec->implementation->decoded_bytes_per_packet;
 					session->raw_read_frame.samples = session->raw_read_frame.datalen / sizeof(int16_t) / session->read_impl.number_of_channels;
 					session->raw_read_frame.channels = session->read_impl.number_of_channels;
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 					memset(session->raw_read_frame.data, 255, session->raw_read_frame.datalen);
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 					status = SWITCH_STATUS_SUCCESS;
 				} else {
 					switch_codec_t *codec = use_codec;
@@ -526,6 +540,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 
 					codec->cur_frame = read_frame;
 					session->read_codec->cur_frame = read_frame;
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 					status = switch_core_codec_decode(codec,
 													  session->read_codec,
 													  read_frame->data,
@@ -533,7 +548,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 													  session->read_impl.actual_samples_per_second,
 													  session->raw_read_frame.data, &session->raw_read_frame.datalen, &session->raw_read_frame.rate,
 													  &read_frame->flags);
-
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 					if (status == SWITCH_STATUS_NOT_INITALIZED) {
 						switch_thread_rwlock_unlock(session->bug_rwlock);
 						goto done;
@@ -568,7 +583,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 			/* mux or demux to match */
 			if (session->raw_read_frame.channels != session->read_impl.number_of_channels) {
 				uint32_t rlen = session->raw_read_frame.datalen / 2 / session->raw_read_frame.channels;
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 				switch_mux_channels((int16_t *) session->raw_read_frame.data, rlen, session->raw_read_frame.channels, session->read_impl.number_of_channels);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 				session->raw_read_frame.datalen = rlen * 2 * session->read_impl.number_of_channels;
 				session->raw_read_frame.samples = session->raw_read_frame.datalen / 2;
 				session->raw_read_frame.channels = session->read_impl.number_of_channels;
@@ -639,7 +656,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 				status = SWITCH_STATUS_SUCCESS;
 				break;
 			case SWITCH_STATUS_BREAK:
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 				memset(session->raw_read_frame.data, 255, read_frame->codec->implementation->decoded_bytes_per_packet);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 				session->raw_read_frame.datalen = read_frame->codec->implementation->decoded_bytes_per_packet;
 				session->raw_read_frame.samples = session->raw_read_frame.datalen / sizeof(int16_t) / session->read_impl.number_of_channels;
 				session->raw_read_frame.channels = session->read_impl.number_of_channels;
@@ -706,9 +725,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 						bp->read_replace_frame_in = read_frame;
 						bp->read_replace_frame_out = read_frame;
 						bp->read_demux_frame = NULL;
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 						if ((ok = bp->callback(bp, bp->user_data, SWITCH_ABC_TYPE_READ_REPLACE)) == SWITCH_TRUE) {
 							read_frame = bp->read_replace_frame_out;
 						}
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 					}
 				}
 
@@ -753,13 +774,16 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 
 				if (bp->ready && switch_test_flag(bp, SMBF_READ_STREAM)) {
 					switch_mutex_lock(bp->read_mutex);
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 					if (bp->read_demux_frame) {
 						uint8_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
 						int bytes = read_frame->datalen;
 						uint32_t datalen = 0;
 						uint32_t samples = bytes / 2 / bp->read_demux_frame->channels;
 
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 						memcpy(data, read_frame->data, read_frame->datalen);
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 						datalen = switch_unmerge_sln((int16_t *)data, samples,
 													 bp->read_demux_frame->data, samples,
 													 bp->read_demux_frame->channels) * 2 * bp->read_demux_frame->channels;
@@ -768,9 +792,12 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 					} else {
 						switch_buffer_write(bp->raw_read_buffer, read_frame->data, read_frame->datalen);
 					}
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 
 					if (bp->callback) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 						ok = bp->callback(bp, bp->user_data, SWITCH_ABC_TYPE_READ);
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 					}
 					switch_mutex_unlock(bp->read_mutex);
 				}
@@ -795,7 +822,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 				short *data = read_frame->data;
 				switch_mutex_lock(session->resample_mutex);
 				switch_resample_process(session->read_resampler, data, (int) read_frame->datalen / 2 / session->read_resampler->channels);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 				memcpy(data, session->read_resampler->to, session->read_resampler->to_len * 2 * session->read_resampler->channels);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 				read_frame->samples = session->read_resampler->to_len;
 				read_frame->channels = session->read_resampler->channels;
 				read_frame->datalen = session->read_resampler->to_len * 2 * session->read_resampler->channels;
@@ -813,10 +842,13 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 					switch_buffer_create_dynamic(&session->raw_read_buffer, bytes * SWITCH_BUFFER_BLOCK_FRAMES, bytes * SWITCH_BUFFER_START_FRAMES, 0);
 				}
 
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 				if (read_frame->datalen && (!switch_buffer_write(session->raw_read_buffer, read_frame->data, read_frame->datalen))) {
 					status = SWITCH_STATUS_MEMERR;
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 					goto done;
 				}
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 			}
 
 			if (perfect || switch_buffer_inuse(session->raw_read_buffer) >= session->read_impl.decoded_bytes_per_packet) {
@@ -824,10 +856,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 					enc_frame = read_frame;
 					session->raw_read_frame.rate = read_frame->rate;
 				} else {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 					session->raw_read_frame.datalen = (uint32_t) switch_buffer_read(session->raw_read_buffer,
 																					session->raw_read_frame.data,
 																					session->read_impl.decoded_bytes_per_packet);
-
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 					session->raw_read_frame.rate = session->read_impl.actual_samples_per_second;
 					enc_frame = &session->raw_read_frame;
 				}
@@ -840,23 +873,27 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 				enc_frame->codec->cur_frame = enc_frame;
 				switch_assert(enc_frame->datalen <= SWITCH_RECOMMENDED_BUFFER_SIZE);
 				switch_assert(session->enc_read_frame.datalen <= SWITCH_RECOMMENDED_BUFFER_SIZE);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 				status = switch_core_codec_encode(session->read_codec,
 												  enc_frame->codec,
 												  enc_frame->data,
 												  enc_frame->datalen,
 												  session->read_impl.actual_samples_per_second,
 												  session->enc_read_frame.data, &session->enc_read_frame.datalen, &session->enc_read_frame.rate, &flag);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 				switch_assert(session->enc_read_frame.datalen <= SWITCH_RECOMMENDED_BUFFER_SIZE);
 
 				if ((flag & SFF_FORK_RTP) && session->read_codec->implementation->impl_id != codec_impl.impl_id) {
 					unsigned int fork_flag = 0;
 
 					session->fork_enc_read_frame.datalen = session->fork_enc_read_frame.buflen;
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 					if (switch_core_codec_encode((*frame)->codec, enc_frame->codec,
 										enc_frame->data, enc_frame->datalen,
 										codec_impl.actual_samples_per_second,
 										session->fork_enc_read_frame.data, &session->fork_enc_read_frame.datalen,
 										&session->fork_enc_read_frame.rate, &fork_flag) == SWITCH_STATUS_SUCCESS) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 						session->fork_enc_read_frame.samples = codec_impl.decoded_bytes_per_packet / sizeof(int16_t) / codec_impl.number_of_channels;
 						session->fork_enc_read_frame.channels = codec_impl.number_of_channels;
 						if (perfect) {
@@ -965,10 +1002,12 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 					switch_mutex_lock(bp->read_mutex);
 					bp->ping_frame = *frame;
 					if (bp->callback) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 						if (bp->callback(bp, bp->user_data, SWITCH_ABC_TYPE_READ_PING) == SWITCH_FALSE
 							|| (bp->stop_time && bp->stop_time <= switch_epoch_time_now(NULL))) {
 							ok = SWITCH_FALSE;
 						}
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 					}
 					bp->ping_frame = NULL;;
 					switch_mutex_unlock(bp->read_mutex);
@@ -1002,6 +1041,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 			switch_core_session_set_fork_read_frame(session, NULL);
 		}
 	}
+
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Read codec addr: %p, codec read mutex addr: %p\n", (void *)&session->read_codec, (void *)&session->codec_read_mutex);
 
 	switch_mutex_unlock(session->read_codec->mutex);
 	switch_mutex_unlock(session->codec_read_mutex);
