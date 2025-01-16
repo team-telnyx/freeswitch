@@ -474,7 +474,9 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 	user_data = data->session_data;
 	stream_id = data->stream_id;
 
-	per_read_frame_ms = 1000 / (read_impl.actual_samples_per_second / read_impl.samples_per_packet);
+	if (read_impl.actual_samples_per_second != 0 && read_impl.samples_per_packet != 0) {
+		per_read_frame_ms = 1000 / (read_impl.actual_samples_per_second / read_impl.samples_per_packet);
+	}
 
 	chan_a = switch_core_session_get_channel(session_a);
 	chan_b = switch_core_session_get_channel(session_b);
