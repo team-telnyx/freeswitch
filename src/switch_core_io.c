@@ -993,6 +993,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 
   even_more_done:
 
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Read codec addr: %p, codec read mutex addr: %p\n", (void *)&session->read_codec, (void *)&session->codec_read_mutex);
+
 	if (!*frame ||
 			(!switch_test_flag(*frame, SFF_PROXY_PACKET) &&
 			 (!(*frame)->codec || !(*frame)->codec->implementation || !switch_core_codec_ready((*frame)->codec)))) {
@@ -1007,8 +1009,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 			switch_core_session_set_fork_read_frame(session, NULL);
 		}
 	}
-
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Read codec addr: %p, codec read mutex addr: %p\n", (void *)&session->read_codec, (void *)&session->codec_read_mutex);
 
 	switch_mutex_unlock(session->read_codec->mutex);
 	switch_mutex_unlock(session->codec_read_mutex);
