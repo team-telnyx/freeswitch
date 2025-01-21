@@ -943,6 +943,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_codec_destroy(switch_codec_t *codec)
 
 	if (mutex) switch_mutex_unlock(mutex);
 
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Codec read mutex addr: %p has been set to NULL\n", (void *)&mutex);
+
 	if (free_pool) {
 		switch_core_destroy_memory_pool(&pool);
 	}
