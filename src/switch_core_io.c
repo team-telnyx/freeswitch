@@ -81,7 +81,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 
 	switch_os_yield();
 
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 
 	if (switch_mutex_trylock(session->codec_read_mutex) == SWITCH_STATUS_SUCCESS) {
 		switch_mutex_unlock(session->codec_read_mutex);
@@ -188,11 +188,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 		switch_mutex_unlock(session->read_codec->mutex);
 		switch_mutex_unlock(session->codec_read_mutex);
 		if ((status = session->endpoint_interface->io_routines->read_frame(session, frame, flags, stream_id)) == SWITCH_STATUS_SUCCESS) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 			for (ptr = session->event_hooks.read_frame; ptr; ptr = ptr->next) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 				if ((status = ptr->read_frame(session, frame, flags, stream_id)) != SWITCH_STATUS_SUCCESS) {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
 					break;
 				}
 			}
@@ -993,7 +993,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 
   even_more_done:
 
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Read codec addr: %p, codec read mutex addr: %p\n", (void *)&session->read_codec, (void *)&session->codec_read_mutex);
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Read codec addr: %p, codec read mutex addr: %p\n", (void *)&session->read_codec, (void *)&session->codec_read_mutex);
 
 	if (!*frame ||
 			(!switch_test_flag(*frame, SFF_PROXY_PACKET) &&
