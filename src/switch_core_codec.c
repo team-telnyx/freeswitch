@@ -724,6 +724,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_codec_init_with_bitrate(switch_codec
 
 		implementation->init(codec, flags, codec_settings);
 		switch_mutex_init(&codec->mutex, SWITCH_MUTEX_NESTED, codec->memory_pool);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Codec mutex addr: %p\n", (void *)&codec->mutex);
+
 		switch_set_flag(codec, SWITCH_CODEC_FLAG_READY);
 		return SWITCH_STATUS_SUCCESS;
 	} else {
