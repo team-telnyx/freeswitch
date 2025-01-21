@@ -48,7 +48,10 @@ SWITCH_DECLARE(void) switch_core_session_unset_read_codec(switch_core_session_t 
 	switch_mutex_t *mutex = NULL;
 
 	switch_mutex_lock(session->codec_read_mutex);
-	if (session->read_codec) mutex = session->read_codec->mutex;
+	if (session->read_codec) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Read codec addr: %p is set to NULL\n", (void *)&session->read_codec);
+		mutex = session->read_codec->mutex;
+	}
 	if (mutex) switch_mutex_lock(mutex);
 	session->real_read_codec = session->read_codec = NULL;
 	session->raw_read_frame.codec = session->read_codec;
@@ -112,6 +115,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_set_real_read_codec(switch_c
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s Original read codec set to %s:%d\n",
 							  switch_channel_get_name(session->channel), codec->implementation->iananame, codec->implementation->ianacode);
 			session->read_codec = session->real_read_codec = codec;
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Read codec addr: %p\n", (void *)&session->read_codec);
 			changed_read_codec = 1;
 			if (codec->implementation) {
 				session->read_impl = *codec->implementation;
