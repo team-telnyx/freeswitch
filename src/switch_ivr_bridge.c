@@ -451,6 +451,7 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 	const char *banner_file = NULL;
 	int played_banner = 0, banner_counter = 0;
 	int pass_val = 0, last_pass_val = 0;
+	switch_status_t get_read_impl_status;
 
 #ifdef SWITCH_VIDEO_IN_THREADS
 	struct vid_helper vh = { 0 };
@@ -468,13 +469,13 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 	//switch_channel_set_flag(switch_core_session_get_channel(session_b), CF_ACCEPT_CNG);
 #endif
 
-	switch_core_session_get_read_impl(session_a, &read_impl);
+	get_read_impl_status = switch_core_session_get_read_impl(session_a, &read_impl);
 
 	input_callback = data->input_callback;
 	user_data = data->session_data;
 	stream_id = data->stream_id;
 
-	if (read_impl.actual_samples_per_second != 0 && read_impl.samples_per_packet != 0) {
+	if (get_read_impl_status == SWITCH_STATUS_SUCCESS) {
 		per_read_frame_ms = 1000 / (read_impl.actual_samples_per_second / read_impl.samples_per_packet);
 	}
 
