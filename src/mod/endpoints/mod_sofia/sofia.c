@@ -8553,7 +8553,7 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 										switch_channel_var_true(channel, "sip_unhold_nosdp") ? "sendrecv" : NULL,
 										zstr(tech_pvt->mparams.local_sdp_str) || !switch_channel_test_flag(channel, CF_PROXY_MODE));
 			} else {
-				switch_core_media_gen_local_sdp(session, SDP_TYPE_RESPONSE, NULL, 0,
+				switch_core_media_gen_local_sdp(session, SDP_TYPE_REQUEST, NULL, 0,
 										switch_channel_var_true(channel, "sip_unhold_nosdp") ? "sendrecv" : NULL,
 										zstr(tech_pvt->mparams.local_sdp_str) || !switch_channel_test_flag(channel, CF_PROXY_MODE));
 			}
@@ -9137,7 +9137,12 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 
 				if (tech_pvt->mparams.num_codecs) {
 					if (sofia_test_flag(tech_pvt, TFLAG_GOT_ACK)) {
-						match = sofia_media_negotiate_sdp(session, r_sdp, SDP_TYPE_REQUEST);
+						// TODO: 
+						// Telnyx Fix for 3pcc and SRTP conflicts with the 3pcc fixes in Freeswitch.
+						// It requires redoing 3pcc and SRTP patches to comply with FS patches.
+						// For now we will revert to FS fix by changing the SDP_TYPE_REQUEST
+						// to SDP_TYPE_RESPONSE.
+						match = sofia_media_negotiate_sdp(session, r_sdp, SDP_TYPE_RESPONSE);
 					} else {
 						match = sofia_media_negotiate_sdp(session, r_sdp, SDP_TYPE_RESPONSE);
 					}
