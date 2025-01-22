@@ -3601,7 +3601,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 
 							rst = setup_ringback(&oglobals, oglobals.originate_status, and_argc, ringback_data, &ringback, &write_frame, &write_codec);
 
-							if (oglobals.bridge_early_media > -1) {
+							if (oglobals.bridge_early_media > -1 && !oglobals.instant_ringback) {
 								switch_threadattr_t *thd_attr = NULL;
 								switch_threadattr_create(&thd_attr, switch_core_session_get_pool(session));
 								switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
@@ -3639,7 +3639,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 							goto do_continue;
 						}
 
-						if (oglobals.bridge_early_media > -1) {
+						if (oglobals.bridge_early_media > -1 && !oglobals.instant_ringback) {
 							write_frame.datalen = 0;
 							switch_mutex_lock(early_state.mutex);
 							if (ringback.asis) {
