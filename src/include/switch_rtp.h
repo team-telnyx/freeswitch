@@ -329,6 +329,26 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_set_remote_ssrc(switch_rtp_t *rtp_ses
 SWITCH_DECLARE(switch_port_t) switch_rtp_set_end_port(switch_port_t port);
 
 /*!
+  \brief Set/Get RTP start sequence
+  \param sequence new value (if > 0)
+  \return the current RTP start sequence
+*/
+SWITCH_DECLARE(uint16_t) switch_rtp_set_start_sequence(uint16_t sequence);
+
+/*!
+  \brief Set/Get RTP end sequence
+  \param sequence new value (if > 0)
+  \return the current RTP end sequence
+*/
+SWITCH_DECLARE(uint16_t) switch_rtp_set_end_sequence(uint16_t sequence);
+
+/*!
+  \brief Request a new start sequence to be used for RTP packet
+  \return the new random sequence
+*/
+SWITCH_DECLARE(uint16_t) switch_rtp_request_sequence();
+
+/*!
   \brief Set/Get RTP packet penalty for packet loss
   \param port new value (if > 0)
   \return the current RTP penalty for packet loss
