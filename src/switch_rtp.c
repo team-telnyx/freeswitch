@@ -79,6 +79,8 @@
 #define rtp_header_len 12
 #define RTP_START_PORT 16384
 #define RTP_END_PORT 32768
+#define RTP_START_SEQUENCE 0
+#define RTP_END_SEQUENCE 64000
 #define MASTER_KEY_LEN   30
 #define RTP_MAGIC_NUMBER 42
 #define WARN_SRTP_ERRS 10
@@ -101,6 +103,8 @@ static const switch_payload_t INVALID_PT = 255;
 
 static switch_port_t START_PORT = RTP_START_PORT;
 static switch_port_t END_PORT = RTP_END_PORT;
+static uint16_t START_SEQUENCE = RTP_START_SEQUENCE;
+static uint16_t END_SEQUENCE = RTP_END_SEQUENCE;
 static switch_mutex_t *port_lock = NULL;
 static switch_size_t do_flush(switch_rtp_t *rtp_session, int force, switch_size_t bytes_in);
 static rtp_create_probe_func create_probe = 0;
@@ -2660,6 +2664,27 @@ SWITCH_DECLARE(switch_port_t) switch_rtp_set_end_port(switch_port_t port)
 	return END_PORT;
 }
 
+SWITCH_DECLARE(uint16_t) switch_rtp_set_start_sequence(uint16_t sequence)
+{
+	if (sequence) {
+		START_SEQUENCE = sequence;
+	}
+	return START_SEQUENCE;
+}
+
+SWITCH_DECLARE(uint16_t) switch_rtp_set_end_sequence(uint16_t sequence)
+{
+	if (sequence) {
+		END_SEQUENCE = sequence;
+	}
+	return END_SEQUENCE;
+}
+
+SWITCH_DECLARE(uint16_t) switch_rtp_request_sequence()
+{
+	return (((uint16_t)rand()) % (END_SEQUENCE - START_SEQUENCE + 1) + START_SEQUENCE);
+}
+
 SWITCH_DECLARE(double) switch_rtp_set_mos_packet_loss_penalty(double penalty)
 {
 	if (penalty) {
@@ -4835,7 +4860,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_create(switch_rtp_t **new_rtp_session
 	if (rtp_session->flags[SWITCH_RTP_FLAG_ENABLE_RTCP]) {
 		switch_sockaddr_create(&rtp_session->rtcp_from_addr, pool);
 	}
-	rtp_session->seq = (uint16_t) rand();
+	rtp_session->seq = switch_rtp_request_sequence();
 	rtp_session->ssrc = (uint32_t) ((intptr_t) rtp_session + (uint32_t) switch_epoch_time_now(NULL));
 #ifdef DEBUG_TS_ROLLOVER
 	rtp_session->last_write_ts = TS_ROLLOVER_START;
