@@ -1932,6 +1932,7 @@ static void our_sofia_event_callback(nua_event_t event,
 	case nua_i_update:
 		if (session) {
 			sofia_update_callee_id(session, profile, sip, SWITCH_TRUE);
+			sofia_handle_sip_i_update(nua, profile, nh, session, sip, de, tags);
 		}
 		break;
 	case nua_r_update:
@@ -3521,7 +3522,7 @@ void *SWITCH_THREAD_FUNC sofia_profile_thread_run(switch_thread_t *thread, void 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Created agent for %s\n", profile->name);
 
 	nua_set_params(profile->nua,
-				   SIPTAG_ALLOW_STR("INVITE, ACK, BYE, CANCEL, OPTIONS, MESSAGE, INFO"),
+				   SIPTAG_ALLOW_STR("INVITE, ACK, BYE, CANCEL, OPTIONS, MESSAGE, INFO, UPDATE"),
 				   SIPTAG_USER_AGENT(SIP_NONE),
 				   NUTAG_AUTOANSWER(0),
 				   NUTAG_AUTOACK(0),
@@ -3546,6 +3547,7 @@ void *SWITCH_THREAD_FUNC sofia_profile_thread_run(switch_thread_t *thread, void 
 				   NUTAG_APPL_METHOD("BYE"),
 #endif
 				   NUTAG_APPL_METHOD("MESSAGE"),
+				   NUTAG_APPL_METHOD("UPDATE"),
 
 				   TAG_IF(profile->session_timeout && profile->minimum_session_expires, NUTAG_MIN_SE(profile->minimum_session_expires)),
 				   NUTAG_SESSION_TIMER(profile->session_timeout),
@@ -9525,6 +9527,16 @@ static switch_status_t sofia_process_proxy_refer(switch_core_session_t *session,
 	}
 
 	return SWITCH_STATUS_FALSE;
+}
+
+void sofia_handle_sip_i_update(nua_t *nua, sofia_profile_t *profile, nua_handle_t *nh, switch_core_session_t *session, sip_t const *sip,
+								sofia_dispatch_event_t *de, tagi_t tags[])
+{
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "in sofia_handle_sip_i_update()\n");
+	if (sip && sip->sip_payload && sip->sip_payload->pl_data) {
+		void *request = nua_current_request(nua);
+		nua_respond(nh, SIP_200_OK, NUTAG_WITH(request), TAG_END());
+	}
 }
 
 void sofia_handle_sip_i_refer(nua_t *nua, sofia_profile_t *profile, nua_handle_t *nh, switch_core_session_t *session, sip_t const *sip,
