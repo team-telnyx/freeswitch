@@ -1,0 +1,211 @@
+<?xml version="1.0"?>
+<document type="freeswitch/xml">
+	<X-PRE-PROCESS cmd="exec-set" data="test=echo 1234"/>
+	<X-PRE-PROCESS cmd="set" data="spawn_instead_of_system=true"/>
+	<X-PRE-PROCESS cmd="exec-set" data="shell_exec_set_test=ls / | grep usr"/>
+	<X-PRE-PROCESS cmd="set" data="spawn_instead_of_system=false"/>
+	<X-PRE-PROCESS cmd="set" data="default_password=$${test}"/>
+	<X-PRE-PROCESS cmd="set" data="rtp_timer_name=soft" />
+	<section name="configuration" description="Various Configuration">
+		<configuration name="modules.conf" description="Modules">
+			<modules>
+				<load module="mod_console"/>
+				<load module="mod_loopback"/>
+				<load module="mod_dptools"/>
+				<load module="mod_sndfile"/>
+				<load module="mod_dialplan_xml"/>
+				<load module="mod_sndfile"/>
+				<load module="mod_telnyx"/>
+				<load module="mod_console"/>
+				<load module="mod_sofia"/>
+			</modules>
+		</configuration>
+		<configuration name="console.conf" description="Console Logger">
+			<mappings>
+				<map name="all" value="console,debug,info,notice,warning,err,crit,alert"/>
+			</mappings>
+			<settings>
+				<param name="colorize" value="true"/>
+				<param name="loglevel" value="debug"/>
+			</settings>
+		</configuration>
+		<configuration name="switch.conf" description="Core Configuration">
+			<default-ptimes></default-ptimes>
+			<settings>
+				<param name="dialplan-timestamps" value="false"/>
+				<param name="loglevel" value="debug"/>
+				<param name="rtp-start-port" value="20000"/>
+				<param name="rtp-end-port" value="30000"/>
+			</settings>
+		</configuration>
+		<configuration name="timezones.conf" description="Timezones">
+			<timezones>
+				<zone name="GMT" value="GMT0" />
+			</timezones>
+		</configuration>
+		<configuration name="sofia.conf" description="SofiaSIP">
+			<profiles>
+				<profile name="external">
+					<gateways>
+						<gateway name="test_gateway">
+							<param name="username" value="not-used"/>
+							<param name="password" value="not-used"/>
+							<param name="proxy" value="$${local_ip_v4}:63068"/>
+							<param name="register" value="false"/>
+							<param name="retry-seconds" value="30"/>
+							<param name="dtmf-type" value="rfc2833"/>
+							<variables>
+								<variable name="rtp_secure_media"  value="false"  direction="outbound"/>
+							</variables>
+						</gateway>
+					</gateways>
+					<domains>
+						<domain name="all" alias="false" parse="true"/>
+					</domains>
+					<settings>
+						<param name="debug" value="1"/>
+						<param name="shutdown-on-fail" value="true"/>
+						<param name="p-asserted-id-parse" value="verbatim"/>
+						<param name="username" value="SignalWire-STACK"/>
+						<param name="user-agent-string" value="SignalWire STACK Unit Test"/>
+						<param name="sip-trace" value="no"/>
+						<param name="sip-capture" value="no"/>
+						<param name="rfc2833-pt" value="101"/>
+						<param name="sip-port" value="63068"/>
+						<param name="dialplan" value="XML"/>
+						<param name="context" value="default"/>
+						<param name="dtmf-duration" value="2000"/>
+						<param name="inbound-codec-prefs" value="PCMU"/>
+						<param name="outbound-codec-prefs" value="PCMU"/>
+						<param name="rtp-timer-name" value="soft"/>
+						<param name="local-network-acl" value="localnet.auto"/>
+						<param name="manage-presence" value="false"/>
+						<param name="inbound-codec-negotiation" value="generous"/>
+						<param name="nonce-ttl" value="60"/>
+						<param name="inbound-late-negotiation" value="true"/>
+						<param name="inbound-zrtp-passthru" value="false"/>
+						<param name="rtp-ip" value="$${local_ip_v4}"/>
+						<param name="sip-ip" value="$${local_ip_v4}"/>
+						<param name="ext-rtp-ip" value="$${local_ip_v4}"/>
+						<param name="ext-sip-ip" value="$${local_ip_v4}"/>
+						<param name="rtp-timeout-sec" value="300"/>
+						<param name="rtp-hold-timeout-sec" value="1800"/>
+						<param name="session-timeout" value="600"/>
+						<param name="minimum-session-expires" value="90"/>
+						<param name="tls" value="false"/>
+					</settings>
+				</profile>
+				<profile name="internal">
+					<gateways>
+						<gateways></gateways>
+					</gateways>
+					<domains>
+						<domain name="all" alias="false" parse="true"/>
+					</domains>
+					<settings>
+						<param name="debug" value="1"/>
+						<param name="shutdown-on-fail" value="true"/>
+						<param name="p-asserted-id-parse" value="verbatim"/>
+						<param name="username" value="SignalWire-STACK"/>
+						<param name="user-agent-string" value="SignalWire STACK Unit Test"/>
+						<param name="sip-trace" value="no"/>
+						<param name="sip-capture" value="no"/>
+						<param name="rfc2833-pt" value="101"/>
+						<param name="sip-port" value="61069"/>
+						<param name="dialplan" value="XML"/>
+						<param name="context" value="default"/>
+						<param name="dtmf-duration" value="2000"/>
+						<param name="inbound-codec-prefs" value="PCMU"/>
+						<param name="outbound-codec-prefs" value="PCMU"/>
+						<param name="rtp-timer-name" value="soft"/>
+						<param name="local-network-acl" value="localnet.auto"/>
+						<param name="manage-presence" value="false"/>
+						<param name="inbound-codec-negotiation" value="generous"/>
+						<param name="nonce-ttl" value="60"/>
+						<param name="inbound-late-negotiation" value="true"/>
+						<param name="inbound-zrtp-passthru" value="false"/>
+						<param name="rtp-ip" value="$${local_ip_v4}"/>
+						<param name="sip-ip" value="$${local_ip_v4}"/>
+						<param name="ext-rtp-ip" value="$${local_ip_v4}"/>
+						<param name="ext-sip-ip" value="$${local_ip_v4}"/>
+						<param name="rtp-timeout-sec" value="300"/>
+						<param name="rtp-hold-timeout-sec" value="1800"/>
+						<param name="session-timeout" value="600"/>
+						<param name="minimum-session-expires" value="90"/>
+						<param name="tls" value="false"/>
+					</settings>
+				</profile>
+			</profiles>
+		</configuration>
+		<configuration name="telnyx.conf">
+			<settings>
+				<param name="heartbeat_interval_sec" value="5"/>
+				<param name="enable_prometheus" value="yes"/>
+				<param name="prometheus_ip" value="$${local_ip_v4}"/>
+				<param name="prometheus_port" value="9080"/>
+				<param name="cpu_threshold_high_water_mark_percent" value="80"/>
+				<param name="cpu_threshhold_check_interval_sec" value="15"/>
+				<param name="cpu_threshold_log_file_purge_hours" value="12"/>
+				<param name="cpu_threshold_backtrace_log_file" value="freeswitch_cpu_consumer.log"/>
+				<param name="cpu_threshold_backtrace_log_file_folder" value="$${log_dir}"/>
+				<param name="carp_enabled" value="yes"/>
+				<param name="carp_interface_name" value="eth0"/>
+				<param name="carp_source_ip" value="$${local_ip_v4}"/>
+				<param name="carp_up_script_path" value=""/>
+				<param name="carp_down_script_path" value=""/>
+				<param name="carp_preferred_master" value="no"/>
+				<param name="carp_hearbeat_freq_sec" value="1"/>
+				<param name="event_queue_ip" value="$${local_ip_v4}"/>
+				<param name="zombie_call_duration_hours" value="12"/>
+				<param name="zombie_call_warning_hours" value="3"/>
+				<param name="zombie_call_recovered_io_timeout_minutes" value="30"/>
+				<param name="zombie_call_io_timeout_minutes" value="60"/>
+				<param name="zombie_call_force_disconnect" value="no"/>
+				<param name="disconnect_response_code_4xx_rewrite" value="yes"/>
+				<param name="disconnect_response_code_4xx_value" value="480"/>
+				<param name="disconnect_response_code_5xx_rewrite" value="yes"/>
+				<param name="disconnect_response_code_5xx_value" value="480"/>
+				<param name="call_control_session_log_level" value="debug"/>
+				<param name="api_handler_port" value="5556"/>
+				<param name="cpu_yield_percent" value="60"/>
+				<param name="cps_yield_count" value="100"/>
+				<param name="yield_session_count_max" value="1000"/>
+				<param name="yield_session_interval_sec_max" value="3"/>
+				<param name="recompute_inbound_cause_codes" value="403 486"/>
+				<param name="health_ip" value="127.0.0.1"/>
+				<param name="health_port" value="2000"/>
+				<param name="enable_health" value="false"/>
+				<param name="enable_audio_stat_metric" value="false"/>
+				<param name="enable_audio_quality_metric" value="false"/>
+			</settings>
+			<dialplans>
+				<dialplan profile="external" order="after" before_apps="bridge,park">
+					<application app="set" data="foo=true"/>
+					<application app="set" data="force_rtcp_passthru=true"/>
+				</dialplan>
+				<dialplan profile="external" order="before">
+					<application app="set" data="bar=true"/>
+					<application app="set" data="force_rtcp_passthru=false"/>
+				</dialplan>
+			</dialplans>
+		</configuration>
+	</section>
+	<section name="dialplan" description="Regex/XML Dialplan">
+		<context name="default">
+			<extension name="two">
+				<condition field="destination_number" expression="^\+15553332901$">
+					<action application="answer"/>
+					<action application="park"/>
+				</condition>
+			</extension>
+			<extension name="one">
+				<condition field="destination_number" expression="^\+15553332900$">
+					<action application="set" data="absolute_codec_string=PCMU@20i"/>
+					<action application="info"/>
+					<action application="answer"/>
+					<action application="park"/>
+				</condition>
+			</extension>
+		</context>
+	</section>
+</document>
