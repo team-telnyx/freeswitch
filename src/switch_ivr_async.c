@@ -1108,7 +1108,13 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_displace_session(switch_core_session_
 	}
 
 	if (flags && strchr(flags, 'f')) {
+		bug_flags &= SMBF_LAST;
 		bug_flags |= SMBF_FIRST;
+	}
+
+	if (flags && strchr(flags, 'b')) {
+		bug_flags &= SMBF_FIRST;
+		bug_flags |= SMBF_LAST;
 	}
 
 	if (flags && strchr(flags, 'r')) {
@@ -2389,7 +2395,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 		char cid_buf[1024] = "";
 		switch_caller_profile_t *cp = NULL;
 		uint32_t sanity = 600;
-		switch_media_bug_flag_t read_flags = 0, write_flags = 0, stereo_flag = 0;
+		switch_media_bug_flag_t read_flags = 0, write_flags = 0, stereo_flag = 0, pos_flag = 0;
 		const char *vval;
 		int buf_size = 0;
 		int channels;
@@ -2567,8 +2573,10 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 			read_flags = 0;
 		}
 
-		if (flags & ED_STEREO) {
-			stereo_flag = SMBF_STEREO;
+		if (flags & ED_BUG_TOP) {
+			pos_flag = SMBF_FIRST;
+		} else if (flags & ED_BUG_BOTTOM) {
+			pos_flag = SMBF_LAST;
 		}
 
 		if (switch_channel_test_flag(session->channel, CF_VIDEO) && switch_channel_test_flag(tsession->channel, CF_VIDEO)) {
@@ -2598,7 +2606,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 
 		if (switch_core_media_bug_add(tsession, "eavesdrop", uuid,
 									  eavesdrop_callback, ep, 0,
-									  read_flags | write_flags | SMBF_READ_PING | SMBF_THREAD_LOCK | SMBF_NO_PAUSE | stereo_flag,
+									  read_flags | write_flags | SMBF_READ_PING | SMBF_THREAD_LOCK | SMBF_NO_PAUSE | stereo_flag | pos_flag,
 									  &bug) != SWITCH_STATUS_SUCCESS) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Cannot attach bug\n");
 			goto end;
@@ -3113,6 +3121,16 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 	if (recording_var_true(channel, vars, "RECORD_READ_ONLY")) {
 		flags &= ~SMBF_WRITE_STREAM;
 		flags |= SMBF_READ_STREAM;
+	}
+
+	if (recording_var_true(channel, vars, "RECORD_BUG_TOP")) {
+		flags &= SMBF_LAST;
+		flags |= SMBF_FIRST;
+	}
+
+	if (recording_var_true(channel, vars, "RECORD_BUG_BOTTOM")) {
+		flags &= SMBF_FIRST;
+		flags |= SMBF_LAST;
 	}
 
 	if (channels == 1) { /* if leg is already stereo this feature is not available */
