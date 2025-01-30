@@ -9607,7 +9607,6 @@ void sofia_handle_sip_i_update(nua_t *nua, sofia_profile_t *profile, nua_handle_
 						TAG_END());
 		}
 		switch_safe_free(extra_headers);
-		sofia_set_flag_locked(tech_pvt, TFLAG_ANS);
 	}
 }
 
