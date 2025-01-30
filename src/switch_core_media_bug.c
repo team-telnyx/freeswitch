@@ -814,7 +814,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_add(switch_core_session_t 
 														  switch_media_bug_flag_t flags,
 														  switch_media_bug_t **new_bug)
 {
-	switch_media_bug_t *bug, *bp;
+	switch_media_bug_t *bug, *bp, *last_bp;
 	switch_size_t bytes;
 	switch_event_t *event;
 	int tap_only = 1, punt = 0, added = 0;
@@ -1010,13 +1010,15 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_add(switch_core_session_t 
 		if (!added) {
 			if (switch_test_flag(bp, SMBF_LAST) && !switch_test_flag(bug, SMBF_LAST)){
 				bug->next = bp;
-				bp = bug;
+				last_bp->next = bug;
 				break;
 			} else if (!bp->next) {
 				bp->next = bug;
 				break;
 			}
 		}
+
+		last_bp = bp;
 	}
 
 	switch_thread_rwlock_unlock(session->bug_rwlock);
