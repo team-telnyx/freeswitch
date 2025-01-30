@@ -956,11 +956,11 @@ SWITCH_STANDARD_APP(eavesdrop_function)
 			flags |= ED_BRIDGE_WRITE;
 		}
 		if (switch_true(bug_top)) {
-			flags &= ED_BUG_BOTTOM;
+			flags &= ~ED_BUG_BOTTOM;
 			flags |= ED_BUG_TOP;
 		}
 		if (switch_true(bug_bottom)) {
-			flags &= ED_BUG_TOP;
+			flags &= ~ED_BUG_TOP;
 			flags |= ED_BUG_BOTTOM;
 		}
 
@@ -1052,11 +1052,11 @@ SWITCH_STANDARD_APP(three_way_function)
 		switch_eavesdrop_flag_t flags = ED_MUX_READ | ED_MUX_WRITE;
 
 		if (switch_true(bug_top)) {
-			flags &= ED_BUG_BOTTOM;
+			flags &= ~ED_BUG_BOTTOM;
 			flags |= ED_BUG_TOP;
 		}
 		if (switch_true(bug_bottom)) {
-			flags &= ED_BUG_TOP;
+			flags &= ~ED_BUG_TOP;
 			flags |= ED_BUG_BOTTOM;
 		}
 		switch_ivr_eavesdrop_session(session, data, NULL, flags);
