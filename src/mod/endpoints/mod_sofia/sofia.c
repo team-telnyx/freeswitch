@@ -9529,6 +9529,35 @@ static switch_status_t sofia_process_proxy_refer(switch_core_session_t *session,
 	return SWITCH_STATUS_FALSE;
 }
 
+static switch_bool_t has_valid_image_media_type(const char *r_sdp)
+{
+	switch_bool_t ret = SWITCH_FALSE;
+	sdp_parser_t *parser = NULL;
+	sdp_session_t *sdp;
+
+	if ((parser = sdp_parse(NULL, r_sdp, (int) strlen(r_sdp), 0))) {
+		if ((sdp = sdp_session(parser))) {
+			sdp_media_t *m;
+			for (m = sdp->sdp_media; m; m = m->m_next) {
+				if (m->m_type == sdp_media_image && m->m_port) {
+					sdp_attribute_t *attr;
+					ret = SWITCH_TRUE;
+					for (attr = m->m_attributes; attr; attr = attr->a_next) {
+						if (!strcasecmp(attr->a_name, "recvonly")) {
+							ret = SWITCH_FALSE;
+							break;
+						}
+					}
+                }
+			}
+		}
+	}
+	if (parser) {
+		sdp_parser_free(parser);
+	}
+	return ret;
+}
+
 void sofia_handle_sip_i_update(nua_t *nua, sofia_profile_t *profile, nua_handle_t *nh, switch_core_session_t *session, sip_t const *sip,
 								sofia_dispatch_event_t *de, tagi_t tags[])
 {
@@ -9536,16 +9565,22 @@ void sofia_handle_sip_i_update(nua_t *nua, sofia_profile_t *profile, nua_handle_
 	const char *session_id_header = NULL;
 	private_object_t *tech_pvt = NULL;
 	switch_channel_t *channel = NULL;
+	switch_bool_t has_valid_sdp = SWITCH_TRUE;
 
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "in sofia_handle_sip_i_update()\n");
 	if (session && sip && sip->sip_payload && sip->sip_payload->pl_data) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "has sdp payload\n");
+		tech_pvt = switch_core_session_get_private(session);
 		r_sdp = sip->sip_payload->pl_data;
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Remote SDP:\n%s\n", r_sdp);
+		if (!strcmp(tech_pvt->mparams.remote_sdp_str, r_sdp)) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Duplicate SDP\n%s\n", r_sdp);
+			has_valid_sdp = SWITCH_FALSE;
+			goto respond;
+		}
 		if (switch_stristr("m=image", r_sdp)) {
 			switch_t38_options_t *t38_options;
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "has m=image\n");
-			tech_pvt = switch_core_session_get_private(session);
+			if (!has_valid_image_media_type(r_sdp)) {
+				has_valid_sdp = SWITCH_FALSE;
+				goto respond;
+			}
 			channel = switch_core_session_get_channel(session);
 
 			t38_options = switch_core_media_extract_t38_options(session, r_sdp);
@@ -9561,24 +9596,25 @@ void sofia_handle_sip_i_update(nua_t *nua, sofia_profile_t *profile, nua_handle_
 			switch_core_media_set_udptl_image_sdp(session, t38_options, 0);
 		} else {
 			int match;
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "has m=image\n");
 			tech_pvt = switch_core_session_get_private(session);
 			channel = switch_core_session_get_channel(session);
-			switch_channel_set_variable(channel, SWITCH_R_SDP_VARIABLE, r_sdp);
 			tech_pvt->mparams.remote_sdp_str = switch_core_session_strdup(session, r_sdp);
 			switch_core_media_set_sdp_codec_string(session, r_sdp, SDP_OFFER);
 			sofia_glue_pass_sdp(tech_pvt, (char *) r_sdp);
 			sofia_set_flag(tech_pvt, TFLAG_NEW_SDP);
 			match = sofia_media_negotiate_sdp(session, r_sdp, SDP_OFFER);
 			if (match) {
+				switch_channel_set_variable(channel, SWITCH_R_SDP_VARIABLE, r_sdp);
 				switch_core_media_gen_local_sdp(session, SDP_ANSWER, NULL, 0, NULL, 0);
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Local SDP:\n%s\n", tech_pvt->mparams.local_sdp_str);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Local SDP:\n%s\n", tech_pvt->mparams.local_sdp_str);
 			} else {
 				nua_respond(nh, SIP_488_NOT_ACCEPTABLE, TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)), NUTAG_WITH_THIS_MSG(de->data->e_msg), TAG_END());
 				return;
 			}
 		}
 	}
+
+respond:
 	if (!sofia_test_flag(tech_pvt, TFLAG_BYE)) {
 		char *extra_headers = sofia_glue_get_extra_headers(channel, SOFIA_SIP_RESPONSE_HEADER_PREFIX);
 		if (sofia_use_soa(tech_pvt)) {
@@ -9586,7 +9622,7 @@ void sofia_handle_sip_i_update(nua_t *nua, sofia_profile_t *profile, nua_handle_
 						NUTAG_AUTOANSWER(0),
 						SIPTAG_CONTACT_STR(tech_pvt->reply_contact),
 						SIPTAG_CALL_INFO_STR(switch_channel_get_variable(tech_pvt->channel, SOFIA_SIP_HEADER_PREFIX "call_info")),
-						SOATAG_USER_SDP_STR(tech_pvt->mparams.local_sdp_str),
+						TAG_IF(has_valid_sdp, SOATAG_USER_SDP_STR(tech_pvt->mparams.local_sdp_str)),
 						SOATAG_REUSE_REJECTED(1),
 						SOATAG_ORDERED_USER(1),
 						SOATAG_AUDIO_AUX("cn telephone-event"), NUTAG_INCLUDE_EXTRA_SDP(1),
@@ -9600,8 +9636,8 @@ void sofia_handle_sip_i_update(nua_t *nua, sofia_profile_t *profile, nua_handle_
 						NUTAG_MEDIA_ENABLE(0),
 						SIPTAG_CONTACT_STR(tech_pvt->reply_contact),
 						SIPTAG_CALL_INFO_STR(switch_channel_get_variable(tech_pvt->channel, SOFIA_SIP_HEADER_PREFIX "call_info")),
-						SIPTAG_CONTENT_TYPE_STR("application/sdp"),
-						SIPTAG_PAYLOAD_STR(tech_pvt->mparams.local_sdp_str),
+						TAG_IF(has_valid_sdp, SIPTAG_CONTENT_TYPE_STR("application/sdp")),
+						TAG_IF(has_valid_sdp, SIPTAG_PAYLOAD_STR(tech_pvt->mparams.local_sdp_str)),
 						TAG_IF(!zstr(extra_headers), SIPTAG_HEADER_STR(extra_headers)),
 						TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)),
 						TAG_END());
