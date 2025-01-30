@@ -1008,7 +1008,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_add(switch_core_session_t 
 		}
 
 		if (!added) {
-			if (switch_test_flag(bp, SMBF_LAST) && !switch_test_flag(bug, SMBF_LAST)){
+			if (switch_test_flag(bp, SMBF_LAST) && !switch_test_flag(bug, SMBF_LAST)) {
 				bug->next = bp;
 				last_bp->next = bug;
 				break;
