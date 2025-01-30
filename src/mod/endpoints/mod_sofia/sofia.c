@@ -9572,7 +9572,6 @@ void sofia_handle_sip_i_update(nua_t *nua, sofia_profile_t *profile, nua_handle_
 		r_sdp = sip->sip_payload->pl_data;
 		if (!strcmp(tech_pvt->mparams.remote_sdp_str, r_sdp)) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Duplicate SDP\n%s\n", r_sdp);
-			has_valid_sdp = SWITCH_FALSE;
 			goto respond;
 		}
 		if (switch_stristr("m=image", r_sdp)) {
@@ -9598,13 +9597,13 @@ void sofia_handle_sip_i_update(nua_t *nua, sofia_profile_t *profile, nua_handle_
 			int match;
 			tech_pvt = switch_core_session_get_private(session);
 			channel = switch_core_session_get_channel(session);
-			tech_pvt->mparams.remote_sdp_str = switch_core_session_strdup(session, r_sdp);
 			switch_core_media_set_sdp_codec_string(session, r_sdp, SDP_OFFER);
 			sofia_glue_pass_sdp(tech_pvt, (char *) r_sdp);
 			sofia_set_flag(tech_pvt, TFLAG_NEW_SDP);
 			match = sofia_media_negotiate_sdp(session, r_sdp, SDP_OFFER);
 			if (match) {
 				switch_channel_set_variable(channel, SWITCH_R_SDP_VARIABLE, r_sdp);
+				tech_pvt->mparams.remote_sdp_str = switch_core_session_strdup(session, r_sdp);
 				switch_core_media_gen_local_sdp(session, SDP_ANSWER, NULL, 0, NULL, 0);
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Local SDP:\n%s\n", tech_pvt->mparams.local_sdp_str);
 			} else {
