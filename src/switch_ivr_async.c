@@ -1108,12 +1108,12 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_displace_session(switch_core_session_
 	}
 
 	if (flags && strchr(flags, 'f')) {
-		bug_flags &= SMBF_LAST;
+		bug_flags &= ~SMBF_LAST;
 		bug_flags |= SMBF_FIRST;
 	}
 
 	if (flags && strchr(flags, 'b')) {
-		bug_flags &= SMBF_FIRST;
+		bug_flags &= ~SMBF_FIRST;
 		bug_flags |= SMBF_LAST;
 	}
 
@@ -3124,12 +3124,12 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 	}
 
 	if (recording_var_true(channel, vars, "RECORD_BUG_TOP")) {
-		flags &= SMBF_LAST;
+		flags &= ~SMBF_LAST;
 		flags |= SMBF_FIRST;
 	}
 
 	if (recording_var_true(channel, vars, "RECORD_BUG_BOTTOM")) {
-		flags &= SMBF_FIRST;
+		flags &= ~SMBF_FIRST;
 		flags |= SMBF_LAST;
 	}
 
