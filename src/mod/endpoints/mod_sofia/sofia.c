@@ -8094,14 +8094,19 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 								TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)),TAG_END());
 						switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
 					} else {
-						if (status == 200 && r_sdp && !switch_channel_test_flag(channel, CF_MEDIA_RENEG_AFTER_BRIDGE)) {
+						if (status == 200 && r_sdp) {
 							if (sip && sip->sip_cseq && sip->sip_cseq->cs_method_name && !strcasecmp(sip->sip_cseq->cs_method_name, "UPDATE")) {
-								if(switch_core_media_has_mismatch_dynamic_payload_code(session, r_sdp)) {
-									switch_channel_set_flag(channel, CF_MEDIA_RENEG_AFTER_BRIDGE);;
+								if (!switch_channel_test_flag(channel, CF_EARLY_MEDIA_SIP_UPDATE)) {
+									switch_channel_set_flag(channel, CF_EARLY_MEDIA_SIP_UPDATE);
+								}
+								if (!switch_channel_test_flag(channel, CF_MEDIA_RENEG_AFTER_BRIDGE)) {
+									if(switch_core_media_has_mismatch_dynamic_payload_code(session, r_sdp)) {
+										switch_channel_set_flag(channel, CF_MEDIA_RENEG_AFTER_BRIDGE);
+									}
 								}
 							}
 
-							if(switch_channel_test_flag(channel, CF_MEDIA_RENEG_AFTER_BRIDGE)) {
+							if (switch_channel_test_flag(channel, CF_MEDIA_RENEG_AFTER_BRIDGE)) {
 								const char* disable_ringback = NULL;
 								if (switch_core_session_get_partner(session, &other_session) == SWITCH_STATUS_SUCCESS) {
 									other_channel = switch_core_session_get_channel(other_session);

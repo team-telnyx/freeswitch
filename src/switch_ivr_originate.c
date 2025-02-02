@@ -1958,7 +1958,7 @@ static void *SWITCH_THREAD_FUNC early_thread_run(switch_thread_t *thread, void *
 						&& switch_core_session_get_write_impl(state->oglobals->session, &write_impl) == SWITCH_STATUS_SUCCESS) {
 
 						// sync sample rate mismatch for bridge_early_media
-						if ((state->write_frame && state->write_frame->codec && state->write_frame->codec->implementation)
+						if (switch_channel_test_flag(channel, CF_EARLY_MEDIA_SIP_UPDATE) && (state->write_frame && state->write_frame->codec && state->write_frame->codec->implementation)
 							&& ((peer_read_impl.actual_samples_per_second != write_impl.actual_samples_per_second && peer_read_impl.actual_samples_per_second != state->write_frame->codec->implementation->actual_samples_per_second)
 								|| state->write_frame->codec->implementation->actual_samples_per_second > write_impl.actual_samples_per_second)) {
 
