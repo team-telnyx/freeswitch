@@ -2689,8 +2689,6 @@ SWITCH_DECLARE(switch_core_session_t *) switch_core_session_request_uuid(switch_
 
 	switch_channel_set_variable_printf(session->channel, "session_id", "%u", session->id);
 
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Codec read mutex addr: %p\n", (void *)&session->codec_read_mutex);
-
 	return session;
 }
 
