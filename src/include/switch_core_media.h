@@ -451,6 +451,10 @@ SWITCH_DECLARE(void) switch_core_media_do_2833(switch_core_session_t *session);
 
 SWITCH_DECLARE(switch_bool_t) switch_core_media_has_mismatch_dynamic_payload_code(switch_core_session_t *session, const char *r_sdp);
 																		
+typedef struct switch_rtp_engine_s switch_rtp_engine_t;
+SWITCH_DECLARE(switch_rtp_engine_t *) switch_core_media_get_engine(switch_core_session_t *session, int media_type);
+SWITCH_DECLARE(switch_codec_t*) switch_core_media_get_codec(switch_core_session_t *session, switch_media_type_t type);
+
 SWITCH_END_EXTERN_C
 #endif
 /* For Emacs:
