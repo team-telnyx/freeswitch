@@ -3094,7 +3094,6 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_speak_text(switch_core_session_t *ses
 	switch_channel_t *channel = switch_core_session_get_channel(session);
 	uint32_t rate = 0;
 	int interval = 0;
-	uint32_t channels;
 	switch_frame_t write_frame = { 0 };
 	switch_timer_t ltimer, *timer;
 	switch_codec_t lcodec, *codec;
@@ -3149,7 +3148,6 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_speak_text(switch_core_session_t *ses
 
 	rate = read_impl.actual_samples_per_second;
 	interval = read_impl.microseconds_per_packet / 1000;
-	channels = read_impl.number_of_channels;
 
 	if (need_create) {
 		memset(sh, 0, sizeof(*sh));
@@ -3179,7 +3177,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_speak_text(switch_core_session_t *ses
 		if (switch_core_codec_init(codec,
 								   codec_name,
 								   NULL,
-								   NULL, (int) rate, interval, channels, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, NULL,
+								   NULL, (int) rate, interval, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, NULL,
 								   pool) == SWITCH_STATUS_SUCCESS) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Raw Codec Activated\n");
 		} else {

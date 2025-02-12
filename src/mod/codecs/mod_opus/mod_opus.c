@@ -368,7 +368,7 @@ static char *gen_fmtp(opus_codec_settings_t *settings, switch_memory_pool_t *poo
 	}
 
 	if (settings->stereo) {
-		snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf), "stereo=%d; ", settings->stereo);
+		snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf), "stereo=%d; ", opus_prefs.mono ? 0 : settings->stereo);
 	}
 
 	if (settings->sprop_stereo) {
