@@ -79,6 +79,8 @@
 #define rtp_header_len 12
 #define RTP_START_PORT 16384
 #define RTP_END_PORT 32768
+#define RTP_START_SEQUENCE 0
+#define RTP_END_SEQUENCE 64000
 #define MASTER_KEY_LEN   30
 #define RTP_MAGIC_NUMBER 42
 #define WARN_SRTP_ERRS 10
@@ -101,6 +103,8 @@ static const switch_payload_t INVALID_PT = 255;
 
 static switch_port_t START_PORT = RTP_START_PORT;
 static switch_port_t END_PORT = RTP_END_PORT;
+static uint16_t START_SEQUENCE = RTP_START_SEQUENCE;
+static uint16_t END_SEQUENCE = RTP_END_SEQUENCE;
 static switch_mutex_t *port_lock = NULL;
 static switch_size_t do_flush(switch_rtp_t *rtp_session, int force, switch_size_t bytes_in);
 static rtp_create_probe_func create_probe = 0;
@@ -2816,6 +2820,27 @@ SWITCH_DECLARE(switch_port_t) switch_rtp_set_end_port(switch_port_t port)
 	return END_PORT;
 }
 
+SWITCH_DECLARE(uint16_t) switch_rtp_set_start_sequence(uint16_t sequence)
+{
+	if (sequence) {
+		START_SEQUENCE = sequence;
+	}
+	return START_SEQUENCE;
+}
+
+SWITCH_DECLARE(uint16_t) switch_rtp_set_end_sequence(uint16_t sequence)
+{
+	if (sequence) {
+		END_SEQUENCE = sequence;
+	}
+	return END_SEQUENCE;
+}
+
+SWITCH_DECLARE(uint16_t) switch_rtp_request_sequence()
+{
+	return (((uint16_t)rand()) % (END_SEQUENCE - START_SEQUENCE + 1) + START_SEQUENCE);
+}
+
 SWITCH_DECLARE(double) switch_rtp_set_mos_packet_loss_penalty(double penalty)
 {
 	if (penalty) {
@@ -5024,9 +5049,8 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_create(switch_rtp_t **new_rtp_session
 	if (rtp_session->flags[SWITCH_RTP_FLAG_ENABLE_RTCP]) {
 		switch_sockaddr_create(&rtp_session->rtcp_from_addr, pool);
 	}
-
-	rtp_session->seq = (uint16_t) rand();
-	rtp_session->ssrc = (uint32_t) ((intptr_t) rtp_session + (switch_time_t) switch_epoch_time_now(NULL));
+	rtp_session->seq = switch_rtp_request_sequence();
+	rtp_session->ssrc = (uint32_t) ((intptr_t) rtp_session + (uint32_t) switch_epoch_time_now(NULL));
 #ifdef DEBUG_TS_ROLLOVER
 	rtp_session->last_write_ts = TS_ROLLOVER_START;
 #endif
@@ -7420,7 +7444,7 @@ static switch_status_t process_rtcp_xr_report(switch_rtcp_report_data_t *report_
 	uint16_t blen = 0;
 	uint16_t count = 0;
 
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG1,
 					  "RTCP XR packet bytes %" SWITCH_SIZE_T_FMT " ssrc %u type %02x block len %d\n",
 					  bytes, ntohl(packet->ssrc), header->bt & 0xff, plen);
 
@@ -7441,15 +7465,14 @@ static switch_status_t process_rtcp_xr_report(switch_rtcp_report_data_t *report_
 		header = (switch_rtcp_xr_rb_header *)((int32_t *)header + blen + 1);
 	}
 
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "Found %d report blocks\n", count);
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG1, "Found %d report blocks\n", count);
 
 	if (!count) {
 		// No report blocks found
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "No report blocks found\n");
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG1, "No report blocks found\n");
 		return status;
 	}
 
-	report_data->xr_count = count;
 	switch_malloc(report_data->rtcp_data.xr_blocks, sizeof(switch_rtcp_xr_report) * count);
 	header = &packet->rb_header;
 	count = 0;
@@ -7461,7 +7484,8 @@ static switch_status_t process_rtcp_xr_report(switch_rtcp_report_data_t *report_
 		// Skip any block with length == 0
 		if (blen) {
 			switch (header->bt) {
-				case XR_RR_TIME: {
+			case XR_RR_TIME:
+				{
 					switch_rtcp_xr_rb_rr_time *rr_time = (switch_rtcp_xr_rb_rr_time *) header;
 					uint32_t lsr = ntohl(rr_time->ntp_sec);
 					uint32_t dlsr = ntohl(rr_time->ntp_frac);
@@ -7469,34 +7493,43 @@ static switch_status_t process_rtcp_xr_report(switch_rtcp_report_data_t *report_
 
 					if (lsr) {
 						rtt = (switch_micro_time_now() - lsr) - dlsr;
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG1,
 										  "RTCP XR RR Time: LSR: %u DLSR: %u RTT: %u\n",
 										  lsr, dlsr, rtt);
 					}
 					report_data->rtcp_data.xr_blocks[count].xr_pt = header->bt;
 					report_data->rtcp_data.xr_blocks[count].report_data.rr_time = rr_time;
-					}
-					break;
-				case XR_VOIP_METRICS: {
+					++count;
+				}
+				break;
+			case XR_VOIP_METRICS:
+				{
 					switch_rtcp_xr_rb_voip_metrics *voip_metrics = (switch_rtcp_xr_rb_voip_metrics *) header;
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG1,
 						"RTCP XR VoIP metrics: loss rate: %02x rt delay: %d es delay: %d \n", voip_metrics->loss_rate, voip_metrics->round_trip_delay, voip_metrics->end_system_delay);
 					report_data->rtcp_data.xr_blocks[count].xr_pt = header->bt;
 					report_data->rtcp_data.xr_blocks[count].report_data.voip_metrics = voip_metrics;
+					++count;
 				}
 				break;
-				case XR_STATS: {
+			case XR_STATS:
+				{
 					switch_rtcp_xr_rb_stats *stats = (switch_rtcp_xr_rb_stats *) header;
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG1,
+						"RTCP XR Statistics summary: begin seq %d, end seq %d, lost packets %d\n", stats->begin_seq, stats->end_seq, stats->lost_packets);
 					report_data->rtcp_data.xr_blocks[count].xr_pt = header->bt;
 					report_data->rtcp_data.xr_blocks[count].report_data.stats = stats;
+					++count;
 				}
-				default:
-					break;
+			default:
+				break;
 			}
-			++count;
 		}
 		header = (switch_rtcp_xr_rb_header *)((int32_t *)header + blen + 1);
 	}
+	report_data->xr_count = count;
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG1, "Parsed %d report blocks\n", count);
+
 	return status;
 }
 #endif
@@ -7672,11 +7705,8 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 				}
 			}
 
-			if (report_data.xr_count > 0) {
-				switch_safe_free(report_data.rtcp_data.xr_blocks)
-			}
-
 			if (!report) {
+				switch_safe_free(report_data.rtcp_data.xr_blocks)
 				return status; // we received only XR report in this packet, do not calculate internal stats
 			}
 

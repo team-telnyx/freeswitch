@@ -3129,6 +3129,20 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 			flags |= SMBF_STEREO_SWAP;
 			channels = 2;
 		}
+	} else if (channels == 2) {
+		flags |= SMBF_REAL_STEREO;
+		if (recording_var_true(channel, vars, "RECORD_STEREO")) {
+			flags |= SMBF_STEREO;
+			flags &= ~SMBF_STEREO_SWAP;
+		}
+
+		if (recording_var_true(channel, vars, "RECORD_STEREO_SWAP")) {
+			flags |= SMBF_STEREO;
+			flags |= SMBF_STEREO_SWAP;
+		}
+		if (!(flags & SMBF_STEREO)) {
+			channels = 1;
+		}
 	}
 
 	if (recording_var_true(channel, vars, "RECORD_ANSWER_REQ")) {
@@ -3137,6 +3151,10 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 
 	if (recording_var_true(channel, vars, "RECORD_BRIDGE_REQ")) {
 		flags |= SMBF_BRIDGE_REQ;
+	}
+
+	if (recording_var_true(channel, vars, "RECORD_STEREO_NO_DOWN_MIX")) {
+		flags |= SMBF_STEREO_NO_DOWN_MIX;
 	}
 
 	if (recording_var_true(channel, vars, "RECORD_APPEND")) {

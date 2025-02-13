@@ -1686,6 +1686,7 @@ typedef enum {
 	CF_VIDEO_READ_TAPPED,
 	CF_VIDEO_WRITE_TAPPED,
 	CF_DEVICES_CHANGED,
+	CF_EARLY_MEDIA_SIP_UPDATE,
 	/* WARNING: DO NOT ADD ANY FLAGS BELOW THIS LINE */
 	/* IF YOU ADD NEW ONES CHECK IF THEY SHOULD PERSIST OR ZERO THEM IN switch_core_session.c switch_core_session_request_xml() */
 	CF_FLAG_MAX
@@ -1965,7 +1966,9 @@ typedef enum {
 	SMBF_READ_VIDEO_PATCH = (1 << 24),
 	SMBF_READ_TEXT_STREAM = (1 << 25),
 	SMBF_FIRST = (1 << 26),
-	SMBF_PAUSE = (1 << 27)
+	SMBF_PAUSE = (1 << 27),
+	SMBF_STEREO_NO_DOWN_MIX = (1 << 28),
+	SMBF_REAL_STEREO = (1 << 29)
 } switch_media_bug_flag_enum_t;
 typedef uint32_t switch_media_bug_flag_t;
 
@@ -2560,6 +2563,8 @@ typedef switch_status_t (*switch_input_callback_function_t) (switch_core_session
 															 switch_input_type_t input_type, void *buf, unsigned int buflen);
 typedef switch_status_t (*switch_read_frame_callback_function_t) (switch_core_session_t *session, switch_frame_t *frame, void *user_data);
 typedef struct switch_say_interface switch_say_interface_t;
+
+typedef void (*switch_post_dialplan_function_t) (switch_core_session_t *, switch_caller_extension_t *, const char *);
 
 #define DMACHINE_MAX_DIGIT_LEN 512
 
