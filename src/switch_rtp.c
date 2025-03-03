@@ -1360,6 +1360,10 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 			//if (cmp) {
 			switch_socket_sendto(sock_output, from_addr, 0, (void *) rpacket, &bytes);
 			//}
+		} else if (packet->header.type == SWITCH_STUN_BINDING_RESPONSE && (ice->type & ICE_LITE)) {
+			if (!ice->ready) {
+				ice->ready = 1;
+			}
 		}
 	} else if (packet->header.type == SWITCH_STUN_BINDING_ERROR_RESPONSE) {
 
