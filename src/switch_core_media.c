@@ -4206,12 +4206,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_set_codec(switch_core_session_
 				(uint32_t) a_engine->read_impl.microseconds_per_packet / 1000 != a_engine->cur_payload_map->codec_ms ||
 				rrate != a_engine->cur_payload_map->rm_rate || force > 1) {
 
-			switch_yield(a_engine->read_impl.microseconds_per_packet);
-			switch_core_session_lock_codec_write(session);
-			switch_core_session_lock_codec_read(session);
-			resetting = 1;
-			switch_yield(a_engine->read_impl.microseconds_per_packet);
-
 			if (session->write_resampler) {
 				switch_core_session_t *other_session = NULL;
 				if (switch_core_session_get_partner(session, &other_session) == SWITCH_STATUS_SUCCESS) {
