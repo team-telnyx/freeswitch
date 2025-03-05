@@ -1591,6 +1591,10 @@ PKG_CHECK_MODULES([HIREDIS], [hiredis >= 0.10.0],[
   AM_CONDITIONAL([HAVE_HIREDIS],[true])],[
   AC_MSG_RESULT([no]); AM_CONDITIONAL([HAVE_HIREDIS],[false])])
 
+PKG_CHECK_MODULES([DEEP_FILTER_NET], [deepfilter >= 0.5.7],[
+  AM_CONDITIONAL([HAVE_DEEP_FILTER_NET],[true])],[
+  AC_MSG_RESULT([no]); AM_CONDITIONAL([HAVE_DEEP_FILTER_NET],[false])])
+
 AC_ARG_ENABLE(core-libedit-support,     
   [AS_HELP_STRING([--disable-core-libedit-support], [Compile without libedit Support])])
 
