@@ -6888,6 +6888,58 @@ char *sofia_stir_shaken_as_create_identity_header(switch_core_session_t *session
 #endif
 }
 
+SWITCH_STANDARD_API(sofia_reinvite_no_sdp_function)
+{
+    char *uuid = NULL;
+    switch_core_session_t *target_session = NULL;
+    private_object_t *tech_pvt = NULL;
+    char *argv[2] = { 0 };
+    int argc;
+    char *mydata = NULL;
+
+    if (zstr(cmd)) {
+        stream->write_function(stream, "-ERR Invalid syntax\n");
+        goto end;
+    }
+
+    mydata = strdup(cmd);
+    argc = switch_separate_string(mydata, ' ', argv, (sizeof(argv) / sizeof(argv[0])));
+
+    if (argc < 1) {
+        stream->write_function(stream, "-ERR Invalid syntax\n");
+        goto end;
+    }
+
+    uuid = argv[0];
+
+    if (!(target_session = switch_core_session_locate(uuid))) {
+        stream->write_function(stream, "-ERR Cannot locate session\n");
+        goto end;
+    }
+
+    tech_pvt = switch_core_session_get_private(target_session);
+
+    if (!tech_pvt) {
+        stream->write_function(stream, "-ERR Cannot locate tech_pvt\n");
+        goto end;
+    }
+
+    /* Send RE-INVITE without SDP */
+    nua_invite(tech_pvt->nh,
+        NUTAG_MEDIA_ENABLE(0),
+        SIPTAG_CONTENT_LENGTH_STR("0"),
+        TAG_END());
+
+    stream->write_function(stream, "+OK\n");
+
+end:
+    if (target_session) {
+        switch_core_session_rwunlock(target_session);
+    }
+
+    switch_safe_free(mydata);
+    return SWITCH_STATUS_SUCCESS;
+}
 
 SWITCH_MODULE_LOAD_FUNCTION(mod_sofia_load)
 {
@@ -7199,6 +7251,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_sofia_load)
 	
 	SWITCH_ADD_API(api_interface, "sofia_dig", "SIP DIG", sip_dig_function, "<url>");
 	SWITCH_ADD_API(api_interface, "sofia_presence_data", "Sofia Presence Data", sofia_presence_data_function, "[list|status|rpid|user_agent] [profile/]<user>@domain");
+	SWITCH_ADD_API(api_interface, "sofia_reinvite_no_sdp", "Send RE-INVITE without SDP", sofia_reinvite_no_sdp_function, "<uuid>");
 	SWITCH_ADD_CHAT(chat_interface, SOFIA_CHAT_PROTO, sofia_presence_chat_send);
 
 	crtp_init(*module_interface);
