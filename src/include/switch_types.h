@@ -361,7 +361,9 @@ typedef enum {
 	ED_BRIDGE_WRITE = (1 << 5),
 	ED_TAP_READ = (1 << 6),
 	ED_TAP_WRITE = (1 << 7),
-	ED_STEREO = (1 << 8)
+	ED_STEREO = (1 << 8),
+	ED_BUG_TOP = (1 << 9),
+	ED_BUG_BOTTOM = (1 << 10)
 } switch_eavesdrop_flag_enum_t;
 typedef uint32_t switch_eavesdrop_flag_t;
 
@@ -1966,9 +1968,10 @@ typedef enum {
 	SMBF_READ_VIDEO_PATCH = (1 << 24),
 	SMBF_READ_TEXT_STREAM = (1 << 25),
 	SMBF_FIRST = (1 << 26),
-	SMBF_PAUSE = (1 << 27),
-	SMBF_STEREO_NO_DOWN_MIX = (1 << 28),
-	SMBF_REAL_STEREO = (1 << 29)
+	SMBF_LAST = (1 << 27),
+	SMBF_PAUSE = (1 << 28),
+	SMBF_STEREO_NO_DOWN_MIX = (1 << 29),
+	SMBF_REAL_STEREO = (1 << 30)
 } switch_media_bug_flag_enum_t;
 typedef uint32_t switch_media_bug_flag_t;
 

@@ -814,14 +814,10 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_add(switch_core_session_t 
 														  switch_media_bug_flag_t flags,
 														  switch_media_bug_t **new_bug)
 {
-	switch_media_bug_t *bug, *bp;
+	switch_media_bug_t *bug, *bp, *last_bp;
 	switch_size_t bytes;
 	switch_event_t *event;
-#if 0
 	int tap_only = 1, punt = 0, added = 0;
-#else
-	int tap_only = 1, punt = 0;
-#endif
 
 	const char *p;
 
@@ -994,7 +990,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_add(switch_core_session_t 
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Attaching BUG to %s\n", switch_channel_get_name(session->channel));
 	switch_thread_rwlock_wrlock(session->bug_rwlock);
-#if 0
+
 	if (!session->bugs) {
 		session->bugs = bug;
 		added = 1;
@@ -1011,21 +1007,19 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_add(switch_core_session_t 
 			tap_only = 0;
 		}
 
-		if (!added && !bp->next) {
-			bp->next = bug;
-			break;
+		if (!added) {
+			if (switch_test_flag(bp, SMBF_LAST) && !switch_test_flag(bug, SMBF_LAST)) {
+				bug->next = bp;
+				last_bp->next = bug;
+				break;
+			} else if (!bp->next) {
+				bp->next = bug;
+				break;
+			}
 		}
-	}
-#else
-	bug->next = session->bugs;
-	session->bugs = bug;
 
-	for(bp = session->bugs; bp; bp = bp->next) {
-		if (bp->ready && !switch_test_flag(bp, SMBF_TAP_NATIVE_READ) && !switch_test_flag(bp, SMBF_TAP_NATIVE_WRITE)) {
-			tap_only = 0;
-		}
+		last_bp = bp;
 	}
-#endif
 
 	switch_thread_rwlock_unlock(session->bug_rwlock);
 	*new_bug = bug;
