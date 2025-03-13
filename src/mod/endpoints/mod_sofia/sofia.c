@@ -9578,54 +9578,56 @@ void sofia_handle_sip_i_update(nua_t *nua, sofia_profile_t *profile, nua_handle_
 	switch_channel_t *channel = NULL;
 	switch_bool_t has_valid_sdp = SWITCH_TRUE;
 
-	if (session && sip && sip->sip_payload && sip->sip_payload->pl_data) {
+	if (session) {
 		tech_pvt = switch_core_session_get_private(session);
-		r_sdp = sip->sip_payload->pl_data;
-		if (!strcmp(tech_pvt->mparams.remote_sdp_str, r_sdp)) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Duplicate SDP\n%s\n", r_sdp);
-			goto respond;
-		}
-		if (switch_stristr("m=image", r_sdp)) {
-			switch_t38_options_t *t38_options;
-			if (!has_valid_image_media_type(r_sdp)) {
-				has_valid_sdp = SWITCH_FALSE;
+		if (sip && sip->sip_payload && sip->sip_payload->pl_data) {
+			r_sdp = sip->sip_payload->pl_data;
+			if (!strcmp(tech_pvt->mparams.remote_sdp_str, r_sdp)) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Duplicate SDP\n%s\n", r_sdp);
 				goto respond;
 			}
-			channel = switch_core_session_get_channel(session);
+			if (switch_stristr("m=image", r_sdp)) {
+				switch_t38_options_t *t38_options;
+				if (!has_valid_image_media_type(r_sdp)) {
+					has_valid_sdp = SWITCH_FALSE;
+					goto respond;
+				}
+				channel = switch_core_session_get_channel(session);
 
-			t38_options = switch_core_media_extract_t38_options(session, r_sdp);
-			session_id_header = sofia_glue_session_id_header(session, tech_pvt->profile);
+				t38_options = switch_core_media_extract_t38_options(session, r_sdp);
+				session_id_header = sofia_glue_session_id_header(session, tech_pvt->profile);
 
-			if (!t38_options) {
-				nua_respond(nh, SIP_488_NOT_ACCEPTABLE, TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)), NUTAG_WITH_THIS_MSG(de->data->e_msg), TAG_END());
-				return;
-			}
+				if (!t38_options) {
+					nua_respond(nh, SIP_488_NOT_ACCEPTABLE, TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)), NUTAG_WITH_THIS_MSG(de->data->e_msg), TAG_END());
+					return;
+				}
 
-			switch_core_media_start_udptl(session, t38_options);
+				switch_core_media_start_udptl(session, t38_options);
 
-			switch_core_media_set_udptl_image_sdp(session, t38_options, 0);
-		} else {
-			int match;
-			tech_pvt = switch_core_session_get_private(session);
-			channel = switch_core_session_get_channel(session);
-			switch_core_media_set_sdp_codec_string(session, r_sdp, SDP_TYPE_REQUEST);
-			sofia_glue_pass_sdp(tech_pvt, (char *) r_sdp);
-			sofia_set_flag(tech_pvt, TFLAG_NEW_SDP);
-			match = sofia_media_negotiate_sdp(session, r_sdp, SDP_TYPE_REQUEST);
-			if (match) {
-				switch_channel_set_variable(channel, SWITCH_R_SDP_VARIABLE, r_sdp);
-				tech_pvt->mparams.remote_sdp_str = switch_core_session_strdup(session, r_sdp);
-				switch_core_media_gen_local_sdp(session, SDP_TYPE_RESPONSE, NULL, 0, NULL, 0);
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Local SDP:\n%s\n", tech_pvt->mparams.local_sdp_str);
+				switch_core_media_set_udptl_image_sdp(session, t38_options, 0);
 			} else {
-				nua_respond(nh, SIP_488_NOT_ACCEPTABLE, TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)), NUTAG_WITH_THIS_MSG(de->data->e_msg), TAG_END());
-				return;
+				int match;
+				tech_pvt = switch_core_session_get_private(session);
+				channel = switch_core_session_get_channel(session);
+				switch_core_media_set_sdp_codec_string(session, r_sdp, SDP_TYPE_REQUEST);
+				sofia_glue_pass_sdp(tech_pvt, (char *) r_sdp);
+				sofia_set_flag(tech_pvt, TFLAG_NEW_SDP);
+				match = sofia_media_negotiate_sdp(session, r_sdp, SDP_TYPE_REQUEST);
+				if (match) {
+					switch_channel_set_variable(channel, SWITCH_R_SDP_VARIABLE, r_sdp);
+					tech_pvt->mparams.remote_sdp_str = switch_core_session_strdup(session, r_sdp);
+					switch_core_media_gen_local_sdp(session, SDP_TYPE_RESPONSE, NULL, 0, NULL, 0);
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Local SDP:\n%s\n", tech_pvt->mparams.local_sdp_str);
+				} else {
+					nua_respond(nh, SIP_488_NOT_ACCEPTABLE, TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)), NUTAG_WITH_THIS_MSG(de->data->e_msg), TAG_END());
+					return;
+				}
 			}
 		}
 	}
 
 respond:
-	if (!sofia_test_flag(tech_pvt, TFLAG_BYE)) {
+	if (tech_pvt && !sofia_test_flag(tech_pvt, TFLAG_BYE)) {
 		char *extra_headers = sofia_glue_get_extra_headers(channel, SOFIA_SIP_RESPONSE_HEADER_PREFIX);
 		if (sofia_use_soa(tech_pvt)) {
 			nua_respond(tech_pvt->nh, SIP_200_OK,
