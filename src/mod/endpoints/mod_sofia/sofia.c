@@ -8185,6 +8185,59 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 
 			sofia_clear_flag(tech_pvt, TFLAG_NEW_SDP);
 
+			/* Handle 3PCC re-INVITE without SDP case */
+			if (sofia_test_flag(tech_pvt, TFLAG_3PCC) && r_sdp) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, 
+					"3PCC: Received 200 OK with SDP in completing state, r_sdp:\n%s\n", r_sdp);
+
+				/* Generate new local SDP with new SRTP crypto key */
+				if (switch_core_media_choose_port(tech_pvt->session, SWITCH_MEDIA_TYPE_AUDIO, 0) != SWITCH_STATUS_SUCCESS) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, 
+						"3PCC: Failed to choose port for audio\n");
+					goto done;
+				}
+
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, 
+					"3PCC: Generating new local SDP with force=1 to ensure new SRTP key\n");
+
+				switch_core_media_gen_local_sdp(session, SDP_TYPE_RESPONSE, NULL, 0, NULL, 1);
+
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, 
+					"3PCC: Generated local SDP:\n%s\n", tech_pvt->mparams.local_sdp_str ? tech_pvt->mparams.local_sdp_str : "NO SDP!");
+				
+				/* Send ACK with SDP */
+				/* Force direct SDP mode for 3PCC ACK to ensure SDP inclusion */
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, 
+					"3PCC: Sending ACK with SDP directly to ensure SDP inclusion\n");
+
+				nua_ack(tech_pvt->nh,
+					TAG_IF(!zstr(tech_pvt->user_via), SIPTAG_VIA_STR(tech_pvt->user_via)),
+					SIPTAG_CONTACT_STR(tech_pvt->reply_contact),
+					SIPTAG_CONTENT_TYPE_STR("application/sdp"),
+					SIPTAG_PAYLOAD_STR(tech_pvt->mparams.local_sdp_str),
+					TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)),
+					TAG_END());
+
+				if (0) { /* Disabled SOA mode for 3PCC ACK */
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, 
+						"3PCC: Sending ACK with SDP directly (no SOA)\n");
+
+					nua_ack(tech_pvt->nh,
+						TAG_IF(!zstr(tech_pvt->user_via), SIPTAG_VIA_STR(tech_pvt->user_via)),
+						SIPTAG_CONTACT_STR(tech_pvt->reply_contact),
+						SIPTAG_CONTENT_TYPE_STR("application/sdp"),
+						SIPTAG_PAYLOAD_STR(tech_pvt->mparams.local_sdp_str),
+						TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)),
+						TAG_END());
+				}
+
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, 
+					"3PCC: ACK sent, clearing 3PCC flag\n");
+
+				sofia_clear_flag_locked(tech_pvt, TFLAG_3PCC);
+				send_ack = 0;
+			}
+
 			if (!switch_channel_test_flag(channel, CF_ANSWERED)) {
 				const char *wait_for_ack = switch_channel_get_variable(channel, "sip_wait_for_aleg_ack");
 
