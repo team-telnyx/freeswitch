@@ -6924,11 +6924,20 @@ SWITCH_STANDARD_API(sofia_reinvite_no_sdp_function)
         goto end;
     }
 
+    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(target_session), SWITCH_LOG_DEBUG, 
+	"3PCC: Setting TFLAG_3PCC flag and sending re-INVITE without SDP\n");
+
+    /* Set flag for 3PCC handling */
+    sofia_set_flag_locked(tech_pvt, TFLAG_3PCC);
+    
     /* Send RE-INVITE without SDP */
     nua_invite(tech_pvt->nh,
         NUTAG_MEDIA_ENABLE(0),
         SIPTAG_CONTENT_LENGTH_STR("0"),
         TAG_END());
+
+    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(target_session), SWITCH_LOG_DEBUG, 
+	"3PCC: Re-INVITE sent without SDP\n");
 
     stream->write_function(stream, "+OK\n");
 
