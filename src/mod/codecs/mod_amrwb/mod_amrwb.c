@@ -530,12 +530,14 @@ static switch_status_t switch_amrwb_decode(switch_codec_t *codec,
 	return SWITCH_STATUS_FALSE;
 #else
 	struct amrwb_context *context = codec->private_info;
-	unsigned char *buf = encoded_data;
+	unsigned char buf[SWITCH_AMRWB_OUT_MAX_SIZE];
 	uint8_t tmp[SWITCH_AMRWB_OUT_MAX_SIZE];
 
-	if (!context) {
+	if (!context || encoded_data_len > SWITCH_AMRWB_OUT_MAX_SIZE) {
 		return SWITCH_STATUS_FALSE;
 	}
+
+	memcpy(buf, encoded_data, encoded_data_len);
 
 	switch_mutex_lock(global_lock);
 	if (global_debug) {
