@@ -5583,8 +5583,10 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_detect_speech_init(switch_core_sessio
 	}
 
 	if (switch_channel_var_true(channel, "asr_bug_top")) {
+		bug_flags &= ~SMBF_LAST;
 		bug_flags |= SMBF_FIRST;
 	} else if (switch_channel_var_true(channel, "asr_bug_bottom")) {
+		bug_flags &= ~SMBF_FIRST;
 		bug_flags |= SMBF_LAST;
 	}
 
