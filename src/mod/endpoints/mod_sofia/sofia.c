@@ -9580,6 +9580,9 @@ void sofia_handle_sip_i_update(nua_t *nua, sofia_profile_t *profile, nua_handle_
 
 	if (session) {
 		tech_pvt = switch_core_session_get_private(session);
+		channel = switch_core_session_get_channel(session);
+		session_id_header = sofia_glue_session_id_header(session, tech_pvt->profile);
+
 		if (sip && sip->sip_payload && sip->sip_payload->pl_data) {
 			r_sdp = sip->sip_payload->pl_data;
 			if (!strcmp(tech_pvt->mparams.remote_sdp_str, r_sdp)) {
@@ -9592,10 +9595,8 @@ void sofia_handle_sip_i_update(nua_t *nua, sofia_profile_t *profile, nua_handle_
 					has_valid_sdp = SWITCH_FALSE;
 					goto respond;
 				}
-				channel = switch_core_session_get_channel(session);
 
 				t38_options = switch_core_media_extract_t38_options(session, r_sdp);
-				session_id_header = sofia_glue_session_id_header(session, tech_pvt->profile);
 
 				if (!t38_options) {
 					nua_respond(nh, SIP_488_NOT_ACCEPTABLE, TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)), NUTAG_WITH_THIS_MSG(de->data->e_msg), TAG_END());
@@ -9607,8 +9608,6 @@ void sofia_handle_sip_i_update(nua_t *nua, sofia_profile_t *profile, nua_handle_
 				switch_core_media_set_udptl_image_sdp(session, t38_options, 0);
 			} else {
 				int match;
-				tech_pvt = switch_core_session_get_private(session);
-				channel = switch_core_session_get_channel(session);
 				switch_core_media_set_sdp_codec_string(session, r_sdp, SDP_TYPE_REQUEST);
 				sofia_glue_pass_sdp(tech_pvt, (char *) r_sdp);
 				sofia_set_flag(tech_pvt, TFLAG_NEW_SDP);
@@ -9628,7 +9627,10 @@ void sofia_handle_sip_i_update(nua_t *nua, sofia_profile_t *profile, nua_handle_
 
 respond:
 	if (tech_pvt && !sofia_test_flag(tech_pvt, TFLAG_BYE)) {
-		char *extra_headers = sofia_glue_get_extra_headers(channel, SOFIA_SIP_RESPONSE_HEADER_PREFIX);
+		char *extra_headers = NULL;
+		if (channel) {
+			extra_headers = sofia_glue_get_extra_headers(channel, SOFIA_SIP_RESPONSE_HEADER_PREFIX);
+		}
 		if (sofia_use_soa(tech_pvt)) {
 			nua_respond(tech_pvt->nh, SIP_200_OK,
 						NUTAG_AUTOANSWER(0),
