@@ -5541,6 +5541,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_detect_speech_init(switch_core_sessio
 	switch_codec_implementation_t read_impl = { 0 };
 	const char *p;
 	char key[512] = "";
+	int bug_flags = SMBF_READ_STREAM | SMBF_NO_PAUSE;
 
 	if (sth) {
 		/* Already initialized */
@@ -5581,10 +5582,18 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_detect_speech_init(switch_core_sessio
 		switch_set_flag(ah, SWITCH_ASR_FLAG_QUEUE_EVENTS);
 	}
 
+	if (switch_channel_var_true(channel, "asr_bug_top")) {
+		bug_flags &= ~SMBF_LAST;
+		bug_flags |= SMBF_FIRST;
+	} else if (switch_channel_var_true(channel, "asr_bug_bottom")) {
+		bug_flags &= ~SMBF_FIRST;
+		bug_flags |= SMBF_LAST;
+	}
+
 	switch_snprintf(key, sizeof(key), "%s/%s/%s/%s", mod_name, NULL, NULL, dest);
 
 	if ((status = switch_core_media_bug_add(session, "detect_speech", key,
-											speech_callback, sth, 0, SMBF_READ_STREAM | SMBF_NO_PAUSE, &sth->bug)) != SWITCH_STATUS_SUCCESS) {
+											speech_callback, sth, 0, bug_flags, &sth->bug)) != SWITCH_STATUS_SUCCESS) {
 		switch_core_asr_close(ah, &flags);
 		return status;
 	}
