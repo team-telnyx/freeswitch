@@ -1932,6 +1932,7 @@ static void our_sofia_event_callback(nua_event_t event,
 	case nua_i_update:
 		if (session) {
 			sofia_update_callee_id(session, profile, sip, SWITCH_TRUE);
+			sofia_handle_sip_i_update(nua, profile, nh, session, sip, de, tags);
 		}
 		break;
 	case nua_r_update:
@@ -3552,6 +3553,7 @@ void *SWITCH_THREAD_FUNC sofia_profile_thread_run(switch_thread_t *thread, void 
 				   NUTAG_APPL_METHOD("BYE"),
 #endif
 				   NUTAG_APPL_METHOD("MESSAGE"),
+				   NUTAG_APPL_METHOD("UPDATE"),
 
 				   TAG_IF(profile->session_timeout && profile->minimum_session_expires, NUTAG_MIN_SE(profile->minimum_session_expires)),
 				   NUTAG_SESSION_TIMER(profile->session_timeout),
@@ -9591,6 +9593,126 @@ static switch_status_t sofia_process_proxy_refer(switch_core_session_t *session,
 	return SWITCH_STATUS_FALSE;
 }
 
+static switch_bool_t has_valid_image_media_type(const char *r_sdp)
+{
+	switch_bool_t ret = SWITCH_FALSE;
+	sdp_parser_t *parser = NULL;
+	sdp_session_t *sdp;
+
+	if ((parser = sdp_parse(NULL, r_sdp, (int) strlen(r_sdp), 0))) {
+		if ((sdp = sdp_session(parser))) {
+			sdp_media_t *m;
+			for (m = sdp->sdp_media; m; m = m->m_next) {
+				if (m->m_type == sdp_media_image && m->m_port) {
+					sdp_attribute_t *attr;
+					ret = SWITCH_TRUE;
+					for (attr = m->m_attributes; attr; attr = attr->a_next) {
+						if (!strcasecmp(attr->a_name, "recvonly")) {
+							ret = SWITCH_FALSE;
+							break;
+						}
+					}
+                }
+			}
+		}
+	}
+	if (parser) {
+		sdp_parser_free(parser);
+	}
+	return ret;
+}
+
+void sofia_handle_sip_i_update(nua_t *nua, sofia_profile_t *profile, nua_handle_t *nh, switch_core_session_t *session, sip_t const *sip,
+								sofia_dispatch_event_t *de, tagi_t tags[])
+{
+	const char *r_sdp = NULL;
+	const char *session_id_header = NULL;
+	private_object_t *tech_pvt = NULL;
+	switch_channel_t *channel = NULL;
+	switch_bool_t has_valid_sdp = SWITCH_TRUE;
+
+	if (session) {
+		tech_pvt = switch_core_session_get_private(session);
+		channel = switch_core_session_get_channel(session);
+		session_id_header = sofia_glue_session_id_header(session, tech_pvt->profile);
+
+		if (sip && sip->sip_payload && sip->sip_payload->pl_data) {
+			r_sdp = sip->sip_payload->pl_data;
+			if (!strcmp(tech_pvt->mparams.remote_sdp_str, r_sdp)) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Duplicate SDP\n%s\n", r_sdp);
+				goto respond;
+			}
+			if (switch_stristr("m=image", r_sdp)) {
+				switch_t38_options_t *t38_options;
+				if (!has_valid_image_media_type(r_sdp)) {
+					has_valid_sdp = SWITCH_FALSE;
+					goto respond;
+				}
+
+				t38_options = switch_core_media_extract_t38_options(session, r_sdp);
+
+				if (!t38_options) {
+					nua_respond(nh, SIP_488_NOT_ACCEPTABLE, TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)), NUTAG_WITH_THIS_MSG(de->data->e_msg), TAG_END());
+					return;
+				}
+
+				switch_core_media_start_udptl(session, t38_options);
+
+				switch_core_media_set_udptl_image_sdp(session, t38_options, 0);
+			} else {
+				int match;
+				switch_core_media_set_sdp_codec_string(session, r_sdp, SDP_TYPE_REQUEST);
+				sofia_glue_pass_sdp(tech_pvt, (char *) r_sdp);
+				sofia_set_flag(tech_pvt, TFLAG_NEW_SDP);
+				match = sofia_media_negotiate_sdp(session, r_sdp, SDP_TYPE_REQUEST);
+				if (match) {
+					switch_channel_set_variable(channel, SWITCH_R_SDP_VARIABLE, r_sdp);
+					tech_pvt->mparams.remote_sdp_str = switch_core_session_strdup(session, r_sdp);
+					switch_core_media_gen_local_sdp(session, SDP_TYPE_RESPONSE, NULL, 0, NULL, 0);
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Local SDP:\n%s\n", tech_pvt->mparams.local_sdp_str);
+				} else {
+					nua_respond(nh, SIP_488_NOT_ACCEPTABLE, TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)), NUTAG_WITH_THIS_MSG(de->data->e_msg), TAG_END());
+					return;
+				}
+			}
+		}
+	}
+
+respond:
+	if (tech_pvt && !sofia_test_flag(tech_pvt, TFLAG_BYE)) {
+		char *extra_headers = NULL;
+		if (channel) {
+			extra_headers = sofia_glue_get_extra_headers(channel, SOFIA_SIP_RESPONSE_HEADER_PREFIX);
+		}
+		if (sofia_use_soa(tech_pvt)) {
+			nua_respond(tech_pvt->nh, SIP_200_OK,
+						NUTAG_AUTOANSWER(0),
+						SIPTAG_CONTACT_STR(tech_pvt->reply_contact),
+						SIPTAG_CALL_INFO_STR(switch_channel_get_variable(tech_pvt->channel, SOFIA_SIP_HEADER_PREFIX "call_info")),
+						TAG_IF(has_valid_sdp, SOATAG_USER_SDP_STR(tech_pvt->mparams.local_sdp_str)),
+						SOATAG_REUSE_REJECTED(1),
+						SOATAG_ORDERED_USER(1),
+						SOATAG_AUDIO_AUX("cn telephone-event"), NUTAG_INCLUDE_EXTRA_SDP(1),
+						TAG_IF(!zstr(extra_headers), SIPTAG_HEADER_STR(extra_headers)),
+						TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)),
+						NUTAG_WITH_THIS_MSG(de->data->e_msg),
+						TAG_END());
+		} else {
+			nua_respond(tech_pvt->nh, SIP_200_OK,
+						NUTAG_AUTOANSWER(0),
+						NUTAG_MEDIA_ENABLE(0),
+						SIPTAG_CONTACT_STR(tech_pvt->reply_contact),
+						SIPTAG_CALL_INFO_STR(switch_channel_get_variable(tech_pvt->channel, SOFIA_SIP_HEADER_PREFIX "call_info")),
+						TAG_IF(has_valid_sdp, SIPTAG_CONTENT_TYPE_STR("application/sdp")),
+						TAG_IF(has_valid_sdp, SIPTAG_PAYLOAD_STR(tech_pvt->mparams.local_sdp_str)),
+						TAG_IF(!zstr(extra_headers), SIPTAG_HEADER_STR(extra_headers)),
+						TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)),
+						TAG_END());
+		}
+		switch_safe_free(extra_headers);
+	}
+}
+
 void sofia_handle_sip_i_refer(nua_t *nua, sofia_profile_t *profile, nua_handle_t *nh, switch_core_session_t *session, sip_t const *sip,
 								sofia_dispatch_event_t *de, tagi_t tags[])
 {
@@ -12206,9 +12328,10 @@ void sofia_handle_sip_i_invite(switch_core_session_t *session, nua_t *nua, sofia
 			}
 		}
 
-		if (sip->sip_identity && sip->sip_identity->id_value) {
-			switch_channel_set_variable(channel, "sip_h_identity", sip->sip_identity->id_value);
-		}
+		// Conflict changes from Vanilla FS - causes duplicated identity header
+		//if (sip->sip_identity && sip->sip_identity->id_value) {
+		//	switch_channel_set_variable(channel, "sip_h_identity", sip->sip_identity->id_value);
+		//}
 		if (sip->sip_date && sip->sip_date->d_time > 0) {
 			// This INVITE has a SIP Date header.
 			// sofia-sip stores the Date header value in sip_date->d_time as seconds since January 1, 1900 0:00:00.
