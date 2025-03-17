@@ -8202,6 +8202,20 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, 
 					"3PCC: Generating new local SDP with force=1 to ensure new SRTP key\n");
 
+				// Debug log channel variable rtp_last_audio_local_crypto_key
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, 
+					"3PCC: rtp_last_audio_local_crypto_key before: %s\n", switch_channel_get_variable(channel, "rtp_last_audio_local_crypto_key"));
+				switch_channel_set_variable(tech_pvt->channel, "rtp_last_audio_local_crypto_key", NULL);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+					"3PCC: rtp_last_audio_local_crypto_key after: %s\n", switch_channel_get_variable(channel, "rtp_last_audio_local_crypto_key"));
+
+				// Debug log channel variable srtp_remote_audio_crypto_key
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, 
+					"3PCC: srtp_remote_audio_crypto_key before: %s\n", switch_channel_get_variable(channel, "srtp_remote_audio_crypto_key"));
+				switch_channel_set_variable(tech_pvt->channel, "srtp_remote_audio_crypto_key", NULL);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+					"3PCC: srtp_remote_audio_crypto_key after: %s\n", switch_channel_get_variable(channel, "srtp_remote_audio_crypto_key"));
+
 				switch_core_media_gen_local_sdp(session, SDP_TYPE_RESPONSE, NULL, 0, NULL, 1);
 
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, 
