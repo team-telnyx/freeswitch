@@ -1269,7 +1269,7 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 			switch_size_t updated_record_ms = current_record_ms;
 			const char *prev_record_sec_str = switch_channel_get_variable(channel, "record_seconds");
 			const char *prev_record_ms_str = switch_channel_get_variable(channel, "record_ms");
-			char buffer_name[25];
+			char buffer_name[32];
 
 			snprintf(buffer_name, sizeof(buffer_name), "record_samples_%d", record_index);
 			switch_channel_set_variable_printf(channel, buffer_name, "%d", current_samples_out);
