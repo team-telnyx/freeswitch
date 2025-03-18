@@ -1168,11 +1168,32 @@ static switch_status_t switch_core_media_build_crypto(switch_media_handle_t *smh
 	switch_channel_t *channel;
 	char *p;
 	switch_rtp_engine_t *engine;
+	const char *force_new_key;
 
 	switch_assert(smh);
 	channel = switch_core_session_get_channel(smh->session);
 
 	engine = &smh->engines[type];
+
+	/* Check if we need to force a new crypto key */
+	force_new_key = switch_channel_get_variable(channel, "rtp_force_new_crypto_key");
+	if (force_new_key && switch_true(force_new_key)) {
+		force = 1;
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG, 
+			"CRYPTO: Forcing new crypto key generation due to rtp_force_new_crypto_key=true\n");
+		
+		/* Log the current crypto key if it exists */
+		if (direction == SWITCH_RTP_CRYPTO_SEND && !zstr(engine->ssec[ctype].local_crypto_key)) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG, 
+				"CRYPTO: Current local crypto key before forced regeneration: %s\n", 
+				engine->ssec[ctype].local_crypto_key);
+			
+			/* Explicitly clear the crypto key to ensure a new one is generated */
+			engine->ssec[ctype].local_crypto_key = NULL;
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG, 
+				"CRYPTO: Explicitly cleared local_crypto_key in engine structure\n");
+		}
+	}
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG, "CRYPTO: Building crypto (type=%s, index=%d, direction=%s, force=%d)\n", type2str(type), index, direction == SWITCH_RTP_CRYPTO_SEND ? "SEND" : "RECV", force);
 
@@ -18164,3 +18185,4 @@ SWITCH_DECLARE(switch_codec_t*) switch_core_media_get_codec(switch_core_session_
  * For VIM:
  * vim:set softtabstop=4 shiftwidth=4 tabstop=4 noet:
  */
+ 

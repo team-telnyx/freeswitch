@@ -8189,8 +8189,48 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 
 			/* Handle 3PCC re-INVITE without SDP case */
 			if (sofia_test_flag(tech_pvt, TFLAG_3PCC) && r_sdp) {
+				const char *remote_crypto_key_before;
+				const char *local_crypto_key_before;
+				const char *local_crypto_key_after;
+				const char *remote_crypto_key_after;
+				const char *sdp_with_crypto;
+				const char *force_new_key_flag;
+				char new_crypto_key[128];
+				unsigned char raw_key[32];
+				unsigned char b64_key[64];
+				char *sdp_copy;
+				char *crypto_line_start;
+				char *crypto_line_end;
+				char new_sdp[4096];
+				size_t prefix_len;
+				char crypto_line[256];
+				int force_new_key = 0;
+				
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, 
 					"3PCC: Received 200 OK with SDP in completing state, r_sdp:\n%s\n", r_sdp);
+
+				/* Check if we need to force a new crypto key in the ACK */
+				force_new_key_flag = switch_channel_get_variable(channel, "sip_force_new_crypto_key_in_ack");
+				
+				/* Add detailed logging for debugging */
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, 
+					"3PCC-DEBUG: Checking for sip_force_new_crypto_key_in_ack flag: %s\n", 
+					force_new_key_flag ? force_new_key_flag : "(null)");
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, 
+					"3PCC-DEBUG: Channel UUID: %s, Channel name: %s\n", 
+					switch_core_session_get_uuid(session), 
+					switch_channel_get_name(channel));
+				
+				if (force_new_key_flag && switch_true(force_new_key_flag)) {
+					force_new_key = 1;
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, 
+						"3PCC: Found sip_force_new_crypto_key_in_ack=true, will force new crypto key in ACK\n");
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, 
+						"3PCC-DEBUG: Force new key flag is set, will generate new crypto key\n");
+				} else {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, 
+						"3PCC-DEBUG: Force new key flag is not set, will check if key needs to be changed\n");
+				}
 
 				/* Generate new local SDP with new SRTP crypto key */
 				if (switch_core_media_choose_port(tech_pvt->session, SWITCH_MEDIA_TYPE_AUDIO, 0) != SWITCH_STATUS_SUCCESS) {
@@ -8202,21 +8242,157 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, 
 					"3PCC: Generating new local SDP with force=1 to ensure new SRTP key\n");
 
-				// Debug log channel variable rtp_last_audio_local_crypto_key
+				/* Store crypto keys before changes for logging */
+				local_crypto_key_before = switch_channel_get_variable(channel, "rtp_last_audio_local_crypto_key");
+				remote_crypto_key_before = switch_channel_get_variable(channel, "srtp_remote_audio_crypto_key");
+				
+				/* Debug log channel variable rtp_last_audio_local_crypto_key */
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, 
-					"3PCC: rtp_last_audio_local_crypto_key before: %s\n", switch_channel_get_variable(channel, "rtp_last_audio_local_crypto_key"));
+					"3PCC: rtp_last_audio_local_crypto_key before: %s\n", local_crypto_key_before ? local_crypto_key_before : "(null)");
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, 
+					"3PCC: srtp_remote_audio_crypto_key before: %s\n", remote_crypto_key_before ? remote_crypto_key_before : "(null)");
+				
+				/* Clear the crypto keys to force generation of new ones */
 				switch_channel_set_variable(tech_pvt->channel, "rtp_last_audio_local_crypto_key", NULL);
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-					"3PCC: rtp_last_audio_local_crypto_key after: %s\n", switch_channel_get_variable(channel, "rtp_last_audio_local_crypto_key"));
-
-				// Debug log channel variable srtp_remote_audio_crypto_key
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, 
-					"3PCC: srtp_remote_audio_crypto_key before: %s\n", switch_channel_get_variable(channel, "srtp_remote_audio_crypto_key"));
 				switch_channel_set_variable(tech_pvt->channel, "srtp_remote_audio_crypto_key", NULL);
+				
+				/* Add a special flag to force new crypto key generation */
+				switch_channel_set_variable(tech_pvt->channel, "rtp_force_new_crypto_key", "true");
+				
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-					"3PCC: srtp_remote_audio_crypto_key after: %s\n", switch_channel_get_variable(channel, "srtp_remote_audio_crypto_key"));
+					"3PCC: Cleared crypto keys and set rtp_force_new_crypto_key=true to force new key generation\n");
 
+				/* Generate local SDP with force=1 to ensure new crypto key */
 				switch_core_media_gen_local_sdp(session, SDP_TYPE_RESPONSE, NULL, 0, NULL, 1);
+
+				/* Clear the flag after SDP generation */
+				switch_channel_set_variable(tech_pvt->channel, "rtp_force_new_crypto_key", NULL);
+
+				/* Store crypto keys after changes for logging */
+				local_crypto_key_after = switch_channel_get_variable(channel, "rtp_last_audio_local_crypto_key");
+				remote_crypto_key_after = switch_channel_get_variable(channel, "srtp_remote_audio_crypto_key");
+				
+				/* Log the crypto keys after generation */
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+					"3PCC: rtp_last_audio_local_crypto_key after: %s\n", local_crypto_key_after ? local_crypto_key_after : "(null)");
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+					"3PCC: srtp_remote_audio_crypto_key after: %s\n", remote_crypto_key_after ? remote_crypto_key_after : "(null)");
+				
+				/* Check if we need to force a new crypto key */
+				if (force_new_key || local_crypto_key_after == NULL || 
+					(local_crypto_key_before && local_crypto_key_after && 
+						!strcmp(local_crypto_key_before, local_crypto_key_after))) {
+					
+					if (force_new_key) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+							"3PCC-DEBUG: Force flag is set, will generate completely new crypto key\n");
+					} else if (local_crypto_key_after == NULL) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+							"3PCC-DEBUG: Local crypto key is NULL, will generate new one\n");
+					} else {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+							"3PCC-DEBUG: Local crypto key did not change from: %s, will generate new one\n",
+							local_crypto_key_after);
+					}
+					
+					/* Add detailed logging for debugging */
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, 
+						"3PCC-DEBUG: About to generate new crypto key, current SDP has key: %s\n",
+						local_crypto_key_after ? local_crypto_key_after : "(null)");
+					
+					/* Initialize variables */
+					memset(new_crypto_key, 0, sizeof(new_crypto_key));
+					memset(raw_key, 0, sizeof(raw_key));
+					memset(b64_key, 0, sizeof(b64_key));
+					
+					/* Generate random key */
+					switch_rtp_get_random(raw_key, 30);
+					switch_b64_encode(raw_key, 30, b64_key, sizeof(b64_key));
+					
+					/* Format the new crypto line */
+					snprintf(new_crypto_key, sizeof(new_crypto_key), 
+						"7 AES_CM_128_HMAC_SHA1_80 inline:%s", b64_key);
+					
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+						"3PCC: Generated new crypto key: %s\n", new_crypto_key);
+					
+					/* Add detailed logging for debugging */
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, 
+						"3PCC-DEBUG: Successfully generated new random crypto key: %s\n", new_crypto_key);
+					
+					/* Update the channel variable with the new key */
+					switch_channel_set_variable(tech_pvt->channel, "rtp_last_audio_local_crypto_key", new_crypto_key);
+					
+					/* Modify the SDP directly */
+					if (tech_pvt->mparams.local_sdp_str) {
+						sdp_copy = strdup(tech_pvt->mparams.local_sdp_str);
+						
+						if (sdp_copy) {
+							crypto_line_start = strstr(sdp_copy, "a=crypto:");
+							
+							if (crypto_line_start) {
+								crypto_line_end = strchr(crypto_line_start, '\n');
+								
+								if (crypto_line_end) {
+									memset(new_sdp, 0, sizeof(new_sdp));
+									prefix_len = crypto_line_start - sdp_copy;
+									
+									/* Build the new SDP with the modified crypto line */
+									memcpy(new_sdp, sdp_copy, prefix_len);
+									snprintf(new_sdp + prefix_len, sizeof(new_sdp) - prefix_len,
+										"a=crypto:%s\n", new_crypto_key);
+									strncat(new_sdp, crypto_line_end + 1, sizeof(new_sdp) - strlen(new_sdp) - 1);
+									
+									/* Replace the SDP */
+									tech_pvt->mparams.local_sdp_str = switch_core_session_strdup(session, new_sdp);
+									
+									switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+										"3PCC: Successfully modified SDP with new crypto key\n");
+										
+									/* Add detailed logging for debugging */
+									switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, 
+										"3PCC-DEBUG: SDP successfully modified with new crypto key\n");
+									switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, 
+										"3PCC-DEBUG: New SDP with modified crypto key:\n%s\n", new_sdp);
+								}
+							}
+							
+							free(sdp_copy);
+						}
+					}
+				} /* End of always generate new crypto key block */
+				
+				/* Extract crypto line from SDP for logging */
+				sdp_with_crypto = tech_pvt->mparams.local_sdp_str;
+				if (sdp_with_crypto) {
+					crypto_line_start = strstr(sdp_with_crypto, "a=crypto:");
+					if (crypto_line_start) {
+						memset(crypto_line, 0, sizeof(crypto_line));
+						crypto_line_end = strchr(crypto_line_start, '\n');
+						if (crypto_line_end) {
+							size_t len = crypto_line_end - crypto_line_start;
+							if (len < sizeof(crypto_line) - 1) {
+								memcpy(crypto_line, crypto_line_start, len);
+								crypto_line[len] = '\0';
+								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+									"3PCC: Final SDP contains crypto line: %s\n", crypto_line);
+							}
+						}
+					} else {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+							"3PCC: WARNING - No crypto line found in generated SDP!\n");
+					}
+				}
+
+				/* Clear the flag after processing */
+				switch_channel_set_variable(channel, "sip_force_new_crypto_key_in_ack", NULL);
+				
+				/* Add detailed logging for debugging */
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, 
+					"3PCC-DEBUG: Cleared sip_force_new_crypto_key_in_ack flag\n");
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, 
+					"3PCC-DEBUG: Final rtp_last_audio_local_crypto_key: %s\n", 
+					switch_channel_get_variable(channel, "rtp_last_audio_local_crypto_key"));
 
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, 
 					"3PCC: Generated local SDP:\n%s\n", tech_pvt->mparams.local_sdp_str ? tech_pvt->mparams.local_sdp_str : "NO SDP!");
