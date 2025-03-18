@@ -31,7 +31,6 @@
  * switch_rtp.c -- RTP
  *
  */
-#include "include/switch_types.h"
 #include <switch.h>
 #ifndef _MSC_VER
 #include <switch_private.h>
@@ -1011,10 +1010,10 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 	end_buf = buf + ((sizeof(buf) > packet->header.length) ? packet->header.length : sizeof(buf));
 
 	switch_stun_packet_first_attribute(packet, attr);
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "%s STUN PACKET TYPE: %s\n",
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG8, "%s STUN PACKET TYPE: %s\n",
 					  rtp_type(rtp_session), switch_stun_value_to_name(SWITCH_STUN_TYPE_PACKET_TYPE, packet->header.type));
 	do {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "|---: %s STUN ATTR %d %x %s\n", rtp_type(rtp_session), attr->type, attr->type,
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG8, "|---: %s STUN ATTR %d %x %s\n", rtp_type(rtp_session), attr->type, attr->type,
 						  switch_stun_value_to_name(SWITCH_STUN_TYPE_ATTRIBUTE, attr->type));
 
 		switch (attr->type) {
@@ -1052,7 +1051,7 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 				char ip[50];
 				uint16_t port;
 				switch_stun_packet_attribute_get_mapped_address(attr, ip, sizeof(ip), &port);
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "|------: %s:%d\n", ip, port);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG8, "|------: %s:%d\n", ip, port);
 			}
 			break;
 		case SWITCH_STUN_ATTR_XOR_MAPPED_ADDRESS:
@@ -1060,13 +1059,13 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 				char ip[50];
 				uint16_t port;
 				switch_stun_packet_attribute_get_xor_mapped_address(attr, &packet->header, ip, sizeof(ip), &port);
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "|------: %s:%d\n", ip, port);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG8, "|------: %s:%d\n", ip, port);
 			}
 			break;
 		case SWITCH_STUN_ATTR_USERNAME:
 			{
 				switch_stun_packet_attribute_get_username(attr, username, sizeof(username));
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "|------: %s\n", username);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG8, "|------: %s\n", username);
 			}
 			break;
 
@@ -1075,7 +1074,7 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 				uint32_t priority = 0;
 				pri = (uint32_t *) attr->value;
 				priority = ntohl(*pri);
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "|------: %u\n", priority);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG8, "|------: %u\n", priority);
 				ok = priority == ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].priority;
 			}
 			break;
@@ -1099,9 +1098,7 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 	if ((ice->type & ICE_VANILLA)) {
 		if (!ok) ok = !memcmp(packet->header.id, ice->last_sent_id, 12);
 
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_INFO, "VANILLA ICE\n");
 		if (packet->header.type == SWITCH_STUN_BINDING_RESPONSE) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_INFO, "VANILLA ICE BINDING RESPONSE\n");
 			ok = 1;
 			if (!ice->rready) {
 				if (rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX]) {
@@ -1249,8 +1246,7 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 		switch_port_t port = 0, port2 = 0;
 		char buf[80] = "";
 		char buf2[80] = "";
-		switch_channel_t *channel = switch_core_session_get_channel(rtp_session->session);
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_INFO, "ICE OK. Response %s, ICE-Lite-inbound %s\n, channel ICE_LITE_INBOUND %s", packet->header.type == SWITCH_STUN_BINDING_RESPONSE? "yes":"no", ice->type & ICE_LITE_INBOUND? "yes": "no", switch_channel_var_true(channel, "ice_lite_inbound") ? "yes":"no");
+
 		if (packet->header.type == SWITCH_STUN_BINDING_REQUEST) {
 			uint8_t stunbuf[512];
 			switch_stun_packet_t *rpacket;
@@ -1365,9 +1361,7 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 			switch_socket_sendto(sock_output, from_addr, 0, (void *) rpacket, &bytes);
 			//}
 		} else if (packet->header.type == SWITCH_STUN_BINDING_RESPONSE && (ice->type & ICE_LITE_INBOUND)) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "Entering ICE-LITE logic for STUN RESPONSE\n");
 			if (!ice->ready) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "ICE-LITE READY!!!!\n");
 				ice->ready = 1;
 			}
 		}
@@ -3727,9 +3721,7 @@ static int do_dtls(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 	int ready = rtp_session->ice.ice_user ? (rtp_session->ice.rready && rtp_session->ice.ready) : 1;
 	int pending;
 
-	//switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR, "DO DTLS\n");
 	if (!dtls->bytes && !ready) {
-		//switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR, "DO DTLS BYTES %li READY %i\n", dtls->bytes, ready);
 		return 0;
 	}
 
@@ -6648,7 +6640,7 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 
 					if (stat) {
 						//++rtp_session->srtp_errs[rtp_session->srtp_idx_rtp]++;
-						//switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR, "RTCP UNPROTECT ERR\n");
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "RTCP UNPROTECT ERR\n");
 					} else {
 						//rtp_session->srtp_errs[rtp_session->srtp_idx_rtp] = 0;
 					}
@@ -7856,7 +7848,7 @@ static switch_status_t read_rtcp_packet(switch_rtp_t *rtp_session, switch_size_t
 
 		if (stat) {
 			//++rtp_session->srtp_errs[rtp_session->srtp_idx_rtp]++;
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR, "RTCP UNPROTECT ERR\n");
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "RTCP UNPROTECT ERR\n");
 		} else {
 			//rtp_session->srtp_errs[rtp_session->srtp_idx_rtp] = 0;
 		}
