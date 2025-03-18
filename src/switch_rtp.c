@@ -1516,6 +1516,10 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "Error sending STUN Binding Request on ICE candidate still unresponsive to %s:%u\n", from_host, from_port);
 				}
 			}
+		} else if (packet->header.type == SWITCH_STUN_BINDING_RESPONSE && (ice->type & ICE_LITE)) {
+			if (!ice->ready) {
+				ice->ready = 1;
+			}
 		}
 	} else if (packet->header.type == SWITCH_STUN_BINDING_ERROR_RESPONSE) {
 
@@ -6827,7 +6831,7 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 
 					if (stat) {
 						//++rtp_session->srtp_errs[rtp_session->srtp_idx_rtp]++;
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR, "RTCP UNPROTECT ERR\n");
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "RTCP UNPROTECT ERR\n");
 					} else {
 						//rtp_session->srtp_errs[rtp_session->srtp_idx_rtp] = 0;
 					}
@@ -8035,7 +8039,7 @@ static switch_status_t read_rtcp_packet(switch_rtp_t *rtp_session, switch_size_t
 
 		if (stat) {
 			//++rtp_session->srtp_errs[rtp_session->srtp_idx_rtp]++;
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR, "RTCP UNPROTECT ERR\n");
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "RTCP UNPROTECT ERR\n");
 		} else {
 			//rtp_session->srtp_errs[rtp_session->srtp_idx_rtp] = 0;
 		}
