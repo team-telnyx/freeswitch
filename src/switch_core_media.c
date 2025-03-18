@@ -4562,6 +4562,8 @@ static switch_core_media_ice_type_t switch_determine_ice_type(switch_rtp_engine_
 	if (switch_channel_var_true(session->channel, "ice_lite")) {
 		ice_type |= ICE_CONTROLLED;
 		ice_type |= ICE_LITE;
+	} else if (switch_channel_var_true(session->channel, "ice_lite_inbound")) {
+		ice_type |= ICE_LITE_INBOUND;
 	} else {
 		switch_call_direction_t direction = switch_ice_direction(engine, session);
 		if (direction == SWITCH_CALL_DIRECTION_INBOUND) {
@@ -4711,6 +4713,8 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 				}
 			} else if (!strcasecmp(attr->a_name, "ice-options")) {
 				engine->ice_in.options = switch_core_session_strdup(smh->session, attr->a_value);
+			} else if (!strcasecmp(attr->a_name, "ice-lite")) {
+					switch_channel_set_variable(smh->session->channel, "ice_lite_inbound", "true");
 			} else if (!strcasecmp(attr->a_name, "setup")) {
 				if (!strcasecmp(attr->a_value, "passive") ||
 					(!strcasecmp(attr->a_value, "actpass") && !switch_channel_test_flag(smh->session->channel, CF_REINVITE))) {
