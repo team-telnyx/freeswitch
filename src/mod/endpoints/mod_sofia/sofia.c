@@ -9654,6 +9654,7 @@ respond:
 						TAG_IF(has_valid_sdp, SIPTAG_PAYLOAD_STR(tech_pvt->mparams.local_sdp_str)),
 						TAG_IF(!zstr(extra_headers), SIPTAG_HEADER_STR(extra_headers)),
 						TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)),
+						NUTAG_WITH_THIS_MSG(de->data->e_msg),
 						TAG_END());
 		}
 		switch_safe_free(extra_headers);
