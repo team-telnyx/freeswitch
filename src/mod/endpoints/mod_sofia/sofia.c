@@ -1932,7 +1932,9 @@ static void our_sofia_event_callback(nua_event_t event,
 	case nua_i_update:
 		if (session) {
 			sofia_update_callee_id(session, profile, sip, SWITCH_TRUE);
-			sofia_handle_sip_i_update(nua, profile, nh, session, sip, de, tags);
+			if (sofia_test_pflag(profile, PFLAG_HANDLE_UPDATE)) {
+				sofia_handle_sip_i_update(nua, profile, nh, session, sip, de, tags);
+			}
 		}
 		break;
 	case nua_r_update:
@@ -3553,7 +3555,7 @@ void *SWITCH_THREAD_FUNC sofia_profile_thread_run(switch_thread_t *thread, void 
 				   NUTAG_APPL_METHOD("BYE"),
 #endif
 				   NUTAG_APPL_METHOD("MESSAGE"),
-				   NUTAG_APPL_METHOD("UPDATE"),
+				   TAG_IF(sofia_test_pflag(profile, PFLAG_HANDLE_UPDATE), NUTAG_APPL_METHOD("UPDATE")),
 
 				   TAG_IF(profile->session_timeout && profile->minimum_session_expires, NUTAG_MIN_SE(profile->minimum_session_expires)),
 				   NUTAG_SESSION_TIMER(profile->session_timeout),
@@ -5113,6 +5115,12 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 							sofia_set_pflag(profile, PFLAG_ALLOW_UPDATE);
 						} else {
 							sofia_clear_pflag(profile, PFLAG_ALLOW_UPDATE);
+						}
+					} else if (!strcasecmp(var, "handle-update")) {
+						if (switch_true(val)) {
+							sofia_set_pflag(profile, PFLAG_HANDLE_UPDATE);
+						} else {
+							sofia_clear_pflag(profile, PFLAG_HANDLE_UPDATE);
 						}
 					} else if (!strcasecmp(var, "send-display-update")) {
 						if (switch_true(val)) {
@@ -9654,6 +9662,7 @@ respond:
 						TAG_IF(has_valid_sdp, SIPTAG_PAYLOAD_STR(tech_pvt->mparams.local_sdp_str)),
 						TAG_IF(!zstr(extra_headers), SIPTAG_HEADER_STR(extra_headers)),
 						TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)),
+						NUTAG_WITH_THIS_MSG(de->data->e_msg),
 						TAG_END());
 		}
 		switch_safe_free(extra_headers);
