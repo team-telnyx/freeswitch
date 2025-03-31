@@ -144,6 +144,7 @@ SWITCH_BEGIN_EXTERN_C
 #define SWITCH_TRANSFER_HISTORY_VARIABLE "transfer_history"
 #define SWITCH_TRANSFER_SOURCE_VARIABLE "transfer_source"
 #define SWITCH_SENSITIVE_DTMF_VARIABLE "sensitive_dtmf"
+#define SWITCH_SENSITIVE_EVENT_DTMF_VARIABLE "sensitive_event_dtmf"
 #define SWITCH_RECORD_POST_PROCESS_EXEC_APP_VARIABLE "record_post_process_exec_app"
 #define SWITCH_RECORD_POST_PROCESS_EXEC_API_VARIABLE "record_post_process_exec_api"
 
@@ -292,7 +293,8 @@ typedef enum {
 
 typedef enum {
 	DTMF_FLAG_SKIP_PROCESS = (1 << 0),
-	DTMF_FLAG_SENSITIVE = (1 << 1)
+	DTMF_FLAG_SENSITIVE = (1 << 1),
+	DTMF_FLAG_EVENT_SENSITIVE = (1 << 2)
 } dtmf_flag_t;
 
 typedef struct {
@@ -361,7 +363,9 @@ typedef enum {
 	ED_BRIDGE_WRITE = (1 << 5),
 	ED_TAP_READ = (1 << 6),
 	ED_TAP_WRITE = (1 << 7),
-	ED_STEREO = (1 << 8)
+	ED_STEREO = (1 << 8),
+	ED_BUG_TOP = (1 << 9),
+	ED_BUG_BOTTOM = (1 << 10)
 } switch_eavesdrop_flag_enum_t;
 typedef uint32_t switch_eavesdrop_flag_t;
 
@@ -1966,9 +1970,10 @@ typedef enum {
 	SMBF_READ_VIDEO_PATCH = (1 << 24),
 	SMBF_READ_TEXT_STREAM = (1 << 25),
 	SMBF_FIRST = (1 << 26),
-	SMBF_PAUSE = (1 << 27),
-	SMBF_STEREO_NO_DOWN_MIX = (1 << 28),
-	SMBF_REAL_STEREO = (1 << 29)
+	SMBF_LAST = (1 << 27),
+	SMBF_PAUSE = (1 << 28),
+	SMBF_STEREO_NO_DOWN_MIX = (1 << 29),
+	SMBF_REAL_STEREO = (1 << 30)
 } switch_media_bug_flag_enum_t;
 typedef uint32_t switch_media_bug_flag_t;
 
