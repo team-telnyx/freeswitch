@@ -115,6 +115,10 @@ struct pvt_s {
 
 	int tx_page_start;
 	int tx_page_end;
+	int t38_retransmission_delay;
+	int t38_indicator_redundancy_count;
+	int t38_control_data_end_redundancy_count;
+	int t38_image_data_end_redundancy_count;
 
 	int done;
 
@@ -774,6 +778,10 @@ static int t38_tx_packet_handler(t38_core_state_t *s, void *user_data, const uin
 				r = -1;
 				break;
 			}
+
+			if (count > 1 && pvt->t38_retransmission_delay > 0) {
+				switch_yield(pvt->t38_retransmission_delay * 1000);
+			}
 		}
 	} else {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "INVALID PACKETLEN: %d PASSED: %d:%d\n", r, len, count);
@@ -999,6 +1007,9 @@ static switch_status_t spanfax_init(pvt_t *pvt, transport_mode_t trans_mode)
 		}
 
 		t38_set_t38_version(pvt->t38_core, 0);
+		t38_set_redundancy_control(pvt->t38_core, T38_PACKET_CATEGORY_INDICATOR, pvt->t38_indicator_redundancy_count);
+		t38_set_redundancy_control(pvt->t38_core, T38_PACKET_CATEGORY_CONTROL_DATA_END, pvt->t38_control_data_end_redundancy_count);
+		t38_set_redundancy_control(pvt->t38_core, T38_PACKET_CATEGORY_IMAGE_DATA_END, pvt->t38_image_data_end_redundancy_count);
 
 		return SWITCH_STATUS_SUCCESS;
 	default:
@@ -1403,6 +1414,10 @@ static pvt_t *pvt_init(switch_core_session_t *session, mod_spandsp_fax_applicati
 
 	pvt->tx_page_start = -1;
 	pvt->tx_page_end = -1;
+	pvt->t38_retransmission_delay = 0;
+	pvt->t38_indicator_redundancy_count = 3;
+	pvt->t38_control_data_end_redundancy_count = 3;
+	pvt->t38_image_data_end_redundancy_count = 3;
 
 
 	switch(pvt->app_mode) {
@@ -1556,6 +1571,33 @@ static pvt_t *pvt_init(switch_core_session_t *session, mod_spandsp_fax_applicati
 		if ((pvt->tx_page_end < pvt->tx_page_start) && (pvt->tx_page_end != -1)) {
 			pvt->tx_page_end = pvt->tx_page_start;
 		}
+	}
+
+	if ((tmp = switch_channel_get_variable(channel, "fax_t38_retransmission_delay"))) {
+		pvt->t38_retransmission_delay = atoi(tmp);
+	} else {
+		pvt->t38_retransmission_delay = spandsp_globals.t38_retransmission_delay;
+	}
+
+	if ((tmp = switch_channel_get_variable(channel, "fax_t38_indicator_redundancy_count"))) {
+		int count = atoi(tmp);
+		pvt->t38_indicator_redundancy_count = (count > 0 ? count : 1);
+	} else {
+		pvt->t38_indicator_redundancy_count = spandsp_globals.t38_indicator_redundancy_count;
+	}
+
+	if ((tmp = switch_channel_get_variable(channel, "fax_t38_control_data_end_redundancy_count"))) {
+		int count = atoi(tmp);
+		pvt->t38_control_data_end_redundancy_count = (count > 0 ? count : 1);
+	} else {
+		pvt->t38_control_data_end_redundancy_count = spandsp_globals.t38_control_data_end_redundancy_count;
+	}
+
+	if ((tmp = switch_channel_get_variable(channel, "fax_t38_image_data_end_redundancy_count"))) {
+		int count = atoi(tmp);
+		pvt->t38_image_data_end_redundancy_count = (count > 0 ? count : 1);
+	} else {
+		pvt->t38_image_data_end_redundancy_count = spandsp_globals.t38_image_data_end_redundancy_count;
 	}
 
 	switch_mutex_init(&pvt->mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));

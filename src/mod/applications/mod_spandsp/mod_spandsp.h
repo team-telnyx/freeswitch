@@ -96,6 +96,10 @@ struct spandsp_globals {
 	int tonedebug;
     int t38_tx_reinvite_packet_count;
     int t38_rx_reinvite_packet_count;
+	int t38_retransmission_delay;
+	int t38_indicator_redundancy_count;
+	int t38_control_data_end_redundancy_count;
+	int t38_image_data_end_redundancy_count;
 };
 
 extern struct spandsp_globals spandsp_globals;
