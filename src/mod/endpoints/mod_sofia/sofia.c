@@ -1655,7 +1655,11 @@ static void our_sofia_event_callback(nua_event_t event,
 	}
 
 	if (sip && (status == 401 || status == 407)) {
-		sofia_reg_handle_sip_r_challenge(status, phrase, nua, profile, nh, sofia_private, session, gateway, sip, de, tags);
+		if (!sofia_test_flag(profile, PFLAG_DISABLE_AUTH_CHALLENGE_RESPONSE)) {
+			sofia_reg_handle_sip_r_challenge(status, phrase, nua, profile, nh, sofia_private, session, gateway, sip, de, tags);
+		} else {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Challenge responses disabled\n");
+		}
 		goto done;
 	}
 
@@ -6441,6 +6445,12 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 							sofia_set_pflag(profile, PFLAG_ALWAYS_BRIDGE_EARLY_MEDIA);
 						} else {
 							sofia_clear_pflag(profile, PFLAG_ALWAYS_BRIDGE_EARLY_MEDIA);
+						}
+					} else if (!strcasecmp(var, "disable-challenge-responses")) {
+						if (switch_true(val)) {
+							sofia_set_pflag(profile, PFLAG_DISABLE_AUTH_CHALLENGE_RESPONSE);
+						} else {
+							sofia_clear_pflag(profile, PFLAG_DISABLE_AUTH_CHALLENGE_RESPONSE);
 						}
 					} else if (!strcasecmp(var, "telnyx-sip-proxy-timeout-hangup-cause") && !zstr(val)) {
 						switch_call_cause_t timeout_cause;
