@@ -996,11 +996,18 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_add(switch_core_session_t 
 		added = 1;
 	}
 
+	if (switch_test_flag(bug, SMBF_FIRST) && switch_test_flag(bug, SMBF_LAST)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Misconfigured bug position is set. Forcing bug to add at bottom!\n");
+		switch_clear_flag(bug, SMBF_FIRST);
+	}
+
 	if (!added && switch_test_flag(bug, SMBF_FIRST)) {
 		bug->next = session->bugs;
 		session->bugs = bug;
 		added = 1;
 	}
+
+	last_bp = session->bugs;
 
 	for(bp = session->bugs; bp; bp = bp->next) {
 		if (bp->ready && !switch_test_flag(bp, SMBF_TAP_NATIVE_READ) && !switch_test_flag(bp, SMBF_TAP_NATIVE_WRITE)) {
@@ -1008,9 +1015,14 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_add(switch_core_session_t 
 		}
 
 		if (!added) {
-			if (switch_test_flag(bp, SMBF_LAST) && !switch_test_flag(bug, SMBF_LAST)) {
+			if (!switch_test_flag(bug, SMBF_LAST) && (switch_test_flag(bp, SMBF_LAST)
+				|| (!switch_test_flag(bp, SMBF_FIRST) && !switch_core_add_media_bug_last()))) {
 				bug->next = bp;
-				last_bp->next = bug;
+				if (bp == session->bugs) {
+					session->bugs = bug;
+				} else {
+					last_bp->next = bug;
+				}
 				break;
 			} else if (!bp->next) {
 				bp->next = bug;
@@ -1019,6 +1031,10 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_add(switch_core_session_t 
 		}
 
 		last_bp = bp;
+	}
+
+	for(bp = session->bugs; bp; bp = bp->next) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "**** Media bug order %s (%s)\n", bp->function, bp->target);
 	}
 
 	switch_thread_rwlock_unlock(session->bug_rwlock);
