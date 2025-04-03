@@ -1033,10 +1033,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_add(switch_core_session_t 
 		last_bp = bp;
 	}
 
-	for(bp = session->bugs; bp; bp = bp->next) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "**** Media bug order %s (%s)\n", bp->function, bp->target);
-	}
-
 	switch_thread_rwlock_unlock(session->bug_rwlock);
 	*new_bug = bug;
 
