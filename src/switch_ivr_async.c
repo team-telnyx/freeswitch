@@ -2575,6 +2575,9 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 			read_flags = 0;
 		}
 
+		if (flags & ED_STEREO) {
+			stereo_flag = SMBF_STEREO;
+		}
 		if (flags & ED_BUG_TOP) {
 			pos_flag = SMBF_FIRST;
 		} else if (flags & ED_BUG_BOTTOM) {
