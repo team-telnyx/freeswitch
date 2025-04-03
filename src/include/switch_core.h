@@ -955,6 +955,7 @@ SWITCH_DECLARE(char *) switch_core_get_variable_dup(_In_z_ const char *varname);
 SWITCH_DECLARE(char *) switch_core_get_variable_pdup(_In_z_ const char *varname, switch_memory_pool_t *pool);
 SWITCH_DECLARE(const char *) switch_core_get_hostname(void);
 SWITCH_DECLARE(const char *) switch_core_get_switchname(void);
+SWITCH_DECLARE(switch_bool_t) switch_core_add_media_bug_last(void);
 
 SWITCH_DECLARE(char *) switch_core_get_domain(switch_bool_t dup);
 
