@@ -6930,17 +6930,10 @@ SWITCH_STANDARD_API(sofia_reinvite_no_sdp_function)
 
 	/* Set channel variable to control crypto key change */
 	if (ack_crypto_change && !strcasecmp(ack_crypto_change, "ack_crypto_change")) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(target_session), SWITCH_LOG_DEBUG, 
-			"3PCC: Setting 3pcc_ack_no_crypto_change=false\n");
 		switch_channel_set_variable(channel, "3pcc_ack_no_crypto_change", "false");
 	} else {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(target_session), SWITCH_LOG_DEBUG, 
-			"3PCC: Setting 3pcc_ack_no_crypto_change=true (default)\n");
 		switch_channel_set_variable(channel, "3pcc_ack_no_crypto_change", "true");
 	}
-
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(target_session), SWITCH_LOG_DEBUG, 
-	"3PCC: Setting TFLAG_3PCC flag and sending re-INVITE without SDP\n");
 
 	/* Set flag for 3PCC handling */
 	sofia_set_flag_locked(tech_pvt, TFLAG_3PCC);
@@ -6950,9 +6943,6 @@ SWITCH_STANDARD_API(sofia_reinvite_no_sdp_function)
 		NUTAG_MEDIA_ENABLE(0),
 		SIPTAG_CONTENT_LENGTH_STR("0"),
 		TAG_END());
-
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(target_session), SWITCH_LOG_DEBUG, 
-	"3PCC: Re-INVITE sent without SDP\n");
 
 	stream->write_function(stream, "+OK\n");
 
