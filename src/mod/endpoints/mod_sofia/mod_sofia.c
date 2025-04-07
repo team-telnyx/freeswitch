@@ -6890,64 +6890,79 @@ char *sofia_stir_shaken_as_create_identity_header(switch_core_session_t *session
 
 SWITCH_STANDARD_API(sofia_reinvite_no_sdp_function)
 {
-    char *uuid = NULL;
-    switch_core_session_t *target_session = NULL;
-    private_object_t *tech_pvt = NULL;
-    char *argv[2] = { 0 };
-    int argc;
-    char *mydata = NULL;
+	char *uuid = NULL;
+	char *ack_crypto_change = NULL;
+	switch_core_session_t *target_session = NULL;
+	private_object_t *tech_pvt = NULL;
+	switch_channel_t *channel = NULL;
+	char *argv[3] = { 0 };
+	int argc;
+	char *mydata = NULL;
 
-    if (zstr(cmd)) {
-        stream->write_function(stream, "-ERR Invalid syntax\n");
-        goto end;
-    }
+	if (zstr(cmd)) {
+		stream->write_function(stream, "-ERR Invalid syntax\n");
+		goto end;
+	}
 
-    mydata = strdup(cmd);
-    argc = switch_separate_string(mydata, ' ', argv, (sizeof(argv) / sizeof(argv[0])));
+	mydata = strdup(cmd);
+	argc = switch_separate_string(mydata, ' ', argv, (sizeof(argv) / sizeof(argv[0])));
 
-    if (argc < 1) {
-        stream->write_function(stream, "-ERR Invalid syntax\n");
-        goto end;
-    }
+	if (argc < 1) {
+		stream->write_function(stream, "-ERR Invalid syntax\n");
+		goto end;
+	}
 
-    uuid = argv[0];
+	uuid = argv[0];
+	ack_crypto_change = argv[1];
 
-    if (!(target_session = switch_core_session_locate(uuid))) {
-        stream->write_function(stream, "-ERR Cannot locate session\n");
-        goto end;
-    }
+	if (!(target_session = switch_core_session_locate(uuid))) {
+		stream->write_function(stream, "-ERR Cannot locate session\n");
+		goto end;
+	}
 
-    tech_pvt = switch_core_session_get_private(target_session);
+	tech_pvt = switch_core_session_get_private(target_session);
+	channel = switch_core_session_get_channel(target_session);
 
-    if (!tech_pvt) {
-        stream->write_function(stream, "-ERR Cannot locate tech_pvt\n");
-        goto end;
-    }
+	if (!tech_pvt) {
+		stream->write_function(stream, "-ERR Cannot locate tech_pvt\n");
+		goto end;
+	}
 
-    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(target_session), SWITCH_LOG_DEBUG, 
+	/* Set channel variable to control crypto key change */
+	if (ack_crypto_change && !strcasecmp(ack_crypto_change, "ack_crypto_change")) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(target_session), SWITCH_LOG_DEBUG, 
+			"3PCC: Setting 3pcc_ack_no_crypto_change=false\n");
+		switch_channel_set_variable(channel, "3pcc_ack_no_crypto_change", "false");
+	} else {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(target_session), SWITCH_LOG_DEBUG, 
+			"3PCC: Setting 3pcc_ack_no_crypto_change=true (default)\n");
+		switch_channel_set_variable(channel, "3pcc_ack_no_crypto_change", "true");
+	}
+
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(target_session), SWITCH_LOG_DEBUG, 
 	"3PCC: Setting TFLAG_3PCC flag and sending re-INVITE without SDP\n");
 
-    /* Set flag for 3PCC handling */
-    sofia_set_flag_locked(tech_pvt, TFLAG_3PCC);
-    
-    /* Send RE-INVITE without SDP */
-    nua_invite(tech_pvt->nh,
-        NUTAG_MEDIA_ENABLE(0),
-        SIPTAG_CONTENT_LENGTH_STR("0"),
-        TAG_END());
+	/* Set flag for 3PCC handling */
+	sofia_set_flag_locked(tech_pvt, TFLAG_3PCC);
+	
+	/* Send RE-INVITE without SDP */
+	nua_invite(tech_pvt->nh,
+		NUTAG_MEDIA_ENABLE(0),
+		SIPTAG_CONTENT_LENGTH_STR("0"),
+		TAG_END());
 
-    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(target_session), SWITCH_LOG_DEBUG, 
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(target_session), SWITCH_LOG_DEBUG, 
 	"3PCC: Re-INVITE sent without SDP\n");
 
-    stream->write_function(stream, "+OK\n");
+	stream->write_function(stream, "+OK\n");
 
 end:
-    if (target_session) {
-        switch_core_session_rwunlock(target_session);
-    }
+	if (target_session) {
+		switch_core_session_rwunlock(target_session);
+	}
 
-    switch_safe_free(mydata);
-    return SWITCH_STATUS_SUCCESS;
+	switch_safe_free(mydata);
+	return SWITCH_STATUS_SUCCESS;
 }
 
 SWITCH_MODULE_LOAD_FUNCTION(mod_sofia_load)
@@ -7247,6 +7262,9 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_sofia_load)
 
 	switch_console_set_complete("add sofia xmlstatus profile ::sofia::list_profiles reg");
 	switch_console_set_complete("add sofia xmlstatus gateway ::sofia::list_gateways");
+
+	switch_console_set_complete("add sofia_reinvite_no_sdp ::console::list_uuid");
+	switch_console_set_complete("add sofia_reinvite_no_sdp ::console::list_uuid ack_crypto_change");
 
 	switch_console_add_complete_func("::sofia::list_profiles", list_profiles);
 	switch_console_add_complete_func("::sofia::list_gateways", list_gateways);
