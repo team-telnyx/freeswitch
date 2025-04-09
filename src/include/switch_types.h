@@ -144,6 +144,7 @@ SWITCH_BEGIN_EXTERN_C
 #define SWITCH_TRANSFER_HISTORY_VARIABLE "transfer_history"
 #define SWITCH_TRANSFER_SOURCE_VARIABLE "transfer_source"
 #define SWITCH_SENSITIVE_DTMF_VARIABLE "sensitive_dtmf"
+#define SWITCH_SENSITIVE_EVENT_DTMF_VARIABLE "sensitive_event_dtmf"
 #define SWITCH_RECORD_POST_PROCESS_EXEC_APP_VARIABLE "record_post_process_exec_app"
 #define SWITCH_RECORD_POST_PROCESS_EXEC_API_VARIABLE "record_post_process_exec_api"
 
@@ -292,7 +293,8 @@ typedef enum {
 
 typedef enum {
 	DTMF_FLAG_SKIP_PROCESS = (1 << 0),
-	DTMF_FLAG_SENSITIVE = (1 << 1)
+	DTMF_FLAG_SENSITIVE = (1 << 1),
+	DTMF_FLAG_EVENT_SENSITIVE = (1 << 2)
 } dtmf_flag_t;
 
 typedef struct {

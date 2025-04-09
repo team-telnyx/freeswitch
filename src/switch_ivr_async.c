@@ -474,7 +474,7 @@ static dm_match_t switch_ivr_dmachine_check_match(switch_ivr_dmachine_t *dmachin
 
 	if (is_timeout) {
 		if (both_bp) {
-			r_bp = exact_bp ? exact_bp : both_bp;
+			r_bp = exact_bp;
 		}
 	}
 
@@ -5325,6 +5325,24 @@ static switch_bool_t speech_callback(switch_media_bug_t *bug, void *user_data, s
 
 		}
 		break;
+	case SWITCH_ABC_TYPE_READ_REPLACE:
+		if (sth->ah) {
+			switch_frame_t *rframe = switch_core_media_bug_get_read_replace_frame(bug);
+			if (rframe) {
+				if (switch_core_asr_feed(sth->ah, rframe->data, rframe->datalen, &flags) != SWITCH_STATUS_SUCCESS) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(switch_core_media_bug_get_session(bug)), SWITCH_LOG_DEBUG, "Error Feeding Data\n");
+					return SWITCH_FALSE;
+				}
+				if (switch_core_asr_check_results(sth->ah, &flags) == SWITCH_STATUS_SUCCESS) {
+					if (sth->mutex && sth->cond && sth->ready) {
+						switch_mutex_lock(sth->mutex);
+						switch_thread_cond_signal(sth->cond);
+						switch_mutex_unlock(sth->mutex);
+					}
+				}
+			}
+		}
+		break;
 	case SWITCH_ABC_TYPE_READ:
 		if (sth->ah) {
 			if (switch_core_media_bug_read(bug, &frame, SWITCH_FALSE) != SWITCH_STATUS_FALSE) {
@@ -5541,7 +5559,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_detect_speech_init(switch_core_sessio
 	switch_codec_implementation_t read_impl = { 0 };
 	const char *p;
 	char key[512] = "";
-	int bug_flags = SMBF_READ_STREAM | SMBF_NO_PAUSE;
+	int bug_flags = SMBF_NO_PAUSE;
 
 	if (sth) {
 		/* Already initialized */
@@ -5588,6 +5606,12 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_detect_speech_init(switch_core_sessio
 	} else if (switch_channel_var_true(channel, "asr_bug_bottom")) {
 		bug_flags &= ~SMBF_FIRST;
 		bug_flags |= SMBF_LAST;
+	}
+
+	if (switch_channel_var_true(channel, "asr_bug_use_read_replace")) {
+		bug_flags |= SMBF_READ_REPLACE;
+	} else {
+		bug_flags |= SMBF_READ_STREAM;
 	}
 
 	switch_snprintf(key, sizeof(key), "%s/%s/%s/%s", mod_name, NULL, NULL, dest);

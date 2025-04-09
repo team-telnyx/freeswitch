@@ -373,6 +373,11 @@ SWITCH_DECLARE(const char *) switch_core_get_switchname(void)
 	return runtime.hostname;
 }
 
+SWITCH_DECLARE(switch_bool_t) switch_core_add_media_bug_last(void)
+{
+	return runtime.add_media_bug_last;
+}
+
 SWITCH_DECLARE(char *) switch_core_get_domain(switch_bool_t dup)
 {
 	char *domain;
@@ -1852,6 +1857,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_init(switch_core_flag_t flags, switc
 	runtime.min_dtmf_duration = SWITCH_MIN_DTMF_DURATION;
 	runtime.odbc_dbtype = DBTYPE_DEFAULT;
 	runtime.dbname = NULL;
+	runtime.add_media_bug_last = SWITCH_TRUE;
 #ifndef WIN32
 	runtime.cpu_count = sysconf (_SC_NPROCESSORS_ONLN);
 #else
@@ -2420,7 +2426,9 @@ static void switch_load_core_config(const char *file)
 						switch_core_set_variable("telnyx_rtp_poll_timeout_s", val);
 						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Set RTP blocking mode poll timeout to %s\n", val);
 					}
-				}
+				} else if (!strcasecmp(var, "media-bug-add-last") && !zstr(val)) {
+					runtime.add_media_bug_last = switch_true(val);
+				} 
 			}
 		}
 
