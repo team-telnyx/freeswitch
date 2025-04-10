@@ -1655,7 +1655,7 @@ static void our_sofia_event_callback(nua_event_t event,
 	}
 
 	if (sip && (status == 401 || status == 407)) {
-		if (!sofia_test_flag(profile, PFLAG_DISABLE_AUTH_CHALLENGE_RESPONSE)) {
+		if (!sofia_test_pflag(profile, PFLAG_DISABLE_AUTH_CHALLENGE_RESPONSE)) {
 			sofia_reg_handle_sip_r_challenge(status, phrase, nua, profile, nh, sofia_private, session, gateway, sip, de, tags);
 		} else {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Challenge responses disabled\n");
