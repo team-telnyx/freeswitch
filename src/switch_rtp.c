@@ -1516,7 +1516,7 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "Error sending STUN Binding Request on ICE candidate still unresponsive to %s:%u\n", from_host, from_port);
 				}
 			}
-		} else if (packet->header.type == SWITCH_STUN_BINDING_RESPONSE && (ice->type & ICE_LITE)) {
+		} else if (packet->header.type == SWITCH_STUN_BINDING_RESPONSE && (ice->type & ICE_LITE_INBOUND)) {
 			if (!ice->ready) {
 				ice->ready = 1;
 			}
