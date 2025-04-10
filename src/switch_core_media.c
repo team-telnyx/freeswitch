@@ -4651,7 +4651,7 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 	sdp_attribute_t *attr = NULL, *attrs[2] = { 0 };
 	int i = 0, got_rtcp_mux = 0;
 	const char *val;
-	int ice_seen = 0, cid = 0, ai = 0, attr_idx = 0, cand_seen = 0, relay_ok = 0;
+	int ice_seen = 0, cid = 0, ai = 0, attr_idx = 0, cand_seen = 0, relay_ok = 0, ice_lite_seen = 0;
 	int ignore_ice_mdns = 0;
 	char con_addr[256];
 	int ice_resolve = 0;
@@ -4711,7 +4711,8 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 			} else if (!strcasecmp(attr->a_name, "ice-options")) {
 				engine->ice_in.options = switch_core_session_strdup(smh->session, attr->a_value);
 			} else if (!strcasecmp(attr->a_name, "ice-lite")) {
-					switch_channel_set_variable(smh->session->channel, "ice_lite_inbound", "true");
+				ice_lite_seen = 1;
+				switch_channel_set_variable(smh->session->channel, "ice_lite_inbound", "true");
 			} else if (!strcasecmp(attr->a_name, "setup")) {
 				if (!strcasecmp(attr->a_value, "passive") ||
 					(!strcasecmp(attr->a_value, "actpass") && !switch_channel_test_flag(smh->session->channel, CF_REINVITE))) {
@@ -4909,6 +4910,10 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 				engine->ice_in.cand_idx[cid]++;
 			}
 		}
+	}
+
+	if (ice_lite_seen == 0 && switch_channel_var_true(smh->session->channel, "ice_lite_inbound")) {
+		switch_channel_set_variable(smh->session->channel, "ice_lite_inbound", "false");
 	}
 
 	if (!ice_seen) {
