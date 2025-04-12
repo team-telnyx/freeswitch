@@ -34,6 +34,7 @@
 
 #include "switch.h"
 #include "private/switch_core_pvt.h"
+#include "switch_telnyx.h"
 
 static void switch_core_media_bug_destroy(switch_media_bug_t **bug)
 {
@@ -814,10 +815,10 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_add(switch_core_session_t 
 														  switch_media_bug_flag_t flags,
 														  switch_media_bug_t **new_bug)
 {
-	switch_media_bug_t *bug, *bp, *last_bp;
+	switch_media_bug_t *bug, *bp;
 	switch_size_t bytes;
 	switch_event_t *event;
-	int tap_only = 1, punt = 0, added = 0;
+	int tap_only = 1, punt = 0;
 
 	const char *p;
 
@@ -889,6 +890,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_add(switch_core_session_t 
 	bug->user_data = user_data;
 	bug->session = session;
 	bug->flags = flags;
+	bug->priority = 0;
 	bug->function = "N/A";
 	bug->target = "N/A";
 
@@ -991,46 +993,51 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_add(switch_core_session_t 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Attaching BUG to %s\n", switch_channel_get_name(session->channel));
 	switch_thread_rwlock_wrlock(session->bug_rwlock);
 
-	if (!session->bugs) {
-		session->bugs = bug;
-		added = 1;
-	}
+	if (!switch_telnyx_on_add_media_bug(&session->bugs, bug, bug->function, bug->target)) {
+		switch_media_bug_t *last_bp = NULL;
+		int added = 0;
 
-	if (switch_test_flag(bug, SMBF_FIRST) && switch_test_flag(bug, SMBF_LAST)) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Misconfigured bug position is set. Forcing bug to add at bottom!\n");
-		switch_clear_flag(bug, SMBF_FIRST);
-	}
-
-	if (!added && switch_test_flag(bug, SMBF_FIRST)) {
-		bug->next = session->bugs;
-		session->bugs = bug;
-		added = 1;
-	}
-
-	last_bp = session->bugs;
-
-	for(bp = session->bugs; bp; bp = bp->next) {
-		if (bp->ready && !switch_test_flag(bp, SMBF_TAP_NATIVE_READ) && !switch_test_flag(bp, SMBF_TAP_NATIVE_WRITE)) {
-			tap_only = 0;
+		if (!session->bugs) {
+			session->bugs = bug;
+			added = 1;
 		}
 
-		if (!added) {
-			if (!switch_test_flag(bug, SMBF_LAST) && (switch_test_flag(bp, SMBF_LAST)
-				|| (!switch_test_flag(bp, SMBF_FIRST) && !switch_core_add_media_bug_last()))) {
-				bug->next = bp;
-				if (bp == session->bugs) {
-					session->bugs = bug;
-				} else {
-					last_bp->next = bug;
-				}
-				break;
-			} else if (!bp->next) {
-				bp->next = bug;
-				break;
+		if (switch_test_flag(bug, SMBF_FIRST) && switch_test_flag(bug, SMBF_LAST)) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Misconfigured bug position is set. Forcing bug to add at bottom!\n");
+			switch_clear_flag(bug, SMBF_FIRST);
+		}
+
+		if (!added && switch_test_flag(bug, SMBF_FIRST)) {
+			bug->next = session->bugs;
+			session->bugs = bug;
+			added = 1;
+		}
+
+		last_bp = session->bugs;
+
+		for(bp = session->bugs; bp; bp = bp->next) {
+			if (bp->ready && !switch_test_flag(bp, SMBF_TAP_NATIVE_READ) && !switch_test_flag(bp, SMBF_TAP_NATIVE_WRITE)) {
+				tap_only = 0;
 			}
-		}
 
-		last_bp = bp;
+			if (!added) {
+				if (!switch_test_flag(bug, SMBF_LAST) && (switch_test_flag(bp, SMBF_LAST)
+					|| (!switch_test_flag(bp, SMBF_FIRST) && !switch_core_add_media_bug_last()))) {
+					bug->next = bp;
+					if (bp == session->bugs) {
+						session->bugs = bug;
+					} else {
+						last_bp->next = bug;
+					}
+					break;
+				} else if (!bp->next) {
+					bp->next = bug;
+					break;
+				}
+			}
+
+			last_bp = bp;
+		}
 	}
 
 	switch_thread_rwlock_unlock(session->bug_rwlock);
@@ -1511,6 +1518,26 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_remove_callback(switch_cor
 	}
 
 	return total ? SWITCH_STATUS_SUCCESS : SWITCH_STATUS_FALSE;
+}
+
+SWITCH_DECLARE(uint16_t) switch_core_media_bug_get_priority(switch_media_bug_t *bug)
+{
+	return bug->priority;
+}
+
+SWITCH_DECLARE(void) switch_core_media_bug_set_priority(switch_media_bug_t *bug, uint16_t priority)
+{
+	bug->priority = priority;
+}
+
+SWITCH_DECLARE(switch_media_bug_t *) switch_core_media_bug_get_next(switch_media_bug_t *bug)
+{
+	return bug->next;
+}
+
+SWITCH_DECLARE(void) switch_core_media_bug_set_next(switch_media_bug_t *bug, switch_media_bug_t *next)
+{
+	bug->next = next;
 }
 
 /* For Emacs:

@@ -295,6 +295,34 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_add(_In_ switch_core_sessi
 														  _In_ time_t stop_time, _In_ switch_media_bug_flag_t flags, _Out_ switch_media_bug_t **new_bug);
 
 /*!
+ * \brief Get the priority of a media bug
+ * \param bug The media bug to get the priority from
+ * \return The priority value
+ */
+SWITCH_DECLARE(uint16_t) switch_core_media_bug_get_priority(switch_media_bug_t *bug);
+
+/*!
+ * \brief Set the priority of a media bug
+ * \param bug The media bug to set the priority on
+ * \param priority The priority value to set
+ */
+SWITCH_DECLARE(void) switch_core_media_bug_set_priority(switch_media_bug_t *bug, uint16_t priority);
+
+/*!
+ * \brief Get the next media bug in the chain
+ * \param bug The current media bug
+ * \return The next media bug in the chain or NULL if none
+ */
+SWITCH_DECLARE(switch_media_bug_t *) switch_core_media_bug_get_next(switch_media_bug_t *bug);
+
+/*!
+ * \brief Set the next media bug in the chain
+ * \param bug The current media bug
+ * \param next The next media bug to chain to
+ */
+SWITCH_DECLARE(void) switch_core_media_bug_set_next(switch_media_bug_t *bug, switch_media_bug_t *next);
+
+/*!
   \brief Pause a media bug on the session
   \param session the session to pause the bug on sets CF_PAUSE_BUGS flag
 */
