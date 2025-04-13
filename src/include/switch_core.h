@@ -2985,6 +2985,20 @@ SWITCH_DECLARE(void) switch_core_global_mutex_unlock(void);
 
 SWITCH_DECLARE(const char *) switch_core_get_event_channel_key_separator(void);
 
+/*!
+ * \brief Get the weight of a media bug
+ * \param bug The media bug to get the weight from
+ * \return The weight value
+ */
+SWITCH_DECLARE(uint16_t) switch_core_media_bug_get_weight(switch_media_bug_t *bug);
+
+/*!
+ * \brief Set the weight of a media bug
+ * \param bug The media bug to set the weight on
+ * \param weight The weight value to set
+ */
+SWITCH_DECLARE(void) switch_core_media_bug_set_weight(switch_media_bug_t *bug, uint16_t weight);
+
 SWITCH_END_EXTERN_C
 #endif
 /* For Emacs:
