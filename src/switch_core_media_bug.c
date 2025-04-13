@@ -890,7 +890,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_add(switch_core_session_t 
 	bug->user_data = user_data;
 	bug->session = session;
 	bug->flags = flags;
-	bug->priority = 0;
+	bug->weight = 0;
 	bug->function = "N/A";
 	bug->target = "N/A";
 
@@ -1520,14 +1520,14 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_remove_callback(switch_cor
 	return total ? SWITCH_STATUS_SUCCESS : SWITCH_STATUS_FALSE;
 }
 
-SWITCH_DECLARE(uint16_t) switch_core_media_bug_get_priority(switch_media_bug_t *bug)
+SWITCH_DECLARE(uint16_t) switch_core_media_bug_get_weight(switch_media_bug_t *bug)
 {
-	return bug->priority;
+	return bug->weight;
 }
 
-SWITCH_DECLARE(void) switch_core_media_bug_set_priority(switch_media_bug_t *bug, uint16_t priority)
+SWITCH_DECLARE(void) switch_core_media_bug_set_weight(switch_media_bug_t *bug, uint16_t weight)
 {
-	bug->priority = priority;
+	bug->weight = weight;
 }
 
 SWITCH_DECLARE(switch_media_bug_t *) switch_core_media_bug_get_next(switch_media_bug_t *bug)

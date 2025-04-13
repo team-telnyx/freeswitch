@@ -295,18 +295,18 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_add(_In_ switch_core_sessi
 														  _In_ time_t stop_time, _In_ switch_media_bug_flag_t flags, _Out_ switch_media_bug_t **new_bug);
 
 /*!
- * \brief Get the priority of a media bug
- * \param bug The media bug to get the priority from
- * \return The priority value
+ * \brief Get the weight of a media bug
+ * \param bug The media bug to get the weight from
+ * \return The weight value
  */
-SWITCH_DECLARE(uint16_t) switch_core_media_bug_get_priority(switch_media_bug_t *bug);
+SWITCH_DECLARE(uint16_t) switch_core_media_bug_get_weight(switch_media_bug_t *bug);
 
 /*!
- * \brief Set the priority of a media bug
- * \param bug The media bug to set the priority on
- * \param priority The priority value to set
+ * \brief Set the weight of a media bug
+ * \param bug The media bug to set the weight on
+ * \param weight The weight value to set
  */
-SWITCH_DECLARE(void) switch_core_media_bug_set_priority(switch_media_bug_t *bug, uint16_t priority);
+SWITCH_DECLARE(void) switch_core_media_bug_set_weight(switch_media_bug_t *bug, uint16_t weight);
 
 /*!
  * \brief Get the next media bug in the chain
@@ -1384,7 +1384,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_get_fork_read_frame_data(_In
   \brief Read a video frame from a session
   \param session the session to read from
   \param frame a NULL pointer to a frame to aim at the newly read frame
-  \param flags I/O flags to modify behavior (i.e. non blocking)
+  \param flags I/O flags to modify behavior (i.g. non blocking)
   \param stream_id which logical media channel to use
   \return SWITCH_STATUS_SUCCESS a if the frame was read
 */
@@ -1394,7 +1394,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_video_frame(_In_ switch
   \brief Write a video frame to a session
   \param session the session to write to
   \param frame a pointer to a frame to write
-  \param flags I/O flags to modify behavior (i.e. non blocking)
+  \param flags I/O flags to modify behavior (i.g. non blocking)
   \param stream_id which logical media channel to use
   \return SWITCH_STATUS_SUCCESS a if the frame was written
 */
@@ -2984,6 +2984,20 @@ SWITCH_DECLARE(void) switch_core_global_mutex_lock(void);
 SWITCH_DECLARE(void) switch_core_global_mutex_unlock(void);
 
 SWITCH_DECLARE(const char *) switch_core_get_event_channel_key_separator(void);
+
+/*!
+ * \brief Get the weight of a media bug
+ * \param bug The media bug to get the weight from
+ * \return The weight value
+ */
+SWITCH_DECLARE(uint16_t) switch_core_media_bug_get_weight(switch_media_bug_t *bug);
+
+/*!
+ * \brief Set the weight of a media bug
+ * \param bug The media bug to set the weight on
+ * \param weight The weight value to set
+ */
+SWITCH_DECLARE(void) switch_core_media_bug_set_weight(switch_media_bug_t *bug, uint16_t weight);
 
 SWITCH_END_EXTERN_C
 #endif

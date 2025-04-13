@@ -191,7 +191,7 @@ struct switch_media_bug {
 	switch_core_session_t *session;
 	void *user_data;
 	uint32_t flags;
-	uint16_t priority;
+	uint16_t weight;
 	uint8_t ready;
 	uint8_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
 	int16_t tmp[SWITCH_RECOMMENDED_BUFFER_SIZE];
