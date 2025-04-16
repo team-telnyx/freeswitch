@@ -803,7 +803,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_next_event(switch_core_session_
 		status = switch_ivr_parse_event(session, event);
 		if (channel && switch_channel_var_true(channel, "log_next_event") == SWITCH_TRUE) {
 			DUMP_EVENT(event);
-        }
+		}
 		event->event_id = SWITCH_EVENT_PRIVATE_COMMAND;
 		switch_event_prep_for_delivery(event);
 		switch_channel_event_set_data(switch_core_session_get_channel(session), event);
