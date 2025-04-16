@@ -799,7 +799,11 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_next_event(switch_core_session_
 	switch_status_t status = SWITCH_STATUS_FALSE;
 
 	if (switch_core_session_dequeue_private_event(session, &event) == SWITCH_STATUS_SUCCESS) {
+		switch_channel_t *channel = switch_core_session_get_channel(session);
 		status = switch_ivr_parse_event(session, event);
+		if (channel && switch_channel_var_true(channel, "log_next_event") == SWITCH_TRUE) {
+			DUMP_EVENT(event);
+		}
 		event->event_id = SWITCH_EVENT_PRIVATE_COMMAND;
 		switch_event_prep_for_delivery(event);
 		switch_channel_event_set_data(switch_core_session_get_channel(session), event);
