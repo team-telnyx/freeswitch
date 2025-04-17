@@ -1661,6 +1661,9 @@ static void our_sofia_event_callback(nua_event_t event,
 			if (!zstr(sip_auth_username) && !zstr(sip_auth_password)) {
 				sofia_reg_handle_sip_r_challenge(status, phrase, nua, profile, nh, sofia_private, session, gateway, sip, de, tags);
 				goto done;
+			} else if (status == 407) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "No SIP auth username/password set for 407 response.\n");
+				switch_channel_hangup(channel, SWITCH_CAUSE_MANDATORY_IE_MISSING);
 			}
 		}
 		if (!sofia_test_pflag(profile, PFLAG_DISABLE_AUTH_CHALLENGE_RESPONSE)) {
