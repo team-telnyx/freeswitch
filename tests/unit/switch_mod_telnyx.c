@@ -12,6 +12,7 @@ FST_CORE_BEGIN("./conf_telnyx")
 		FST_SETUP_BEGIN()
 		{
 			fst_requires_module("mod_telnyx");
+			fst_requires_module("mod_tone_stream");
 		}
 		FST_SETUP_END()
 
@@ -90,6 +91,27 @@ FST_CORE_BEGIN("./conf_telnyx")
 			}
 		}
 		FST_TEST_END()
+
+		FST_SESSION_BEGIN(session_record_pause)
+		{
+			const char *record_filename = switch_core_session_sprintf(fst_session, "%s%s%s.wav", SWITCH_GLOBAL_dirs.temp_dir, SWITCH_PATH_SEPARATOR, s
+			switch_status_t status;
+			switch_media_bug_t *bug;
+			status = switch_ivr_record_session_event(fst_session, record_filename, 0, NULL, NULL);
+			fst_xcheck(status == SWITCH_STATUS_SUCCESS, "Expect switch_ivr_record_session() to return SWITCH_STATUS_SUCCESS");
+			status = switch_ivr_displace_session(fst_session, "file_string://silence_stream://500,0!tone_stream://%%(2000,0,350,440)", 0, "r");
+			fst_xcheck(status == SWITCH_STATUS_SUCCESS, "Expect switch_ivr_displace_session() to return SWITCH_STATUS_SUCCESS");
+			status = switch_core_media_bug_pop(fst_session, "displace", &bug);
+			fst_xcheck(status == SWITCH_STATUS_SUCCESS, "Expect 'displace' bug");
+			fst_xcheck(switch_core_media_bug_get_weight(bug) == 350, "Expect weight of 350");
+			switch_core_media_bug_set_flag(bug, SMBF_PRUNE);
+			bug = switch_core_media_bug_get_next(bug);
+			fst_xcheck(switch_core_media_bug_get_weight(bug) == 450, "Expect weight of 450");
+			bug = switch_core_media_bug_get_next(bug);
+			fst_xcheck(switch_core_media_bug_get_weight(bug) == 450, "Expect weight of 450");
+			switch_ivr_stop_record_session(fst_session, record_filename);
+		}
+		FST_SESSION_END()
 	}
 	FST_SUITE_END()
 }
