@@ -18,6 +18,7 @@
 				<load module="mod_telnyx"/>
 				<load module="mod_console"/>
 				<load module="mod_sofia"/>
+				<load module="mod_tone_stream"/>
 			</modules>
 		</configuration>
 		<configuration name="console.conf" description="Console Logger">
@@ -188,6 +189,25 @@
 					<application app="set" data="force_rtcp_passthru=false"/>
 				</dialplan>
 			</dialplans>
+			<mediabugs>
+				<mediabug name="displace" weight="350"/>
+				<mediabug name="session_record" weight="450"/>
+				<mediabug name="eavesdrop" weight="400"/>
+				<mediabug name="detect_speech" weight="100"/>
+				<mediabug name="telnyx_amd" weight="100"/>
+				<mediabug name="telnyx_amd_detect_greeting_end" weight="100"/>
+				<mediabug name="_denoiser_bug_rd_" weight="50"/>
+				<mediabug name="_denoiser_bug_wr_" weight="50"/>
+				<mediabug name="inband_dtmf" weight="300"/>
+				<mediabug name="inband_dtmf_generate" weight="300"/>
+				<mediabug name="telnyx_play_and_get_digits" weight="200"/>
+				<mediabug name="telnyx_read_async" weight="200"/>
+				<mediabug name="avmd" weight="100"/>
+				<mediabug name="siprec_read" weight="450"/>
+				<mediabug name="soundtouch" weight="250"/>
+				<mediabug name="fax_tone_detect" weight="100"/>
+				<mediabug name="gstt" weight="150"/>
+			</mediabugs>
 		</configuration>
 	</section>
 	<section name="dialplan" description="Regex/XML Dialplan">

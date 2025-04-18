@@ -26,6 +26,7 @@ typedef switch_call_cause_t (*switch_telnyx_recompute_cause_code_func)(switch_ch
 typedef switch_bool_t (*switch_telnyx_sip_cause_to_q850_func)(int, switch_call_cause_t*);
 typedef switch_bool_t (*switch_telnyx_on_media_timeout_func)(switch_channel_t*, switch_rtp_t*);
 typedef void (*switch_telnyx_channel_event_set_basic_data_func)(switch_channel_t*, switch_event_t*);
+typedef switch_bool_t (*switch_telnyx_on_add_media_bug_func)(switch_media_bug_t**, switch_media_bug_t*, const char*, const char*);
 
 typedef struct switch_telnyx_event_dispatch_s {
 	switch_telnyx_hangup_cause_to_sip_func switch_telnyx_hangup_cause_to_sip;
@@ -45,6 +46,7 @@ typedef struct switch_telnyx_event_dispatch_s {
 	switch_telnyx_sip_cause_to_q850_func switch_telnyx_sip_cause_to_q850;
 	switch_telnyx_on_media_timeout_func switch_telnyx_on_media_timeout;
 	switch_telnyx_channel_event_set_basic_data_func switch_telnyx_channel_event_set_basic_data;
+	switch_telnyx_on_add_media_bug_func switch_telnyx_on_add_media_bug;
 } switch_telnyx_event_dispatch_t;
 
 SWITCH_DECLARE(void) switch_telnyx_init(switch_memory_pool_t *pool);
@@ -71,11 +73,11 @@ SWITCH_DECLARE(void) switch_telnyx_process_audio_quality(switch_core_session_t* 
 SWITCH_DECLARE(void) switch_telnyx_process_flaws(switch_rtp_t* rtp_session, int penalty);
 SWITCH_DECLARE(void) switch_telnyx_process_packet_loss(switch_rtp_t* rtp_session, int loss);
 SWITCH_DECLARE(void) switch_telnyx_set_current_trace_message(const char* msg);
-
 SWITCH_DECLARE(switch_call_cause_t) switch_telnyx_recompute_cause_code(switch_channel_t* channel, int status, switch_call_cause_t cause);
 SWITCH_DECLARE(switch_bool_t) switch_telnyx_sip_cause_to_q850(int status, switch_call_cause_t* cause);
 SWITCH_DECLARE(switch_bool_t) switch_telnyx_sip_on_media_timeout(switch_channel_t* channel, switch_rtp_t* rtp_session);
 SWITCH_DECLARE(void) switch_telnyx_channel_event_set_basic_data(switch_channel_t *channel, switch_event_t *event);
+SWITCH_DECLARE(switch_bool_t) switch_telnyx_on_add_media_bug(switch_media_bug_t **list, switch_media_bug_t *bug, const char* function, const char* target);
 
 SWITCH_END_EXTERN_C
 
