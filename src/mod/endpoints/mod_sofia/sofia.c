@@ -1665,7 +1665,7 @@ static void our_sofia_event_callback(nua_event_t event,
 				}
 			}
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Challenge responses disabled\n");
-			switch_channel_hangup(channel, SWITCH_CAUSE_OUTGOING_CALL_BARRED);
+			nua_cancel(nh, SIPTAG_CONTACT(SIP_NONE), TAG_END());
 		} else {
 			sofia_reg_handle_sip_r_challenge(status, phrase, nua, profile, nh, sofia_private, session, gateway, sip, de, tags);
 		}
