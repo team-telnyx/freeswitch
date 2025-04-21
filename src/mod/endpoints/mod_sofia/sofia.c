@@ -8196,125 +8196,80 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 			sofia_clear_flag(tech_pvt, TFLAG_NEW_SDP);
 
 			/* Handle 3PCC re-INVITE without SDP case */
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC: Checking for 3PCC handling, TFLAG_3PCC=%d, r_sdp=%s\n", sofia_test_flag(tech_pvt, TFLAG_3PCC) ? 1 : 0, r_sdp ? "present" : "not present");
+			
 			if (sofia_test_flag(tech_pvt, TFLAG_3PCC) && r_sdp) {
-				const char *local_crypto_key_before;
-				const char *local_crypto_key_after;
 				const char *sdp_with_crypto;
-				const char *remote_crypto_tag;
-				const char *remote_crypto_key;
-				const char *crypto_suite = "AES_CM_128_HMAC_SHA1_80"; /* Default fallback */
-				const char *crypto_tag;
-				char new_crypto_key[128];
-				unsigned char raw_key[32];
-				unsigned char b64_key[64];
-				char *sdp_copy;
 				char *crypto_line_start;
 				char *crypto_line_end;
-				char *crypto_suite_buf = NULL;
-				char *space;
-				char *inline_marker;
+				char crypto_line[256];
+				const char *change_crypto_var;
+				int change_crypto = 0; /* Default to NOT changing crypto key */
+				const char *new_crypto_key;
+				char *sdp_copy;
 				char new_sdp[4096];
 				size_t prefix_len;
-				char crypto_line[256];
-				const char *no_crypto_change = switch_channel_get_variable(channel, "3pcc_ack_no_crypto_change");
-				int change_crypto = 0; /* Default to NOT changing crypto key */
+				
+				change_crypto_var = switch_channel_get_variable(channel, "3pcc_change_crypto");
 
-				if (no_crypto_change && !switch_true(no_crypto_change)) {
+				if (change_crypto_var && switch_true(change_crypto_var)) {
 					change_crypto = 1;
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC: Will generate new crypto key\n");
+				} else {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC: Will NOT generate new crypto key\n");
 				}
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC: Received 200 OK with SDP in completing state, r_sdp:\n%s\n", r_sdp);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC: Received 200 OK with SDP\n");
 
 				/* Generate new local SDP with new SRTP crypto key */
 				if (switch_core_media_choose_port(tech_pvt->session, SWITCH_MEDIA_TYPE_AUDIO, 0) != SWITCH_STATUS_SUCCESS) {
 					goto done;
 				}
 
-				/* Get remote crypto tag and key from channel variables */
-				remote_crypto_tag = switch_channel_get_variable(channel, "srtp_remote_audio_crypto_tag");
-				remote_crypto_key = switch_channel_get_variable(channel, "srtp_remote_audio_crypto_key");
-
-				if (change_crypto) {
-
-					local_crypto_key_before = switch_channel_get_variable(channel, "rtp_last_audio_local_crypto_key");
-					switch_channel_set_variable(tech_pvt->channel, "rtp_last_audio_local_crypto_key", NULL);
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC: rtp_last_audio_local_crypto_key before: %s\n", local_crypto_key_before);
-
-					switch_core_media_gen_local_sdp(session, SDP_TYPE_RESPONSE, NULL, 0, NULL, 1);
+				/* Handle crypto key generation in the media module */
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC: Calling switch_core_media_handle_3pcc_crypto_key with change_crypto=%d\n", change_crypto);
 					
-					local_crypto_key_after = switch_channel_get_variable(channel, "rtp_last_audio_local_crypto_key");
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC: rtp_last_audio_local_crypto_key after: %s\n", local_crypto_key_after);
-
-					memset(new_crypto_key, 0, sizeof(new_crypto_key));
-					memset(raw_key, 0, sizeof(raw_key));
-					memset(b64_key, 0, sizeof(b64_key));
-
-					/* Get remote crypto tag and key from channel variables */
-					remote_crypto_tag = switch_channel_get_variable(channel, "srtp_remote_audio_crypto_tag");
-					remote_crypto_key = switch_channel_get_variable(channel, "srtp_remote_audio_crypto_key");
-					
-					/* Extract crypto suite from remote key if available */
-					if (remote_crypto_key) {
-						/* Format is typically: "X SUITE inline:KEY" */
-						crypto_suite_buf = strdup(remote_crypto_key);
-						if (crypto_suite_buf) {
-						space = strchr(crypto_suite_buf, ' ');
-						if (space) {
-							inline_marker = strstr(space + 1, " inline:");
-							if (inline_marker) {
-							*inline_marker = '\0';
-							crypto_suite = space + 1;
-							}
-						}
-						}
-					}
-					
-					/* Use remote tag if available, otherwise default to 7 */
-					crypto_tag = remote_crypto_tag ? remote_crypto_tag : "7";
-					
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC: Using crypto tag %s and suite %s from remote SDP\n", crypto_tag, crypto_suite);
-					
-					switch_rtp_get_random(raw_key, 30);
-					switch_b64_encode(raw_key, 30, b64_key, sizeof(b64_key));
-					snprintf(new_crypto_key, sizeof(new_crypto_key), "%s %s inline:%s", crypto_tag, crypto_suite, b64_key);
-					
-					switch_safe_free(crypto_suite_buf);
-					switch_channel_set_variable(tech_pvt->channel, "rtp_last_audio_local_crypto_key", new_crypto_key);
-					/* Modify the SDP directly */
-					if (tech_pvt->mparams.local_sdp_str) {
-						sdp_copy = strdup(tech_pvt->mparams.local_sdp_str);
-
-						if (sdp_copy) {
-							crypto_line_start = strstr(sdp_copy, "a=crypto:");
-
-							if (crypto_line_start) {
-								crypto_line_end = strchr(crypto_line_start, '\n');
-
-								if (crypto_line_end) {
-									memset(new_sdp, 0, sizeof(new_sdp));
-									prefix_len = crypto_line_start - sdp_copy;
-
-									/* Build the new SDP with the modified crypto line */
-									memcpy(new_sdp, sdp_copy, prefix_len);
-									snprintf(new_sdp + prefix_len, sizeof(new_sdp) - prefix_len,
-										"a=crypto:%s\n", new_crypto_key);
-									strncat(new_sdp, crypto_line_end + 1, sizeof(new_sdp) - strlen(new_sdp) - 1);
-
-									/* Replace the SDP */
-									tech_pvt->mparams.local_sdp_str = switch_core_session_strdup(session, new_sdp);
-								}
-							}
-
-							free(sdp_copy);
-						}
-					}
-				} else {
-					/* Use the remote crypto key instead of generating a new one */
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC: Using remote crypto key instead of generating a new one\n");
-					
-					/* Generate local SDP without forcing new crypto key */
-					switch_core_media_gen_local_sdp(session, SDP_TYPE_RESPONSE, NULL, 0, NULL, 0);
+				if (switch_core_media_handle_3pcc_crypto_key(session, change_crypto) != SWITCH_STATUS_SUCCESS) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "3PCC: switch_core_media_handle_3pcc_crypto_key failed\n");
+					goto done;
 				}
 
+				/* Check if we need to update the SDP with a new crypto key */
+				new_crypto_key = switch_channel_get_variable(channel, "3pcc_new_crypto_key");
+				if (new_crypto_key && tech_pvt->mparams.local_sdp_str) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC: Applying new crypto key to SDP\n");
+						
+					sdp_copy = strdup(tech_pvt->mparams.local_sdp_str);
+					
+					if (sdp_copy) {
+						
+						crypto_line_start = strstr(sdp_copy, "a=crypto:");
+						
+						if (crypto_line_start) {
+							crypto_line_end = strchr(crypto_line_start, '\n');
+							
+							if (crypto_line_end) {
+								prefix_len = crypto_line_start - sdp_copy;
+								
+								/* Build the new SDP with the modified crypto line */
+								memset(new_sdp, 0, sizeof(new_sdp));
+								memcpy(new_sdp, sdp_copy, prefix_len);
+								snprintf(new_sdp + prefix_len, sizeof(new_sdp) - prefix_len,
+									"a=crypto:%s\n", new_crypto_key);
+								strncat(new_sdp, crypto_line_end + 1, sizeof(new_sdp) - strlen(new_sdp) - 1);
+								
+								/* Replace the SDP */
+								tech_pvt->mparams.local_sdp_str = switch_core_session_strdup(session, new_sdp);
+								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC: Updated SDP with new crypto key\n");
+							}
+						}
+						
+						free(sdp_copy);
+					}
+					
+					/* Clear the variable so we don't reuse it */
+					switch_channel_set_variable(channel, "3pcc_new_crypto_key", NULL);
+				}
+				
 				/* Extract crypto line from SDP for logging */
 				sdp_with_crypto = tech_pvt->mparams.local_sdp_str;
 				if (sdp_with_crypto) {
@@ -8327,18 +8282,16 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 							if (len < sizeof(crypto_line) - 1) {
 								memcpy(crypto_line, crypto_line_start, len);
 								crypto_line[len] = '\0';
-								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC: Final SDP contains crypto line: %s\n", crypto_line);
+								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC: Final SDP contains crypto line\n");
 							}
 						}
 					}
 				}
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC: Final rtp_last_audio_local_crypto_key: %s\n", switch_channel_get_variable(channel, "rtp_last_audio_local_crypto_key"));
-
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC: Generated local SDP:\n%s\n", tech_pvt->mparams.local_sdp_str ? tech_pvt->mparams.local_sdp_str : "NO SDP!");
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC: Generated local SDP with crypto\n");
 				
 				/* Send ACK with SDP */
 				/* Force direct SDP mode for 3PCC ACK to ensure SDP inclusion */
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC: Sending ACK with SDP directly to ensure SDP inclusion\n");
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC: Sending ACK with SDP\n");
 
 				nua_ack(tech_pvt->nh,
 					TAG_IF(!zstr(tech_pvt->user_via), SIPTAG_VIA_STR(tech_pvt->user_via)),

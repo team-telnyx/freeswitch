@@ -18138,6 +18138,86 @@ SWITCH_DECLARE(switch_bool_t) switch_core_media_has_mismatch_dynamic_payload_cod
 	return result;
 }
 
+SWITCH_DECLARE(switch_status_t) switch_core_media_handle_3pcc_crypto_key(switch_core_session_t *session, int change_crypto)
+{
+	switch_channel_t *channel = switch_core_session_get_channel(session);
+	const char *remote_crypto_tag;
+	const char *remote_crypto_key;
+	const char *crypto_suite = "AES_CM_128_HMAC_SHA1_80"; /* Default fallback */
+	const char *crypto_tag;
+	char new_crypto_key[128];
+	unsigned char raw_key[32];
+	unsigned char b64_key[64];
+	char *crypto_suite_buf = NULL;
+	char *space;
+	char *inline_marker;
+	switch_status_t status = SWITCH_STATUS_SUCCESS;
+	
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC: Handling crypto key, change_crypto=%d\n", change_crypto);
+
+	/* Get remote crypto tag and key from channel variables */
+	remote_crypto_tag = switch_channel_get_variable(channel, "srtp_remote_audio_crypto_tag");
+	remote_crypto_key = switch_channel_get_variable(channel, "srtp_remote_audio_crypto_key");
+
+	if (change_crypto) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC: Will generate new crypto key\n");
+			
+		/* Store the current crypto key for reference */
+		switch_channel_set_variable(channel, "rtp_last_audio_local_crypto_key", NULL);
+		
+		/* Generate new local SDP with new crypto key */
+		switch_core_media_gen_local_sdp(session, SDP_TYPE_RESPONSE, NULL, 0, NULL, 1);
+		
+		memset(new_crypto_key, 0, sizeof(new_crypto_key));
+		memset(raw_key, 0, sizeof(raw_key));
+		memset(b64_key, 0, sizeof(b64_key));
+
+		/* Extract crypto suite from remote key if available */
+		if (remote_crypto_key) {
+			/* Format is typically: "X SUITE inline:KEY" */
+			crypto_suite_buf = strdup(remote_crypto_key);
+			if (crypto_suite_buf) {
+				space = strchr(crypto_suite_buf, ' ');
+				if (space) {
+					inline_marker = strstr(space + 1, " inline:");
+					if (inline_marker) {
+						*inline_marker = '\0';
+						crypto_suite = space + 1;
+					}
+				}
+			}
+		}
+		
+		/* Use remote tag if available, otherwise default to 7 */
+		crypto_tag = remote_crypto_tag ? remote_crypto_tag : "7";
+		
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, 
+			"3PCC: Using crypto tag %s and suite %s from remote SDP\n", crypto_tag, crypto_suite);
+		
+		/* Generate new random crypto key */
+		switch_rtp_get_random(raw_key, 30);
+		switch_b64_encode(raw_key, 30, b64_key, sizeof(b64_key));
+		snprintf(new_crypto_key, sizeof(new_crypto_key), "%s %s inline:%s", crypto_tag, crypto_suite, b64_key);
+		
+		switch_safe_free(crypto_suite_buf);
+		
+		/* Store the new crypto key in the channel variable */
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC: Generated new crypto key\n");
+		switch_channel_set_variable(channel, "rtp_last_audio_local_crypto_key", new_crypto_key);
+		
+		/* Store the new crypto key in a special variable for the sofia module to use */
+		switch_channel_set_variable(channel, "3pcc_new_crypto_key", new_crypto_key);
+	} else {
+		/* Use the remote crypto key instead of generating a new one */
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC: Will NOT generate new crypto key\n");
+		
+		/* Generate local SDP without forcing new crypto key */
+		switch_core_media_gen_local_sdp(session, SDP_TYPE_RESPONSE, NULL, 0, NULL, 0);
+	}
+
+	return status;
+}
+
 SWITCH_DECLARE(switch_rtp_engine_t *) switch_core_media_get_engine(switch_core_session_t *session, int media_type)
 {
     if (!session) return NULL;
