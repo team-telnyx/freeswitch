@@ -3665,6 +3665,9 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_fork_reset_state(switch_rtp_t *rtp_se
 	}
 
 	rtp_session->fork.start_event_fired = 0;
+	rtp_session->fork.stop_event_fired = 0;
+	rtp_session->fork.start_time = 0;
+	rtp_session->fork.stop_time = 0;
 
 	return SWITCH_STATUS_SUCCESS;
 }
@@ -10489,6 +10492,8 @@ SWITCH_DECLARE(void) switch_rtp_fork_fire_start_event(switch_rtp_t *rtp_session)
 		cJSON_AddItemToObject(f, "tx", tx);
 	}
 
+	fork->start_time = switch_micro_time_now() / 1000;
+
 	if (f) {
 		s = cJSON_Print(f);
 		if (s == NULL) {
@@ -10497,12 +10502,32 @@ SWITCH_DECLARE(void) switch_rtp_fork_fire_start_event(switch_rtp_t *rtp_session)
 
 		switch_core_media_fork_do_fire_start_event(rtp_session->session, fork, s);
 		fork->start_event_fired = 1;
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "%s Fork: fired event with variable_media_fork_request:\n%s\n", (rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName"), s);
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "%s Fork: fired start event with variable_media_fork_request:\n%s\n", (rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName"), s);
 	}
 
 end:
     if (f) cJSON_Delete(f);
 	if (s) free(s);
+}
+
+SWITCH_DECLARE(void) switch_rtp_fork_fire_stop_event(switch_rtp_t *rtp_session)
+{
+	switch_fork_state_t *fork = NULL;
+	uint32_t current_duration = 0, last_duration = 0;
+
+	fork = &rtp_session->fork;
+	if (fork->stop_event_fired) {
+		return;
+	}
+
+	fork->stop_time = switch_micro_time_now() / 1000;
+	last_duration = fork->duration;
+	current_duration = (fork->stop_time - fork->start_time);
+	fork->duration = current_duration + last_duration;
+
+	switch_core_media_fork_do_fire_stop_event(rtp_session->session, fork, last_duration);
+	fork->stop_event_fired = 1;
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "%s Fork: fired stop event with duration of %d -> %d:\n", (rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName"), current_duration, fork->duration);
 }
 
 static switch_status_t switch_rtp_sendto(switch_rtp_t *rtp_session, switch_socket_t *sock, switch_sockaddr_t *where, int32_t flags, rtp_msg_t *send_msg, switch_size_t *len)

@@ -227,6 +227,10 @@ typedef struct switch_fork_state_s {
 	switch_time_t	wait_ssrc_time_start_us;
 	int				wait_ssrc_timeout_ms;
 	uint8_t			start_event_fired;
+	uint8_t			stop_event_fired;
+	switch_time_t	start_time;
+	switch_time_t	stop_time;
+	uint32_t		duration;
 } switch_fork_state_t;
 
 
@@ -281,6 +285,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_fork_activate(switch_core_sess
 SWITCH_DECLARE(switch_status_t) switch_core_media_fork_deactivate(switch_core_session_t *session, switch_fork_direction_t direction);
 SWITCH_DECLARE(void) switch_core_media_fork_fire_start_event(switch_core_session_t *session);
 SWITCH_DECLARE(void) switch_core_media_fork_do_fire_start_event(switch_core_session_t *session, switch_fork_state_t *fork, const char *fmr);
+SWITCH_DECLARE(void) switch_core_media_fork_fire_stop_event(switch_core_session_t *session);
+SWITCH_DECLARE(void) switch_core_media_fork_do_fire_stop_event(switch_core_session_t *session, switch_fork_state_t *fork, uint32_t last_duration);
 SWITCH_DECLARE(void) switch_core_media_check_dtmf_type(switch_core_session_t *session);
 SWITCH_DECLARE(void) switch_core_media_absorb_sdp(switch_core_session_t *session);
 SWITCH_DECLARE(switch_status_t) switch_core_media_proxy_remote_addr(switch_core_session_t *session, const char *sdp_str);
