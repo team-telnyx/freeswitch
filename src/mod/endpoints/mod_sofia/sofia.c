@@ -7061,6 +7061,7 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 			char status_str[5];
 			const char* session_ignore_list = switch_channel_get_variable(channel, "ignore_reason_header_by_sip_code");
 			const char* current_ignore_list = !zstr(session_ignore_list) ? session_ignore_list : profile->ignore_reason_header_by_sip_code;
+			switch_call_cause_t overwrite_cause = SWITCH_CAUSE_NORMAL_CLEARING;
 			switch_snprintf(status_str, sizeof(status_str), "%d", status);
 			if(!zstr(current_ignore_list) && !!switch_stristr(status_str, current_ignore_list)) {
 				tech_pvt->q850_cause = 0;
@@ -7068,6 +7069,11 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 			} else {
 				tech_pvt->q850_cause = atoi(sip->sip_reason->re_cause);
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Remote Reason: %d\n", tech_pvt->q850_cause);
+			}
+
+			if (switch_telnyx_sip_cause_to_q850(status, &overwrite_cause)) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "Remote Reason is overwritten: %d -> %d\n", tech_pvt->q850_cause, overwrite_cause);
+				tech_pvt->q850_cause = overwrite_cause;
 			}
 		}
 
