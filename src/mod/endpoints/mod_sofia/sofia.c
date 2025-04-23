@@ -1655,10 +1655,23 @@ static void our_sofia_event_callback(nua_event_t event,
 	}
 
 	if (sip && (status == 401 || status == 407)) {
-		if (!sofia_test_pflag(profile, PFLAG_DISABLE_AUTH_CHALLENGE_RESPONSE)) {
-			sofia_reg_handle_sip_r_challenge(status, phrase, nua, profile, nh, sofia_private, session, gateway, sip, de, tags);
-		} else {
+		if (sofia_test_pflag(profile, PFLAG_DISABLE_AUTH_CHALLENGE_RESPONSE)) {
+			if (channel) {
+				const char *sip_auth_username = switch_channel_get_variable(channel, "sip_auth_username");
+				const char *sip_auth_password = switch_channel_get_variable(channel, "sip_auth_password");
+				if (!zstr(sip_auth_username) && !zstr(sip_auth_password)) {
+					sofia_reg_handle_sip_r_challenge(status, phrase, nua, profile, nh, sofia_private, session, gateway, sip, de, tags);
+					goto done;
+				}
+			}
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Challenge responses disabled\n");
+			if (channel) {
+				switch_channel_hangup(channel, SWITCH_CAUSE_MANDATORY_IE_MISSING);
+			} else {
+				nua_cancel(nh, SIPTAG_CONTACT(SIP_NONE), TAG_END());
+			}
+		} else {
+			sofia_reg_handle_sip_r_challenge(status, phrase, nua, profile, nh, sofia_private, session, gateway, sip, de, tags);
 		}
 		goto done;
 	}
