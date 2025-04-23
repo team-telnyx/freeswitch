@@ -238,3 +238,11 @@ void switch_telnyx_channel_event_set_basic_data(switch_channel_t *channel, switc
 		_event_dispatch.switch_telnyx_channel_event_set_basic_data(channel, event);
 	}
 }
+
+switch_bool_t switch_telnyx_on_add_media_bug(switch_media_bug_t **list, switch_media_bug_t *bug, const char* function, const char* target)
+{
+	if (_event_dispatch.switch_telnyx_on_add_media_bug) {
+		return _event_dispatch.switch_telnyx_on_add_media_bug(list, bug, function, target);
+	}
+	return SWITCH_FALSE;
+}
