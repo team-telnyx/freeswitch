@@ -6267,6 +6267,57 @@ SWITCH_STANDARD_API(uuid_setvar_multi_function)
 	return SWITCH_STATUS_SUCCESS;
 }
 
+#define EAVESDROP_COMMAND_SYNTAX "<uuid> threeway|speak [caller|callee]"
+SWITCH_STANDARD_API(uuid_eavesdrop_command_function)
+{
+	switch_core_session_t *tsession = NULL;
+	char *uuid = NULL, *mydata = NULL, *eavesdrop_command = NULL, *argv[3] = { 0 };
+	int argc = 0;
+
+	if (!zstr(cmd) && (mydata = strdup(cmd))) {
+		argc = switch_separate_string(mydata, ' ', argv, (sizeof(argv) / sizeof(argv[0])));
+		if (argc >= 2 && !zstr(argv[0])) {
+			char *command = NULL;
+			
+			uuid = argv[0];
+			command = argv[1];
+			
+			if (!strcasecmp(command, "threeway")) {
+				eavesdrop_command = "3";
+			} else if (!strcasecmp(command, "speak")) {
+				if (argc >= 3) {
+					if (!strcasecmp(argv[2], "caller")) {
+						eavesdrop_command = "2";
+					} else if (!strcasecmp(argv[2], "callee")) {
+						eavesdrop_command = "1";
+					}
+				}
+			}
+		}
+	}
+
+	if (zstr(uuid) || zstr(eavesdrop_command)) {
+		stream->write_function(stream, "-USAGE: %s\n", EAVESDROP_COMMAND_SYNTAX);
+	} else {
+		if ((tsession = switch_core_session_locate(uuid))) {
+			switch_event_t *event;
+			if (switch_event_create(&event, SWITCH_EVENT_COMMAND) == SWITCH_STATUS_SUCCESS) {
+				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "eavesdrop-command", eavesdrop_command);
+				switch_core_session_queue_event(tsession, &event);
+				stream->write_function(stream, "+OK\n");
+			} else {
+				stream->write_function(stream, "-ERR Fail to queue event!\n");	
+			}
+			switch_core_session_rwunlock(tsession);
+		} else {
+			stream->write_function(stream, "-ERR No such channel %s!\n", uuid);
+		}
+	}
+
+	switch_safe_free(mydata);
+	return SWITCH_STATUS_SUCCESS;
+}
+
 #define EXISTS_SYNTAX "<uuid>"
 SWITCH_STANDARD_API(uuid_exists_function)
 {
@@ -7742,6 +7793,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_commands_load)
 	SWITCH_ADD_API(commands_api_interface, "uuid_media_params", "Update remote vid params", uuid_media_params_function, MEDIA_PARAMS_SYNTAX);
 	SWITCH_ADD_API(commands_api_interface, "uuid_drop_dtmf", "Drop all DTMF or replace it with a mask", uuid_drop_dtmf, UUID_DROP_DTMF_SYNTAX);
 	SWITCH_ADD_API(commands_api_interface, "uuid_dump", "Dump session vars", uuid_dump_function, DUMP_SYNTAX);
+	SWITCH_ADD_API(commands_api_interface, "uuid_eavesdrop_command", "Execute eavesdrop command", uuid_eavesdrop_command_function, EAVESDROP_COMMAND_SYNTAX);
 	SWITCH_ADD_API(commands_api_interface, "uuid_exists", "Check if a uuid exists", uuid_exists_function, EXISTS_SYNTAX);
 	SWITCH_ADD_API(commands_api_interface, "uuid_fileman", "Manage session audio", uuid_fileman_function, FILEMAN_SYNTAX);
 	SWITCH_ADD_API(commands_api_interface, "uuid_flush_dtmf", "Flush dtmf on a given uuid", uuid_flush_dtmf_function, "<uuid>");
@@ -7942,6 +7994,9 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_commands_load)
 	switch_console_set_complete("add uuid_ring_ready ::console::list_uuid queued");
 	switch_console_set_complete("add uuid_pre_answer ::console::list_uuid");
 	switch_console_set_complete("add uuid_early_ok ::console::list_uuid");
+	switch_console_set_complete("add uuid_eavesdrop_command ::console::list_uuid threeway");
+	switch_console_set_complete("add uuid_eavesdrop_command ::console::list_uuid speak caller");
+	switch_console_set_complete("add uuid_eavesdrop_command ::console::list_uuid speak callee");
 	switch_console_set_complete("add uuid_exists ::console::list_uuid");
 	switch_console_set_complete("add uuid_fileman ::console::list_uuid");
 	switch_console_set_complete("add uuid_flush_dtmf ::console::list_uuid");
