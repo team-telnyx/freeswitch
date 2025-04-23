@@ -94,7 +94,7 @@ FST_CORE_BEGIN("./conf_telnyx")
 
 		FST_SESSION_BEGIN(session_record_pause)
 		{
-			const char *record_filename = switch_core_session_sprintf(fst_session, "%s%s%s.wav", SWITCH_GLOBAL_dirs.temp_dir, SWITCH_PATH_SEPARATOR, s
+			const char *record_filename = switch_core_session_sprintf(fst_session, "%s%s%s.wav", SWITCH_GLOBAL_dirs.temp_dir, SWITCH_PATH_SEPARATOR, switch_core_session_get_uuid(fst_session));
 			switch_status_t status;
 			switch_media_bug_t *bug;
 			status = switch_ivr_record_session_event(fst_session, record_filename, 0, NULL, NULL);
