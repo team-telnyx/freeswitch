@@ -295,6 +295,34 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_add(_In_ switch_core_sessi
 														  _In_ time_t stop_time, _In_ switch_media_bug_flag_t flags, _Out_ switch_media_bug_t **new_bug);
 
 /*!
+ * \brief Get the weight of a media bug
+ * \param bug The media bug to get the weight from
+ * \return The weight value
+ */
+SWITCH_DECLARE(uint16_t) switch_core_media_bug_get_weight(switch_media_bug_t *bug);
+
+/*!
+ * \brief Set the weight of a media bug
+ * \param bug The media bug to set the weight on
+ * \param weight The weight value to set
+ */
+SWITCH_DECLARE(void) switch_core_media_bug_set_weight(switch_media_bug_t *bug, uint16_t weight);
+
+/*!
+ * \brief Get the next media bug in the chain
+ * \param bug The current media bug
+ * \return The next media bug in the chain or NULL if none
+ */
+SWITCH_DECLARE(switch_media_bug_t *) switch_core_media_bug_get_next(switch_media_bug_t *bug);
+
+/*!
+ * \brief Set the next media bug in the chain
+ * \param bug The current media bug
+ * \param next The next media bug to chain to
+ */
+SWITCH_DECLARE(void) switch_core_media_bug_set_next(switch_media_bug_t *bug, switch_media_bug_t *next);
+
+/*!
   \brief Pause a media bug on the session
   \param session the session to pause the bug on sets CF_PAUSE_BUGS flag
 */
@@ -955,6 +983,7 @@ SWITCH_DECLARE(char *) switch_core_get_variable_dup(_In_z_ const char *varname);
 SWITCH_DECLARE(char *) switch_core_get_variable_pdup(_In_z_ const char *varname, switch_memory_pool_t *pool);
 SWITCH_DECLARE(const char *) switch_core_get_hostname(void);
 SWITCH_DECLARE(const char *) switch_core_get_switchname(void);
+SWITCH_DECLARE(switch_bool_t) switch_core_add_media_bug_last(void);
 
 SWITCH_DECLARE(char *) switch_core_get_domain(switch_bool_t dup);
 
@@ -1355,7 +1384,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_get_fork_read_frame_data(_In
   \brief Read a video frame from a session
   \param session the session to read from
   \param frame a NULL pointer to a frame to aim at the newly read frame
-  \param flags I/O flags to modify behavior (i.e. non blocking)
+  \param flags I/O flags to modify behavior (i.g. non blocking)
   \param stream_id which logical media channel to use
   \return SWITCH_STATUS_SUCCESS a if the frame was read
 */
@@ -1365,7 +1394,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_video_frame(_In_ switch
   \brief Write a video frame to a session
   \param session the session to write to
   \param frame a pointer to a frame to write
-  \param flags I/O flags to modify behavior (i.e. non blocking)
+  \param flags I/O flags to modify behavior (i.g. non blocking)
   \param stream_id which logical media channel to use
   \return SWITCH_STATUS_SUCCESS a if the frame was written
 */

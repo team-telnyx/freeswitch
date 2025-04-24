@@ -1109,7 +1109,13 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_displace_session(switch_core_session_
 	}
 
 	if (flags && strchr(flags, 'f')) {
+		bug_flags &= ~SMBF_LAST;
 		bug_flags |= SMBF_FIRST;
+	}
+
+	if (flags && strchr(flags, 'b')) {
+		bug_flags &= ~SMBF_FIRST;
+		bug_flags |= SMBF_LAST;
 	}
 
 	if (flags && strchr(flags, 'r')) {
@@ -2391,7 +2397,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 		char cid_buf[1024] = "";
 		switch_caller_profile_t *cp = NULL;
 		uint32_t sanity = 600;
-		switch_media_bug_flag_t read_flags = 0, write_flags = 0, stereo_flag = 0;
+		switch_media_bug_flag_t read_flags = 0, write_flags = 0, stereo_flag = 0, pos_flag = 0;
 		const char *vval;
 		int buf_size = 0;
 		int channels;
@@ -2572,6 +2578,11 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 		if (flags & ED_STEREO) {
 			stereo_flag = SMBF_STEREO;
 		}
+		if (flags & ED_BUG_TOP) {
+			pos_flag = SMBF_FIRST;
+		} else if (flags & ED_BUG_BOTTOM) {
+			pos_flag = SMBF_LAST;
+		}
 
 		if (switch_channel_test_flag(session->channel, CF_VIDEO) && switch_channel_test_flag(tsession->channel, CF_VIDEO)) {
 			if ((vval = switch_channel_get_variable(session->channel, "eavesdrop_show_listener_video"))) {
@@ -2600,7 +2611,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 
 		if (switch_core_media_bug_add(tsession, "eavesdrop", uuid,
 									  eavesdrop_callback, ep, 0,
-									  read_flags | write_flags | SMBF_READ_PING | SMBF_THREAD_LOCK | SMBF_NO_PAUSE | stereo_flag,
+									  read_flags | write_flags | SMBF_READ_PING | SMBF_THREAD_LOCK | SMBF_NO_PAUSE | stereo_flag | pos_flag,
 									  &bug) != SWITCH_STATUS_SUCCESS) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Cannot attach bug\n");
 			goto end;
@@ -3117,6 +3128,16 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 		flags |= SMBF_READ_STREAM;
 	}
 
+	if (recording_var_true(channel, vars, "RECORD_BUG_TOP")) {
+		flags &= ~SMBF_LAST;
+		flags |= SMBF_FIRST;
+	}
+
+	if (recording_var_true(channel, vars, "RECORD_BUG_BOTTOM")) {
+		flags &= ~SMBF_FIRST;
+		flags |= SMBF_LAST;
+	}
+
 	if (channels == 1) { /* if leg is already stereo this feature is not available */
 		if (recording_var_true(channel, vars, "RECORD_STEREO")) {
 			flags |= SMBF_STEREO;
@@ -3129,6 +3150,20 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 			flags |= SMBF_STEREO_SWAP;
 			channels = 2;
 		}
+	} else if (channels == 2) {
+		flags |= SMBF_REAL_STEREO;
+		if (recording_var_true(channel, vars, "RECORD_STEREO")) {
+			flags |= SMBF_STEREO;
+			flags &= ~SMBF_STEREO_SWAP;
+		}
+
+		if (recording_var_true(channel, vars, "RECORD_STEREO_SWAP")) {
+			flags |= SMBF_STEREO;
+			flags |= SMBF_STEREO_SWAP;
+		}
+		if (!(flags & SMBF_STEREO)) {
+			channels = 1;
+		}
 	}
 
 	if (recording_var_true(channel, vars, "RECORD_ANSWER_REQ")) {
@@ -3137,6 +3172,10 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 
 	if (recording_var_true(channel, vars, "RECORD_BRIDGE_REQ")) {
 		flags |= SMBF_BRIDGE_REQ;
+	}
+
+	if (recording_var_true(channel, vars, "RECORD_STEREO_NO_DOWN_MIX")) {
+		flags |= SMBF_STEREO_NO_DOWN_MIX;
 	}
 
 	if (recording_var_true(channel, vars, "RECORD_APPEND")) {
@@ -5289,6 +5328,24 @@ static switch_bool_t speech_callback(switch_media_bug_t *bug, void *user_data, s
 
 		}
 		break;
+	case SWITCH_ABC_TYPE_READ_REPLACE:
+		if (sth->ah) {
+			switch_frame_t *rframe = switch_core_media_bug_get_read_replace_frame(bug);
+			if (rframe) {
+				if (switch_core_asr_feed(sth->ah, rframe->data, rframe->datalen, &flags) != SWITCH_STATUS_SUCCESS) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(switch_core_media_bug_get_session(bug)), SWITCH_LOG_DEBUG, "Error Feeding Data\n");
+					return SWITCH_FALSE;
+				}
+				if (switch_core_asr_check_results(sth->ah, &flags) == SWITCH_STATUS_SUCCESS) {
+					if (sth->mutex && sth->cond && sth->ready) {
+						switch_mutex_lock(sth->mutex);
+						switch_thread_cond_signal(sth->cond);
+						switch_mutex_unlock(sth->mutex);
+					}
+				}
+			}
+		}
+		break;
 	case SWITCH_ABC_TYPE_READ:
 		if (sth->ah) {
 			if (switch_core_media_bug_read(bug, &frame, SWITCH_FALSE) != SWITCH_STATUS_FALSE) {
@@ -5505,6 +5562,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_detect_speech_init(switch_core_sessio
 	switch_codec_implementation_t read_impl = { 0 };
 	const char *p;
 	char key[512] = "";
+	int bug_flags = SMBF_NO_PAUSE;
 
 	if (sth) {
 		/* Already initialized */
@@ -5545,10 +5603,24 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_detect_speech_init(switch_core_sessio
 		switch_set_flag(ah, SWITCH_ASR_FLAG_QUEUE_EVENTS);
 	}
 
+	if (switch_channel_var_true(channel, "asr_bug_top")) {
+		bug_flags &= ~SMBF_LAST;
+		bug_flags |= SMBF_FIRST;
+	} else if (switch_channel_var_true(channel, "asr_bug_bottom")) {
+		bug_flags &= ~SMBF_FIRST;
+		bug_flags |= SMBF_LAST;
+	}
+
+	if (switch_channel_var_true(channel, "asr_bug_use_read_replace")) {
+		bug_flags |= SMBF_READ_REPLACE;
+	} else {
+		bug_flags |= SMBF_READ_STREAM;
+	}
+
 	switch_snprintf(key, sizeof(key), "%s/%s/%s/%s", mod_name, NULL, NULL, dest);
 
 	if ((status = switch_core_media_bug_add(session, "detect_speech", key,
-											speech_callback, sth, 0, SMBF_READ_STREAM | SMBF_NO_PAUSE, &sth->bug)) != SWITCH_STATUS_SUCCESS) {
+											speech_callback, sth, 0, bug_flags, &sth->bug)) != SWITCH_STATUS_SUCCESS) {
 		switch_core_asr_close(ah, &flags);
 		return status;
 	}

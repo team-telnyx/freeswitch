@@ -8,4 +8,4 @@ project:
     private_api: false
 build:
     promote_to_dev:
-        branch_pattern: "telnyx/telephony/master|telnyx/telephony/development"
+        branch_pattern: "telnyx/telephony/master|telnyx/telephony/deploy-development"

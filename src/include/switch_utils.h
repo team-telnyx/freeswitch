@@ -1276,6 +1276,8 @@ static inline switch_bool_t switch_is_file_path(const char *file)
 		if ((e = switch_find_end_paren(file, '{', '}'))) {
 			file = e + 1;
 			while(*file == ' ') file++;
+		} else {
+			return SWITCH_FALSE;
 		}
 	}
 

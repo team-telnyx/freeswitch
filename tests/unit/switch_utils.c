@@ -80,6 +80,18 @@ FST_TEST_BEGIN(b64)
 }
 FST_TEST_END()
 
+FST_TEST_BEGIN(is_file_path)
+{
+    switch_bool_t b = switch_is_file_path("{av_record_audio_only=true");
+    fst_requires(b == SWITCH_FALSE);
+    b = switch_is_file_path("{av_record_audio_only=true,future_json_var='{key=value}'");
+    fst_requires(b == SWITCH_FALSE);
+    b = switch_is_file_path("{av_record_audio_only=true,future_json_var='{key=value}'}");
+    fst_requires(b == SWITCH_FALSE);
+    b = switch_is_file_path("{av_record_audio_only=true,future_json_var='{key=value}'}/foo");
+    fst_requires(b == SWITCH_TRUE);
+}
+FST_TEST_END()
 
 FST_SUITE_END()
 

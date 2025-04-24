@@ -144,6 +144,7 @@ SWITCH_BEGIN_EXTERN_C
 #define SWITCH_TRANSFER_HISTORY_VARIABLE "transfer_history"
 #define SWITCH_TRANSFER_SOURCE_VARIABLE "transfer_source"
 #define SWITCH_SENSITIVE_DTMF_VARIABLE "sensitive_dtmf"
+#define SWITCH_SENSITIVE_EVENT_DTMF_VARIABLE "sensitive_event_dtmf"
 #define SWITCH_RECORD_POST_PROCESS_EXEC_APP_VARIABLE "record_post_process_exec_app"
 #define SWITCH_RECORD_POST_PROCESS_EXEC_API_VARIABLE "record_post_process_exec_api"
 
@@ -296,7 +297,8 @@ typedef enum {
 
 typedef enum {
 	DTMF_FLAG_SKIP_PROCESS = (1 << 0),
-	DTMF_FLAG_SENSITIVE = (1 << 1)
+	DTMF_FLAG_SENSITIVE = (1 << 1),
+	DTMF_FLAG_EVENT_SENSITIVE = (1 << 2)
 } dtmf_flag_t;
 
 typedef struct {
@@ -365,7 +367,9 @@ typedef enum {
 	ED_BRIDGE_WRITE = (1 << 5),
 	ED_TAP_READ = (1 << 6),
 	ED_TAP_WRITE = (1 << 7),
-	ED_STEREO = (1 << 8)
+	ED_STEREO = (1 << 8),
+	ED_BUG_TOP = (1 << 9),
+	ED_BUG_BOTTOM = (1 << 10)
 } switch_eavesdrop_flag_enum_t;
 typedef uint32_t switch_eavesdrop_flag_t;
 
@@ -1697,6 +1701,7 @@ typedef enum {
 	CF_VIDEO_READ_TAPPED,
 	CF_VIDEO_WRITE_TAPPED,
 	CF_DEVICES_CHANGED,
+	CF_EARLY_MEDIA_SIP_UPDATE,
 	/* WARNING: DO NOT ADD ANY FLAGS BELOW THIS LINE */
 	/* IF YOU ADD NEW ONES CHECK IF THEY SHOULD PERSIST OR ZERO THEM IN switch_core_session.c switch_core_session_request_xml() */
 	CF_FLAG_MAX
@@ -1976,7 +1981,10 @@ typedef enum {
 	SMBF_READ_VIDEO_PATCH = (1 << 24),
 	SMBF_READ_TEXT_STREAM = (1 << 25),
 	SMBF_FIRST = (1 << 26),
-	SMBF_PAUSE = (1 << 27)
+	SMBF_LAST = (1 << 27),
+	SMBF_PAUSE = (1 << 28),
+	SMBF_STEREO_NO_DOWN_MIX = (1 << 29),
+	SMBF_REAL_STEREO = (1 << 30)
 } switch_media_bug_flag_enum_t;
 typedef uint32_t switch_media_bug_flag_t;
 
@@ -2572,6 +2580,8 @@ typedef switch_status_t (*switch_input_callback_function_t) (switch_core_session
 typedef switch_status_t (*switch_read_frame_callback_function_t) (switch_core_session_t *session, switch_frame_t *frame, void *user_data);
 typedef struct switch_say_interface switch_say_interface_t;
 
+typedef void (*switch_post_dialplan_function_t) (switch_core_session_t *, switch_caller_extension_t *, const char *);
+
 #define DMACHINE_MAX_DIGIT_LEN 512
 
 typedef enum {
@@ -2804,7 +2814,8 @@ typedef enum {
 	ICE_GOOGLE_JINGLE = (1 << 0),
 	ICE_VANILLA = (1 << 1),
 	ICE_CONTROLLED = (1 << 2),
-	ICE_LITE = (1 << 3)
+	ICE_LITE = (1 << 3),
+	ICE_LITE_INBOUND = (1 << 4)
 } switch_core_media_ice_type_t;
 
 typedef enum {

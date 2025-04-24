@@ -190,6 +190,7 @@ struct switch_channel {
 	switch_device_node_t *device_node;
 	char *device_id;
 	switch_event_t *log_tags;
+	switch_post_dialplan_function_t post_dialplan_function;
 };
 
 static void process_device_hup(switch_channel_t *channel);
@@ -549,6 +550,7 @@ SWITCH_DECLARE(switch_status_t) switch_channel_queue_dtmf(switch_channel_t *chan
 	void *pop;
 	switch_dtmf_t new_dtmf = { 0 };
 	switch_bool_t sensitive = switch_true(switch_channel_get_variable_dup(channel, SWITCH_SENSITIVE_DTMF_VARIABLE, SWITCH_FALSE, -1));
+	switch_bool_t event_sensitive = switch_true(switch_channel_get_variable_dup(channel, SWITCH_SENSITIVE_EVENT_DTMF_VARIABLE, SWITCH_FALSE, -1));
 
 	switch_assert(dtmf);
 
@@ -557,6 +559,10 @@ SWITCH_DECLARE(switch_status_t) switch_channel_queue_dtmf(switch_channel_t *chan
 
 	if (sensitive) {
 		switch_set_flag((&new_dtmf), DTMF_FLAG_SENSITIVE);
+	}
+
+	if (event_sensitive) {
+		switch_set_flag((&new_dtmf), DTMF_FLAG_EVENT_SENSITIVE);
 	}
 
 	if ((status = switch_core_session_recv_dtmf(channel->session, dtmf) != SWITCH_STATUS_SUCCESS)) {
@@ -686,7 +692,7 @@ SWITCH_DECLARE(switch_status_t) switch_channel_dequeue_dtmf(switch_channel_t *ch
 	void *pop;
 	switch_dtmf_t *dt;
 	switch_status_t status = SWITCH_STATUS_FALSE;
-	int sensitive = 0;
+	int sensitive = 0, event_sensitive = 0;
 
 	switch_mutex_lock(channel->dtmf_mutex);
 
@@ -694,6 +700,7 @@ SWITCH_DECLARE(switch_status_t) switch_channel_dequeue_dtmf(switch_channel_t *ch
 		dt = (switch_dtmf_t *) pop;
 		*dtmf = *dt;
 		sensitive = switch_test_flag(dtmf, DTMF_FLAG_SENSITIVE);
+		event_sensitive = switch_test_flag(dtmf, DTMF_FLAG_EVENT_SENSITIVE);
 
 		if (!sensitive && switch_queue_trypush(channel->dtmf_log_queue, dt) != SWITCH_STATUS_SUCCESS) {
 			free(dt);
@@ -717,7 +724,7 @@ SWITCH_DECLARE(switch_status_t) switch_channel_dequeue_dtmf(switch_channel_t *ch
 	}
 	switch_mutex_unlock(channel->dtmf_mutex);
 
-	if (!sensitive && status == SWITCH_STATUS_SUCCESS && switch_event_create(&event, SWITCH_EVENT_DTMF) == SWITCH_STATUS_SUCCESS) {
+	if (!event_sensitive && status == SWITCH_STATUS_SUCCESS && switch_event_create(&event, SWITCH_EVENT_DTMF) == SWITCH_STATUS_SUCCESS) {
 		const char *dtmf_source_str = NULL;
 		switch_channel_event_set_data(channel, event);
 		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Digit", "%c", dtmf->digit);
@@ -5806,6 +5813,22 @@ SWITCH_DECLARE(switch_status_t) switch_channel_pass_sdp(switch_channel_t *from_c
 	switch_safe_free(patched_sdp);
 
 	return status;
+}
+
+SWITCH_DECLARE(void) switch_channel_set_post_dialplan_function(switch_channel_t *channel, switch_post_dialplan_function_t function)
+{
+	assert(function != NULL);
+	if (channel) {
+		channel->post_dialplan_function = function;
+	}
+}
+
+SWITCH_DECLARE(switch_post_dialplan_function_t) switch_channel_get_post_dialplan_function(switch_channel_t *channel)
+{
+	if (channel) {
+		return channel->post_dialplan_function;
+	}
+	return NULL;
 }
 
 /* For Emacs:
