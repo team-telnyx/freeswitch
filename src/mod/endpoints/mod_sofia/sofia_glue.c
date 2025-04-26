@@ -171,6 +171,7 @@ void sofia_glue_attach_private(switch_core_session_t *session, sofia_profile_t *
 	tech_pvt->mparams.ndlb = tech_pvt->profile->mndlb;
 	tech_pvt->mparams.inbound_codec_string = profile->inbound_codec_string;
 	tech_pvt->mparams.outbound_codec_string = profile->outbound_codec_string;
+	tech_pvt->mparams.disable_video_codecs = profile->disable_video_codecs;
 	tech_pvt->mparams.auto_rtp_bugs = profile->auto_rtp_bugs;
 	tech_pvt->mparams.timer_name = profile->timer_name;
 	tech_pvt->mparams.vflags = profile->vflags;
