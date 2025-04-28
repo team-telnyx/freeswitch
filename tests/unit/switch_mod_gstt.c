@@ -58,4 +58,3 @@ FST_CORE_BEGIN("./conf_gstt")
 	FST_SUITE_END()
 }
 FST_CORE_END()
-
