@@ -46,9 +46,7 @@ FST_CORE_BEGIN("./conf_gstt")
 					SWITCH_STANDARD_STREAM(stream);
 					switch_api_execute("uuid_gstt_transcribe", off_uuid, NULL, &stream);
 					switch_safe_free(stream.data);
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Calling switch_ivr_play_file\n");
 					switch_ivr_play_file(session, NULL, "silence_stream://100,0", NULL);
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "switch_ivr_play_file done\n");
 					switch_sleep(20);
 				}
 			}
