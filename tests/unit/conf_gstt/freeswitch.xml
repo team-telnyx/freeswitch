@@ -19,6 +19,8 @@
 		<load module="mod_sndfile"/>
 		<load module="mod_gstt"/>
 		<load module="mod_sofia"/>
+		<load module="mod_polly"/>
+		<load module="mod_commands"/>
       </modules>
     </configuration>
 
@@ -153,6 +155,25 @@
   </profiles>
    </configuration>
 
+<configuration name="polly.conf">
+    <settings>
+        <param name="aws_id" value=""/>
+        <param name="aws_key" value=""/>
+        <param name="aws_region" value="us-east-1"/>
+        <param name="aws_http_bind_local" value="127.0.0.1"/>
+        <param name="aws_max_connection" value="200"/>
+        <param name="aws_connection_timeout" value="1000"/>
+        <param name="aws_request_timeout" value="3000"/>
+        <param name="aws_low_speed_limit" value="18000"/>
+        <param name="aws_max_retry_attempt" value="2"/>
+        <param name="aws_client_max_continuous_failures" value="10"/>
+        <param name="aws_client_timeout_validation_sec" value="600"/>
+        <param name="aws_fallback_region_1" value="us-east-2"/>
+        <param name="aws_fallback_region_2" value="us-west-1"/>
+        <param name="aws_fallback_region_3" value="eu-central-1"/>
+    </settings>
+</configuration>
+
     <X-PRE-PROCESS cmd="include" data="vpx.conf.xml"/>
   </section>
   <section name="dialplan" description="Regex/XML Dialplan">
@@ -170,6 +191,7 @@
                                 <action application="set" data="absolute_codec_string=PCMU@20i"/>
                                 <action application="info"/>
                                 <action application="answer"/>
+                                <action application="speak" data="polly|Joanna|foo bar"/>
                                 <action application="park"/>
                         </condition>
                 </extension>
