@@ -2321,9 +2321,15 @@ static switch_status_t av_file_open(switch_file_handle_t *handle, const char *pa
 				.opaque = context,
 			};
 			
+#if (LIBAVFORMAT_VERSION_MAJOR < LIBAVFORMAT_V)
 			av_dict_set(&dict, "rw_timeout", context->rw_timeout, 0);
+#endif
 			context->connect_start_time = switch_time_now() / 1000;
+#if (LIBAVFORMAT_VERSION_MAJOR < LIBAVFORMAT_V)
 			ret = avio_open2(&context->fc->pb, file, AVIO_FLAG_WRITE, &cb, &dict);
+#else
+			ret = avio_open2(&context->fc->pb, file, AVIO_FLAG_WRITE, &cb, NULL);
+#endif
 		} else {
 			ret = avio_open(&context->fc->pb, file, AVIO_FLAG_WRITE);
 		}
@@ -2508,10 +2514,12 @@ static switch_status_t av_file_open(switch_file_handle_t *handle, const char *pa
 	if (context->audio_buffer) {
 		switch_buffer_destroy(&context->audio_buffer);
 	}
-	
-	if(dict) {
+
+#if (LIBAVFORMAT_VERSION_MAJOR < LIBAVFORMAT_V)	
+	if (dict) {
 		av_dict_free(&dict);
 	}
+#endif
 
 	return status;
 }
