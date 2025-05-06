@@ -2854,6 +2854,19 @@ SWITCH_DECLARE(int) switch_loadable_module_get_codecs_sorted(const switch_codec_
 
 				if (imp->codec_type != SWITCH_CODEC_TYPE_VIDEO) {
 					uint32_t crate = !strcasecmp(imp->iananame, "g722") ? imp->samples_per_second : imp->actual_samples_per_second;
+					if (!strcasecmp(name, "amr-wb")) {
+						if (!zstr(fmtp) && imp->matches_fmtp) {
+							if (SWITCH_STATUS_SUCCESS == imp->matches_fmtp(fmtp, imp->fmtp)) {
+								array[i++] = imp;
+								goto found;
+							}
+							continue;
+						}
+						else {
+							array[i++] = imp;
+							continue;
+						}
+					}
 
 					if ((!interval && (uint32_t) (imp->microseconds_per_packet / 1000) != default_ptime) ||
 						(interval && (uint32_t) (imp->microseconds_per_packet / 1000) != interval)) {
