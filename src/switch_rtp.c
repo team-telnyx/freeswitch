@@ -204,6 +204,10 @@ typedef struct {
 	char body[SWITCH_RTCP_MAX_BUF_LEN];
 } rtcp_msg_t;
 
+typedef struct {
+	switch_rtcp_hdr_t header;
+	uint32_t ssrc;
+} sdes_ssrc_t;
 
 typedef enum {
 	VAD_FIRE_TALK = (1 << 0),
@@ -2408,9 +2412,9 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 		struct switch_rtcp_report_block *rtcp_report_block = NULL;
 		switch_size_t rtcp_bytes = sizeof(struct switch_rtcp_hdr_s)+sizeof(uint32_t); /* add size of the packet header and the ssrc */
 		switch_rtcp_hdr_t *sdes;
+		sdes_ssrc_t *sdes_ssrc;
 		uint8_t *p;
 		switch_size_t sdes_bytes = sizeof(struct switch_rtcp_hdr_s);
-		uint32_t *ssrc;
 		switch_rtcp_sdes_unit_t *unit;
 		struct switch_rtcp_sender_info *rtcp_sender_info = 0;
 		switch_bool_t is_only_receiver = FALSE;
@@ -2643,14 +2647,13 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 
 		//SDES + CNAME
 		p = (uint8_t *) (&rtp_session->rtcp_send_msg) + rtcp_bytes;
-		sdes = (switch_rtcp_hdr_t *) p;
+		sdes_ssrc = (sdes_ssrc_t *) p;
+		sdes = &sdes_ssrc->header;
 		sdes->version = 2;
 		sdes->type = _RTCP_PT_SDES;
 		sdes->count = 1;
 		sdes->p = 0;
-		p = (uint8_t *) (sdes) + sdes_bytes;
-		ssrc = (uint32_t *) p;
-		*ssrc = htonl(rtp_session->ssrc);
+		sdes_ssrc->ssrc = htonl(rtp_session->ssrc);
 		sdes_bytes += sizeof(uint32_t);
 
 
@@ -9377,11 +9380,11 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 	if (switch_rtp_test_flag(rtp_session, SWITCH_RTP_FLAG_VIDEO)) {
 		int external = (flags && *flags & SFF_EXTERNAL);
 		/* Normalize the timestamps to our own base by generating a made up starting point then adding the measured deltas to that base
-		   so if the timestamps and ssrc of the source change, it will not break the other end's jitter bufffer / decoder etc *cough* CHROME *cough*
+		   so if the timestamps and ssrc of the source change, it will not break the other end's jitter buffer / decoder etc *cough* CHROME *cough*
 		 */
 
 		if (!rtp_session->ts_norm.ts) {
-			rtp_session->ts_norm.ts = (uint32_t) rand() % 1000000 + 1;
+			rtp_session->ts_norm.ts = (uint32_t) switch_rand() % 1000000 + 1;
 		}
 
 		if (!rtp_session->ts_norm.last_ssrc || send_msg->header.ssrc != rtp_session->ts_norm.last_ssrc || rtp_session->ts_norm.last_external != external) {
@@ -9704,9 +9707,9 @@ fork_done:
 			}
 
 			if (!rtp_session->flags[SWITCH_RTP_FLAG_SECURE_SEND_MKI]) {
-				stat = srtp_protect(rtp_session->send_ctx[rtp_session->srtp_idx_rtp], &send_msg->header, &sbytes);
+				stat = srtp_protect(rtp_session->send_ctx[rtp_session->srtp_idx_rtp], send_msg, &sbytes);
 			} else {
-				stat = srtp_protect_mki(rtp_session->send_ctx[rtp_session->srtp_idx_rtp], &send_msg->header, &sbytes, 1, SWITCH_CRYPTO_MKI_INDEX);
+				stat = srtp_protect_mki(rtp_session->send_ctx[rtp_session->srtp_idx_rtp], send_msg, &sbytes, 1, SWITCH_CRYPTO_MKI_INDEX);
 			}
 
 			if (stat) {
@@ -10331,9 +10334,9 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_write_raw(switch_rtp_t *rtp_session, 
 			}
 
 			if (!rtp_session->flags[SWITCH_RTP_FLAG_SECURE_SEND_MKI]) {
-				stat = srtp_protect(rtp_session->send_ctx[rtp_session->srtp_idx_rtp], &rtp_session->write_msg.header, &sbytes);
+				stat = srtp_protect(rtp_session->send_ctx[rtp_session->srtp_idx_rtp], &rtp_session->write_msg, &sbytes);
 			} else {
-				stat = srtp_protect_mki(rtp_session->send_ctx[rtp_session->srtp_idx_rtp], &rtp_session->write_msg.header, &sbytes, 1, SWITCH_CRYPTO_MKI_INDEX);
+				stat = srtp_protect_mki(rtp_session->send_ctx[rtp_session->srtp_idx_rtp], &rtp_session->write_msg, &sbytes, 1, SWITCH_CRYPTO_MKI_INDEX);
 			}
 
 			if (stat) {

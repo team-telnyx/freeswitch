@@ -1520,6 +1520,11 @@ SWITCH_DECLARE(char *) switch_must_strdup(const char *_s);
 SWITCH_DECLARE(const char *) switch_memory_usage_stream(switch_stream_handle_t *stream);
 SWITCH_DECLARE(void) switch_string_tolower(char *s);
 
+/**
+/ Compliant random number generator. Returns the value between 0 and 0x7fff (RAND_MAX).
+**/
+SWITCH_DECLARE(int) switch_rand(void);
+
 SWITCH_END_EXTERN_C
 #endif
 /* For Emacs:

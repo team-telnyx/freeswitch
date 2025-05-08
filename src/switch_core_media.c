@@ -822,7 +822,7 @@ SWITCH_DECLARE(payload_map_t *) switch_core_media_add_payload_map(switch_core_se
 
 	for (pmap = engine->payload_map; pmap && pmap->allocated; pmap = pmap->next) {
 
-		if (sdp_type == SDP_TYPE_RESPONSE) {
+		if (sdp_type == SDP_ANSWER) {
 			switch(type) {
 			case SWITCH_MEDIA_TYPE_TEXT:
 				exists = (type == pmap->type && !strcasecmp(name, pmap->iananame));
@@ -831,11 +831,11 @@ SWITCH_DECLARE(payload_map_t *) switch_core_media_add_payload_map(switch_core_se
 				exists = (type == pmap->type && !strcasecmp(name, pmap->iananame) && pmap->pt == pt && (!pmap->rate || rate == pmap->rate) && (!pmap->ptime || pmap->ptime == ptime));
 				break;
 			case SWITCH_MEDIA_TYPE_VIDEO:
-				exists = (pmap->sdp_type == SDP_TYPE_REQUEST && type == pmap->type && !strcasecmp(name, pmap->iananame));
+				exists = (pmap->sdp_type == SDP_OFFER && type == pmap->type && !strcasecmp(name, pmap->iananame));
 
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG1, "CHECK PMAP %s:%s %d %s:%s %d ... %d\n", 
 								  name, "RES", pt,
-								  pmap->iananame, pmap->sdp_type == SDP_TYPE_REQUEST ? "REQ" : "RES", pmap->pt, exists);
+								  pmap->iananame, pmap->sdp_type == SDP_OFFER ? "REQ" : "RES", pmap->pt, exists);
 								  
 
 				break;
@@ -906,7 +906,7 @@ SWITCH_DECLARE(payload_map_t *) switch_core_media_add_payload_map(switch_core_se
 	}
 
 	if (!zstr(fmtp)) {
-		if (sdp_type == SDP_TYPE_REQUEST || !exists) {
+		if (sdp_type == SDP_OFFER || !exists) {
 			pmap->rm_fmtp = switch_core_strdup(session->pool, fmtp);
 		}
 	}
@@ -916,7 +916,7 @@ SWITCH_DECLARE(payload_map_t *) switch_core_media_add_payload_map(switch_core_se
 	pmap->recv_pt = (switch_payload_t) pt;
 
 
-	if (sdp_type == SDP_TYPE_REQUEST || !exists) {
+	if (sdp_type == SDP_OFFER || !exists) {
 		pmap->pt = (switch_payload_t) pt;
 	}
 
@@ -927,7 +927,7 @@ SWITCH_DECLARE(payload_map_t *) switch_core_media_add_payload_map(switch_core_se
 	if (!exists) {
 		pmap->sdp_type = sdp_type;
 
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG1, "ADD PMAP %s %s %d\n", sdp_type == SDP_TYPE_REQUEST ? "REQ" : "RES", name, pt);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG1, "ADD PMAP %s %s %d\n", sdp_type == SDP_OFFER ? "REQ" : "RES", name, pt);
 
 		if (pmap == engine->payload_map) {
 			engine->pmap_tail = pmap;
@@ -2009,7 +2009,7 @@ SWITCH_DECLARE(int) switch_core_session_check_incoming_crypto(switch_core_sessio
 			}
 
 			if (!skip_local) {
-				if (sdp_type == SDP_TYPE_REQUEST) {
+				if (sdp_type == SDP_OFFER) {
 					if (!vval) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Unsupported Crypto [%s]\n", crypto);
 						goto end;
@@ -5302,7 +5302,7 @@ static void check_stream_changes(switch_core_session_t *session, const char *r_s
 			switch_channel_set_flag(other_session->channel, CF_PROCESSING_STREAM_CHANGE);
 			switch_channel_set_flag(session->channel, CF_AWAITING_STREAM_CHANGE);
 
-			if (sdp_type == SDP_TYPE_REQUEST && r_sdp) {
+			if (sdp_type == SDP_OFFER && r_sdp) {
 				const char *filter_codec_string = switch_channel_get_variable(session->channel, "filter_codec_string");
 				
 				switch_channel_set_variable(session->channel, "codec_string", NULL);
@@ -5324,7 +5324,7 @@ static void check_stream_changes(switch_core_session_t *session, const char *r_s
 	}
 
 	if (other_session) {
-		if (sdp_type == SDP_TYPE_RESPONSE && switch_channel_test_flag(session->channel, CF_PROCESSING_STREAM_CHANGE)) {
+		if (sdp_type == SDP_ANSWER && switch_channel_test_flag(session->channel, CF_PROCESSING_STREAM_CHANGE)) {
 			switch_channel_clear_flag(session->channel, CF_PROCESSING_STREAM_CHANGE);
 			
 			if (switch_channel_test_flag(other_session->channel, CF_AWAITING_STREAM_CHANGE)) {
@@ -5337,7 +5337,7 @@ static void check_stream_changes(switch_core_session_t *session, const char *r_s
 				}
 
 				sdp_in = switch_channel_get_variable(other_session->channel, SWITCH_R_SDP_VARIABLE);
-				res = switch_core_media_negotiate_sdp(other_session, sdp_in, &proceed, SDP_TYPE_REQUEST);
+				res = switch_core_media_negotiate_sdp(other_session, sdp_in, &proceed, SDP_OFFER);
 				(void)res;
 				switch_core_media_activate_rtp(other_session);
 				msg = switch_core_session_alloc(other_session, sizeof(*msg));
@@ -5385,11 +5385,11 @@ SWITCH_DECLARE(void) switch_core_media_set_smode(switch_core_session_t *session,
 	engine->pass_codecs = 0;
 	
 	if (switch_channel_var_true(session->channel, "rtp_pass_codecs_on_stream_change")) {
-		if (sdp_type == SDP_TYPE_REQUEST && switch_channel_test_flag(session->channel, CF_REINVITE) && 
+		if (sdp_type == SDP_OFFER && switch_channel_test_flag(session->channel, CF_REINVITE) && 
 			switch_channel_media_up(session->channel) && (pass_codecs || old_smode != smode)) {
 
 			if (switch_core_session_get_partner(session, &other_session) == SWITCH_STATUS_SUCCESS) {
-				switch_core_media_set_smode(other_session, type, opp_smode, SDP_TYPE_REQUEST);
+				switch_core_media_set_smode(other_session, type, opp_smode, SDP_OFFER);
 				switch_channel_set_flag(session->channel, CF_STREAM_CHANGED);
 				switch_core_session_rwunlock(other_session);
 			}
@@ -5422,7 +5422,7 @@ static void switch_core_media_set_rmode(switch_core_session_t *session, switch_m
 
 	if (switch_core_session_get_partner(session, &other_session) == SWITCH_STATUS_SUCCESS) {
 
-		if (sdp_type == SDP_TYPE_RESPONSE && (switch_channel_test_flag(other_session->channel, CF_REINVITE) || switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_OUTBOUND)) {
+		if (sdp_type == SDP_ANSWER && (switch_channel_test_flag(other_session->channel, CF_REINVITE) || switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_OUTBOUND)) {
 			switch_core_media_set_smode(other_session, type, rmode, sdp_type);
 		}
 
@@ -6117,7 +6117,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 					switch_channel_clear_app_flag_key("T38", session->channel, CF_APP_T38);
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s T38 REFUSE on %s\n",
 									  switch_channel_get_name(channel),
-									  sdp_type == SDP_TYPE_RESPONSE ? "response" : "request");
+									  sdp_type == SDP_ANSWER ? "response" : "request");
 
 					restore_pmaps(a_engine);
 					fmatch = 0;
@@ -6130,7 +6130,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s T38 ACCEPT on %s\n",
 									  switch_channel_get_name(channel),
-									  sdp_type == SDP_TYPE_RESPONSE ? "response" : "request");
+									  sdp_type == SDP_ANSWER ? "response" : "request");
 
 					if (switch_channel_test_app_flag_key("T38", session->channel, CF_APP_T38)) {
 						if (proceed) *proceed = 0;
@@ -6235,7 +6235,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s T38 %s POSSIBLE on %s\n",
 								  switch_channel_get_name(channel),
 								  fmatch ? "IS" : "IS NOT",
-								  sdp_type == SDP_TYPE_RESPONSE ? "response" : "request");
+								  sdp_type == SDP_ANSWER ? "response" : "request");
 
 
 				goto done;
@@ -6269,7 +6269,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 
 			switch_core_media_set_rmode(smh->session, SWITCH_MEDIA_TYPE_AUDIO, sdp_media_flow(m->m_mode), sdp_type);
 
-			if (sdp_type == SDP_TYPE_REQUEST) {
+			if (sdp_type == SDP_OFFER) {
 				switch(a_engine->rmode) {
 				case SWITCH_MEDIA_FLOW_RECVONLY:
 					switch_core_media_set_smode(smh->session, SWITCH_MEDIA_TYPE_AUDIO, SWITCH_MEDIA_FLOW_SENDONLY, sdp_type);
@@ -6339,7 +6339,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 				switch_channel_set_variable(session->channel, "media_audio_mode", NULL);
 			}
 
-			if (sdp_type == SDP_TYPE_RESPONSE) {
+			if (sdp_type == SDP_ANSWER) {
 				if (inactive) {
 					// When freeswitch had previously sent inactive in sip request. it should remain inactive otherwise smode should be sendrecv
 					if (a_engine->smode==SWITCH_MEDIA_FLOW_INACTIVE) {
@@ -6999,7 +6999,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 
 				if (smh->mparams->dtmf_type == DTMF_AUTO || smh->mparams->dtmf_type == DTMF_2833 ||
 					switch_channel_test_flag(session->channel, CF_LIBERAL_DTMF)) {
-					if (sdp_type == SDP_TYPE_REQUEST) {
+					if (sdp_type == SDP_OFFER) {
 						if (!zstr(val) && strcasecmp(val, "info") == 0) {
 							switch_channel_set_flag(session->channel, CF_FORCE_INFO_DTMF);
 						}
@@ -7075,7 +7075,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 														 map->rm_encoding,
 														 NULL,
 														 NULL,
-														 SDP_TYPE_REQUEST,
+														 SDP_OFFER,
 														 map->rm_pt,
 														 1000,
 														 0,
@@ -7154,7 +7154,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 			
 			switch_core_media_set_rmode(smh->session, SWITCH_MEDIA_TYPE_VIDEO, sdp_media_flow(m->m_mode), sdp_type);
 			
-			if (sdp_type == SDP_TYPE_REQUEST) {
+			if (sdp_type == SDP_OFFER) {
 				sdp_bandwidth_t *bw;
 				int tias = 0;
 
@@ -7323,7 +7323,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 						vmatch = strcasecmp(rm_encoding, imp->iananame) ? 0 : 1;
 					}
 
-					if (sdp_type == SDP_TYPE_RESPONSE && consider_video_fmtp && vmatch && !zstr(map->rm_fmtp) && !zstr(smh->fmtps[i])) {
+					if (sdp_type == SDP_ANSWER && consider_video_fmtp && vmatch && !zstr(map->rm_fmtp) && !zstr(smh->fmtps[i])) {
 						almost_vmatch = 1;
 						vmatch = !strcasecmp(smh->fmtps[i], map->rm_fmtp);
 					}
@@ -7498,7 +7498,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 												 "L16",
 												 NULL,
 												 NULL,
-												 SDP_TYPE_REQUEST,
+												 SDP_OFFER,
 												 97,
 												 8000,
 												 20,
@@ -7555,7 +7555,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 		if (switch_channel_test_flag(channel, CF_VIDEO) && !saw_video) {
 			//switch_core_media_set_rmode(smh->session, SWITCH_MEDIA_TYPE_VIDEO, SWITCH_MEDIA_FLOW_INACTIVE, sdp_type);
 
-			if (sdp_type == SDP_TYPE_REQUEST) {
+			if (sdp_type == SDP_OFFER) {
 				switch_core_media_set_smode(smh->session, SWITCH_MEDIA_TYPE_VIDEO, SWITCH_MEDIA_FLOW_INACTIVE, sdp_type);
 			}
 		}
@@ -11213,7 +11213,7 @@ static const char *get_media_profile_name(switch_core_session_t *session, int se
 static char *get_setup(switch_rtp_engine_t *engine, switch_core_session_t *session, switch_sdp_type_t sdp_type)
 {
 
-	if (sdp_type == SDP_TYPE_REQUEST) {
+	if (sdp_type == SDP_OFFER) {
 		engine->dtls_controller = 0;
 		engine->new_dtls = 1;
 		engine->new_ice = 1;
@@ -11314,7 +11314,7 @@ static void generate_m(switch_core_session_t *session, char *buf, size_t buflen,
 	}
 
 	if (smh->mparams->dtmf_type == DTMF_2833 && smh->mparams->te > 95) {
-		if (sdp_type == SDP_TYPE_RESPONSE) {
+		if (sdp_type == SDP_ANSWER) {
 			switch_rtp_engine_t *a_engine = &smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
 			if (a_engine) {
 				payload_map_t *pmap;
@@ -11420,7 +11420,7 @@ static void generate_m(switch_core_session_t *session, char *buf, size_t buflen,
 
 
 	if ((smh->mparams->dtmf_type == DTMF_2833 || switch_channel_test_flag(session->channel, CF_LIBERAL_DTMF)) && smh->mparams->te > 95) {
-		if (smh->mparams->dtmf_type == DTMF_2833 && sdp_type == SDP_TYPE_RESPONSE) {
+		if (smh->mparams->dtmf_type == DTMF_2833 && sdp_type == SDP_ANSWER) {
 			switch_rtp_engine_t *a_engine = &smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
 			if (a_engine) {
 				payload_map_t *pmap;
@@ -11787,7 +11787,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 		v_engine->rtcp_mux = -1;
 	}
 
-	if ((a_engine->rtcp_mux != -1 && v_engine->rtcp_mux != -1) && (sdp_type == SDP_TYPE_REQUEST)) {
+	if ((a_engine->rtcp_mux != -1 && v_engine->rtcp_mux != -1) && (sdp_type == SDP_OFFER)) {
 		a_engine->rtcp_mux = 1;
 		v_engine->rtcp_mux = 1;
 	}
@@ -11878,7 +11878,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 				continue;
 			}
 
-			if (sdp_type == SDP_TYPE_REQUEST) {
+			if (sdp_type == SDP_OFFER) {
 				for (j = 0; j < SWITCH_MAX_CODECS; j++) {
 					if (smh->rates[j] == 0) {
 						break;
@@ -11896,7 +11896,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 			continue;
 		}
 
-		if (sdp_type == SDP_TYPE_REQUEST) {
+		if (sdp_type == SDP_OFFER) {
 			switch_core_session_t *orig_session = NULL;
 
 			switch_core_session_get_partner(session, &orig_session);
@@ -12727,7 +12727,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 					}
 				}
 
-				if (sdp_type == SDP_TYPE_REQUEST) {
+				if (sdp_type == SDP_OFFER) {
 					fir++;
 					pli++;
 					nack++;
@@ -12988,7 +12988,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 
 	// RTP TEXT
 
-	if (sdp_type == SDP_TYPE_RESPONSE && !switch_channel_test_flag(session->channel, CF_RTT)) {
+	if (sdp_type == SDP_ANSWER && !switch_channel_test_flag(session->channel, CF_RTT)) {
 		if (switch_channel_test_flag(session->channel, CF_TEXT_SDP_RECVD)) {
 			switch_channel_clear_flag(session->channel, CF_TEXT_SDP_RECVD);
 			switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "m=text 0 %s 19\r\n",
@@ -13003,7 +13003,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 		t_engine->t140_pt = 0;
 		t_engine->red_pt = 0;
 
-		if (sdp_type == SDP_TYPE_REQUEST) {
+		if (sdp_type == SDP_OFFER) {
 			t_engine->t140_pt = 96;
 			t_engine->red_pt = 97;
 
@@ -13012,7 +13012,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 											  "red",
 											  NULL,
 											  NULL,
-											  SDP_TYPE_REQUEST,
+											  SDP_OFFER,
 											  t_engine->red_pt,
 											  1000,
 											  0,
@@ -13024,7 +13024,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 											  "t140",
 											  NULL,
 											  NULL,
-											  SDP_TYPE_REQUEST,
+											  SDP_OFFER,
 											  t_engine->t140_pt,
 											  1000,
 											  0,
@@ -13527,7 +13527,7 @@ SWITCH_DECLARE(void) switch_core_media_patch_sdp(switch_core_session_t *session)
 												 "PROXY",
 												 NULL,
 												 NULL,
-												 SDP_TYPE_RESPONSE,
+												 SDP_ANSWER,
 												 0,
 												 8000,
 												 20,
@@ -13684,7 +13684,7 @@ SWITCH_DECLARE(void) switch_core_media_patch_sdp(switch_core_session_t *session)
 														 "PROXY-VID",
 														 NULL,
 														 NULL,
-														 SDP_TYPE_RESPONSE,
+														 SDP_ANSWER,
 														 0,
 														 90000,
 														 90000,
@@ -13747,7 +13747,7 @@ SWITCH_DECLARE(void) switch_core_media_patch_sdp(switch_core_session_t *session)
 														 "PROXY-TXT",
 														 NULL,
 														 NULL,
-														 SDP_TYPE_RESPONSE,
+														 SDP_ANSWER,
 														 0,
 														 90000,
 														 90000,
@@ -14654,7 +14654,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_receive_message(switch_core_se
 					switch_core_media_prepare_codecs(session, 1);
 					clear_pmaps(a_engine);
 					clear_pmaps(v_engine);
-					switch_core_media_gen_local_sdp(session, SDP_TYPE_REQUEST, ip, (switch_port_t)atoi(port), NULL, 1);
+					switch_core_media_gen_local_sdp(session, SDP_OFFER, ip, (switch_port_t)atoi(port), NULL, 1);
 				}
 			}
 
@@ -14706,7 +14706,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_receive_message(switch_core_se
 				switch_core_media_prepare_codecs(session, SWITCH_TRUE);
 				switch_core_media_check_video_codecs(session);
 				
-				switch_core_media_gen_local_sdp(session, SDP_TYPE_REQUEST, NULL, 0, NULL, 1);
+				switch_core_media_gen_local_sdp(session, SDP_OFFER, NULL, 0, NULL, 1);
 			}
 
 			if (msg->numeric_arg && switch_core_session_get_partner(session, &nsession) == SWITCH_STATUS_SUCCESS) {
@@ -15519,7 +15519,7 @@ SWITCH_DECLARE(void) switch_core_media_check_outgoing_proxy(switch_core_session_
 											 "PROXY",
 											 NULL,
 											 NULL,
-											 SDP_TYPE_RESPONSE,
+											 SDP_ANSWER,
 											 0,
 											 8000,
 											 20,
@@ -15535,7 +15535,7 @@ SWITCH_DECLARE(void) switch_core_media_check_outgoing_proxy(switch_core_session_
 												 "PROXY-VID",
 												 NULL,
 												 NULL,
-												 SDP_TYPE_RESPONSE,
+												 SDP_ANSWER,
 												 0,
 												 90000,
 												 90000,
@@ -15556,7 +15556,7 @@ SWITCH_DECLARE(void) switch_core_media_check_outgoing_proxy(switch_core_session_
 												 "PROXY-TXT",
 												 NULL,
 												 NULL,
-												 SDP_TYPE_RESPONSE,
+												 SDP_ANSWER,
 												 0,
 												 1000,
 												 1000,
@@ -15735,7 +15735,7 @@ SWITCH_DECLARE (void) switch_core_media_recover_session(switch_core_session_t *s
 		}
 	}
 
-	switch_core_media_gen_local_sdp(session, SDP_TYPE_REQUEST, NULL, 0, NULL, 1);
+	switch_core_media_gen_local_sdp(session, SDP_OFFER, NULL, 0, NULL, 1);
 	switch_core_media_set_video_codec(session, 1);
 
 	if (switch_core_media_activate_rtp(session) != SWITCH_STATUS_SUCCESS) {

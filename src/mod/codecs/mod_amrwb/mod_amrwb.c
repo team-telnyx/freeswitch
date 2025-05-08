@@ -277,6 +277,7 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 	if (codec->fmtp_in) {
 		codec->fmtp_out = switch_core_strdup(codec->memory_pool, codec->fmtp_in);
 	}
+
 	return SWITCH_STATUS_SUCCESS;
 #else
 	struct amrwb_context *context = NULL;
@@ -284,12 +285,13 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 	int x, i, argc, fmtptmp_pos;
 	char *argv[10];
 	char fmtptmp[128];
-	switch_core_session_t *session = codec->session;
+	char *fmtp_dup = NULL;
 
 	encoding = (flags & SWITCH_CODEC_FLAG_ENCODE);
 	decoding = (flags & SWITCH_CODEC_FLAG_DECODE);
 
 	if (!(encoding || decoding) || (!(context = switch_core_alloc(codec->memory_pool, sizeof(struct amrwb_context))))) {
+
 		return SWITCH_STATUS_FALSE;
 	} else {
 
@@ -305,13 +307,19 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 		switch_clear_flag(context, AMRWB_OPT_OCTET_ALIGN);
 
 		if (codec->fmtp_in) {
-			argc = switch_separate_string(codec->fmtp_in, ';', argv, (sizeof(argv) / sizeof(argv[0])));
+			fmtp_dup = strdup(codec->fmtp_in);
+			switch_assert(fmtp_dup);
+
+			argc = switch_separate_string(fmtp_dup, ';', argv, (sizeof(argv) / sizeof(argv[0])));
+
 			for (x = 0; x < argc; x++) {
 				char *data = argv[x];
 				char *arg;
+
 				while (*data && *data == ' ') {
 					data++;
 				}
+
 				if ((arg = strchr(data, '='))) {
 					*arg++ = '\0';
 					if (!strcasecmp(data, "octet-align")) {
@@ -347,7 +355,9 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 					} else if (!strcasecmp(data, "mode-set")) {
 						int y, m_argc;
 						char *m_argv[SWITCH_AMRWB_MODES-1]; /* AMRWB has 9 modes */
+
 						m_argc = switch_separate_string(arg, ',', m_argv, (sizeof(m_argv) / sizeof(m_argv[0])));
+
 						for (y = 0; y < m_argc; y++) {
 							context->enc_modes |= (1 << atoi(m_argv[y]));
 							context->enc_mode = atoi(m_argv[y]);
@@ -355,6 +365,8 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 					}
 				}
 			}
+
+			free(fmtp_dup);
 		}
 
 		if (globals.force_oa) {
@@ -379,6 +391,7 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 
 			/* re-create mode-set */
 			fmtptmp_pos = switch_snprintf(fmtptmp, sizeof(fmtptmp), "mode-set=");
+
 			for (i = 0; SWITCH_AMRWB_MODES-1 > i; ++i) {
 				if (context->enc_modes & (1 << i)) {
 					fmtptmp_pos += switch_snprintf(fmtptmp + fmtptmp_pos, sizeof(fmtptmp) - fmtptmp_pos, fmtptmp_pos > strlen("mode-set=") ? ",%d" : "%d", i);
@@ -411,27 +424,11 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 		}
 
 		if (!globals.volte) {
-			fmtptmp_pos += switch_snprintf(fmtptmp + fmtptmp_pos, sizeof(fmtptmp) - fmtptmp_pos, "; octet-align=%d",
+			switch_snprintf(fmtptmp + fmtptmp_pos, sizeof(fmtptmp) - fmtptmp_pos, ";octet-align=%d",
 					switch_test_flag(context, AMRWB_OPT_OCTET_ALIGN) ? 1 : 0);
 		} else {
-			fmtptmp_pos += switch_snprintf(fmtptmp + fmtptmp_pos, sizeof(fmtptmp) - fmtptmp_pos, "; octet-align=%d; max-red=0; mode-change-capability=2",
+			switch_snprintf(fmtptmp + fmtptmp_pos, sizeof(fmtptmp) - fmtptmp_pos, ";octet-align=%d;max-red=0;mode-change-capability=2",
 					switch_test_flag(context, AMRWB_OPT_OCTET_ALIGN) ? 1 : 0);
-		}
-
-		if (!zstr(globals.fmtp_extra)) {
-			fmtptmp_pos += switch_snprintf(fmtptmp + fmtptmp_pos, sizeof(fmtptmp) - fmtptmp_pos, "; %s", globals.fmtp_extra);
-		}
-
-		if (globals.silence_supp_off) {
-			switch_channel_t *channel = NULL;
-			if (session) {
-				channel = switch_core_session_get_channel(session);
-				switch_assert(channel);
-				switch_channel_set_variable(channel, "suppress_cng", "true");
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Turning CNG off (silence suppression off, suppress_cng=true) due to silence-supp-off=true\n");
-			} else {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Cannot turn silence suppression off - session missing\n");
-			}
 		}
 
 		codec->fmtp_out = switch_core_strdup(codec->memory_pool, fmtptmp);
