@@ -1,0 +1,200 @@
+<?xml version="1.0"?>
+<document type="freeswitch/xml">
+  <X-PRE-PROCESS cmd="exec-set" data="test=echo 1234"/>
+  <X-PRE-PROCESS cmd="set" data="spawn_instead_of_system=true"/>
+  <X-PRE-PROCESS cmd="exec-set" data="shell_exec_set_test=ls / | grep usr"/>
+  <X-PRE-PROCESS cmd="set" data="spawn_instead_of_system=false"/>
+  <X-PRE-PROCESS cmd="set" data="default_password=$${test}"/>
+  <X-PRE-PROCESS cmd="set" data="rtp_timer_name=soft" />
+  <section name="configuration" description="Various Configuration">
+    <configuration name="modules.conf" description="Modules">
+      <modules>
+        <load module="mod_console"/>
+		<load module="mod_loopback"/>
+		<load module="mod_spandsp"/>
+		<load module="mod_tone_stream"/>
+		<load module="mod_dptools"/>
+		<load module="mod_sndfile"/>
+		<load module="mod_dialplan_xml"/>
+		<load module="mod_sndfile"/>
+		<load module="mod_gstt"/>
+		<load module="mod_sofia"/>
+		<load module="mod_polly"/>
+		<load module="mod_commands"/>
+      </modules>
+    </configuration>
+
+<configuration name="switch.conf" description="Core Configuration">
+
+  <default-ptimes>
+  </default-ptimes>
+
+  <settings>
+
+    <param name="colorize-console" value="false"/>
+    <param name="dialplan-timestamps" value="false"/>
+    <param name="loglevel" value="debug"/>
+    <param name="rtp-enable-zrtp" value="false"/>
+     <param name="rtp-start-port" value="20000"/>
+     <param name="rtp-end-port" value="30000"/>
+  </settings>
+
+ </configuration>
+    <configuration name="console.conf" description="Console Logger">
+      <mappings>
+        <map name="all" value="console,debug,info,notice,warning,err,crit,alert"/>
+      </mappings>
+      <settings>
+        <param name="colorize" value="true"/>
+        <param name="loglevel" value="debug"/>
+      </settings>
+    </configuration>
+
+    <configuration name="timezones.conf" description="Timezones">
+      <timezones>
+          <zone name="GMT" value="GMT0" />
+      </timezones>
+    </configuration>
+
+    <configuration name="sofia.conf" description="SofiaSIP">
+        <profiles>
+    <profile name="external">
+        <gateways>
+
+           <gateway name="test_gateway">
+                <param name="username" value="not-used"/>
+                <param name="password" value="not-used"/>
+                <param name="proxy" value="$${local_ip_v4}:62068"/>
+                <param name="register" value="false"/>
+                <param name="retry-seconds" value="30"/>
+                <param name="dtmf-type" value="rfc2833"/>
+                <variables>   
+                 <variable name="rtp_secure_media"  value="false"  direction="outbound"/>  
+                </variables>
+            </gateway>
+        </gateways>
+
+      <domains>
+        <domain name="all" alias="false" parse="true"/>
+      </domains>
+
+      <settings>
+        <param name="debug" value="1"/>
+        <param name="shutdown-on-fail" value="true"/>
+        <param name="p-asserted-id-parse" value="verbatim"/>
+        <param name="username" value="SignalWire-STACK"/>
+        <param name="user-agent-string" value="SignalWire STACK Unit Test"/>
+        <param name="sip-trace" value="no"/>
+        <param name="sip-capture" value="no"/>
+        <param name="rfc2833-pt" value="101"/>
+        <param name="sip-port" value="62068"/>
+        <param name="dialplan" value="XML"/>
+        <param name="context" value="default"/>
+        <param name="dtmf-duration" value="2000"/>
+        <param name="inbound-codec-prefs" value="PCMU"/>
+        <param name="outbound-codec-prefs" value="PCMU"/>
+        <param name="rtp-timer-name" value="soft"/>
+        <param name="local-network-acl" value="localnet.auto"/>
+        <param name="manage-presence" value="false"/>
+        <param name="inbound-codec-negotiation" value="generous"/>
+        <param name="nonce-ttl" value="60"/>
+        <param name="inbound-late-negotiation" value="true"/>
+        <param name="rtp-ip" value="$${local_ip_v4}"/>
+        <param name="sip-ip" value="$${local_ip_v4}"/>
+        <param name="ext-rtp-ip" value="$${local_ip_v4}"/>
+        <param name="ext-sip-ip" value="$${local_ip_v4}"/>
+        <param name="rtp-timeout-sec" value="300"/>
+        <param name="rtp-hold-timeout-sec" value="1800"/>
+        <param name="session-timeout" value="600"/>
+        <param name="minimum-session-expires" value="90"/>
+        <param name="tls" value="false"/>
+      </settings>
+  </profile>
+
+    <profile name="internal">
+        <gateways>
+    </gateways>
+
+      <domains>
+        <domain name="all" alias="false" parse="true"/>
+      </domains>
+
+      <settings>
+        <param name="debug" value="1"/>
+        <param name="shutdown-on-fail" value="true"/>
+        <param name="p-asserted-id-parse" value="verbatim"/>
+        <param name="username" value="SignalWire-STACK"/>
+        <param name="user-agent-string" value="SignalWire STACK Unit Test"/>
+        <param name="sip-trace" value="no"/>
+        <param name="sip-capture" value="no"/>
+        <param name="rfc2833-pt" value="101"/>
+        <param name="sip-port" value="61069"/>
+        <param name="dialplan" value="XML"/>
+        <param name="context" value="default"/>
+        <param name="dtmf-duration" value="2000"/>
+        <param name="inbound-codec-prefs" value="PCMU"/>
+        <param name="outbound-codec-prefs" value="PCMU"/>
+        <param name="rtp-timer-name" value="soft"/>
+        <param name="local-network-acl" value="localnet.auto"/>
+        <param name="manage-presence" value="false"/>
+        <param name="inbound-codec-negotiation" value="generous"/>
+        <param name="nonce-ttl" value="60"/>
+        <param name="inbound-late-negotiation" value="true"/>
+        <param name="rtp-ip" value="$${local_ip_v4}"/>
+        <param name="sip-ip" value="$${local_ip_v4}"/>
+        <param name="ext-rtp-ip" value="$${local_ip_v4}"/>
+        <param name="ext-sip-ip" value="$${local_ip_v4}"/>
+        <param name="rtp-timeout-sec" value="300"/>
+        <param name="rtp-hold-timeout-sec" value="1800"/>
+        <param name="session-timeout" value="600"/>
+        <param name="minimum-session-expires" value="90"/>
+        <param name="tls" value="false"/>
+      </settings>
+  </profile>
+
+  </profiles>
+   </configuration>
+
+<configuration name="polly.conf">
+    <settings>
+        <param name="aws_id" value=""/>
+        <param name="aws_key" value=""/>
+        <param name="aws_region" value="us-east-1"/>
+        <param name="aws_http_bind_local" value="127.0.0.1"/>
+        <param name="aws_max_connection" value="200"/>
+        <param name="aws_connection_timeout" value="1000"/>
+        <param name="aws_request_timeout" value="3000"/>
+        <param name="aws_low_speed_limit" value="18000"/>
+        <param name="aws_max_retry_attempt" value="2"/>
+        <param name="aws_client_max_continuous_failures" value="10"/>
+        <param name="aws_client_timeout_validation_sec" value="600"/>
+        <param name="aws_fallback_region_1" value="us-east-2"/>
+        <param name="aws_fallback_region_2" value="us-west-1"/>
+        <param name="aws_fallback_region_3" value="eu-central-1"/>
+    </settings>
+</configuration>
+
+    <X-PRE-PROCESS cmd="include" data="vpx.conf.xml"/>
+  </section>
+  <section name="dialplan" description="Regex/XML Dialplan">
+    <context name="default">
+                <extension name="two">
+                        <condition field="destination_number" expression="^\+15553332901$">
+                                <action application="log" data="${sip_h_identity}"/>
+                                <action application="hash" data="insert/realm/identity_check/${sip_h_identity}"/>
+                                <action application="answer"/>
+                                <action application="park"/>
+                        </condition>
+                </extension>
+                <extension name="one">
+                        <condition field="destination_number" expression="^\+15553332900$">
+                                <action application="set" data="absolute_codec_string=PCMU@20i"/>
+                                <action application="info"/>
+                                <action application="answer"/>
+                                <action application="speak" data="polly|Joanna|foo bar"/>
+                                <action application="park"/>
+                        </condition>
+                </extension>
+    </context>
+  </section>
+</document>
