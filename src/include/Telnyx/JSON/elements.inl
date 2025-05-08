@@ -255,11 +255,11 @@ inline bool Object::Member::operator == (const Member& member) const
           element == member.element;
 }
 
-class Object::Finder : public std::unary_function<Object::Member, bool>
+class Object::Finder
 {
 public:
    Finder(const std::string& name) : m_name(name) {}
-   bool operator () (const Object::Member& member) {
+   bool operator () (const Object::Member& member) const {
       return member.name == m_name;
    }
 

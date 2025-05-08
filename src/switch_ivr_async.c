@@ -1269,15 +1269,15 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 			switch_size_t updated_record_ms = current_record_ms;
 			const char *prev_record_sec_str = switch_channel_get_variable(channel, "record_seconds");
 			const char *prev_record_ms_str = switch_channel_get_variable(channel, "record_ms");
-			char buffer_name[25];
+			char buffer_name[32];
 
-			sprintf(buffer_name, "record_samples_%d", record_index);
+			snprintf(buffer_name, sizeof(buffer_name), "record_samples_%d", record_index);
 			switch_channel_set_variable_printf(channel, buffer_name, "%d", current_samples_out);
-			sprintf(buffer_name, "record_seconds_%d", record_index);
+			snprintf(buffer_name, sizeof(buffer_name), "record_seconds_%d", record_index);
 			switch_channel_set_variable_printf(channel, buffer_name, "%d", current_record_seconds);
-			sprintf(buffer_name, "record_ms_%d", record_index);
+			snprintf(buffer_name, sizeof(buffer_name), "record_ms_%d", record_index);
 			switch_channel_set_variable_printf(channel, buffer_name, "%d", current_record_ms);
-			sprintf(buffer_name, "record_url_%d", record_index);
+			snprintf(buffer_name, sizeof(buffer_name), "record_url_%d", record_index);
 			switch_channel_set_variable_printf(channel, buffer_name, "%s", !zstr(rh->file) ? rh->file : "");
 
 			if ((!zstr(prev_record_sec_str) && switch_is_number(prev_record_sec_str))
