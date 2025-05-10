@@ -443,6 +443,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_fork_reset_state(switch_rtp_t *rtp_se
 SWITCH_DECLARE(switch_status_t) switch_rtp_fork_activate(switch_rtp_t *rtp_session, switch_fork_direction_t direction);
 SWITCH_DECLARE(void) switch_rtp_fork_deactivate(switch_rtp_t *rtp_session, switch_fork_direction_t direction);
 SWITCH_DECLARE(void) switch_rtp_fork_fire_start_event(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(void) switch_rtp_fork_fire_stop_event(switch_rtp_t *rtp_session);
 
 SWITCH_DECLARE(void) switch_rtp_reset_jb(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(char *) switch_rtp_get_remote_host(switch_rtp_t *rtp_session);

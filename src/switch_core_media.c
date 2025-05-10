@@ -9680,7 +9680,7 @@ SWITCH_DECLARE(void) switch_core_media_fork_do_fire_start_event(switch_core_sess
 
 	if (switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, "telnyx_media_stream::start") == SWITCH_STATUS_SUCCESS) {
 		switch_channel_event_set_data(session->channel, event);
-		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "telnyx_media_streaming_start_time", "%ld", switch_micro_time_now() / 1000);
+		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "telnyx_media_streaming_start_time", "%ld", fork->start_time);
 		if (!zstr(fork->fork_rx.cmd)) {
 			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "telnyx_media_streaming_rx", fork->fork_rx.cmd);
 		}
@@ -9715,6 +9715,54 @@ SWITCH_DECLARE(void) switch_core_media_fork_fire_start_event(switch_core_session
 	}
 
 	switch_rtp_fork_fire_start_event(a_engine->rtp_session);
+}
+
+SWITCH_DECLARE(void) switch_core_media_fork_fire_stop_event(switch_core_session_t *session)
+{
+	switch_rtp_engine_t *a_engine = NULL;
+	switch_media_handle_t *smh = NULL;
+
+	if (!session) {
+		return;
+	}
+
+	if (!(smh = session->media_handle)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "%s Fork: failed to send stop event (no media)\n", switch_channel_get_name(session->channel));
+		return;
+	}
+
+	a_engine = &smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
+	if (!a_engine->rtp_session) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "%s Fork: failed to send start event (no RTP session)\n", switch_channel_get_name(session->channel));
+		return;
+	}
+
+	switch_rtp_fork_fire_stop_event(a_engine->rtp_session);
+}
+
+SWITCH_DECLARE(void) switch_core_media_fork_do_fire_stop_event(switch_core_session_t *session, switch_fork_state_t *fork, uint32_t last_duration)
+{
+	switch_event_t *event;
+
+	if (!session || !fork) {
+		return;
+	}
+
+	switch_channel_set_variable_printf(session->channel, "telnyx_media_streaming_duration", "%d", fork->duration);
+	if( switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, "telnyx_media_stream::stop") == SWITCH_STATUS_SUCCESS) {
+		const char *fmr = NULL;
+		switch_channel_event_set_data(session->channel, event);
+
+		fmr = switch_channel_get_variable(session->channel, "variable_media_fork_request");
+		if (!zstr(fmr)) {
+			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "variable_media_fork_request", fmr);
+		}
+
+		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "telnyx_media_streaming_stop_time", "%ld", fork->stop_time);
+		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "telnyx_media_streaming_last_duration", "%d", last_duration);
+		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "telnyx_media_streaming_duration", "%d", fork->duration);
+		switch_event_fire(&event);
+	}
 }
 
 //?
