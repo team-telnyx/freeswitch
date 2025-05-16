@@ -2576,7 +2576,7 @@ static switch_bool_t is_codec_match(const char *lcodec, const char *rcodec)
 	return SWITCH_FALSE;
 }
 
-static void merge_codec_string(switch_core_session_t *session, const char *preferred_codecs, const char *codecs, char **codec_lists)
+static void merge_codec_string(switch_core_session_t *session, const char *preferred_codecs, const char *codecs, bool by_sampling_rate, char **codec_lists)
 {
 	char *tmp_prefer_codecs[SWITCH_MAX_CODECS];
 	char *tmp_codecs[SWITCH_MAX_CODECS];
@@ -2610,6 +2610,72 @@ static void merge_codec_string(switch_core_session_t *session, const char *prefe
 		}
 	}
 
+	if (by_sampling_rate && pref_codecs_count > 0 && codecs_count > 0) {
+		char fmtp[SWITCH_MAX_CODECS][MAX_FMTP_LEN];
+		const switch_codec_implementation_t *priority_codec_array[1];
+		const switch_codec_implementation_t *codec_array[SWITCH_MAX_CODECS];
+		int codec_array_count = 0;
+		int closest_rate_index = -1;
+
+		if (switch_loadable_module_get_codecs_sorted(priority_codec_array, fmtp, 1, tmp_prefer_codecs, 1) <= 0) {
+			goto end;
+		}
+
+		if ((codec_array_count = switch_loadable_module_get_codecs_sorted(codec_array, fmtp, SWITCH_MAX_CODECS, tmp_codecs, codecs_count)) <= 0) {
+			goto end;
+		}
+
+		// If priority codec is the same as the first codec in the list, we can just return the current codec order
+		if (!strcasecmp(priority_codec_array[0]->iananame, codec_array[0]->iananame)) {
+			goto end;
+		}
+
+		// TODO
+		// If the codec list contain unsupported or invalid codec, 
+		// we will need to locate it from the tmp_codecs and rewrite it.
+		// For now, we will just return the current codec order.
+		if (codec_array_count != codecs_count) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Found invalid/unsupported codec: %s\n", codecs);
+			goto end;
+		}
+
+		// Start looking for closest sampling rate
+		for (i = 0; i < codec_array_count; ++i) {
+			uint32_t priority_rate = priority_codec_array[0]->actual_samples_per_second;
+			uint32_t current_rate = codec_array[i]->actual_samples_per_second;
+			uint32_t closest_rate = closest_rate_index >= 0 ? codec_array[closest_rate_index]->actual_samples_per_second : 0;
+			
+			if (current_rate == priority_rate) {
+				closest_rate_index = i;
+				break;
+			} else if (priority_rate >= 16000) {
+				if (current_rate >= 16000 && closest_rate_index < 0) {
+					closest_rate_index = i;
+				} else if (current_rate >= 16000 && closest_rate_index >= 0) {
+					if (current_rate < closest_rate) {
+						closest_rate_index = i;
+					}
+				}
+			} else {
+				if (closest_rate_index < 0 || (abs(current_rate - priority_rate) < abs(closest_rate - priority_rate))) {
+					closest_rate_index = i;
+				}
+			}
+		}
+
+		if (closest_rate_index > 0) {
+			// Shift the found codec to the top of the list
+			char *tmp = tmp_codecs[closest_rate_index];
+			for (i = closest_rate_index; i > 0; --i) {
+				tmp_codecs[i] = tmp_codecs[i-1];
+			}
+			tmp_codecs[0] = tmp;
+			k++; // Increment to inform that there are reorder of codecs
+		}
+	}
+
+end:
+
 	if (k > 0) {
 		SWITCH_STANDARD_STREAM(stream);
 		for (j = 0; j < codecs_count; ++j) {
@@ -2620,12 +2686,51 @@ static void merge_codec_string(switch_core_session_t *session, const char *prefe
 	}
 }
 
+
+static void prepare_merge_codec_string(switch_core_session_t *session, const char *preferred_codecs, const char *codecs, char **codec_lists)
+{
+	const char *val = NULL;
+	switch_media_handle_t *smh = NULL;
+	switch_bool_t merge_by_order = SWITCH_FALSE;
+	switch_bool_t merge_by_sampling_rate = SWITCH_FALSE;
+
+	if (!(smh = session->media_handle)) {
+		return;
+	}
+
+	val = switch_channel_get_variable_dup(session->channel, "merge_inbound_outbound_codecs", SWITCH_FALSE, -1);
+	if (!zstr(val)) {
+		if (switch_true(val) || !strcasecmp(val, "order")) {
+			merge_by_order = SWITCH_TRUE;
+		} else if (!strcasecmp(val, "sampling-rate")) {
+			merge_by_sampling_rate = SWITCH_TRUE;
+		} else {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Invalid value for merge_inbound_outbound_codecs: %s\n", val);
+		}
+	} else {
+		if (smh->media_flags[SCMF_MERGE_INBOUND_OUTBOUND_CODEC_BY_ORDER]) {
+			merge_by_order = SWITCH_TRUE;
+		} else if (smh->media_flags[SCMF_MERGE_INBOUND_OUTBOUND_CODEC_BY_SAMPLING_RATE]) {
+			merge_by_sampling_rate = SWITCH_TRUE;
+		}
+	}
+
+	if (merge_by_order || merge_by_sampling_rate) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Merging preferred codec (%s) to target codec (%s) by %s\n"
+			, preferred_codecs, codecs, merge_by_sampling_rate ? "sampling-rate" : "order");
+		merge_codec_string(session, preferred_codecs, codecs, merge_by_sampling_rate, codec_lists);
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Merge codec final result from (%s) to (%s)\n", codecs, (*codec_lists ? *codec_lists : codecs));
+	} else {
+		*codec_lists = NULL;
+	}
+}
+
 SWITCH_DECLARE(int) switch_core_media_retrieve_codecs(switch_core_session_t *session, const switch_codec_implementation_t **array)
 {
 	const char *abs, *codec_string = NULL;
 	const char *ocodec = NULL, *val;
 	switch_media_handle_t *smh;
-	char *tmp_codec_string;
+	char *tmp_codec_string = NULL;
 	char fmtp[SWITCH_MAX_CODECS][MAX_FMTP_LEN];
 	char *codec_order[SWITCH_MAX_CODECS];
 	int codec_order_last;
@@ -2673,17 +2778,16 @@ SWITCH_DECLARE(int) switch_core_media_retrieve_codecs(switch_core_session_t *ses
 		codec_string = "PCMU@20i,PCMA@20i,speex@20i";
 	}
 
-	val = switch_channel_get_variable_dup(session->channel, "merge_inbound_outbound_codecs", SWITCH_FALSE, -1);
-	if (ocodec && (!(zstr(val) && switch_true(val)) || (zstr(val) && smh->media_flags[SCMF_MERGE_INBOUND_OUTBOUND_CODEC]))) {
+	if (ocodec) {
 		char *merge_codec = NULL;
-		merge_codec_string(session, ocodec, codec_string, &merge_codec);
+		prepare_merge_codec_string(session, ocodec, codec_string, &merge_codec);
 		if (merge_codec) {
 			tmp_codec_string = switch_core_session_strdup(smh->session, merge_codec);
 			switch_safe_free(merge_codec);
-		} else {
-			tmp_codec_string = switch_core_session_strdup(smh->session, codec_string);
 		}
-	} else {
+	}
+
+	if (zstr(tmp_codec_string)) {
 		tmp_codec_string = switch_core_session_strdup(smh->session, codec_string);
 	}
 
@@ -2696,7 +2800,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_prepare_codecs(switch_core_ses
 	const char *abs, *codec_string = NULL;
 	const char *ocodec = NULL, *val;
 	switch_media_handle_t *smh;
-	char *tmp_codec_string;
+	char *tmp_codec_string = NULL;
 
 	switch_assert(session);
 
@@ -2753,19 +2857,19 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_prepare_codecs(switch_core_ses
 		codec_string = "PCMU@20i,PCMA@20i,speex@20i";
 	}
 
-	val = switch_channel_get_variable_dup(session->channel, "merge_inbound_outbound_codecs", SWITCH_FALSE, -1);
-	if (ocodec && ((!zstr(val) && switch_true(val)) || (zstr(val) && smh->media_flags[SCMF_MERGE_INBOUND_OUTBOUND_CODEC]))) {
+	if (ocodec) {
 		char *merge_codec = NULL;
-		merge_codec_string(session, ocodec, codec_string, &merge_codec);
+		prepare_merge_codec_string(session, ocodec, codec_string, &merge_codec);
 		if (merge_codec) {
 			tmp_codec_string = switch_core_session_strdup(smh->session, merge_codec);
 			switch_safe_free(merge_codec);
-		} else {
-			tmp_codec_string = switch_core_session_strdup(smh->session, codec_string);
 		}
-	} else {
+	}
+
+	if (zstr(tmp_codec_string)) {
 		tmp_codec_string = switch_core_session_strdup(smh->session, codec_string);
 	}
+
 	switch_channel_set_variable(session->channel, "rtp_use_codec_string", tmp_codec_string);
 
 	smh->codec_order_last = switch_separate_string(tmp_codec_string, ',', smh->codec_order, SWITCH_MAX_CODECS);
