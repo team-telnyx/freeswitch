@@ -6125,6 +6125,8 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						profile->inbound_codec_string = switch_core_strdup(profile->pool, val);
 					} else if (!strcasecmp(var, "outbound-codec-prefs")) {
 						profile->outbound_codec_string = switch_core_strdup(profile->pool, val);
+					} else if (!strcasecmp(var, "disable-video-codecs")) {
+						profile->disable_video_codecs = switch_true(val);
 					} else if (!strcasecmp(var, "challenge-realm")) {
 						profile->challenge_realm = switch_core_strdup(profile->pool, val);
 					} else if (!strcasecmp(var, "challenge-opaque")) {

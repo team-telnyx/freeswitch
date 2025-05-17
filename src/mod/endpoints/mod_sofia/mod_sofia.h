@@ -715,6 +715,7 @@ struct sofia_profile {
 	unsigned int tls_timeout;
 	char *inbound_codec_string;
 	char *outbound_codec_string;
+	switch_bool_t disable_video_codecs;
 	int running;
 	int dtmf_duration;
 	uint8_t flags[TFLAG_MAX];
