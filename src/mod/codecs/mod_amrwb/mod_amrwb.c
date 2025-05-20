@@ -264,7 +264,6 @@ static switch_status_t amrwb_parse_fmtp_cb(const char *fmtp, switch_codec_fmtp_t
 		if ((oa == 0 && globals.invite_prefer_oa) || (oa == 1 && globals.invite_prefer_be)) {
 			return SWITCH_STATUS_IGNORE;
 		}
-		return SWITCH_STATUS_SUCCESS;
 	}
 
 	/* Must return FALSE for FS to continue as if callback was not called */
@@ -905,7 +904,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_amrwb_load)
 	codec_interface->implementations->matches_fmtp = matches_fmtp;
 #endif
 
-	SWITCH_ADD_CODEC(codec_interface, "AMR-WB / Bandwidth Efficient");
+//	SWITCH_ADD_CODEC(codec_interface, "AMR-WB / Bandwidth Efficient");
 	codec_interface->parse_fmtp = amrwb_parse_fmtp_cb;
 
 	default_fmtp_be = generate_fmtp(pool, 0);
