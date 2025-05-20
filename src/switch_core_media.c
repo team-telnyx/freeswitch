@@ -15258,6 +15258,10 @@ static void switch_core_media_set_r_sdp_codec_string(switch_core_session_t *sess
 								switch_status_t match_result = imp->matches_fmtp(imp->fmtp, map->rm_fmtp);
 								if (match_result == SWITCH_STATUS_SUCCESS) {
 									add_audio_codec(map, imp, ptime, imp->fmtp, buf, sizeof(buf));
+								} else {
+									switch_log_printf(SWITCH_CHANNEL_CHANNEL_LOG(channel), SWITCH_LOG_WARNING, "Codec %s.%s does not match fmtp: %s\n",
+													  imp->modname, imp->iananame, map->rm_fmtp);
+									match = 0;
 								}
 							} else {
 								add_audio_codec(map, imp, ptime, imp->fmtp, buf, sizeof(buf));
