@@ -1297,8 +1297,6 @@ static xmlrpc_value *freeswitch_batch(xmlrpc_env * const envP, xmlrpc_value * co
 		xmlrpc_DECREF(value);
 	}
 
-  end:
-
 	xmlrpc_DECREF(commands);
 	return commandResults;
 }
@@ -1331,7 +1329,7 @@ SWITCH_MODULE_RUNTIME_FUNCTION(mod_xml_rpc_runtime)
     xmlrpc_registry_add_method2(&env, globals.registryP, "freeswitch_api", &freeswitch_api, NULL, NULL, NULL);
     xmlrpc_registry_add_method(&env, globals.registryP, NULL, "freeswitch.management", &freeswitch_man, NULL);
     xmlrpc_registry_add_method(&env, globals.registryP, NULL, "freeswitch_management", &freeswitch_man, NULL);
-	xmlrpc_registry_add_method2(&env, globals.registryP, "freeswitch.batch", &freeswitch_batch, NULL, NULL, NULL);
+    xmlrpc_registry_add_method2(&env, globals.registryP, "freeswitch.batch", &freeswitch_batch, NULL, NULL, NULL);
     xmlrpc_registry_add_method2(&env, globals.registryP, "freeswitch_batch", &freeswitch_batch, NULL, NULL, NULL);
 
 	MIMETypeInit();
