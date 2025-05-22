@@ -575,7 +575,7 @@ switch_status_t sofia_on_hangup(switch_core_session_t *session)
 			
 			if (!sofia_test_flag(tech_pvt, TFLAG_BYE)) {
 				nua_bye(tech_pvt->nh,
-				        TAG_IF(!zstr(tech_pvt->route_uri), NUTAG_PROXY(tech_pvt->route_uri)),
+					TAG_IF(!zstr(tech_pvt->route_uri), NUTAG_PROXY(tech_pvt->route_uri)),
 						SIPTAG_CONTACT(SIP_NONE),
 						TAG_IF(!zstr(reason), SIPTAG_REASON_STR(reason)),
 						TAG_IF(call_info, SIPTAG_CALL_INFO_STR(call_info)),
@@ -1896,6 +1896,26 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 		}
 		break;
 
+	case SWITCH_MESSAGE_INDICATE_3PCC_REINVITE:
+		{
+			/* Handle 3PCC re-INVITE without SDP */
+			const char *change_crypto_var = switch_channel_get_variable(channel, "3pcc_change_crypto");
+			
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC: %s Sending 3PCC re-INVITE without SDP, 3pcc_change_crypto=%s\n", switch_channel_get_name(channel), change_crypto_var ? change_crypto_var : "not set");
+			
+			/* Set 3PCC flag if not already set */
+			if (!sofia_test_flag(tech_pvt, TFLAG_3PCC)) {
+				sofia_set_flag_locked(tech_pvt, TFLAG_3PCC);
+			}
+			
+			/* Send RE-INVITE without SDP */
+			nua_invite(tech_pvt->nh,
+				NUTAG_MEDIA_ENABLE(0),
+				SIPTAG_CONTENT_LENGTH_STR("0"),
+				TAG_END());
+		}
+		break;
+
 	case SWITCH_MESSAGE_INDICATE_T38_DESCRIPTION:
 		{
 			switch_t38_options_t *t38_options = switch_channel_get_private(tech_pvt->channel, "t38_options");
@@ -3062,7 +3082,7 @@ static int show_reg_callback(void *pArg, int argc, char **argv, char **columnNam
 							   "Ping-Status:\t%s\n"
 							   "Ping-Time:\t%0.2f\n"
 							   "Host:       \t%s\n"
-							   "IP:         \t%s\n"
+							   "IP:	 \t%s\n"
 							   "Port:       \t%s\n"
 							   "Auth-User:  \t%s\n"
 							   "Auth-Realm: \t%s\n"
@@ -3097,21 +3117,21 @@ static int show_reg_callback_xml(void *pArg, int argc, char **argv, char **colum
 	}
 
 	cb->stream->write_function(cb->stream, "    <registration>\n");
-	cb->stream->write_function(cb->stream, "        <call-id>%s</call-id>\n", switch_str_nil(argv[0]));
-	cb->stream->write_function(cb->stream, "        <user>%s@%s</user>\n", switch_str_nil(argv[1]), switch_str_nil(argv[2]));
-	cb->stream->write_function(cb->stream, "        <contact>%s</contact>\n", switch_amp_encode(switch_str_nil(argv[3]), xmlbuf, buflen));
-	cb->stream->write_function(cb->stream, "        <agent>%s</agent>\n", switch_amp_encode(switch_str_nil(argv[7]), xmlbuf, buflen));
-	cb->stream->write_function(cb->stream, "        <status>%s(%s) exp(%s) expsecs(%d)</status>\n", switch_str_nil(argv[4]), switch_str_nil(argv[5]),
+	cb->stream->write_function(cb->stream, "	<call-id>%s</call-id>\n", switch_str_nil(argv[0]));
+	cb->stream->write_function(cb->stream, "	<user>%s@%s</user>\n", switch_str_nil(argv[1]), switch_str_nil(argv[2]));
+	cb->stream->write_function(cb->stream, "	<contact>%s</contact>\n", switch_amp_encode(switch_str_nil(argv[3]), xmlbuf, buflen));
+	cb->stream->write_function(cb->stream, "	<agent>%s</agent>\n", switch_amp_encode(switch_str_nil(argv[7]), xmlbuf, buflen));
+	cb->stream->write_function(cb->stream, "	<status>%s(%s) exp(%s) expsecs(%d)</status>\n", switch_str_nil(argv[4]), switch_str_nil(argv[5]),
 							   exp_buf, exp_secs);
-	cb->stream->write_function(cb->stream, "        <ping-status>%s</ping-status>\n", switch_str_nil(argv[18]));
-	cb->stream->write_function(cb->stream, "        <ping-time>%0.2f</ping-time>\n", (float)atoll(switch_str_nil(argv[19]))/1000);
-	cb->stream->write_function(cb->stream, "        <host>%s</host>\n", switch_str_nil(argv[11]));
-	cb->stream->write_function(cb->stream, "        <network-ip>%s</network-ip>\n", switch_str_nil(argv[12]));
-	cb->stream->write_function(cb->stream, "        <network-port>%s</network-port>\n", switch_str_nil(argv[13]));
-	cb->stream->write_function(cb->stream, "        <sip-auth-user>%s</sip-auth-user>\n",
+	cb->stream->write_function(cb->stream, "	<ping-status>%s</ping-status>\n", switch_str_nil(argv[18]));
+	cb->stream->write_function(cb->stream, "	<ping-time>%0.2f</ping-time>\n", (float)atoll(switch_str_nil(argv[19]))/1000);
+	cb->stream->write_function(cb->stream, "	<host>%s</host>\n", switch_str_nil(argv[11]));
+	cb->stream->write_function(cb->stream, "	<network-ip>%s</network-ip>\n", switch_str_nil(argv[12]));
+	cb->stream->write_function(cb->stream, "	<network-port>%s</network-port>\n", switch_str_nil(argv[13]));
+	cb->stream->write_function(cb->stream, "	<sip-auth-user>%s</sip-auth-user>\n",
 							   switch_url_encode(switch_str_nil(argv[14]), xmlbuf, sizeof(xmlbuf)));
-	cb->stream->write_function(cb->stream, "        <sip-auth-realm>%s</sip-auth-realm>\n", switch_str_nil(argv[15]));
-	cb->stream->write_function(cb->stream, "        <mwi-account>%s@%s</mwi-account>\n", switch_str_nil(argv[16]), switch_str_nil(argv[17]));
+	cb->stream->write_function(cb->stream, "	<sip-auth-realm>%s</sip-auth-realm>\n", switch_str_nil(argv[15]));
+	cb->stream->write_function(cb->stream, "	<mwi-account>%s@%s</mwi-account>\n", switch_str_nil(argv[16]), switch_str_nil(argv[17]));
 	cb->stream->write_function(cb->stream, "    </registration>\n");
 
 	return 0;
@@ -3253,41 +3273,41 @@ static switch_status_t cmd_status(char **argv, int argc, switch_stream_handle_t 
 			if ((argv[1]) && (profile = sofia_glue_find_profile(argv[1]))) {
 				if (!argv[2] || (strcasecmp(argv[2], "reg") && strcasecmp(argv[2], "user"))) {
 					stream->write_function(stream, "%s\n", line);
-					stream->write_function(stream, "Name             \t%s\n", switch_str_nil(argv[1]));
+					stream->write_function(stream, "Name	     \t%s\n", switch_str_nil(argv[1]));
 					stream->write_function(stream, "Domain Name      \t%s\n", profile->domain_name ? profile->domain_name : "N/A");
 					if (strcasecmp(argv[1], profile->name)) {
-						stream->write_function(stream, "Alias Of         \t%s\n", switch_str_nil(profile->name));
+						stream->write_function(stream, "Alias Of	 \t%s\n", switch_str_nil(profile->name));
 					}
-					stream->write_function(stream, "Auto-NAT         \t%s\n", sofia_test_pflag(profile, PFLAG_AUTO_NAT) ? "true" : "false");
-					stream->write_function(stream, "DBName           \t%s\n", profile->dbname ? profile->dbname : switch_str_nil(profile->odbc_dsn));
+					stream->write_function(stream, "Auto-NAT	 \t%s\n", sofia_test_pflag(profile, PFLAG_AUTO_NAT) ? "true" : "false");
+					stream->write_function(stream, "DBName	   \t%s\n", profile->dbname ? profile->dbname : switch_str_nil(profile->odbc_dsn));
 					stream->write_function(stream, "Pres Hosts       \t%s\n", switch_str_nil(profile->presence_hosts));
-					stream->write_function(stream, "Dialplan         \t%s\n", switch_str_nil(profile->dialplan));
-					stream->write_function(stream, "Context          \t%s\n", switch_str_nil(profile->context));
+					stream->write_function(stream, "Dialplan	 \t%s\n", switch_str_nil(profile->dialplan));
+					stream->write_function(stream, "Context	  \t%s\n", switch_str_nil(profile->context));
 					stream->write_function(stream, "Challenge Realm  \t%s\n", zstr(profile->challenge_realm) ? "auto_to" : profile->challenge_realm);
 					stream->write_function(stream, "Challenge Opaque \t%s\n", switch_str_nil(profile->challenge_opaque));
 
 					for (x = 0; x < profile->rtpip_index; x++) {
-						stream->write_function(stream, "RTP-IP           \t%s\n", switch_str_nil(profile->rtpip[x]));
+						stream->write_function(stream, "RTP-IP	   \t%s\n", switch_str_nil(profile->rtpip[x]));
 					}
 
 					for (x = 0; x < profile->rtpip_index6; x++) {
-						stream->write_function(stream, "RTP-IP           \t%s\n", switch_str_nil(profile->rtpip6[x]));
+						stream->write_function(stream, "RTP-IP	   \t%s\n", switch_str_nil(profile->rtpip6[x]));
 					}
 
 					if (profile->extrtpip) {
 						stream->write_function(stream, "Ext-RTP-IP       \t%s\n", profile->extrtpip);
 					}
 
-					stream->write_function(stream, "SIP-IP           \t%s\n", switch_str_nil(profile->sipip));
+					stream->write_function(stream, "SIP-IP	   \t%s\n", switch_str_nil(profile->sipip));
 					if (profile->extsipip) {
 						stream->write_function(stream, "Ext-SIP-IP       \t%s\n", profile->extsipip);
 					}
 					if (! sofia_test_pflag(profile, PFLAG_TLS) || ! profile->tls_only) {
-						stream->write_function(stream, "URL              \t%s\n", switch_str_nil(profile->url));
-						stream->write_function(stream, "BIND-URL         \t%s\n", switch_str_nil(profile->bindurl));
+						stream->write_function(stream, "URL	      \t%s\n", switch_str_nil(profile->url));
+						stream->write_function(stream, "BIND-URL	 \t%s\n", switch_str_nil(profile->bindurl));
 					}
 					if (sofia_test_pflag(profile, PFLAG_TLS)) {
-						stream->write_function(stream, "TLS-URL          \t%s\n", switch_str_nil(profile->tls_url));
+						stream->write_function(stream, "TLS-URL	  \t%s\n", switch_str_nil(profile->tls_url));
 						stream->write_function(stream, "TLS-BIND-URL     \t%s\n", switch_str_nil(profile->tls_bindurl));
 					}
 					if (profile->ws_bindurl) {
@@ -3298,23 +3318,23 @@ static switch_status_t cmd_status(char **argv, int argc, switch_stream_handle_t 
 					}
 					stream->write_function(stream, "HOLD-MUSIC       \t%s\n", zstr(profile->hold_music) ? "N/A" : profile->hold_music);
 					stream->write_function(stream, "OUTBOUND-PROXY   \t%s\n", zstr(profile->outbound_proxy) ? "N/A" : profile->outbound_proxy);
-					stream->write_function(stream, "CODECS IN        \t%s\n", switch_str_nil(profile->inbound_codec_string));
+					stream->write_function(stream, "CODECS IN	\t%s\n", switch_str_nil(profile->inbound_codec_string));
 					stream->write_function(stream, "CODECS OUT       \t%s\n", switch_str_nil(profile->outbound_codec_string));
 
-					stream->write_function(stream, "TEL-EVENT        \t%d\n", profile->te);
+					stream->write_function(stream, "TEL-EVENT	\t%d\n", profile->te);
 					if (profile->dtmf_type == DTMF_2833) {
-						stream->write_function(stream, "DTMF-MODE        \trfc2833\n");
+						stream->write_function(stream, "DTMF-MODE	\trfc2833\n");
 					} else if (profile->dtmf_type == DTMF_INFO) {
-						stream->write_function(stream, "DTMF-MODE        \tinfo\n");
+						stream->write_function(stream, "DTMF-MODE	\tinfo\n");
 					} else {
-						stream->write_function(stream, "DTMF-MODE        \tnone\n");
+						stream->write_function(stream, "DTMF-MODE	\tnone\n");
 					}
-					stream->write_function(stream, "CNG              \t%d\n", profile->cng_pt);
+					stream->write_function(stream, "CNG	      \t%d\n", profile->cng_pt);
 					stream->write_function(stream, "SESSION-TO       \t%d\n", profile->session_timeout);
 					stream->write_function(stream, "MAX-DIALOG       \t%d\n", profile->max_proceeding);
 					stream->write_function(stream, "MAX-RECV-RPS     \t%d\n", profile->max_recv_requests_per_second);
-					stream->write_function(stream, "NOMEDIA          \t%s\n", sofia_test_flag(profile, TFLAG_INB_NOMEDIA) ? "true" : "false");
-					stream->write_function(stream, "LATE-NEG         \t%s\n", sofia_test_flag(profile, TFLAG_LATE_NEGOTIATION) ? "true" : "false");
+					stream->write_function(stream, "NOMEDIA	  \t%s\n", sofia_test_flag(profile, TFLAG_INB_NOMEDIA) ? "true" : "false");
+					stream->write_function(stream, "LATE-NEG	 \t%s\n", sofia_test_flag(profile, TFLAG_LATE_NEGOTIATION) ? "true" : "false");
 					stream->write_function(stream, "PROXY-MEDIA      \t%s\n", sofia_test_flag(profile, TFLAG_PROXY_MEDIA) ? "true" : "false");
 					stream->write_function(stream, "AGGRESSIVENAT    \t%s\n",
 										   sofia_test_pflag(profile, PFLAG_AGGRESSIVE_NAT_DETECTION) ? "true" : "false");
@@ -3324,9 +3344,9 @@ static switch_status_t cmd_status(char **argv, int argc, switch_stream_handle_t 
 					if (profile->max_registrations_perext > 0) {
 						stream->write_function(stream, "MAX-REG-PEREXT   \t%d\n", profile->max_registrations_perext);
 					}
-					stream->write_function(stream, "CALLS-IN         \t%u\n", profile->ib_calls);
+					stream->write_function(stream, "CALLS-IN	 \t%u\n", profile->ib_calls);
 					stream->write_function(stream, "FAILED-CALLS-IN  \t%u\n", profile->ib_failed_calls);
-					stream->write_function(stream, "CALLS-OUT        \t%u\n", profile->ob_calls);
+					stream->write_function(stream, "CALLS-OUT	\t%u\n", profile->ob_calls);
 					stream->write_function(stream, "FAILED-CALLS-OUT \t%u\n", profile->ob_failed_calls);
 					stream->write_function(stream, "REGISTRATIONS    \t%lu\n", sofia_profile_reg_count(profile));
 				}
@@ -4761,17 +4781,17 @@ SWITCH_STANDARD_API(sofia_function)
 	static const char usage_string[] = "USAGE:\n"
 		"--------------------------------------------------------------------------------\n"
 		"sofia global siptrace <on|off>\n"
-		"sofia        capture  <on|off>\n"
-		"             watchdog <on|off>\n\n"
+		"sofia	capture  <on|off>\n"
+		"	     watchdog <on|off>\n\n"
 		"sofia profile <name> [start | stop | restart | rescan] [wait]\n"
-		"                     flush_inbound_reg [<call_id> | <[user]@domain>] [reboot]\n"
-		"                     check_sync [<call_id> | <[user]@domain>]\n"
-		"                     [register | unregister] [<gateway name> | all]\n"
-		"                     killgw <gateway name>\n"
-		"                     [stun-auto-disable | stun-enabled] [true | false]]\n"
-		"                     siptrace <on|off>\n"
-		"                     capture  <on|off>\n"
-		"                     watchdog <on|off>\n\n"
+		"		     flush_inbound_reg [<call_id> | <[user]@domain>] [reboot]\n"
+		"		     check_sync [<call_id> | <[user]@domain>]\n"
+		"		     [register | unregister] [<gateway name> | all]\n"
+		"		     killgw <gateway name>\n"
+		"		     [stun-auto-disable | stun-enabled] [true | false]]\n"
+		"		     siptrace <on|off>\n"
+		"		     capture  <on|off>\n"
+		"		     watchdog <on|off>\n\n"
 		"sofia <status|xmlstatus> profile <name> [reg [<contact str>]] | [pres <pres str>] | [user <user@domain>]\n"
 		"sofia <status|xmlstatus> gateway <name>\n\n"
 		"sofia count <profiles|gateways>\n\n"
@@ -6888,6 +6908,73 @@ char *sofia_stir_shaken_as_create_identity_header(switch_core_session_t *session
 #endif
 }
 
+SWITCH_STANDARD_API(sofia_reinvite_no_sdp_function)
+{
+	char *uuid = NULL;
+	char *ack_crypto_change = NULL;
+	switch_core_session_t *target_session = NULL;
+	private_object_t *tech_pvt = NULL;
+	switch_channel_t *channel = NULL;
+	char *argv[3] = { 0 };
+	int argc;
+	char *mydata = NULL;
+	switch_core_session_message_t *msg;
+
+	if (zstr(cmd)) {
+		stream->write_function(stream, "-ERR Invalid syntax\n");
+		goto end;
+	}
+
+	mydata = strdup(cmd);
+	argc = switch_separate_string(mydata, ' ', argv, (sizeof(argv) / sizeof(argv[0])));
+
+	if (argc < 1) {
+		stream->write_function(stream, "-ERR Invalid syntax\n");
+		goto end;
+	}
+
+	uuid = argv[0];
+	ack_crypto_change = argv[1];
+
+	if (!(target_session = switch_core_session_locate(uuid))) {
+		stream->write_function(stream, "-ERR Cannot locate session\n");
+		goto end;
+	}
+
+	tech_pvt = switch_core_session_get_private(target_session);
+	channel = switch_core_session_get_channel(target_session);
+
+	if (!tech_pvt) {
+		stream->write_function(stream, "-ERR Cannot locate tech_pvt\n");
+		goto end;
+	}
+
+	/* Set channel variable to control crypto key change */
+	if (ack_crypto_change && !strcasecmp(ack_crypto_change, "ack_crypto_change")) {
+		switch_channel_set_variable(channel, "3pcc_change_crypto", "true");
+	} else {
+		switch_channel_set_variable(channel, "3pcc_change_crypto", "false");
+	}
+
+	/* Set flag for 3PCC handling */
+	sofia_set_flag_locked(tech_pvt, TFLAG_3PCC);
+	
+	/* Send RE-INVITE without SDP via session message queue for thread safety */
+	msg = switch_core_session_alloc(target_session, sizeof(*msg));
+	msg->message_id = SWITCH_MESSAGE_INDICATE_3PCC_REINVITE;
+	msg->string_arg = "";
+	switch_core_session_queue_message(target_session, msg);
+
+	stream->write_function(stream, "+OK\n");
+
+end:
+	if (target_session) {
+		switch_core_session_rwunlock(target_session);
+	}
+
+	switch_safe_free(mydata);
+	return SWITCH_STATUS_SUCCESS;
+}
 
 SWITCH_MODULE_LOAD_FUNCTION(mod_sofia_load)
 {
@@ -7187,6 +7274,9 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_sofia_load)
 	switch_console_set_complete("add sofia xmlstatus profile ::sofia::list_profiles reg");
 	switch_console_set_complete("add sofia xmlstatus gateway ::sofia::list_gateways");
 
+	switch_console_set_complete("add sofia_reinvite_no_sdp ::console::list_uuid");
+	switch_console_set_complete("add sofia_reinvite_no_sdp ::console::list_uuid ack_crypto_change");
+
 	switch_console_add_complete_func("::sofia::list_profiles", list_profiles);
 	switch_console_add_complete_func("::sofia::list_gateways", list_gateways);
 	switch_console_add_complete_func("::sofia::list_profile_gateway", list_profile_gateway);
@@ -7199,6 +7289,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_sofia_load)
 	
 	SWITCH_ADD_API(api_interface, "sofia_dig", "SIP DIG", sip_dig_function, "<url>");
 	SWITCH_ADD_API(api_interface, "sofia_presence_data", "Sofia Presence Data", sofia_presence_data_function, "[list|status|rpid|user_agent] [profile/]<user>@domain");
+	SWITCH_ADD_API(api_interface, "sofia_reinvite_no_sdp", "Send RE-INVITE without SDP", sofia_reinvite_no_sdp_function, "<uuid>");
 	SWITCH_ADD_CHAT(chat_interface, SOFIA_CHAT_PROTO, sofia_presence_chat_send);
 
 	crtp_init(*module_interface);
