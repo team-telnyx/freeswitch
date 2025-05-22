@@ -768,10 +768,15 @@ static switch_status_t shout_file_open(switch_file_handle_t *handle, const char 
 			}
 		}
 
-		mpg123_getformat(context->mh, &rate, &channels, &encoding);
+		if (mpg123_getformat(context->mh, &rate, &channels, &encoding) != MPG123_OK) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Error opening %s (Failed to get format)\n", path);
+			mpg123err = mpg123_strerror(context->mh);
+			goto error;
+		}
 
 		if (!channels || !rate) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Error opening %s (invalid rate or channel count)\n", path);
+			mpg123err = mpg123_strerror(context->mh);
 			goto error;
 		}
 
