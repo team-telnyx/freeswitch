@@ -6750,6 +6750,11 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 						match = 0;
 					}
 
+					if (match && !strcasecmp(map->rm_encoding, "opus") && codec_rate != imp->actual_samples_per_second) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Change OPUS codec rate %d to use actual codec rate %d\n", codec_rate, imp->actual_samples_per_second);
+						codec_rate = imp->actual_samples_per_second;
+					}
+
 					if (match) {
 						if (scrooge) {
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
