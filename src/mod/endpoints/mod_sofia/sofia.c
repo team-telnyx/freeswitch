@@ -1032,6 +1032,7 @@ void sofia_handle_sip_i_bye(switch_core_session_t *session, int status,
 		if (!zstr(reason_header)) {
 			switch_channel_set_variable(channel, "sip_reason", reason_header);
 			switch_channel_set_variable_partner(channel, "sip_reason", reason_header);
+			su_free(nua_handle_get_home(nh), reason_header);
 		}
 	}
 
@@ -1744,6 +1745,7 @@ static void our_sofia_event_callback(nua_event_t event,
 				if (!zstr(reason_header)) {
 					switch_channel_set_variable(channel, "sip_reason", reason_header);
 					switch_channel_set_variable_partner(channel, "sip_reason", reason_header);
+					su_free(nua_handle_get_home(nh), reason_header);
 				}
 			}
 		}
@@ -7068,22 +7070,32 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 			switch_channel_set_variable_partner(channel, "sip_invite_failure_phrase", NULL);
 		}
 
-		if (status >= 400 && sip->sip_reason && sip->sip_reason->re_protocol && (!strcasecmp(sip->sip_reason->re_protocol, "Q.850")
-				|| !strcasecmp(sip->sip_reason->re_protocol, "FreeSWITCH")
-				|| !strcasecmp(sip->sip_reason->re_protocol, profile->sdp_username)) && sip->sip_reason->re_cause) {
-			char status_str[5];
-			const char* session_ignore_list = switch_channel_get_variable(channel, "ignore_reason_header_by_sip_code");
-			const char* current_ignore_list = !zstr(session_ignore_list) ? session_ignore_list : profile->ignore_reason_header_by_sip_code;
-			switch_call_cause_t overwrite_cause = SWITCH_CAUSE_NORMAL_CLEARING;
-			switch_snprintf(status_str, sizeof(status_str), "%d", status);
-			if(!zstr(current_ignore_list) && !!switch_stristr(status_str, current_ignore_list)) {
-				tech_pvt->q850_cause = 0;
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Ignore Remote Reason for %d: %s\n", status, sip->sip_reason->re_cause);
-			} else {
-				tech_pvt->q850_cause = atoi(sip->sip_reason->re_cause);
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Remote Reason: %d\n", tech_pvt->q850_cause);
-			}
+		if (status >= 400 && sip->sip_reason) {
+			char *reason_header = sip_header_as_string(nua_handle_get_home(nh), (void *) sip->sip_reason);
 
+			if (!zstr(reason_header)) {
+				switch_channel_set_variable(channel, "sip_reason", reason_header);
+				su_free(nua_handle_get_home(nh), reason_header);
+			}
+			if (sip->sip_reason->re_protocol && (!strcasecmp(sip->sip_reason->re_protocol, "Q.850")
+					|| !strcasecmp(sip->sip_reason->re_protocol, "FreeSWITCH")
+					|| !strcasecmp(sip->sip_reason->re_protocol, profile->sdp_username)) && sip->sip_reason->re_cause) {
+				char status_str[5];
+				const char* session_ignore_list = switch_channel_get_variable(channel, "ignore_reason_header_by_sip_code");
+				const char* current_ignore_list = !zstr(session_ignore_list) ? session_ignore_list : profile->ignore_reason_header_by_sip_code;
+				switch_call_cause_t overwrite_cause = SWITCH_CAUSE_NORMAL_CLEARING;
+				switch_snprintf(status_str, sizeof(status_str), "%d", status);
+				if(!zstr(current_ignore_list) && !!switch_stristr(status_str, current_ignore_list)) {
+					tech_pvt->q850_cause = 0;
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Ignore Remote Reason for %d: %s\n", status, sip->sip_reason->re_cause);
+				} else {
+					tech_pvt->q850_cause = atoi(sip->sip_reason->re_cause);
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Remote Reason: %d\n", tech_pvt->q850_cause);
+				}
+			}
+		}
+
+		if (status >= 400) {
 			if (switch_telnyx_sip_cause_to_q850(status, &overwrite_cause)) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "Remote Reason is overwritten: %d -> %d\n", tech_pvt->q850_cause, overwrite_cause);
 				tech_pvt->q850_cause = overwrite_cause;
