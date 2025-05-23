@@ -6626,7 +6626,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 						codec_fmtp.private_info = imp->fmtp;
 						if (imp->matches_fmtp) {
 							if (SWITCH_STATUS_SUCCESS != imp->matches_fmtp(map->rm_fmtp, imp->fmtp)) {
-                                match = 0;
+								match = 0;
                             }
 						}
 //						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB found\n");
