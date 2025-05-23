@@ -702,8 +702,16 @@ SWITCH_DECLARE(switch_status_t) switch_core_codec_init_with_bitrate(switch_codec
 		uint32_t crate = !strcasecmp(codec_name, "g722") ? iptr->samples_per_second : iptr->actual_samples_per_second;
 		if ((!rate || rate == crate) && (!bitrate || bitrate == (uint32_t)iptr->bits_per_second) &&
 			(!ms || ms == (iptr->microseconds_per_packet / 1000)) && (!channels || channels == iptr->number_of_channels)) {
-			implementation = iptr;
-			break;
+			/* Try to match fmtp too */
+			if (iptr->matches_fmtp) {
+				if (SWITCH_STATUS_SUCCESS == iptr->matches_fmtp(iptr->fmtp, fmtp)) {
+					implementation = iptr;
+					break;
+				}
+			} else {
+				implementation = iptr;
+				break;
+			}
 		}
 	}
 
