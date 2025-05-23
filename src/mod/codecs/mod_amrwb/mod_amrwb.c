@@ -432,6 +432,23 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 					switch_test_flag(context, AMRWB_OPT_OCTET_ALIGN) ? 1 : 0);
 		}
 
+		if (!zstr(globals.fmtp_extra)) {
+			fmtptmp_pos += switch_snprintf(fmtptmp + fmtptmp_pos, sizeof(fmtptmp) - fmtptmp_pos, "; %s", globals.fmtp_extra);
+		}
+
+		if (globals.silence_supp_off) {
+			switch_channel_t *channel = NULL;
+			if (session) {
+				channel = switch_core_session_get_channel(session);
+				switch_assert(channel);
+				switch_channel_set_variable(channel, "suppress_cng", "true");
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Turning CNG off (silence suppression off, suppress_cng=true) due to silence-supp-off=true\n");
+			} else {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Cannot turn silence suppression off - session missing\n");
+			}
+		}
+
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "fmtp_out: %s\n", fmtptmp);
 		codec->fmtp_out = switch_core_strdup(codec->memory_pool, fmtptmp);
 
 		context->encoder_state = NULL;
