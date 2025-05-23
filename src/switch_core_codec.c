@@ -705,8 +705,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_codec_init_with_bitrate(switch_codec
 			/* Try to match fmtp too */
 			if (iptr->matches_fmtp) {
 				if (SWITCH_STATUS_SUCCESS == iptr->matches_fmtp(iptr->fmtp, fmtp)) {
-            		implementation = iptr;
-            		break;
+					implementation = iptr;
+					break;
 				}
 			} else {
 				implementation = iptr;
