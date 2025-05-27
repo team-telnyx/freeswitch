@@ -262,7 +262,6 @@ static switch_status_t amrwb_parse_fmtp_cb(const char *fmtp, switch_codec_fmtp_t
 
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AMR-WB fmtp mode: %s\n", oa ? "octet aligned" : "bandwidth efficient");
 		if ((oa == 0 && globals.invite_prefer_oa) || (oa == 1 && globals.invite_prefer_be)) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AMR-WB returning SWITCH_STATUS_IGNORE\n");
 			return SWITCH_STATUS_IGNORE;
 		}
 	}
@@ -520,7 +519,6 @@ static switch_status_t switch_amrwb_encode(switch_codec_t *codec,
 		switch_amrwb_pack_oa(shift_buf, n);  /* the payload is OA as it
 												comes out of the encoding function */
 		*encoded_data_len = n + 1;
-		//switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB encoder: encoded to %d bytes\n", *encoded_data_len);
 	} else {
 		switch_amrwb_pack_be(shift_buf, n);
 	}
