@@ -2907,7 +2907,7 @@ SWITCH_DECLARE(int) switch_loadable_module_get_codecs_sorted(const switch_codec_
 						continue;
 					}
 				}
-				if (!strcasecmp(name, "amr-wb")) {
+				if (imp->matches_fmtp) {
 					continue;
 				}
 
