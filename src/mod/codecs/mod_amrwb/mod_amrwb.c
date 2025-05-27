@@ -140,31 +140,31 @@ const int switch_amrwb_frame_sizes[] = {17, 23, 32, 36, 40, 46, 50, 58, 60, 5, 0
 
 #define invalid_frame_type (index > SWITCH_AMRWB_MODES && index != 0xe && index != 0xf) /* include SPEECH_LOST and NO_DATA*/
 
-//static switch_bool_t switch_amrwb_unpack_oa(unsigned char *buf, uint8_t *tmp, int encoded_data_len)
-//{
-//	uint8_t *tocs;
-//	int index;
-//	int framesz;
-//
-//	buf++;/* CMR skip */
-//	tocs = buf;
-//	index = ((tocs[0]>>3) & 0xf);
-//	buf++; /* point to voice payload */
-//
-//	if (invalid_frame_type) {
-//		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB decoder (OA): Invalid TOC: 0x%x", index);
-//		return SWITCH_FALSE;
-//	}
-//	framesz = switch_amrwb_frame_sizes[index];
-//	if (framesz > encoded_data_len - 1) {
-//		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB decoder (OA): Invalid frame size: %d\n", framesz);
-//		return SWITCH_FALSE;
-//	}
-//	tmp[0] = tocs[0];
-//	memcpy(&tmp[1], buf, framesz);
-//
-//	return SWITCH_TRUE;
-//}
+static switch_bool_t switch_amrwb_unpack_oa(unsigned char *buf, uint8_t *tmp, int encoded_data_len)
+{
+	uint8_t *tocs;
+	int index;
+	int framesz;
+
+	buf++;/* CMR skip */
+	tocs = buf;
+	index = ((tocs[0]>>3) & 0xf);
+	buf++; /* point to voice payload */
+
+	if (invalid_frame_type) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB decoder (OA): Invalid TOC: 0x%x", index);
+		return SWITCH_FALSE;
+	}
+	framesz = switch_amrwb_frame_sizes[index];
+	if (framesz > encoded_data_len - 1) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB decoder (OA): Invalid frame size: %d\n", framesz);
+		return SWITCH_FALSE;
+	}
+	tmp[0] = tocs[0];
+	memcpy(&tmp[1], buf, framesz);
+
+	return SWITCH_TRUE;
+}
 
 static switch_bool_t switch_amrwb_pack_oa(unsigned char *shift_buf, int n)
 {
@@ -228,7 +228,7 @@ static switch_bool_t switch_amrwb_info(switch_codec_t *codec, unsigned char *enc
 static switch_status_t amrwb_parse_fmtp_cb(const char *fmtp, switch_codec_fmtp_t *codec_fmtp)
 {
 	/* Must return IGNORE for FS to skip this codec */
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Considering fmtp\n");
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Considering fmtp %s\n", fmtp);
 
 	if (!zstr(fmtp)) {
 		int x, argc;
@@ -262,6 +262,7 @@ static switch_status_t amrwb_parse_fmtp_cb(const char *fmtp, switch_codec_fmtp_t
 
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AMR-WB fmtp mode: %s\n", oa ? "octet aligned" : "bandwidth efficient");
 		if ((oa == 0 && globals.invite_prefer_oa) || (oa == 1 && globals.invite_prefer_be)) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AMR-WB returning SWITCH_STATUS_IGNORE\n");
 			return SWITCH_STATUS_IGNORE;
 		}
 	}
@@ -325,6 +326,7 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 					*arg++ = '\0';
 					if (!strcasecmp(data, "octet-align")) {
 						if (atoi(arg)) {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "AMR-WB fmtp octet-align: %s\n", arg);
 							switch_set_flag(context, AMRWB_OPT_OCTET_ALIGN);
 						}
 					} else if (!strcasecmp(data, "mode-change-neighbor")) {
@@ -518,6 +520,7 @@ static switch_status_t switch_amrwb_encode(switch_codec_t *codec,
 		switch_amrwb_pack_oa(shift_buf, n);  /* the payload is OA as it
 												comes out of the encoding function */
 		*encoded_data_len = n + 1;
+		//switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB encoder: encoded to %d bytes\n", *encoded_data_len);
 	} else {
 		switch_amrwb_pack_be(shift_buf, n);
 	}
@@ -563,11 +566,10 @@ static switch_status_t switch_amrwb_decode(switch_codec_t *codec,
 
 	if (switch_test_flag(context, AMRWB_OPT_OCTET_ALIGN)) {
 		/* Octed Aligned */
-		memcpy(tmp, buf + 1, encoded_data_len - 1);
-//		if (!switch_amrwb_unpack_oa(buf, tmp, encoded_data_len)) {
-//			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB decoder (OA): Invalid frame size: %d\n", encoded_data_len);
-//			return SWITCH_STATUS_FALSE;
-//		}
+		if (!switch_amrwb_unpack_oa(buf, tmp, encoded_data_len)) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB decoder (OA): Invalid frame size: %d\n", encoded_data_len);
+			return SWITCH_STATUS_FALSE;
+		}
 	} else {
 		/* Bandwidth Efficient */
 		if (!switch_amrwb_unpack_be(buf, tmp, encoded_data_len)) {
