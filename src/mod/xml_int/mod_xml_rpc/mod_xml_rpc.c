@@ -1280,7 +1280,7 @@ static xmlrpc_value *freeswitch_batch(xmlrpc_env * const envP, xmlrpc_value * co
 		
 		xmlrpc_array_read_item(envP, commands, i, &command);
 		if (envP->fault_occurred) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Memory allocation failed!\n");
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to read command item from array!\n");
 			break;
 		}
 
