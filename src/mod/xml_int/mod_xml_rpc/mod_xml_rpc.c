@@ -1254,7 +1254,6 @@ static xmlrpc_value *freeswitch_man(xmlrpc_env * const envP, xmlrpc_value * cons
 
 static xmlrpc_value *freeswitch_batch(xmlrpc_env * const envP, xmlrpc_value * const paramArrayP, void *const userData, void *const callInfo)
 {
-	switch_stream_handle_t stream = { 0 };
 	xmlrpc_value *commandResults = NULL;
 	xmlrpc_value *commands = NULL;
 	unsigned int i = 0,commandSize = 0;
