@@ -194,9 +194,22 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 		}
 
 		if (status == SWITCH_STATUS_INUSE) {
+			switch_bool_t continue_recording = switch_channel_var_true(session->channel, "continue_recording_on_hold");
 			*frame = &runtime.dummy_cng_frame;
 			if (switch_test_flag(*frame, SFF_FORK_RTP)) {
 				switch_core_session_set_fork_read_frame(session, *frame);
+			}
+			if (continue_recording) {
+				switch_mutex_lock(session->codec_read_mutex);
+				if (!switch_core_codec_ready(session->read_codec)) {
+					switch_mutex_unlock(session->codec_read_mutex);
+					switch_yield(20000);
+					return SWITCH_STATUS_SUCCESS;
+				}
+				(*frame)->codec = session->read_codec;
+				switch_mutex_unlock(session->codec_read_mutex);
+				status = SWITCH_STATUS_SUCCESS;
+				goto cnt_with_cng;
 			}
 			switch_yield(20000);
 			return SWITCH_STATUS_SUCCESS;
@@ -239,6 +252,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 		goto done;
 	}
 
+cnt_with_cng:
 	if (switch_test_flag(*frame, SFF_FORK_RTP)) {
 		flag |= SFF_FORK_RTP;
 		fork_frame = *frame;
