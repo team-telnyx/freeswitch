@@ -1258,7 +1258,6 @@ static xmlrpc_value *freeswitch_batch(xmlrpc_env * const envP, xmlrpc_value * co
 	xmlrpc_value *commands = NULL;
 	unsigned int i = 0,commandSize = 0;
 
-
 	/* Parse our argument array. */
 	xmlrpc_decompose_value(envP, paramArrayP, "(A)", &commands);
 	if (envP->fault_occurred) {
