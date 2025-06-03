@@ -1252,7 +1252,7 @@ static xmlrpc_value *freeswitch_man(xmlrpc_env * const envP, xmlrpc_value * cons
 	return val;
 }
 
-static xmlrpc_value *freeswitch_batch(xmlrpc_env * const envP, xmlrpc_value * const paramArrayP, void *const userData, void *const callInfo)
+static xmlrpc_value *freeswitch_batch(xmlrpc_env * const envP, xmlrpc_value * const paramArrayP, void * const userData, void * const callInfo)
 {
 	xmlrpc_value *commandResults = NULL;
 	xmlrpc_value *commands = NULL;
