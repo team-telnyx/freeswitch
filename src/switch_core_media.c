@@ -6627,18 +6627,8 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 						if (imp->matches_fmtp) {
 							if (SWITCH_STATUS_SUCCESS != imp->matches_fmtp(map->rm_fmtp, imp->fmtp)) {
 								match = 0;
-                            }
+							}
 						}
-//						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB found\n");
-//						if (amrwb_offerings_n > 0) {
-//							switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB offerings > 0\n");
-//							if (amrwb_offerings_rejected_n < amrwb_offerings_n) {
-//								switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB calling parse_fmtp\n");
-//								if (SWITCH_STATUS_IGNORE == switch_core_codec_parse_fmtp(map->rm_encoding, map->rm_fmtp, map->rm_rate, &codec_fmtp)) {
-//									match = 0;
-//								}
-//							}
-//						}
 					} else if (!strcasecmp(map->rm_encoding, "AMR")) {
 						if (amr_offerings_n > 1) {
 							if (amr_offerings_rejected_n + 1 < amr_offerings_n) {
