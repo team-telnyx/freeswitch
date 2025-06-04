@@ -708,7 +708,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_codec_init_with_bitrate(switch_codec
 					implementation = iptr;
 					break;
 				}
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Fmtp match failed.\n");
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Fmtp match failed (%s - %s).\n", iptr->fmtp, fmtp);
 			} else {
 				implementation = iptr;
 				break;
