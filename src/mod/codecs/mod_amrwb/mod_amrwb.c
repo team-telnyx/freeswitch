@@ -690,7 +690,7 @@ static switch_status_t matches_fmtp(const char *fmtp, const char *codec_fmtp)
 	int oa1 = extract_octet_align(fmtp);
 	int oa2 = extract_octet_align(codec_fmtp);
 
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB fmtp: %s, codec_fmtp: %s\n", fmtp, codec_fmtp);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AMRWB fmtp: %s, codec_fmtp: %s\n", fmtp, codec_fmtp);
 
 	return (oa1 == oa2) ? SWITCH_STATUS_SUCCESS : SWITCH_STATUS_FALSE;
 }
