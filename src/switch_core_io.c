@@ -69,7 +69,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 {
 	switch_io_event_hook_read_frame_t *ptr;
 	switch_status_t status = SWITCH_STATUS_FALSE;
-	int need_codec, perfect, do_bugs = 0, do_resample = 0, is_cng = 0, tap_only = 0, cng_frame = 0;
+	int need_codec, perfect, do_bugs = 0, do_resample = 0, is_cng = 0, tap_only = 0, is_inuse = 0;
 	switch_codec_implementation_t codec_impl;
 	switch_frame_t *fork_frame = NULL;
 	unsigned int flag = 0;
@@ -218,7 +218,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 				(*frame)->codec = session->read_codec;
 				switch_mutex_unlock(session->codec_read_mutex);
 				status = SWITCH_STATUS_SUCCESS;
-				cng_frame = 1;
+				is_inuse = 1;
 				goto cnt_with_cng;
 			}
 			switch_yield(20000);
@@ -297,7 +297,7 @@ cnt_with_cng:
 		for (bp = session->bugs; bp; bp = bp->next) {
 			ok = SWITCH_TRUE;
 
-			if (cng_frame && !switch_core_media_bug_test_flag(bp, SMBF_CONTINUE_ON_HOLD)) {
+			if (is_inuse && !switch_core_media_bug_test_flag(bp, SMBF_CONTINUE_ON_HOLD)) {
 				continue;
 			}
 			if (switch_core_media_bug_test_flag(bp, SMBF_PAUSE) || (switch_channel_test_flag(session->channel, CF_PAUSE_BUGS) && !switch_core_media_bug_test_flag(bp, SMBF_NO_PAUSE))) {
@@ -361,7 +361,7 @@ cnt_with_cng:
 			for (bp = session->bugs; bp; bp = bp->next) {
 				ok = SWITCH_TRUE;
 
-				if (cng_frame && !switch_core_media_bug_test_flag(bp, SMBF_CONTINUE_ON_HOLD)) {
+				if (is_inuse && !switch_core_media_bug_test_flag(bp, SMBF_CONTINUE_ON_HOLD)) {
 					continue;
 				}
 
@@ -714,7 +714,7 @@ cnt_with_cng:
 			for (bp = session->bugs; bp; bp = bp->next) {
 				ok = SWITCH_TRUE;
 
-				if (cng_frame && !switch_core_media_bug_test_flag(bp, SMBF_CONTINUE_ON_HOLD)) {
+				if (is_inuse && !switch_core_media_bug_test_flag(bp, SMBF_CONTINUE_ON_HOLD)) {
 					continue;
 				}
 
@@ -769,7 +769,7 @@ cnt_with_cng:
 			for (bp = session->bugs; bp; bp = bp->next) {
 				ok = SWITCH_TRUE;
 
-				if (cng_frame && !switch_core_media_bug_test_flag(bp, SMBF_CONTINUE_ON_HOLD)) {
+				if (is_inuse && !switch_core_media_bug_test_flag(bp, SMBF_CONTINUE_ON_HOLD)) {
 					continue;
 				}
 
@@ -983,7 +983,7 @@ cnt_with_cng:
 			for (bp = session->bugs; bp; bp = bp->next) {
 				ok = SWITCH_TRUE;
 
-				if (cng_frame && !switch_core_media_bug_test_flag(bp, SMBF_CONTINUE_ON_HOLD)) {
+				if (is_inuse && !switch_core_media_bug_test_flag(bp, SMBF_CONTINUE_ON_HOLD)) {
 					continue;
 				}
 
