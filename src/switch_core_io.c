@@ -203,8 +203,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 			switch_thread_rwlock_rdlock(session->bug_rwlock);
 			for (switch_media_bug_t *bp = session->bugs; bp; bp = bp->next) {
 				if (switch_core_media_bug_test_flag(bp, SMBF_CONTINUE_ON_HOLD)) {
-    	            has_bug_with_continue_on_hold = SWITCH_TRUE;
-        	        break;
+					has_bug_with_continue_on_hold = SWITCH_TRUE;
+					break;
 				}
 			}
 			switch_thread_rwlock_unlock(session->bug_rwlock);
@@ -298,8 +298,8 @@ cnt_with_cng:
 			ok = SWITCH_TRUE;
 
 			if (cng_frame && !switch_core_media_bug_test_flag(bp, SMBF_CONTINUE_ON_HOLD)) {
-                continue;
-            }
+				continue;
+			}
 			if (switch_core_media_bug_test_flag(bp, SMBF_PAUSE) || (switch_channel_test_flag(session->channel, CF_PAUSE_BUGS) && !switch_core_media_bug_test_flag(bp, SMBF_NO_PAUSE))) {
 				continue;
 			}
@@ -362,8 +362,8 @@ cnt_with_cng:
 				ok = SWITCH_TRUE;
 
 				if (cng_frame && !switch_core_media_bug_test_flag(bp, SMBF_CONTINUE_ON_HOLD)) {
-    	            continue;
-        	    }
+					continue;
+				}
 
 				if (switch_core_media_bug_test_flag(bp, SMBF_PAUSE) || (switch_channel_test_flag(session->channel, CF_PAUSE_BUGS) && !switch_core_media_bug_test_flag(bp, SMBF_NO_PAUSE))) {
 					continue;
@@ -715,8 +715,8 @@ cnt_with_cng:
 				ok = SWITCH_TRUE;
 
 				if (cng_frame && !switch_core_media_bug_test_flag(bp, SMBF_CONTINUE_ON_HOLD)) {
-    	            continue;
-        	    }
+					continue;
+				}
 
 				if (switch_core_media_bug_test_flag(bp, SMBF_PAUSE) || (switch_channel_test_flag(session->channel, CF_PAUSE_BUGS) && !switch_core_media_bug_test_flag(bp, SMBF_NO_PAUSE))) {
 					continue;
@@ -770,8 +770,8 @@ cnt_with_cng:
 				ok = SWITCH_TRUE;
 
 				if (cng_frame && !switch_core_media_bug_test_flag(bp, SMBF_CONTINUE_ON_HOLD)) {
-    	            continue;
-        	    }
+					continue;
+				}
 
 				if (switch_core_media_bug_test_flag(bp, SMBF_PAUSE) || (switch_channel_test_flag(session->channel, CF_PAUSE_BUGS) && !switch_core_media_bug_test_flag(bp, SMBF_NO_PAUSE))) {
 					continue;
@@ -984,8 +984,8 @@ cnt_with_cng:
 				ok = SWITCH_TRUE;
 
 				if (cng_frame && !switch_core_media_bug_test_flag(bp, SMBF_CONTINUE_ON_HOLD)) {
-    	            continue;
-        	    }
+					continue;
+				}
 
 				if (switch_core_media_bug_test_flag(bp, SMBF_PAUSE) || (switch_channel_test_flag(session->channel, CF_PAUSE_BUGS) && !switch_core_media_bug_test_flag(bp, SMBF_NO_PAUSE))) {
 					continue;
