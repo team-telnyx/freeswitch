@@ -325,7 +325,6 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 					*arg++ = '\0';
 					if (!strcasecmp(data, "octet-align")) {
 						if (atoi(arg)) {
-							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "AMR-WB fmtp octet-align: %s\n", arg);
 							switch_set_flag(context, AMRWB_OPT_OCTET_ALIGN);
 						}
 					} else if (!strcasecmp(data, "mode-change-neighbor")) {
@@ -441,15 +440,15 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 			switch_channel_t *channel = NULL;
 			if (session) {
 				channel = switch_core_session_get_channel(session);
-				switch_assert(channel);
-				switch_channel_set_variable(channel, "suppress_cng", "true");
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Turning CNG off (silence suppression off, suppress_cng=true) due to silence-supp-off=true\n");
+				if (channel) {
+					switch_channel_set_variable(channel, "suppress_cng", "true");
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Turning CNG off (silence suppression off, suppress_cng=true) due to silence-supp-off=true\n");
+				}
 			} else {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Cannot turn silence suppression off - session missing\n");
 			}
 		}
 
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "fmtp_out: %s\n", fmtptmp);
 		codec->fmtp_out = switch_core_strdup(codec->memory_pool, fmtptmp);
 
 		context->encoder_state = NULL;
