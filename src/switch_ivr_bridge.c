@@ -470,14 +470,21 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 #endif
 
 	get_read_impl_status = switch_core_session_get_read_impl(session_a, &read_impl);
+	if (get_read_impl_status != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_ERROR, "Cannot get read implementation!\n");
+		return NULL;
+	}
 
 	input_callback = data->input_callback;
 	user_data = data->session_data;
 	stream_id = data->stream_id;
 
-	if (get_read_impl_status == SWITCH_STATUS_SUCCESS) {
-		per_read_frame_ms = 1000 / (read_impl.actual_samples_per_second / read_impl.samples_per_packet);
+	if (read_impl.samples_per_packet == 0) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_ERROR, "Read implementation's samples_per_packet is zero!\n");
+                return NULL;
 	}
+
+	per_read_frame_ms = 1000 / (read_impl.actual_samples_per_second / read_impl.samples_per_packet);
 
 	chan_a = switch_core_session_get_channel(session_a);
 	chan_b = switch_core_session_get_channel(session_b);
