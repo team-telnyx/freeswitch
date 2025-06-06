@@ -451,7 +451,6 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 	const char *banner_file = NULL;
 	int played_banner = 0, banner_counter = 0;
 	int pass_val = 0, last_pass_val = 0;
-	switch_status_t get_read_impl_status;
 
 #ifdef SWITCH_VIDEO_IN_THREADS
 	struct vid_helper vh = { 0 };
@@ -469,8 +468,7 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 	//switch_channel_set_flag(switch_core_session_get_channel(session_b), CF_ACCEPT_CNG);
 #endif
 
-	get_read_impl_status = switch_core_session_get_read_impl(session_a, &read_impl);
-	if (get_read_impl_status != SWITCH_STATUS_SUCCESS) {
+	if (switch_core_session_get_read_impl(session_a, &read_impl) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_ERROR, "Cannot get read implementation!\n");
 		return NULL;
 	}
