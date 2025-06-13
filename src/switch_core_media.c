@@ -9789,7 +9789,7 @@ SWITCH_DECLARE(void) switch_core_media_fork_do_fire_start_event(switch_core_sess
 
 	if (switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, "telnyx_media_stream::start") == SWITCH_STATUS_SUCCESS) {
 		switch_channel_event_set_data(session->channel, event);
-		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "telnyx_media_streaming_start_time", "%ld", fork->start_time);
+		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "telnyx_media_streaming_start_time", "%lld", fork->start_time);
 		if (!zstr(fork->fork_rx.cmd)) {
 			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "telnyx_media_streaming_rx", fork->fork_rx.cmd);
 		}
@@ -9867,7 +9867,7 @@ SWITCH_DECLARE(void) switch_core_media_fork_do_fire_stop_event(switch_core_sessi
 			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "variable_media_fork_request", fmr);
 		}
 
-		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "telnyx_media_streaming_stop_time", "%ld", fork->stop_time);
+		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "telnyx_media_streaming_stop_time", "%lld", fork->stop_time);
 		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "telnyx_media_streaming_last_duration", "%d", last_duration);
 		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "telnyx_media_streaming_duration", "%d", fork->duration);
 		switch_event_fire(&event);
@@ -10256,7 +10256,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 	}
 
 	if (((val = switch_channel_get_variable(session->channel, "srtp_hangup_on_error")))) {
-		flags[SWITCH_RTP_FLAG_SRTP_HANGUP_ON_ERROR] = switch_true(val);
+		flags[SWITCH_RTP_FLAG_SRTP_HANGUP_ON_ERROR] = switch_true(val) ? 1 : 0;
 	} else if (switch_media_handle_test_media_flag(smh, SCMF_SRTP_HANGUP_ON_ERROR)) {
 		flags[SWITCH_RTP_FLAG_SRTP_HANGUP_ON_ERROR]++;
 	}
