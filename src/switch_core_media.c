@@ -205,6 +205,7 @@ struct switch_rtp_engine_s {
 	void *engine_user_data;
 	int8_t engine_function_running;
 	switch_frame_buffer_t *write_fb;
+	uint8_t ice_remote_initiator;
 };
 
 #define MAX_REJ_STREAMS 10
@@ -4660,7 +4661,11 @@ static switch_call_direction_t switch_ice_direction(switch_rtp_engine_t *engine,
 	}
 
 	if (switch_rtp_has_dtls() && dtls_ok(smh->session)) {
-		r = engine->dtls_controller ? SWITCH_CALL_DIRECTION_INBOUND : SWITCH_CALL_DIRECTION_OUTBOUND;
+		if (switch_channel_test_flag(session->channel, CF_OBSERVE_INITIATOR)) {
+			r = engine->ice_remote_initiator ? SWITCH_CALL_DIRECTION_INBOUND : SWITCH_CALL_DIRECTION_OUTBOUND;
+		} else {
+			r = engine->dtls_controller ? SWITCH_CALL_DIRECTION_INBOUND : SWITCH_CALL_DIRECTION_OUTBOUND;
+		}
 	} else {
 		if ((switch_channel_test_flag(session->channel, CF_REINVITE) || switch_channel_test_flag(session->channel, CF_RECOVERING))
 			&& switch_channel_test_flag(session->channel, CF_AVPF)) {
@@ -4763,7 +4768,7 @@ static switch_bool_t is_mdns(const char *ip)
 }
 
 //?
-static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t type, sdp_session_t *sdp, sdp_media_t *m)
+static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t type, sdp_session_t *sdp, sdp_media_t *m, switch_sdp_type_t sdp_type)
 {
 	switch_rtp_engine_t *engine = &smh->engines[type];
 	sdp_attribute_t *attr = NULL, *attrs[2] = { 0 };
@@ -4781,6 +4786,14 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 
 	if (switch_true(switch_channel_get_variable_dup(smh->session->channel, "ignore_ice_mdns", SWITCH_FALSE, -1))) {
 		ignore_ice_mdns = 1;
+	}
+
+
+	if (switch_channel_var_true(smh->session->channel, "ice_observe_initiator")) {
+		switch_channel_set_flag(smh->session->channel, CF_OBSERVE_INITIATOR);
+		if (ice_seen && sdp_type == SDP_OFFER && !switch_channel_test_flag(smh->session->channel, CF_REINVITE)) {
+			engine->ice_remote_initiator = 1;
+		}
 	}
 
 	//if (engine->ice_in.is_chosen[0] && engine->ice_in.is_chosen[1]) {
@@ -6035,9 +6048,9 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 	}
 
 	switch_channel_set_variable(smh->session->channel, "ice_lite_inbound", "false");
-	check_ice(smh, SWITCH_MEDIA_TYPE_AUDIO, sdp, NULL);
-	check_ice(smh, SWITCH_MEDIA_TYPE_VIDEO, sdp, NULL);
-	check_ice(smh, SWITCH_MEDIA_TYPE_TEXT, sdp, NULL);
+	check_ice(smh, SWITCH_MEDIA_TYPE_AUDIO, sdp, NULL, sdp_type);
+	check_ice(smh, SWITCH_MEDIA_TYPE_VIDEO, sdp, NULL, sdp_type);
+	check_ice(smh, SWITCH_MEDIA_TYPE_TEXT, sdp, NULL, sdp_type);
 
 	if ((sdp->sdp_connection && sdp->sdp_connection->c_address && !strcmp(sdp->sdp_connection->c_address, "0.0.0.0"))) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "RFC2543 from March 1999 called; They want their 0.0.0.0 hold method back.....\n");
@@ -7063,7 +7076,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 				}
 
 				if (match) {
-					if (check_ice(smh, SWITCH_MEDIA_TYPE_AUDIO, sdp, m) == SWITCH_STATUS_FALSE) {
+					if (check_ice(smh, SWITCH_MEDIA_TYPE_AUDIO, sdp, m, sdp_type) == SWITCH_STATUS_FALSE) {
 						match = 0;
 						got_audio = 0;
 					} else {
@@ -7267,7 +7280,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 				switch_core_media_choose_port(session, SWITCH_MEDIA_TYPE_TEXT, 1);
 			}
 
-			check_ice(smh, SWITCH_MEDIA_TYPE_TEXT, sdp, m);
+			check_ice(smh, SWITCH_MEDIA_TYPE_TEXT, sdp, m, sdp_type);
 			//parse rtt
 
 		} else if (m->m_type == sdp_media_video) {
@@ -7580,7 +7593,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 				}
 
 				if (switch_core_media_set_video_codec(session, 0) == SWITCH_STATUS_SUCCESS) {
-					if (check_ice(smh, SWITCH_MEDIA_TYPE_VIDEO, sdp, m) == SWITCH_STATUS_FALSE) {
+					if (check_ice(smh, SWITCH_MEDIA_TYPE_VIDEO, sdp, m, sdp_type) == SWITCH_STATUS_FALSE) {
 						vmatch = 0;
 					}
 				}
