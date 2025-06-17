@@ -3496,7 +3496,9 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_set_remote_address(switch_rtp_t *rtp_
 		rtp_session->dtls->sock_output = rtp_session->sock_output;
 
 		if (rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX]) {
+			switch_mutex_lock(rtp_session->ice_mutex);
 			status = switch_sockaddr_info_get(&rtp_session->dtls->remote_addr, host, SWITCH_UNSPEC, port, 0, rtp_session->pool);
+			switch_mutex_unlock(rtp_session->ice_mutex);
 		}
 	}
 
