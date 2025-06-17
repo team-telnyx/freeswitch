@@ -5897,6 +5897,25 @@ SWITCH_DECLARE(int16_t) switch_core_media_validate_common_audio_sdp(switch_core_
 	return match;
 }
 
+static inline void handle_audio_timeout(switch_core_session_t *session, switch_rtp_engine_t *a_engine)
+{
+	a_engine->media_timeout = 0;
+	a_engine->media_hold_timeout = 0;
+
+	if (switch_rtp_ready(a_engine->rtp_session)) {
+		   switch_rtp_set_max_missed_packets(a_engine->rtp_session, 0);
+		   a_engine->max_missed_hold_packets = 0;
+		   a_engine->max_missed_packets = 0;
+		   switch_rtp_set_media_timeout(a_engine->rtp_session, a_engine->media_timeout);
+	} else {
+		   switch_channel_set_variable(session->channel, "media_timeout_audio", "0");
+		   switch_channel_set_variable(session->channel, "media_hold_timeout_audio", "0");
+		   switch_channel_set_variable(session->channel, "rtp_timeout_sec", "0");
+		   switch_channel_set_variable(session->channel, "rtp_hold_timeout_sec", "0");
+	}
+}
+
+
 //?
 SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *session, const char *r_sdp, uint8_t *proceed, switch_sdp_type_t sdp_type)
 {
@@ -6419,49 +6438,46 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 				}
 			}
 
-			for (attr = sdp->sdp_attributes; attr; attr = attr->a_next) {
-				if (zstr(attr->a_name)) {
-					continue;
-				}
-
-
-				if (!strncasecmp(attr->a_name, "ice", 3)) {
-					ice++;
-				} else if (sendonly < 2 && !strcasecmp(attr->a_name, "sendonly")) {
-					sendonly = 1;
-					switch_channel_set_variable(session->channel, "media_audio_mode", "recvonly");
-				} else if (sendonly < 2 && !strcasecmp(attr->a_name, "inactive")) {
-					switch_channel_set_variable(session->channel, "media_audio_mode", "inactive");
-				} else if (!strcasecmp(attr->a_name, "recvonly")) {
-					switch_channel_set_variable(session->channel, "media_audio_mode", "sendonly");
-					recvonly = 1;
-
-					a_engine->media_timeout = 0;
-					a_engine->media_hold_timeout = 0;
-
-					if (switch_rtp_ready(a_engine->rtp_session)) {
-						switch_rtp_set_max_missed_packets(a_engine->rtp_session, 0);
-						a_engine->max_missed_hold_packets = 0;
-						a_engine->max_missed_packets = 0;
-						switch_rtp_set_media_timeout(a_engine->rtp_session, a_engine->media_timeout);
-					} else {
-						switch_channel_set_variable(session->channel, "media_timeout_audio", "0");
-						switch_channel_set_variable(session->channel, "media_hold_timeout_audio", "0");
-						switch_channel_set_variable(session->channel, "rtp_timeout_sec", "0");
-						switch_channel_set_variable(session->channel, "rtp_hold_timeout_sec", "0");
+			if (sdp->sdp_attributes) {
+				for (attr = sdp->sdp_attributes; attr; attr = attr->a_next) {
+					if (zstr(attr->a_name)) {
+						continue;
 					}
-				} else if (sendonly < 2 && !strcasecmp(attr->a_name, "sendrecv")) {
-					sendonly = 0;
-				} else if (!strcasecmp(attr->a_name, "ptime")) {
-					ptime = dptime = atoi(attr->a_value);
-				} else if (!strcasecmp(attr->a_name, "maxptime")) {
-					maxptime = dmaxptime = atoi(attr->a_value);
-				} else if (!strcasecmp(attr->a_name, "group")) {
-					switch_channel_set_variable(session->channel, "rtp_group", attr->a_value);
-				} else if (!strcasecmp(attr->a_name, "fingerprint") && !zstr(attr->a_value)) {
-					got_crypto = 1;
+
+					if (!strncasecmp(attr->a_name, "ice", 3)) {
+						ice++;
+					} else if (!strcasecmp(attr->a_name, "ptime")) {
+						 ptime = dptime = atoi(attr->a_value);
+					} else if (!strcasecmp(attr->a_name, "maxptime")) {
+						maxptime = dmaxptime = atoi(attr->a_value);
+					}
 				}
 			}
+
+			if (!ice && m->m_attributes) {
+				for (attr = m->m_attributes; attr; attr = attr->a_next) {
+					if (zstr(attr->a_name)) {
+						continue;
+					}
+
+					if (!strncasecmp(attr->a_name, "ice", 3)) {
+						ice++;
+					}
+				}
+			}
+
+			if (sendonly < 2 && m->m_mode == sdp_sendonly) {
+ 				sendonly = 1;
+ 				switch_channel_set_variable(session->channel, "media_audio_mode", "recvonly");
+ 			} else if (sendonly < 2 && m->m_mode == sdp_inactive) {
+ 				switch_channel_set_variable(session->channel, "media_audio_mode", "inactive");
+ 			} else if (m->m_mode == sdp_recvonly) {
+ 				switch_channel_set_variable(session->channel, "media_audio_mode", "sendonly");
+ 				recvonly = 1;
+ 				handle_audio_timeout(session, a_engine);
+ 			} else if (sendonly < 2 && m->m_mode == sdp_sendrecv) {
+ 				sendonly = 0;
+ 			}
 
 			if (sendonly == 2 && ice) {
 				sendonly = 0;
