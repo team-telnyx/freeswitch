@@ -2303,7 +2303,7 @@ static switch_status_t t38_gateway_on_consume_media(switch_core_session_t *sessi
 	switch_channel_set_variable(channel, "t38_peer", NULL);
 
 	if (switch_channel_var_true(channel, "delay_hangup_on_fax_failure") && switch_channel_test_flag(channel, CF_REINVITE)) {
-		switch_ivr_schedule_hangup(switch_epoch_time_now(NULL) + 60, switch_core_session_get_uuid(session), SWITCH_CAUSE_NORMAL_CLEARING, SWITCH_FALSE);
+		switch_ivr_schedule_hangup(switch_epoch_time_now(NULL) + 5, switch_core_session_get_uuid(session), SWITCH_CAUSE_NORMAL_CLEARING, SWITCH_FALSE);
 	}
 	else {
 		switch_channel_hangup(channel, SWITCH_CAUSE_NORMAL_CLEARING);
