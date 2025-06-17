@@ -14257,41 +14257,90 @@ static int check_engine(switch_rtp_engine_t *engine)
 	return 1;
 }
 
-SWITCH_DECLARE(switch_bool_t) switch_core_media_check_dtls(switch_core_session_t *session, switch_media_type_t type)
+static inline switch_status_t switch_core_media_check_dtls_ex(switch_core_session_t *session, switch_media_type_t type)
 {
 	switch_media_handle_t *smh;
 	switch_rtp_engine_t *engine;
-	int checking = 0;
+
+	int elapsed;
+	switch_time_t now, started;
+	int too_long = 30000;
+	const char *var;
 
 	switch_assert(session);
 
 	if (!(smh = session->media_handle)) {
-		return SWITCH_FALSE;
-	}
-
-	if (!switch_channel_media_up(session->channel)) {
-		return SWITCH_FALSE;
+		return SWITCH_STATUS_GENERR;
 	}
 
 	if (!switch_channel_test_flag(session->channel, CF_DTLS)) {
-		return SWITCH_TRUE;
+		goto verified;
 	}
 
 	engine = &smh->engines[type];
 
+	if (!engine->rtp_session) {
+		return SWITCH_STATUS_GENERR;
+	}
+
 	if (engine->rmode == SWITCH_MEDIA_FLOW_DISABLED) {
-		return SWITCH_TRUE;
+		goto verified;
 	}
 
-	do {
-		if (engine->rtp_session) checking = check_engine(engine);
-	} while (switch_channel_ready(session->channel) && checking);
+	if ((var = switch_channel_get_variable(session->channel, "media_dtls_setup_timeout"))) {
+		int tmp = atoi(var);
 
-	if (!checking) {
-		return SWITCH_TRUE;
+		if (tmp > 0) {
+			too_long = tmp;
+		}
 	}
 
-	return SWITCH_FALSE;
+	if (!(started = switch_rtp_session_get_dtls_checks_started(engine->rtp_session))) {
+		started = switch_rtp_session_set_dtls_checks_started(engine->rtp_session, switch_micro_time_now());
+	}
+
+	if (too_long) {
+		now = switch_micro_time_now();
+		elapsed = (int)(now - started) / 1000;
+
+		if (elapsed > too_long) {
+			switch_channel_hangup(session->channel, SWITCH_CAUSE_MEDIA_TIMEOUT);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Hangup on %s DTLS timeout [%d]\n", type2str(type), too_long);
+
+			return SWITCH_STATUS_SUCCESS;
+		}
+	}
+
+	if (!check_engine(engine)) {
+		goto verified;
+	}
+
+	return SWITCH_STATUS_FALSE;
+
+verified:
+	switch (type) {
+	case SWITCH_MEDIA_TYPE_AUDIO :
+		break;
+	case SWITCH_MEDIA_TYPE_VIDEO :
+		switch_core_media_gen_key_frame(session);
+		break;
+	case SWITCH_MEDIA_TYPE_TEXT :
+		break;
+	default :
+		break;
+	}
+
+	return SWITCH_STATUS_SUCCESS;
+
+}
+
+SWITCH_DECLARE(switch_bool_t) switch_core_media_check_dtls(switch_core_session_t *session, switch_media_type_t type)
+{
+	if (switch_core_media_check_dtls_ex(session, type) != SWITCH_STATUS_SUCCESS) {
+		return SWITCH_FALSE;
+	}
+
+	return SWITCH_TRUE;
 }
 
 SWITCH_DECLARE(uint32_t) switch_core_media_get_orig_bitrate(switch_core_session_t *session, switch_media_type_t type) 
