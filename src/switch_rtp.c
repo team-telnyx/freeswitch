@@ -1461,7 +1461,7 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 					switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp",ice->initializing, switch_cmp_addr(from_addr, ice->addr, SWITCH_TRUE), from_host, from_port, is_relay, is_responsive, use_candidate,
 					ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].cand_type);
 
-				if (!do_adj && (switch_cmp_addr(from_addr, ice->addr, SWITCH_TRUE) || use_candidate)) {
+				if (!do_adj && (switch_cmp_addr(from_addr, ice->addr, SWITCH_TRUE) || (use_candidate && !is_relay))) {
 					do_adj++;
 					rtp_session->last_adj = now;
 
