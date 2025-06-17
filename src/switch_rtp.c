@@ -410,6 +410,7 @@ struct switch_rtp {
 	switch_dtls_t *dtls;
 	switch_dtls_t *rtcp_dtls;
 
+	switch_time_t dtls_checks_started;
 	rtp_hdr_t last_rtp_hdr;
 
 	uint16_t seq;
@@ -10626,6 +10627,18 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_transcode(switch_codec_t *codec_in, s
 	}
 
 	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(switch_time_t) switch_rtp_session_get_dtls_checks_started(switch_rtp_t *rtp_session)
+{
+	return rtp_session->dtls_checks_started;
+}
+
+SWITCH_DECLARE(switch_time_t) switch_rtp_session_set_dtls_checks_started(switch_rtp_t *rtp_session, switch_time_t dtls_checks_started)
+{
+	rtp_session->dtls_checks_started = dtls_checks_started;
+
+	return rtp_session->dtls_checks_started;
 }
 
 /* For Emacs:

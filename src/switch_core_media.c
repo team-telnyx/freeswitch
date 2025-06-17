@@ -3444,6 +3444,13 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 	engine->read_frame.img = NULL;
 	engine->read_frame.payload = 0;
 
+	if ((engine->smode == SWITCH_MEDIA_FLOW_SENDRECV || engine->smode == SWITCH_MEDIA_FLOW_RECVONLY) && !switch_channel_test_flag(session->channel, CF_DTLS_VERIFIED)) {
+		if (!switch_core_media_check_dtls(session, type)) {
+			switch_yield(50000);
+			return SWITCH_STATUS_INUSE;
+		}
+	}
+
 	while (smh->media_flags[SCMF_RUNNING] && engine->read_frame.datalen == 0) {
 		engine->read_frame.flags = SFF_NONE;
 		status = switch_rtp_zerocopy_read_frame(engine->rtp_session, &engine->read_frame, flags);
@@ -4005,6 +4012,13 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 		if (smh->first_audio_frame == 0) {
 			switch_channel_set_first_early_rtp_packet_time(session->channel);
 			smh->first_audio_frame = switch_micro_time_now();
+		}
+	}
+
+	if (engine->smode == SWITCH_MEDIA_FLOW_SENDONLY && !switch_channel_test_flag(session->channel, CF_DTLS_VERIFIED)) {
+		if (!switch_core_media_check_dtls(session, type)) {
+			switch_yield(50000);
+			return SWITCH_STATUS_SUCCESS;
 		}
 	}
 
@@ -8598,8 +8612,6 @@ static void *SWITCH_THREAD_FUNC text_helper_thread(switch_thread_t *thread, void
 
 	mh->up = 1;
 
-	switch_core_media_check_dtls(session, SWITCH_MEDIA_TYPE_TEXT);
-
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "%s Text thread started.\n", switch_channel_get_name(session->channel));
 
 	if (!switch_channel_test_flag(channel, CF_MSRP)) {
@@ -8771,8 +8783,6 @@ static void *SWITCH_THREAD_FUNC video_helper_thread(switch_thread_t *thread, voi
 
 	mh->up = 1;
 	switch_mutex_lock(mh->cond_mutex);
-
-	switch_core_media_check_dtls(session, SWITCH_MEDIA_TYPE_VIDEO);
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "%s Video thread started. Echo is %s\n",
 					  switch_channel_get_name(session->channel), switch_channel_test_flag(channel, CF_VIDEO_ECHO) ? "on" : "off");
