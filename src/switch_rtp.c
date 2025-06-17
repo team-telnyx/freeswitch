@@ -1550,7 +1550,7 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG6, "Send STUN Binding Response to %s:%u\n", from_host, from_port);
 
-			if (ice->initializing && !is_responsive) {
+			if (!(rtp_session->ice.type & ICE_LITE) && ice->initializing && !is_responsive) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "Send STUN Binding Request on ICE candidate still unresponsive to %s:%u\n", from_host, from_port);
 				if (ice_out(rtp_session, ice, SWITCH_TRUE) != SWITCH_STATUS_SUCCESS) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "Error sending STUN Binding Request on ICE candidate still unresponsive to %s:%u\n", from_host, from_port);
