@@ -291,6 +291,7 @@ typedef struct {
 	char last_sent_id[13];
 	switch_time_t last_ok;
 	uint8_t cand_responsive;
+	uint8_t dtls_handshake;
 } switch_rtp_ice_t;
 
 struct switch_rtp;
@@ -1182,8 +1183,42 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 			if (ice->ice_params) {
 				for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; i++) {
 					if (!strcmp(ice->ice_params->cands[i][ice->proto].con_addr, from_host) && ice->ice_params->cands[i][ice->proto].con_port == from_port) {
+						int is_relay = 0;
 						ice->ice_params->cands[i][ice->proto].responsive = 1;
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "Marked ICE candidate %s:%d as responsive\n", ice->ice_params->cands[i][ice->proto].con_addr, ice->ice_params->cands[i][ice->proto].con_port);
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "Marked ICE candidate %s:%d as responsive\n", ice->ice_params->cands[i][ice->proto].con_addr, ice->ice_params->cands[i][ice->proto].con_port);                                   
+						if (!strcasecmp(ice->ice_params->cands[i][ice->proto].cand_type, "relay")) {
+							is_relay = 1;
+						}
+
+						if (!ice->cand_responsive && !switch_cmp_addr(from_addr, ice->addr, SWITCH_FALSE) && (!is_relay || rtp_session->elapsed_stun >= 1000)) {
+							switch_channel_t *channel = NULL;
+							char ice_cur_buf[80] = "";
+							const char *ice_cur_host = switch_get_addr(ice_cur_buf, sizeof(ice_cur_buf), ice->addr);
+							uint16_t ice_cur_port = switch_sockaddr_get_port(ice->addr);
+
+							if (rtp_session->session) {
+								channel = switch_core_session_get_channel(rtp_session->session);
+							}
+
+							ice->missed_count = 0;
+							ice->rready = 1;
+
+							ice->ice_params->chosen[ice->proto] = i;
+
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE,
+											  "On candidate responsive auto changing %s stun/%s/dtls port from %s:%u "
+											  "to %s:%u idx:%d\n",
+											  rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp", ice_cur_host,
+											  ice_cur_port, from_host, from_port, i);
+
+							switch_channel_set_flag(channel, CF_VIDEO_REFRESH_REQ);
+							switch_core_media_gen_key_frame(rtp_session->session);
+
+							switch_rtp_change_ice_dest(rtp_session, ice, from_host, from_port);
+
+							ice->last_ok = switch_micro_time_now();
+						}
+
 						if (!strcmp(ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr, from_host) && ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port == from_port) {
 							ice->cand_responsive = 1;
 							ice->initializing = 0;
@@ -1393,7 +1428,7 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 				"%s %s STUN from %s:%d %s is_relay: %d is_responsive: %d use_candidate: %d ready: %d, rready: %d\n", switch_channel_get_name(channel), rtp_type(rtp_session), from_host, from_port, cmp ? "EXPECTED" : "IGNORED",
 				is_relay, is_responsive, use_candidate, ice->ready, ice->rready);
 
-			if (ice->initializing && !cmp) {
+			if (ice->initializing && !cmp && !rtp_session->ice.dtls_handshake) {
 				if (!rtp_session->adj_window && (!ice->ready || !ice->rready || (!rtp_session->dtls || rtp_session->dtls->state != DS_READY))) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s %s %s ICE set ADJUST window to 10 seconds on binding request from %s:%d (is_relay: %d, is_responsivie: %d, use_candidate: %d) Current cand: %s:%d typ: %s\n",
 						switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp", from_host, from_port, is_relay, is_responsive, use_candidate,
@@ -1437,7 +1472,7 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 
 			if (cmp) {
 				ice->last_ok = now;
-			} else if (!do_adj) {
+			} else if (!do_adj && !rtp_session->ice.dtls_handshake) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "ICE %d/%d dt:%d i:%d i2:%d cmp:%d\n", rtp_session->elapsed_stun, rtp_session->elapsed_media, (rtp_session->dtls && rtp_session->dtls->state != DS_READY), !ice->ready, !ice->rready, switch_cmp_addr(from_addr, ice->addr, SWITCH_TRUE));
 
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s %s %s ICE ADJUST ELAPSED vs 1000 %d on binding request from %s:%d (is_relay: %d, is_responsive: %d, use_candidate: %d) Current cand: %s:%d typ: %s\n",
@@ -1547,6 +1582,8 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 	switch_mutex_unlock(rtp_session->ice_mutex);
 	WRITE_DEC(rtp_session);
 	READ_DEC(rtp_session);
+
+	rtp_session->ice.dtls_handshake = 0;
 }
 
 #ifdef ENABLE_SRTP
@@ -3827,6 +3864,7 @@ static int dtls_state_fail(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 		switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
 	}
 
+	rtp_session->ice.dtls_handshake = 0;
 	return -1;
 }
 
@@ -3835,6 +3873,7 @@ static int dtls_state_handshake(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 {
 	int ret;
 
+	rtp_session->ice.dtls_handshake = 1;
 	if ((ret = SSL_do_handshake(dtls->ssl)) != 1){
 		switch((ret = SSL_get_error(dtls->ssl, ret))){
 		case SSL_ERROR_WANT_READ:
