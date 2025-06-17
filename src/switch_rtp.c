@@ -1544,16 +1544,17 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 
 				ice->last_ok = now;
 			}
-			//if (cmp) {
-			switch_socket_sendto(sock_output, from_addr, 0, (void *) rpacket, &bytes);
-			//}
 
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG6, "Send STUN Binding Response to %s:%u\n", from_host, from_port);
+			if (!switch_rtp_test_flag(rtp_session, SWITCH_RTP_FLAG_ICE_NO_RESPONSE_IGNORED) || cmp || do_adj) {
+				switch_socket_sendto(sock_output, from_addr, 0, (void *) rpacket, &bytes);
 
-			if (!(rtp_session->ice.type & ICE_LITE) && ice->initializing && !is_responsive) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "Send STUN Binding Request on ICE candidate still unresponsive to %s:%u\n", from_host, from_port);
-				if (ice_out(rtp_session, ice, SWITCH_TRUE) != SWITCH_STATUS_SUCCESS) {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "Error sending STUN Binding Request on ICE candidate still unresponsive to %s:%u\n", from_host, from_port);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG6, "Send STUN Binding Response to %s:%u\n", from_host, from_port);
+
+				if (!(rtp_session->ice.type & ICE_LITE) && ice->initializing && !is_responsive) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "Send STUN Binding Request on ICE candidate still unresponsive to %s:%u\n", from_host, from_port);
+					if (ice_out(rtp_session, ice, SWITCH_TRUE) != SWITCH_STATUS_SUCCESS) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "Error sending STUN Binding Request on ICE candidate still unresponsive to %s:%u\n", from_host, from_port);
+					}
 				}
 			}
 		} else if (packet->header.type == SWITCH_STUN_BINDING_RESPONSE && (ice->type & ICE_LITE_INBOUND)) {
@@ -5677,6 +5678,10 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice(switch_rtp_t *rtp_sessio
 
 		host = (char *)switch_get_addr(bufc, sizeof(bufc), ice->addr);
 		port = switch_sockaddr_get_port(ice->addr);
+	}
+
+	if (switch_channel_var_true(switch_core_session_get_channel(rtp_session->session), "ice_no_response_to_ignored_candidate")) {
+		switch_rtp_set_flag(rtp_session, SWITCH_RTP_FLAG_ICE_NO_RESPONSE_IGNORED);
 	}
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "Activating %s %s ICE: %s %s:%d\n",
