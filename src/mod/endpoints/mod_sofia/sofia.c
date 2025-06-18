@@ -7015,6 +7015,11 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 		int has_t38 = 0;
 		const char *drrrf_chanvar_str = switch_channel_get_variable(channel, "disable_recovery_record_route_fixup"); // disable_recovery_record_route_fixup as a chanvar
 		switch_bool_t drrrf_chanvar_zstr = zstr(drrrf_chanvar_str), drrrf_chanvar = switch_true(drrrf_chanvar_str);
+		switch_bool_t handle_update = switch_channel_var_true(channel, "handle_update");
+
+		if (status > 180 && handle_update && sofia_test_pflag(profile, PFLAG_HANDLE_UPDATE)) {
+			nua_set_params(nua, NUTAG_APPL_METHOD("UPDATE"), TAG_END());
+		}
 
 		if (status == 100 && !sofia_test_flag(tech_pvt, TFLAG_100_UEPOCH_SET)) {
 			sofia_set_flag(tech_pvt, TFLAG_100_UEPOCH_SET);
@@ -11527,6 +11532,9 @@ void sofia_handle_sip_i_invite(switch_core_session_t *session, nua_t *nua, sofia
 	}
 
 	channel = tech_pvt->channel = switch_core_session_get_channel(session);
+	if (switch_channel_var_true(channel, "handle_update") && sofia_test_pflag(profile, PFLAG_HANDLE_UPDATE)) {
+		nua_set_params(nua, NUTAG_APPL_METHOD("UPDATE"), TAG_END());
+	}
 
 	switch_channel_set_variable_printf(channel, "sip_local_network_addr", "%s", profile->extsipip ? profile->extsipip : profile->sipip);
 	switch_channel_set_variable_printf(channel, "sip_network_ip", "%s", network_ip);
