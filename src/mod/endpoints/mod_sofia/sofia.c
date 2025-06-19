@@ -3574,7 +3574,6 @@ void *SWITCH_THREAD_FUNC sofia_profile_thread_run(switch_thread_t *thread, void 
 				   NUTAG_APPL_METHOD("BYE"),
 #endif
 				   NUTAG_APPL_METHOD("MESSAGE"),
-				   TAG_IF(sofia_test_pflag(profile, PFLAG_HANDLE_UPDATE), NUTAG_APPL_METHOD("UPDATE")),
 
 				   TAG_IF(profile->session_timeout && profile->minimum_session_expires, NUTAG_MIN_SE(profile->minimum_session_expires)),
 				   NUTAG_SESSION_TIMER(profile->session_timeout),
