@@ -50,6 +50,7 @@
 #include <switch_ssl.h>
 #include <switch_jitterbuffer.h>
 #include <switch_estimators.h>
+#include "private/switch_rtp_pvt.h"
 
 #define DEBUG_RTP 0
 //#define DEBUG_TS_ROLLOVER
@@ -270,29 +271,6 @@ struct switch_rtp_rfc2833_data {
 	switch_mutex_t *dtmf_mutex;
 	uint8_t in_digit_queued;
 };
-
-typedef struct {
-	char *ice_user;
-	char *user_ice;
-	char *luser_ice;
-	char *pass;
-	char *rpass;
-	switch_sockaddr_t *addr;
-	uint32_t funny_stun;
-	switch_time_t next_run;
-	switch_core_media_ice_type_t type;
-	ice_t *ice_params;
-	ice_proto_t proto;
-	uint8_t sending;
-	uint8_t ready;
-	uint8_t rready;
-	uint8_t initializing;
-	int missed_count;
-	char last_sent_id[13];
-	switch_time_t last_ok;
-	uint8_t cand_responsive;
-	uint8_t dtls_handshake;
-} switch_rtp_ice_t;
 
 struct switch_rtp;
 
@@ -1007,7 +985,7 @@ int icecmp(const char *them, switch_rtp_ice_t *ice)
 	return strcmp(them, ice->luser_ice);
 }
 
-static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *data, switch_size_t len)
+SWITCH_DECLARE(void) switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *data, switch_size_t len)
 {
 	switch_stun_packet_t *packet;
 	switch_stun_packet_attribute_t *attr;
@@ -6838,7 +6816,7 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 
 		if (rtp_session->has_ice) {
 			if (rtp_session->ice.ice_user) {
-				handle_ice(rtp_session, &rtp_session->ice, (void *) &rtp_session->recv_msg, *bytes);
+				switch_rtp_pvt_handle_ice(rtp_session, &rtp_session->ice, (void *) &rtp_session->recv_msg, *bytes);
 			}
 			*bytes = 0;
 			sync = 1;
@@ -7988,7 +7966,7 @@ static switch_status_t process_rtcp_packet(switch_rtp_t *rtp_session, switch_siz
 	if (msg->header.version != 2) {
 		if (msg->header.version == 0) {
 			if (rtp_session->ice.ice_user) {
-				handle_ice(rtp_session, &rtp_session->rtcp_ice, (void *) msg, *bytes);
+				switch_rtp_pvt_handle_ice(rtp_session, &rtp_session->rtcp_ice, (void *) msg, *bytes);
 			}
 			return SWITCH_STATUS_SUCCESS;
 		} else {
@@ -8056,7 +8034,7 @@ static switch_status_t read_rtcp_packet(switch_rtp_t *rtp_session, switch_size_t
 
 		if (*b == 0 || *b == 1) {
 			if (rtp_session->rtcp_ice.ice_user) {
-				handle_ice(rtp_session, &rtp_session->rtcp_ice, (void *) rtp_session->rtcp_recv_msg_p, *bytes);
+				switch_rtp_pvt_handle_ice(rtp_session, &rtp_session->rtcp_ice, (void *) rtp_session->rtcp_recv_msg_p, *bytes);
 			}
 			*bytes = 0;
 		}
@@ -8815,7 +8793,7 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 
 			//if (rtp_session->recv_msg.header.version == 0) {
 			//	if (rtp_session->ice.ice_user) {
-			//		handle_ice(rtp_session, &rtp_session->ice, (void *) &rtp_session->recv_msg, bytes);
+			//		switch_rtp_pvt_handle_ice(rtp_session, &rtp_session->ice, (void *) &rtp_session->recv_msg, bytes);
 			//		goto recvfrom;
 			//	}
 			//}
