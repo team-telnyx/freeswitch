@@ -801,6 +801,9 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(switch_status_t) switch_rtp_transcode(switch_codec_t *codec_in, switch_codec_t *codec_out, char *payload_in, uint32_t len_in, char *payload_out, uint32_t *len_out, uint32_t rate_in, uint32_t rate_out);
 SWITCH_DECLARE(switch_time_t) switch_rtp_session_get_dtls_checks_started(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(switch_time_t) switch_rtp_session_set_dtls_checks_started(switch_rtp_t *rtp_session, switch_time_t dtls_checks_started);
+SWITCH_DECLARE(switch_sockaddr_t*) switch_rtp_session_get_remote_addr(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(switch_sockaddr_t*) switch_rtp_session_get_rtcp_remote_addr(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(char *) switch_rtp_session_get_type(switch_rtp_t *rtp_session);
 
 /*!
   \}

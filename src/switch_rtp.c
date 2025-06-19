@@ -10626,6 +10626,21 @@ SWITCH_DECLARE(switch_time_t) switch_rtp_session_set_dtls_checks_started(switch_
 	return rtp_session->dtls_checks_started;
 }
 
+SWITCH_DECLARE(switch_sockaddr_t*) switch_rtp_session_get_remote_addr(switch_rtp_t *rtp_session)
+{
+	return rtp_session->remote_addr;
+}
+
+ SWITCH_DECLARE(switch_sockaddr_t*) switch_rtp_session_get_rtcp_remote_addr(switch_rtp_t *rtp_session)
+ {
+ 	return rtp_session->rtcp_remote_addr;
+ }
+
+ SWITCH_DECLARE(char *) switch_rtp_session_get_type(switch_rtp_t *rtp_session)
+ {
+ 	return rtp_type(rtp_session);
+ }
+
 /* For Emacs:
  * Local Variables:
  * mode:c
