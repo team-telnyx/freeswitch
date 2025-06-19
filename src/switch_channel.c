@@ -3796,6 +3796,14 @@ SWITCH_DECLARE(switch_status_t) switch_channel_perform_pre_answer(switch_channel
 		switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
 	}
 
+	if (switch_channel_direction(channel) == SWITCH_CALL_DIRECTION_INBOUND &&
+			!switch_channel_test_flag(channel, CF_ORIGINATOR) && !switch_channel_test_flag(channel, CF_BRIDGE_ORIGINATOR) &&
+			!switch_channel_test_flag(channel, CF_UUID_BRIDGE_ORIGINATOR)) {
+		switch_core_media_dtls_init_check_lock(channel->session, SWITCH_MEDIA_TYPE_AUDIO);
+		switch_core_media_dtls_init_check_lock(channel->session, SWITCH_MEDIA_TYPE_VIDEO);
+		switch_core_media_dtls_init_check_lock(channel->session, SWITCH_MEDIA_TYPE_TEXT);
+	}
+
 	return status;
 }
 
@@ -4142,6 +4150,15 @@ SWITCH_DECLARE(switch_status_t) switch_channel_perform_answer(switch_channel_t *
 				switch_ivr_sleep(channel->session, msec, SWITCH_TRUE, NULL);
 			}
 		}
+	}
+
+	if (switch_channel_direction(channel) == SWITCH_CALL_DIRECTION_INBOUND &&
+				!switch_channel_test_flag(channel, CF_ORIGINATOR) && !switch_channel_test_flag(channel, CF_BRIDGE_ORIGINATOR) &&
+				!switch_channel_test_flag(channel, CF_UUID_BRIDGE_ORIGINATOR)) {
+
+		switch_core_media_dtls_init_check_lock(channel->session, SWITCH_MEDIA_TYPE_AUDIO);
+		switch_core_media_dtls_init_check_lock(channel->session, SWITCH_MEDIA_TYPE_VIDEO);
+		switch_core_media_dtls_init_check_lock(channel->session, SWITCH_MEDIA_TYPE_TEXT);
 	}
 
 	return status;

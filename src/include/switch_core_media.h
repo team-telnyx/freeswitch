@@ -461,6 +461,8 @@ SWITCH_DECLARE(switch_bool_t) switch_core_media_has_mismatch_dynamic_payload_cod
 typedef struct switch_rtp_engine_s switch_rtp_engine_t;
 SWITCH_DECLARE(switch_rtp_engine_t *) switch_core_media_get_engine(switch_core_session_t *session, int media_type);
 SWITCH_DECLARE(switch_codec_t*) switch_core_media_get_codec(switch_core_session_t *session, switch_media_type_t type);
+SWITCH_DECLARE(switch_status_t) switch_core_session_start_dtls_init_job(switch_core_session_t *session);
+SWITCH_DECLARE(switch_status_t) switch_core_media_dtls_init_check_lock(switch_core_session_t *session, switch_media_type_t type);
 
 SWITCH_END_EXTERN_C
 #endif

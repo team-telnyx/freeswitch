@@ -87,6 +87,11 @@ struct media_helper {
 	int ready;
 };
 
+struct dtls_init_helper {
+	switch_core_session_t *session;
+	int ready;
+};
+
 typedef enum {
 	CRYPTO_MODE_OPTIONAL,
 	CRYPTO_MODE_MANDATORY,
@@ -206,6 +211,7 @@ struct switch_rtp_engine_s {
 	int8_t engine_function_running;
 	switch_frame_buffer_t *write_fb;
 	uint8_t ice_remote_initiator;
+	switch_thread_rwlock_t *dtls_init_rwlock;
 };
 
 #define MAX_REJ_STREAMS 10
@@ -274,6 +280,8 @@ struct switch_media_handle_s {
 
 	switch_time_t last_text_frame;
 	switch_time_t first_audio_frame;
+	uint8_t dtls_init_job;
+	struct dtls_init_helper dtls_init_helper;
 };
 
 switch_srtp_crypto_suite_t SUITES[CRYPTO_INVALID] = {
@@ -2414,6 +2422,10 @@ SWITCH_DECLARE(switch_status_t) switch_media_handle_create(switch_media_handle_t
 		session->media_handle->engines[SWITCH_MEDIA_TYPE_TEXT].cur_payload_map = session->media_handle->engines[SWITCH_MEDIA_TYPE_TEXT].payload_map;
 		session->media_handle->engines[SWITCH_MEDIA_TYPE_TEXT].cur_payload_map->current = 1;
 
+		switch_thread_rwlock_create(&session->media_handle->engines[SWITCH_MEDIA_TYPE_AUDIO].dtls_init_rwlock, switch_core_session_get_pool(session));
+		switch_thread_rwlock_create(&session->media_handle->engines[SWITCH_MEDIA_TYPE_VIDEO].dtls_init_rwlock, switch_core_session_get_pool(session));
+		switch_thread_rwlock_create(&session->media_handle->engines[SWITCH_MEDIA_TYPE_TEXT].dtls_init_rwlock, switch_core_session_get_pool(session));
+
 		switch_channel_set_flag(session->channel, CF_DTLS_OK);
 
 		status = SWITCH_STATUS_SUCCESS;
@@ -3431,10 +3443,15 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 		return SWITCH_STATUS_FALSE;
 	}
 
+	if (switch_thread_rwlock_tryrdlock(engine->dtls_init_rwlock) != SWITCH_STATUS_SUCCESS) {
+		return SWITCH_STATUS_INUSE;
+	}
+
 	if (smh->read_mutex[type] && switch_mutex_trylock(smh->read_mutex[type]) != SWITCH_STATUS_SUCCESS) {
 		/* return CNG, another thread is already reading  */
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG1, "%s is already being read for %s\n",
 						  switch_channel_get_name(session->channel), type2str(type));
+		switch_thread_rwlock_unlock(engine->dtls_init_rwlock);
 		return SWITCH_STATUS_INUSE;
 	}
 
@@ -3444,13 +3461,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 	engine->read_frame.m = SWITCH_FALSE;
 	engine->read_frame.img = NULL;
 	engine->read_frame.payload = 0;
-
-	if ((engine->smode == SWITCH_MEDIA_FLOW_SENDRECV || engine->smode == SWITCH_MEDIA_FLOW_RECVONLY) && !switch_channel_test_flag(session->channel, CF_DTLS_VERIFIED)) {
-		if (!switch_core_media_check_dtls(session, type)) {
-			switch_yield(50000);
-			return SWITCH_STATUS_INUSE;
-		}
-	}
 
 	while (smh->media_flags[SCMF_RUNNING] && engine->read_frame.datalen == 0) {
 		engine->read_frame.flags = SFF_NONE;
@@ -3970,6 +3980,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 		switch_mutex_unlock(smh->read_mutex[type]);
 	}
 
+	switch_thread_rwlock_unlock(engine->dtls_init_rwlock);
+
 	return status;
 }
 
@@ -4013,13 +4025,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 		if (smh->first_audio_frame == 0) {
 			switch_channel_set_first_early_rtp_packet_time(session->channel);
 			smh->first_audio_frame = switch_micro_time_now();
-		}
-	}
-
-	if (engine->smode == SWITCH_MEDIA_FLOW_SENDONLY && !switch_channel_test_flag(session->channel, CF_DTLS_VERIFIED)) {
-		if (!switch_core_media_check_dtls(session, type)) {
-			switch_yield(50000);
-			return SWITCH_STATUS_SUCCESS;
 		}
 	}
 
@@ -18433,6 +18438,193 @@ SWITCH_DECLARE(switch_codec_t*) switch_core_media_get_codec(switch_core_session_
     if (!engine) return NULL;
 
     return &engine->read_codec;
+}
+
+static void *SWITCH_THREAD_FUNC dtls_init_job(switch_thread_t *thread, void *obj)
+
+{
+	struct dtls_init_helper *dih = obj;
+	switch_core_session_t *session;
+	switch_channel_t *channel;
+	switch_media_handle_t *smh;
+	switch_status_t a_verified = SWITCH_STATUS_FALSE;
+	switch_status_t v_verified = SWITCH_STATUS_FALSE;
+	switch_status_t t_verified = SWITCH_STATUS_FALSE;
+	switch_rtp_engine_t *a_engine = NULL;
+	switch_rtp_engine_t *v_engine = NULL;
+	switch_rtp_engine_t *t_engine = NULL;
+	switch_time_t start = switch_time_now();
+
+	session = dih->session;
+	smh = session->media_handle;
+
+	a_engine = &smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
+	v_engine = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
+	t_engine = &smh->engines[SWITCH_MEDIA_TYPE_TEXT];
+
+	channel = switch_core_session_get_channel(session);
+
+	if (switch_core_session_read_lock(session) != SWITCH_STATUS_SUCCESS) {
+		dih->ready = -1;
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "%s DTLS init could not be started.\n", switch_channel_get_name(channel));
+
+		return NULL;
+	}
+
+	switch_thread_rwlock_wrlock(a_engine->dtls_init_rwlock);
+	switch_thread_rwlock_wrlock(v_engine->dtls_init_rwlock);
+	switch_thread_rwlock_wrlock(t_engine->dtls_init_rwlock);
+
+	dih->ready = 1;
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "%s DTLS init started.\n", switch_channel_get_name(channel));
+
+	do {
+		if (a_verified == SWITCH_STATUS_FALSE) {
+			a_verified = switch_core_media_check_dtls_ex(session, SWITCH_MEDIA_TYPE_AUDIO);
+			if (a_verified == SWITCH_STATUS_SUCCESS || a_verified == SWITCH_STATUS_GENERR) {
+				switch_thread_rwlock_unlock(a_engine->dtls_init_rwlock);
+				a_verified = SWITCH_STATUS_NOOP;
+			}
+		}
+
+		if (v_verified == SWITCH_STATUS_FALSE) {
+			v_verified = switch_core_media_check_dtls_ex(session, SWITCH_MEDIA_TYPE_VIDEO);
+			if (v_verified == SWITCH_STATUS_SUCCESS || v_verified == SWITCH_STATUS_GENERR) {
+				switch_thread_rwlock_unlock(v_engine->dtls_init_rwlock);
+				v_verified = SWITCH_STATUS_NOOP;
+			}
+		}
+
+		if (t_verified == SWITCH_STATUS_FALSE) {
+			t_verified = switch_core_media_check_dtls_ex(session, SWITCH_MEDIA_TYPE_TEXT);
+			if (t_verified == SWITCH_STATUS_SUCCESS || t_verified == SWITCH_STATUS_GENERR) {
+				switch_thread_rwlock_unlock(t_engine->dtls_init_rwlock);
+				t_verified = SWITCH_STATUS_NOOP;
+			}
+		}
+
+		switch_channel_check_signal(channel, SWITCH_FALSE);
+
+		if (!switch_channel_up_nosig(channel)) {
+			if (a_verified == SWITCH_STATUS_FALSE) {
+				switch_thread_rwlock_unlock(a_engine->dtls_init_rwlock);
+			}
+
+			if (v_verified == SWITCH_STATUS_FALSE) {
+				switch_thread_rwlock_unlock(v_engine->dtls_init_rwlock);
+			}
+
+			if (t_verified == SWITCH_STATUS_FALSE) {
+				switch_thread_rwlock_unlock(t_engine->dtls_init_rwlock);
+			}
+
+			break;
+		}
+
+	} while (a_verified == SWITCH_STATUS_FALSE || v_verified == SWITCH_STATUS_FALSE || t_verified == SWITCH_STATUS_FALSE);
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "%s DTLS init finished in [%" SWITCH_TIME_T_FMT " ms].\n", switch_channel_get_name(channel), (switch_time_now() - start) / 1000);
+	smh->dtls_init_job = 0;
+
+	switch_core_session_rwunlock(session);
+
+	return NULL;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_session_start_dtls_init_job(switch_core_session_t *session)
+{
+	switch_memory_pool_t *pool = switch_core_session_get_pool(session);
+	switch_thread_data_t *td;
+	switch_rtp_engine_t *a_engine = NULL;
+	switch_rtp_engine_t *v_engine = NULL;
+	switch_rtp_engine_t *t_engine = NULL;
+	switch_media_handle_t *smh;
+	switch_channel_t *channel;
+
+	if (!(smh = session->media_handle)) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	channel = switch_core_session_get_channel(session);
+	if (!switch_channel_test_flag(channel, CF_DTLS)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "%s DTLS init thread not needed - no DTLS.\n", switch_core_session_get_name(session));
+
+		return SWITCH_STATUS_SUCCESS;
+	}
+
+	if (smh->dtls_init_helper.ready) {
+		return SWITCH_STATUS_SUCCESS;
+	}
+
+	a_engine = &smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
+	v_engine = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
+	t_engine = &smh->engines[SWITCH_MEDIA_TYPE_TEXT];
+
+	switch_mutex_lock(smh->control_mutex);
+
+	if (smh->dtls_init_job) {
+		switch_mutex_unlock(smh->control_mutex);
+
+		return SWITCH_STATUS_FALSE;
+	}
+
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "%s Starting DTLS init thread\n", switch_core_session_get_name(session));
+
+	if (a_engine->rtp_session) {
+		switch_rtp_set_default_payload(a_engine->rtp_session, a_engine->cur_payload_map->pt);
+	}
+
+	if (v_engine->rtp_session) {
+		switch_rtp_set_default_payload(v_engine->rtp_session, v_engine->cur_payload_map->pt);
+	}
+
+	if (t_engine->rtp_session) {
+		switch_rtp_set_default_payload(t_engine->rtp_session, t_engine->cur_payload_map->pt);
+	}
+
+	smh->dtls_init_helper.session = session;
+	smh->dtls_init_helper.ready = 0;
+
+	td = switch_core_alloc(pool, sizeof(*td));
+	td->func = dtls_init_job;
+	td->obj = &smh->dtls_init_helper;
+	sprintf(td->name, "core/dtls/%"SWITCH_SIZE_T_FMT, switch_core_session_get_id(session));
+
+	smh->dtls_init_job = 1;
+
+	if (switch_thread_pool_launch_thread(&td) != SWITCH_STATUS_SUCCESS) {
+		smh->dtls_init_job = 0;
+	} else {
+
+		while (!smh->dtls_init_helper.ready) {
+			switch_cond_next();
+		}
+	}
+
+	switch_mutex_unlock(smh->control_mutex);
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_media_dtls_init_check_lock(switch_core_session_t *session, switch_media_type_t type)
+{
+	switch_media_handle_t *smh;
+	switch_rtp_engine_t *engine = NULL;
+
+	if (!(smh = session->media_handle)) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	engine = &smh->engines[type];
+
+	if (engine->dtls_init_rwlock && (switch_thread_rwlock_rdlock(engine->dtls_init_rwlock) == SWITCH_STATUS_SUCCESS)) {
+		switch_thread_rwlock_unlock(engine->dtls_init_rwlock);
+
+		return SWITCH_STATUS_SUCCESS;
+	}
+
+	return SWITCH_STATUS_FALSE;
 }
 
 /* For Emacs:
