@@ -963,10 +963,14 @@ static switch_status_t ice_out(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 
 	bytes = switch_stun_packet_length(packet);
 
-#ifdef DEBUG_EXTRA
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_CRIT, "%s send %s stun\n", rtp_session_name(rtp_session), rtp_type(rtp_session));
-#endif
-	switch_socket_sendto(sock_output, ice->addr, 0, (void *) packet, &bytes);
+	switch_mutex_lock(rtp_session->ice_mutex);
+	if (ice->addr) {
+		char buf_host[16];
+		const char *tx_host = switch_get_addr(buf_host, sizeof(buf_host), ice->addr);
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s send %s STUN to %s:%d\n", rtp_session_name(rtp_session), rtp_type(rtp_session), tx_host, switch_sockaddr_get_port(ice->addr));             
+		switch_socket_sendto(sock_output, ice->addr, 0, (void *) packet, &bytes);
+	}
+	switch_mutex_unlock(rtp_session->ice_mutex);
 
 	ice->sending = 3;
 
