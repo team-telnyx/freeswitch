@@ -4019,6 +4019,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 		switch_media_flow_t audio_flow = switch_core_session_media_flow(session, SWITCH_MEDIA_TYPE_AUDIO);
 
 		if (audio_flow != SWITCH_MEDIA_FLOW_SENDRECV && audio_flow != SWITCH_MEDIA_FLOW_SENDONLY) {
+			switch_thread_rwlock_unlock(engine->dtls_init_rwlock);
 			return SWITCH_STATUS_SUCCESS;
 		}
 
@@ -4034,11 +4035,13 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 			if (switch_channel_ready(session->channel)) {
 				switch_yield(10000);
 			} else {
+				switch_thread_rwlock_unlock(engine->dtls_init_rwlock);
 				return SWITCH_STATUS_GENERR;
 			}
 		}
 
 		if (!engine->read_codec.implementation || !switch_core_codec_ready(&engine->read_codec)) {
+			switch_thread_rwlock_unlock(engine->dtls_init_rwlock);
 			return SWITCH_STATUS_GENERR;
 		}
 
@@ -4070,6 +4073,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 		}
 	}
 
+	switch_thread_rwlock_unlock(engine->dtls_init_rwlock);
 	return status;
 }
 
@@ -8091,6 +8095,7 @@ static void *SWITCH_THREAD_FUNC video_write_thread(switch_thread_t *thread, void
 
 	v_engine = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
 
+	switch_thread_rwlock_rdlock(v_engine->dtls_init_rwlock);
 	switch_mutex_lock(smh->write_mutex[SWITCH_MEDIA_TYPE_VIDEO]);
 	v_engine->thread_write_lock = switch_thread_self();
 
@@ -8219,6 +8224,7 @@ static void *SWITCH_THREAD_FUNC video_write_thread(switch_thread_t *thread, void
 	v_engine->thread_write_lock = 0;
 	switch_mutex_unlock(smh->write_mutex[SWITCH_MEDIA_TYPE_VIDEO]);
 
+	switch_thread_rwlock_unlock(v_engine->dtls_init_rwlock);
 	switch_channel_clear_flag(session->channel, CF_VIDEO_WRITING);
 	smh->video_write_thread_running = 0;
 
@@ -16561,10 +16567,16 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_video_frame(switch_cor
 		return SWITCH_STATUS_SUCCESS;
 	}
 
+	v_engine = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
+	if (switch_thread_rwlock_tryrdlock(v_engine->dtls_init_rwlock) != SWITCH_STATUS_SUCCESS) {
+		return SWITCH_STATUS_SUCCESS;
+	}
+
 	if (smh->write_mutex[SWITCH_MEDIA_TYPE_VIDEO] && switch_mutex_trylock(smh->write_mutex[SWITCH_MEDIA_TYPE_VIDEO]) != SWITCH_STATUS_SUCCESS) {
 		/* return CNG, another thread is already writing  */
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG1, "%s is already being written to for %s\n",
 						  switch_channel_get_name(session->channel), type2str(SWITCH_MEDIA_TYPE_VIDEO));
+		switch_thread_rwlock_unlock(v_engine->dtls_init_rwlock);
 		return SWITCH_STATUS_INUSE;
 	}
 
@@ -16740,6 +16752,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_video_frame(switch_cor
 	if (smh->write_mutex[SWITCH_MEDIA_TYPE_VIDEO]) {
 		switch_mutex_unlock(smh->write_mutex[SWITCH_MEDIA_TYPE_VIDEO]);
 	}
+
+	switch_thread_rwlock_unlock(v_engine->dtls_init_rwlock);
 
 	switch_img_free(&dup_img);
 
