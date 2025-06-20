@@ -1360,8 +1360,6 @@ SWITCH_DECLARE(switch_bool_t) switch_is_lan_addr(const char *ip)
 			strncmp(ip, "127.", 4) &&      /* 127.0.0.0       -   127.255.255.255 (127/8 prefix)      */
 			strncmp(ip, "255.", 4) &&
 			strncmp(ip, "0.", 2) &&
-			strncmp(ip, "1.", 2) &&
-			strncmp(ip, "2.", 2) &&
 			strncmp(ip, "172.16.", 7) &&   /* 172.16.0.0      -   172.31.255.255  (172.16/12 prefix)  */
 			strncmp(ip, "172.17.", 7) &&
 			strncmp(ip, "172.18.", 7) &&
