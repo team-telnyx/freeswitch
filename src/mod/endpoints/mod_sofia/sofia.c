@@ -7016,7 +7016,7 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 		switch_bool_t drrrf_chanvar_zstr = zstr(drrrf_chanvar_str), drrrf_chanvar = switch_true(drrrf_chanvar_str);
 		switch_bool_t handle_update = switch_channel_var_true(channel, "handle_update");
 
-		if (status > 180 && handle_update && sofia_test_pflag(profile, PFLAG_HANDLE_UPDATE)) {
+		if (status > 180 && (handle_update || sofia_test_pflag(profile, PFLAG_HANDLE_UPDATE))) {
 			nua_set_params(nua, NUTAG_APPL_METHOD("UPDATE"), TAG_END());
 		}
 
