@@ -7014,9 +7014,16 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 		int has_t38 = 0;
 		const char *drrrf_chanvar_str = switch_channel_get_variable(channel, "disable_recovery_record_route_fixup"); // disable_recovery_record_route_fixup as a chanvar
 		switch_bool_t drrrf_chanvar_zstr = zstr(drrrf_chanvar_str), drrrf_chanvar = switch_true(drrrf_chanvar_str);
-		switch_bool_t handle_update = switch_channel_var_true(channel, "handle_update");
+		const char *handle_update = switch_channel_get_variable(channel, "handle_update");
+		switch_bool_t to_handle_update = SWITCH_FALSE;
 
-		if (status > 180 && (handle_update || sofia_test_pflag(profile, PFLAG_HANDLE_UPDATE))) {
+		if (!zstr(handle_update)) {
+			to_handle_update = switch_true(handle_update);
+		} else {
+			to_handle_update = sofia_test_pflag(profile, PFLAG_HANDLE_UPDATE);
+		}
+
+		if (status > 180 && to_handle_update) {
 			nua_set_params(nua, NUTAG_APPL_METHOD("UPDATE"), TAG_END());
 		}
 
