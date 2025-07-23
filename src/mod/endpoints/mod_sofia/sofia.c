@@ -11199,6 +11199,8 @@ void sofia_handle_sip_i_invite(switch_core_session_t *session, nua_t *nua, sofia
 	char *req_user = NULL;
 	switch_time_t sip_invite_time;
 	const char *session_id_header;
+	const char *handle_update;
+	switch_bool_t to_handle_update = SWITCH_FALSE;
 
 	profile->nua_handle_count = nua_handle_count_handles(nh);
 
@@ -11538,7 +11540,14 @@ void sofia_handle_sip_i_invite(switch_core_session_t *session, nua_t *nua, sofia
 	}
 
 	channel = tech_pvt->channel = switch_core_session_get_channel(session);
-	if (switch_channel_var_true(channel, "handle_update") || sofia_test_pflag(profile, PFLAG_HANDLE_UPDATE)) {
+	handle_update = switch_channel_get_variable(channel, "handle_update");
+
+	if (!zstr(handle_update)) {
+		to_handle_update = switch_true(handle_update);
+	} else {
+		to_handle_update = sofia_test_pflag(profile, PFLAG_HANDLE_UPDATE);
+	}
+	if (to_handle_update) {
 		nua_set_params(nua, NUTAG_APPL_METHOD("UPDATE"), TAG_END());
 	}
 
