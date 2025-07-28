@@ -1116,20 +1116,21 @@ abyss_bool handler_hook(TSession * r)
 	/* fs api command will write to stream,  calling http_stream_write / http_stream_raw_write	*/
 	/* switch_api_execute will stream INVALID COMMAND before it fails					        */
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Execute HTTP request command: [%s] args: [%s].\n", command, api_str);
+	prometheus_increment_current_api_call();
 	prometheus_increment_api_counter(command);
 	switch_api_execute(command, api_str, NULL, &stream);
 	prometheus_decrement_current_api_call();
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Completed HTTP request command: [%s] args: [%s].\n", command, api_str);
 
-        if (globals.commands_to_log != NULL) {
-                full_command = switch_mprintf("%s%s%s", command, (api_str==NULL ? "" : " "), api_str);
+	if (globals.commands_to_log != NULL) {
+		full_command = switch_mprintf("%s%s%s", command, (api_str==NULL ? "" : " "), api_str);
 
-                if (switch_regex_match(full_command, globals.commands_to_log) == SWITCH_STATUS_SUCCESS) {
-                        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Executed HTTP request command: [%s].\n", full_command);
-                }
+		if (switch_regex_match(full_command, globals.commands_to_log) == SWITCH_STATUS_SUCCESS) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Executed HTTP request command: [%s].\n", full_command);
+		}
 
-                switch_safe_free(full_command);
-        }
+		switch_safe_free(full_command);
+	}
 
 	r->responseStarted = TRUE;
 	ResponseStatus(r, 200);     /* we don't want an assertion failure */
@@ -1146,7 +1147,8 @@ static xmlrpc_value *freeswitch_api(xmlrpc_env * const envP, xmlrpc_value * cons
 	switch_stream_handle_t stream = { 0 };
 	xmlrpc_value *val = NULL;
 	switch_bool_t freed = 0;
-
+	switch_time_t start_time = 0;
+	char *sub_command = NULL;
 
 	/* Parse our argument array. */
 	xmlrpc_decompose_value(envP, paramArrayP, "(ss)", &command, &arg);
@@ -1175,14 +1177,45 @@ static xmlrpc_value *freeswitch_api(xmlrpc_env * const envP, xmlrpc_value * cons
 		arg = "reload mod_xml_rpc";
 	}
 
-	prometheus_increment_api_counter(command);
+	/* Extract actual command for metrics and logging */
+	if (!strcasecmp(command, "bgapi") || !strcasecmp(command, "expand")) {
+		if (arg && *arg) {
+			char *space_pos = strchr(arg, ' ');
+			if (space_pos) {
+				sub_command = strndup(arg, space_pos - arg);
+			} else {
+				sub_command = strdup(arg);
+			}
+		}
+	}
+
+	prometheus_increment_current_api_call();
+
 	SWITCH_STANDARD_STREAM(stream);
+
+	// Log executed commands
+	prometheus_increment_api_counter(command);
+	if (sub_command) {
+		prometheus_increment_api_counter(sub_command);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Execute XML-RPC API command: [%s] (via %s) args: [%s].\n", sub_command, command, arg);
+	} else {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Execute XML-RPC API command: [%s] args: [%s].\n", command, arg);
+	}
+	
+	start_time = switch_time_now();
 	if (switch_api_execute(command, arg, NULL, &stream) == SWITCH_STATUS_SUCCESS) {
 		/* Return our result. */
 		val = xmlrpc_build_value(envP, "s", stream.data);
 		free(stream.data);
 	} else {
 		val = xmlrpc_build_value(envP, "s", "ERROR!");
+	}
+
+	// Log completed commands
+	if (sub_command) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Completed (%llu ms) XML-RPC API command: [%s] (via %s) args: [%s].\n", (unsigned long long)((switch_time_now() - start_time) / 1000), sub_command, command, arg);
+	} else {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Completed (%llu ms) XML-RPC API command: [%s] args: [%s].\n", (unsigned long long)((switch_time_now() - start_time) / 1000), command, arg);
 	}
 	prometheus_decrement_current_api_call();
 
@@ -1192,6 +1225,11 @@ static xmlrpc_value *freeswitch_api(xmlrpc_env * const envP, xmlrpc_value * cons
 	if (!freed) {
 		switch_safe_free(command);
 		switch_safe_free(arg);
+	}
+	
+	/* Free the extracted sub command */
+	if (sub_command) {
+		switch_safe_free(sub_command);
 	}
 
 	return val;
