@@ -1206,20 +1206,23 @@ static xmlrpc_value *freeswitch_api(xmlrpc_env * const envP, xmlrpc_value * cons
 	if (switch_api_execute(command, arg, NULL, &stream) == SWITCH_STATUS_SUCCESS) {
 		/* Return our result. */
 		val = xmlrpc_build_value(envP, "s", stream.data);
-		free(stream.data);
 	} else {
 		val = xmlrpc_build_value(envP, "s", "ERROR!");
 	}
 
 	// Log completed commands
 	if (sub_command) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Completed (%llu ms) XML-RPC API command: [%s] (via %s) args: [%s].\n", (unsigned long long)((switch_time_now() - start_time) / 1000), sub_command, command, arg);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Completed (%llu ms) XML-RPC API command: [%s] (via %s) args: [%s] reply: [%s].\n"
+			, (unsigned long long)((switch_time_now() - start_time) / 1000), sub_command, command, arg, stream.data ? stream.data : "<NULL>");
 	} else {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Completed (%llu ms) XML-RPC API command: [%s] args: [%s].\n", (unsigned long long)((switch_time_now() - start_time) / 1000), command, arg);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Completed (%llu ms) XML-RPC API command: [%s] args: [%s] reply: [%s].\n"
+			, (unsigned long long)((switch_time_now() - start_time) / 1000), command, arg, stream.data ? stream.data : "<NULL>");
 	}
 	prometheus_decrement_current_api_call();
 
   end:
+    /* Free stream data*/
+	switch_safe_free(stream.data);
 
 	/* xmlrpc-c requires us to free memory it malloced from xmlrpc_decompose_value */
 	switch_safe_free(command);
