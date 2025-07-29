@@ -1070,7 +1070,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_set_fork_read_frame(_In_ swi
 	if (frame) {
 		result = switch_frame_dup(frame, &session->fork_read_frame);
 		if (frame->data && frame->datalen <= 2) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Fork Read Frame has 2 bytes: (%02x %02x)\n", *((uint8_t *)frame->data), *((uint8_t *)frame->data + 1));
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Fork payload only has %d bytes: (%02x %02x) %s\n"
+			, frame->datalen
+			, (frame->datalen > 0 ? *((uint8_t *)frame->data) : 0)
+			, (frame->datalen > 1 ? *((uint8_t *)frame->data + 1) : 0)
+			, (switch_test_flag(frame, SFF_CNG) ? "CNG" : ""));
 		}
 	}
 	switch_mutex_unlock(session->fork_read_frame_mutex);
