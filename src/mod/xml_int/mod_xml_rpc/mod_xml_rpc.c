@@ -1126,7 +1126,7 @@ abyss_bool handler_hook(TSession * r)
 		full_command = switch_mprintf("%s%s%s", command, (api_str==NULL ? "" : " "), api_str);
 
 		if (switch_regex_match(full_command, globals.commands_to_log) == SWITCH_STATUS_SUCCESS) {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Executed HTTP request command: [%s].\n", full_command);
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Executed HTTP request command: [%s].\n", full_command);
 		}
 
 		switch_safe_free(full_command);
@@ -1222,15 +1222,11 @@ static xmlrpc_value *freeswitch_api(xmlrpc_env * const envP, xmlrpc_value * cons
   end:
 
 	/* xmlrpc-c requires us to free memory it malloced from xmlrpc_decompose_value */
-	if (!freed) {
-		switch_safe_free(command);
-		switch_safe_free(arg);
-	}
+	switch_safe_free(command);
+	switch_safe_free(arg);	
 	
 	/* Free the extracted sub command */
-	if (sub_command) {
-		switch_safe_free(sub_command);
-	}
+	switch_safe_free(sub_command);
 
 	return val;
 }
