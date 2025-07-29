@@ -1069,6 +1069,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_set_fork_read_frame(_In_ swi
 	
 	if (frame) {
 		result = switch_frame_dup(frame, &session->fork_read_frame);
+		if (frame->data && frame->datalen <= 2) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Fork Read Frame has 2 bytes: (%02x %02x)\n", *((uint8_t *)frame->data), *((uint8_t *)frame->data + 1));
+		}
 	}
 	switch_mutex_unlock(session->fork_read_frame_mutex);
 	return result;
