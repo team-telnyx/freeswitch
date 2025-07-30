@@ -1702,10 +1702,11 @@ static void *SWITCH_THREAD_FUNC prefetch_thread(switch_thread_t *thread, void *o
 
 	// shutting down- clear the queue
 	while (switch_queue_trypop(gcache.prefetch_queue, &url) == SWITCH_STATUS_SUCCESS) {
-		prometheus_set_prefetch_queue_size(switch_queue_size(gcache.prefetch_queue));
 		switch_safe_free(url);
 		url = NULL;
 	}
+
+	prometheus_set_prefetch_queue_size(0);
 
 	switch_thread_rwlock_unlock(gcache.shutdown_lock);
 
