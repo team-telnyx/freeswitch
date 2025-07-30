@@ -1221,7 +1221,7 @@ static xmlrpc_value *freeswitch_api(xmlrpc_env * const envP, xmlrpc_value * cons
 	prometheus_decrement_current_api_call();
 
   end:
-    /* Free stream data*/
+	/* Free stream data*/
 	switch_safe_free(stream.data);
 
 	/* xmlrpc-c requires us to free memory it malloced from xmlrpc_decompose_value */
