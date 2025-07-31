@@ -778,6 +778,8 @@ static char *url_cache_get(url_cache_t *cache, http_profile_t *profile, switch_c
 		/* download the file */
 		url_cache_unlock(cache, session);
 		timestamp = switch_time_now() / 1000;
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, 
+			"CALLING_HTTP_GET: url=%s filename=%s\n", url, u->filename ? u->filename : "NULL");
 		if (http_get(cache, profile, u, use_mime_ext, event, session) == SWITCH_STATUS_SUCCESS) {
 			unsigned int duration = (switch_time_now() / 1000) - timestamp;
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Download duration: %u\n", duration);
@@ -799,7 +801,9 @@ static char *url_cache_get(url_cache_t *cache, http_profile_t *profile, switch_c
 			cache->errors++;
 		}
 	} else if (!u || (u->status == CACHED_URL_RX_IN_PROGRESS && download != DOWNLOAD)) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Download URL %s is needed\n", url);
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, 
+			"URL_CACHE_GET_DOWNLOAD_NEEDED: url=%s u=%p download=%d status=%d\n", 
+			url, (void*)u, download, u ? u->status : -1);
 		filename = DOWNLOAD_NEEDED;
 	} else {
 		/* Wait until file is downloaded */
@@ -823,7 +827,9 @@ static char *url_cache_get(url_cache_t *cache, http_profile_t *profile, switch_c
 		} else {
 			cache->misses++;
 			cache->errors++;
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "%s: Cache MISS: size = %zu (%zu MB), hit ratio = %d/%d, error count = %d\n", url, cache->queue.size, cache->size / 1000000, cache->hits, cache->hits + cache->misses, cache->errors);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, 
+				"URL_CACHE_GET_FINAL_ERROR: url=%s status=%d size=%zu hit_ratio=%d/%d error_count=%d\n", 
+				url, u ? u->status : -1, cache->queue.size, cache->hits, cache->hits + cache->misses, cache->errors);
 		}
 	}
 	url_cache_unlock(cache, session);
@@ -1165,6 +1171,9 @@ static void cached_url_destroy(cached_url_t *url, switch_memory_pool_t *pool)
  */
 static switch_status_t http_get(url_cache_t *cache, http_profile_t *profile, cached_url_t *url, int use_mime_extension, switch_event_t* event, switch_core_session_t *session)
 {
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, 
+		"HTTP_GET_START: url=%s filename=%s event=%p\n", 
+		url->url, url->filename ? url->filename : "NULL", (void*)event);
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
 	switch_curl_slist_t *headers = NULL;  /* optional linked-list of HTTP headers */
 	switch_CURL *curl_handle = NULL;
@@ -1323,6 +1332,9 @@ done:
 	if (curl_handle) {
 		switch_curl_easy_cleanup(curl_handle);
 	}
+
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, 
+		"HTTP_GET_END: url=%s status=%d\n", url->url, status);
 
 	return status;
 }
