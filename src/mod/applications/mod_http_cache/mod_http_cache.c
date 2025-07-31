@@ -1171,9 +1171,6 @@ static void cached_url_destroy(cached_url_t *url, switch_memory_pool_t *pool)
  */
 static switch_status_t http_get(url_cache_t *cache, http_profile_t *profile, cached_url_t *url, int use_mime_extension, switch_event_t* event, switch_core_session_t *session)
 {
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, 
-		"HTTP_GET_START: url=%s filename=%s event=%p\n", 
-		url->url, url->filename ? url->filename : "NULL", (void*)event);
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
 	switch_curl_slist_t *headers = NULL;  /* optional linked-list of HTTP headers */
 	switch_CURL *curl_handle = NULL;
@@ -1188,6 +1185,10 @@ static switch_status_t http_get(url_cache_t *cache, http_profile_t *profile, cac
 	char *remote_ip = NULL;
 	long remote_port = 0;
 	char errbuf[CURL_ERROR_SIZE] = { 0 };
+
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, 
+		"HTTP_GET_START: url=%s filename=%s event=%p\n", 
+		url->url, url->filename ? url->filename : "NULL", (void*)event);
 
 	/* set up HTTP GET */
 	get_data.fd = 0;
