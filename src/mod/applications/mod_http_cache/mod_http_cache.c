@@ -1207,9 +1207,10 @@ static switch_status_t http_get(url_cache_t *cache, http_profile_t *profile, cac
 #else
 	if (curl_handle && (get_data.fd = open(get_data.url->filename, O_CREAT | O_RDWR | O_TRUNC, S_IRUSR | S_IWUSR)) > -1) {
 #endif
+		int i;
+		
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, 
 			"HTTP_GET_FILE_OPENED: fd=%d file=%s\n", get_data.fd, get_data.url->filename);
-		int i;
 
 		switch_curl_easy_setopt(curl_handle, CURLOPT_FOLLOWLOCATION, 1);
 		switch_curl_easy_setopt(curl_handle, CURLOPT_MAXREDIRS, 10);
@@ -1275,7 +1276,7 @@ static switch_status_t http_get(url_cache_t *cache, http_profile_t *profile, cac
 		switch_curl_easy_cleanup(curl_handle);
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, 
 			"HTTP_GET_FILE_OPEN_FAILED: url=%s file=%s errno=%d error=%s curl_handle=%p\n", 
-			url->url, get_data.url->filename, errno, strerror(errno), curl_handle);
+			url->url, get_data.url->filename, errno, strerror(errno), (void*)curl_handle);
 		status = SWITCH_STATUS_GENERR;
 		goto done;
 	}
@@ -1407,7 +1408,7 @@ SWITCH_STANDARD_API(http_cache_get)
 	}
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, 
-		"HTTP_GET_REQUEST: cmd=[%s] session=[%p]\n", cmd, session);
+		"HTTP_GET_REQUEST: cmd=[%s] session=[%p]\n", cmd, (void*)session);
 
 	if (session) {
 		pool = switch_core_session_get_pool(session);
@@ -1453,7 +1454,7 @@ SWITCH_STANDARD_API(http_cache_get)
 		stream->write_function(stream, "%s", filename);
 	} else {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, 
-			"HTTP_GET_FAILED: url=[%s] event=[%p]\n", url, event);
+			"HTTP_GET_FAILED: url=[%s] event=[%p]\n", url, (void*)event);
 		
 		if (event) {
 			const char * curl_status = switch_event_get_header(event, "http_cache_curl_status");
