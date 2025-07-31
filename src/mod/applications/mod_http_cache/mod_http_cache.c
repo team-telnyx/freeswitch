@@ -740,15 +740,19 @@ static char *url_cache_get(url_cache_t *cache, http_profile_t *profile, switch_c
 
 	if (u && u->status == CACHED_URL_AVAILABLE) {
 		if (switch_time_now() >= (u->download_time + u->max_age)) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "%s: Cached URL has expired.\n", url);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, 
+				"URL_CACHE_EXPIRED: url=%s download_time=%lld max_age=%lld current_time=%lld\n", 
+				url, (long long)u->download_time, (long long)u->max_age, (long long)switch_time_now());
 			url_cache_remove_soft(cache, session, u); /* will get permanently deleted upon replacement */
 			u = NULL;
 		} else if (switch_file_exists(u->filename, pool) != SWITCH_STATUS_SUCCESS) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "%s: Cached URL file is missing.\n", url);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, 
+				"URL_CACHE_FILE_MISSING: url=%s filename=%s\n", url, u->filename ? u->filename : "NULL");
 			url_cache_remove_soft(cache, session, u); /* will get permanently deleted upon replacement */
 			u = NULL;
 		} else if (refresh) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "%s: Cached URL manually expired.\n", url);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, 
+				"URL_CACHE_MANUAL_REFRESH: url=%s refresh=%d\n", url, refresh);
 			url_cache_remove_soft(cache, session, u); /* will get permanently deleted upon replacement */
 			u = NULL;
 		} else if (u->status == CACHED_URL_RX_IN_PROGRESS && switch_time_now() >= (u->download_time + download_timeout_ns)) {
@@ -795,6 +799,9 @@ static char *url_cache_get(url_cache_t *cache, http_profile_t *profile, switch_c
 
 			/* Did not get the file, flag for replacement */
 			url_cache_lock(cache, session);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, 
+				"URL_CACHE_DOWNLOAD_FAILED: url=%s filename=%s status_before_removal=%d\n", 
+				url, u->filename ? u->filename : "NULL", u->status);
 			url_cache_remove_soft(cache, session, u);
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, 
 				"HTTP_GET_DOWNLOAD_FAILED: url=%s filename=%s\n", url, u->filename ? u->filename : "NULL");
@@ -819,6 +826,9 @@ static char *url_cache_get(url_cache_t *cache, http_profile_t *profile, switch_c
 		}
 
 		/* grab filename if everything is OK */
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, 
+			"URL_CACHE_GET_STATUS_CHECK: url=%s u=%p u->status=%d expected_AVAILABLE=%d\n", 
+			url, (void*)u, u ? u->status : -1, CACHED_URL_AVAILABLE);
 		if (u->status == CACHED_URL_AVAILABLE) {
 			filename = switch_core_strdup(pool, u->filename);
 			cache->hits++;
@@ -827,9 +837,9 @@ static char *url_cache_get(url_cache_t *cache, http_profile_t *profile, switch_c
 		} else {
 			cache->misses++;
 			cache->errors++;
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, 
-				"URL_CACHE_GET_FINAL_ERROR: url=%s status=%d size=%zu hit_ratio=%d/%d error_count=%d\n", 
-				url, u ? u->status : -1, cache->queue.size, cache->hits, cache->hits + cache->misses, cache->errors);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, 
+				"URL_CACHE_GET_FINAL_ERROR: url=%s status=%d expected=%d size=%zu hit_ratio=%d/%d error_count=%d\n", 
+				url, u ? u->status : -1, CACHED_URL_AVAILABLE, cache->queue.size, cache->hits, cache->hits + cache->misses, cache->errors);
 		}
 	}
 	url_cache_unlock(cache, session);
@@ -914,6 +924,9 @@ static switch_status_t url_cache_replace(url_cache_t *cache, switch_core_session
  */
 static void url_cache_remove_soft(url_cache_t *cache, switch_core_session_t *session, cached_url_t *url)
 {
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+		"URL_CACHE_REMOVE_SOFT: url=%s old_status=%d marking_as_REMOVE\n",
+		url->url, url->status);
 	switch_core_hash_delete(cache->map, url->url);
 	url->used = 0;
 	url->status = CACHED_URL_REMOVE;
