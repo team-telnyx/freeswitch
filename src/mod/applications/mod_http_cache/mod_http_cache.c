@@ -768,7 +768,9 @@ static char *url_cache_get(url_cache_t *cache, http_profile_t *profile, switch_c
 		if (url_cache_add(cache, session, u) != SWITCH_STATUS_SUCCESS) {
 			/* This error should never happen */
 			url_cache_unlock(cache, session);
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT, "%s: Failed to add URL to cache!\n", url);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT, 
+				"CACHE_ADD_CRITICAL_FAILURE: url=%s queue_size=%zu max_size=%zu\n", 
+				url, cache->queue.size, cache->queue.max_size);
 			cached_url_destroy(u, cache->pool);
 			return NULL;
 		}
@@ -792,7 +794,8 @@ static char *url_cache_get(url_cache_t *cache, http_profile_t *profile, switch_c
 			/* Did not get the file, flag for replacement */
 			url_cache_lock(cache, session);
 			url_cache_remove_soft(cache, session, u);
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Failed to download URL %s\n", url);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, 
+				"HTTP_GET_DOWNLOAD_FAILED: url=%s filename=%s\n", url, u->filename ? u->filename : "NULL");
 			cache->errors++;
 		}
 	} else if (!u || (u->status == CACHED_URL_RX_IN_PROGRESS && download != DOWNLOAD)) {
@@ -838,6 +841,9 @@ static switch_status_t url_cache_add(url_cache_t *cache, switch_core_session_t *
 {
 	simple_queue_t *queue = &cache->queue;
 	if (queue->size >= queue->max_size && url_cache_replace(cache, session) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, 
+			"CACHE_ADD_FAILED: queue full, replacement failed. size=%zu max=%zu url=%s\n", 
+			queue->size, queue->max_size, url->url);
 		return SWITCH_STATUS_FALSE;
 	}
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Adding %s(%s) to cache index %d\n", url->url, url->filename, queue->pos);
@@ -1201,6 +1207,8 @@ static switch_status_t http_get(url_cache_t *cache, http_profile_t *profile, cac
 #else
 	if (curl_handle && (get_data.fd = open(get_data.url->filename, O_CREAT | O_RDWR | O_TRUNC, S_IRUSR | S_IWUSR)) > -1) {
 #endif
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, 
+			"HTTP_GET_FILE_OPENED: fd=%d file=%s\n", get_data.fd, get_data.url->filename);
 		int i;
 
 		switch_curl_easy_setopt(curl_handle, CURLOPT_FOLLOWLOCATION, 1);
@@ -1265,7 +1273,9 @@ static switch_status_t http_get(url_cache_t *cache, http_profile_t *profile, cac
 		close(get_data.fd);
 	} else {
 		switch_curl_easy_cleanup(curl_handle);
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "URL %s open() error: %s\n", url->url, strerror(errno));
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, 
+			"HTTP_GET_FILE_OPEN_FAILED: url=%s file=%s errno=%d error=%s curl_handle=%p\n", 
+			url->url, get_data.url->filename, errno, strerror(errno), curl_handle);
 		status = SWITCH_STATUS_GENERR;
 		goto done;
 	}
@@ -1396,6 +1406,9 @@ SWITCH_STANDARD_API(http_cache_get)
 		return SWITCH_STATUS_SUCCESS;
 	}
 
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, 
+		"HTTP_GET_REQUEST: cmd=[%s] session=[%p]\n", cmd, session);
+
 	if (session) {
 		pool = switch_core_session_get_pool(session);
 	} else {
@@ -1431,26 +1444,46 @@ SWITCH_STANDARD_API(http_cache_get)
 	}
 
 	switch_event_create_plain(&event, SWITCH_EVENT_CHANNEL_DATA);
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, 
+		"HTTP_GET_CALLING_CACHE: url=[%s] download=[%d] refresh=[%d]\n", url, download, refresh);
 	filename = url_cache_get(&gcache, profile, session, url, download, refresh, extension, validate_url_extension, use_mime_ext, event, pool);
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, 
+		"HTTP_GET_CACHE_RESULT: url=[%s] filename=[%s]\n", url, filename ? filename : "NULL");
 	if (filename) {
 		stream->write_function(stream, "%s", filename);
 	} else {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, 
+			"HTTP_GET_FAILED: url=[%s] event=[%p]\n", url, event);
+		
 		if (event) {
 			const char * curl_status = switch_event_get_header(event, "http_cache_curl_status");
 			const char * file_status = switch_event_get_header(event, "http_cache_file_create_result");
+			const char * response_code = switch_event_get_header(event, "http_cache_response_code");
+			const char * curl_error = switch_event_get_header(event, "http_cache_curl_error");
+			
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, 
+				"HTTP_GET_EVENT_DETAILS: curl_status=[%s] file_status=[%s] response_code=[%s] curl_error=[%s]\n", 
+				curl_status ? curl_status : "NULL",
+				file_status ? file_status : "NULL", 
+				response_code ? response_code : "NULL",
+				curl_error ? curl_error : "NULL");
+				
 			if (!zstr(curl_status) && strcmp(curl_status, "0")) {
-				stream->write_function(stream, "-ERR CURL(%s:%s):%s\n"
-					, curl_status
-					, switch_event_get_header(event, "http_cache_response_code")
-					, switch_event_get_header(event, "http_cache_curl_error"));
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, 
+					"HTTP_GET_CURL_ERROR: status=%s code=%s error=%s\n", curl_status, response_code, curl_error);
+				stream->write_function(stream, "-ERR CURL(%s:%s):%s\n", curl_status, response_code, curl_error);
 			} else if (!zstr(file_status) && strcmp(file_status, "0")) {
-				stream->write_function(stream, "-ERR FILE(%s):%s\n"
-					, file_status
-					, strerror(atoi(file_status)));
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, 
+					"HTTP_GET_FILE_ERROR: errno=%s error=%s\n", file_status, strerror(atoi(file_status)));
+				stream->write_function(stream, "-ERR FILE(%s):%s\n", file_status, strerror(atoi(file_status)));
 			} else {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, 
+					"HTTP_GET_UNKNOWN_ERROR: No specific curl or file error detected\n");
 				stream->write_function(stream, "-ERR UNKNOWN\n");
 			}
 		} else {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, 
+				"HTTP_GET_NO_EVENT: url_cache_get returned NULL with no event object\n");
 			stream->write_function(stream, "-ERR UNKNOWN\n");
 		}
 		status = SWITCH_STATUS_SUCCESS;
