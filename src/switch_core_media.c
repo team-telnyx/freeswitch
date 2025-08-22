@@ -1699,8 +1699,8 @@ static void switch_core_session_get_recovery_crypto_key(switch_core_session_t *s
 				engine->ssec[engine->crypto_type].local_crypto_key = switch_core_session_strdup(session, local_crypto_key);
 			} else {
 				// If its missing, attempt to recreate it using remote key.
-				engine->ssec[engine->crypto_type].local_crypto_key = switch_core_session_sprintf(session
-					, "%d %s inline:%s", engine->ssec[engine->crypto_type].crypto_tag, ct, remote_crypto_key);
+				engine->ssec[engine->crypto_type].local_crypto_key = switch_core_session_sprintf(session,
+					"%d %s inline:%s", engine->ssec[engine->crypto_type].crypto_tag, ct, remote_crypto_key);
 			}
 		}
 
@@ -1708,10 +1708,10 @@ static void switch_core_session_get_recovery_crypto_key(switch_core_session_t *s
 			switch_core_media_add_crypto(session, &engine->ssec[engine->crypto_type], SWITCH_RTP_CRYPTO_SEND);
 			switch_core_media_add_crypto(session, &engine->ssec[engine->crypto_type], SWITCH_RTP_CRYPTO_RECV);
 
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "CRYPTO: Restored recovery crypto (type=%s, tag=%d, localkey='%s', remotekey='%s')\n"
-				, type2str(type), engine->ssec[engine->crypto_type].crypto_tag
-				, engine->ssec[engine->crypto_type].local_crypto_key
-				, engine->ssec[engine->crypto_type].remote_crypto_key);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "CRYPTO: Restored recovery crypto (type=%s, tag=%d, localkey='%s', remotekey='%s')\n",
+				type2str(type), engine->ssec[engine->crypto_type].crypto_tag,
+				engine->ssec[engine->crypto_type].local_crypto_key,
+				engine->ssec[engine->crypto_type].remote_crypto_key);
 		} else {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "CRYPTO: Skipping raw key extraction - keys not ready for recovery!\n");
 		}
