@@ -124,7 +124,7 @@ fi
 
 # Get list of tests from make
 echo "Fetching test list..."
-TESTS=$(make -s -C ../.. print_tests 2>/dev/null) || {
+TESTS=$(make -s -C ../.. print_tests 2>/dev/null | grep -E "^(tests|src|WARNING)") || {
 	echo "Error: Failed to fetch test list"
 	exit 1
 }
