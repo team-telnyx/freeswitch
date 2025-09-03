@@ -52,8 +52,8 @@ AC_ARG_ENABLE(address_sanitizer,
   [enable_address_sanitizer="no"])
 
 if test "${enable_address_sanitizer}" = "yes"; then
-  FREESWITCH_CFLAGS="$FREESWITCH_CFLAGS -fsanitize=address -fno-omit-frame-pointer -fstack-protector-strong"
-  FREESWITCH_LDFLAGS="$FREESWITCH_LDFLAGS -fsanitize=address"
+  FREESWITCH_CFLAGS="$FREESWITCH_CFLAGS -fsanitize=address,undefined -fno-omit-frame-pointer -fstack-protector-strong"
+  FREESWITCH_LDFLAGS="$FREESWITCH_LDFLAGS -fsanitize=address,undefined"
 fi
 
 AC_SUBST(SWITCH_VERSION_MAJOR, [$SWITCH_VERSION_MAJOR])
