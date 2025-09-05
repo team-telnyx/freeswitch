@@ -2031,9 +2031,9 @@ AC_ARG_ENABLE(address_sanitizer,
   [enable_address_sanitizer="no"])
 
 if test "${enable_address_sanitizer}" = "yes"; then
-  APR_ADDTO(CFLAGS, -fsanitize=address -fsanitize=undefined -fsanitize=leak -fno-omit-frame-pointer -fstack-protector-strong)
-  APR_ADDTO(CXXFLAGS, -fsanitize=address -fsanitize=undefined -fsanitize=leak -fno-omit-frame-pointer -fstack-protector-strong)
-  APR_ADDTO(LDFLAGS, -fsanitize=address -fsanitize=undefined -fsanitize=leak)
+  APR_ADDTO(CFLAGS, -fsanitize=address -fno-omit-frame-pointer -fstack-protector-strong)
+  APR_ADDTO(CXXFLAGS, -fsanitize=address -fno-omit-frame-pointer -fstack-protector-strong)
+  APR_ADDTO(LDFLAGS, -fsanitize=address)
 fi
 
 #  Enable HEAP profiler (requires libgoogle-perftools-dev package)
