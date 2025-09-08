@@ -146,7 +146,7 @@ char *sofia_media_get_multipart(switch_core_session_t *session, const char *pref
 	switch_bool_t allow_custom_sdp = switch_true(switch_channel_get_variable(channel, "allow_custom_sdp"));
 	switch_bool_t drop_sdp = !!sdp && !allow_custom_sdp;
 
-	char * isup = (char*)switch_channel_get_private(channel, "_isup_payload");
+	char *isup = (char*)switch_channel_get_private(channel, "_isup_payload");
 	intptr_t isup_len = (intptr_t)switch_channel_get_private(channel, "_isup_payload_size");
 
 
