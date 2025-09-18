@@ -80,32 +80,7 @@ public:
     switch_thread_rwlock_t* getLock() { return _rwlock; }
     KVModules& modules() { return _kv_modules; }
     KVModuleIndex& index() { return _kv_module_index; }
-    
-    ModuleCallbacks* findModule(const std::string& name) {
-        auto it = _kv_module_index.find(name);
-        if (it != _kv_module_index.end() && it->second < _kv_modules.size()) {
-            return &_kv_modules[it->second];
-        }
-        return nullptr;
-    }
-    
-    void removeModule(const std::string& module_name) {
-        auto index_it = _kv_module_index.find(module_name);
-        if (index_it != _kv_module_index.end()) {
-            size_t index = index_it->second;
-            if (index < _kv_modules.size()) {
-                _kv_modules.erase(_kv_modules.begin() + index);
-                // Update indices for all modules that shifted down
-                for (auto& [name, idx] : _kv_module_index) {
-                    if (idx > index) {
-                        idx--;
-                    }
-                }
-            }
-            _kv_module_index.erase(index_it);
-        }
-    }
-    
+        
     switch_status_t getModule(const char* module_name, const char* key, const char* ns, char** value) {
         LockGuard guard(_rwlock);
         
@@ -255,6 +230,33 @@ public:
         LockGuard guard(_rwlock);
         return (_kv_module_index.find(module_name) != _kv_module_index.end()) ? SWITCH_TRUE : SWITCH_FALSE;
     }
+
+private:
+    ModuleCallbacks* findModule(const std::string& name) {
+        auto it = _kv_module_index.find(name);
+        if (it != _kv_module_index.end() && it->second < _kv_modules.size()) {
+            return &_kv_modules[it->second];
+        }
+        return nullptr;
+    }
+
+    void removeModule(const std::string& module_name) {
+        auto index_it = _kv_module_index.find(module_name);
+        if (index_it != _kv_module_index.end()) {
+            size_t index = index_it->second;
+            if (index < _kv_modules.size()) {
+                _kv_modules.erase(_kv_modules.begin() + index);
+                // Update indices for all modules that shifted down
+                for (auto& [name, idx] : _kv_module_index) {
+                    if (idx > index) {
+                        idx--;
+                    }
+                }
+            }
+            _kv_module_index.erase(index_it);
+        }
+    }
+
 
 private:
 	KVModules _kv_modules;
