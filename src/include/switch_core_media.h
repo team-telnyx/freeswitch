@@ -42,6 +42,7 @@ SWITCH_BEGIN_EXTERN_C
 #define SWITCH_MAX_CAND_ACL 25
 #define SWITCH_NO_CRYPTO_TAG -1
 #define SWITCH_REMOTE_CRYPTO_TAG_INVALID -1
+#define MAX_RTP_EXTENSIONS 10
 
 typedef enum {
 	DTMF_AUTO,
@@ -185,6 +186,8 @@ typedef struct switch_core_media_params_s {
 
 	switch_thread_t *video_write_thread;
 
+	rtp_extension_t rtp_recv_extensions[MAX_RTP_EXTENSIONS];
+	rtp_extension_t rtp_send_extensions[MAX_RTP_EXTENSIONS];
 } switch_core_media_params_t;
 
 static inline const char *switch_media_type2str(switch_media_type_t type)
@@ -461,6 +464,38 @@ SWITCH_DECLARE(switch_bool_t) switch_core_media_has_mismatch_dynamic_payload_cod
 typedef struct switch_rtp_engine_s switch_rtp_engine_t;
 SWITCH_DECLARE(switch_rtp_engine_t *) switch_core_media_get_engine(switch_core_session_t *session, int media_type);
 SWITCH_DECLARE(switch_codec_t*) switch_core_media_get_codec(switch_core_session_t *session, switch_media_type_t type);
+SWITCH_DECLARE(switch_status_t) switch_core_session_start_dtls_init_job(switch_core_session_t *session);
+SWITCH_DECLARE(switch_status_t) switch_core_media_dtls_init_check_lock(switch_core_session_t *session, switch_media_type_t type);
+SWITCH_DECLARE(switch_bool_t) switch_core_media_has_crypto(switch_core_session_t *session);
+SWITCH_DECLARE(switch_status_t) switch_core_media_set_recv_extension(switch_rtp_engine_t *engine, uint8_t id, uint8_t ext_type);
+SWITCH_DECLARE(switch_status_t) switch_core_media_set_send_extension(switch_rtp_engine_t *engine, uint8_t id, uint8_t ext_type);
+SWITCH_DECLARE(rtp_extension_t *) switch_core_media_get_recv_extension_by_id(switch_rtp_engine_t *engine, uint8_t id);
+SWITCH_DECLARE(rtp_extension_t *) switch_core_media_get_send_extension_by_id(switch_rtp_engine_t *engine, uint8_t id);
+SWITCH_DECLARE(rtp_extension_t *) switch_core_media_get_recv_extension_by_type(switch_rtp_engine_t *engine, uint8_t type);
+SWITCH_DECLARE(rtp_extension_t *) switch_core_media_get_send_extension_by_type(switch_rtp_engine_t *engine, uint8_t type);
+
+SWITCH_DECLARE(void) switch_core_media_trickle_register(switch_core_session_t *session, const char *mid, int mline_index);
+
+SWITCH_DECLARE(switch_status_t) switch_core_media_trickle_add_remote_candidate(switch_core_session_t *session, int mline_index, const char *mid, const char *cand_line);
+
+SWITCH_DECLARE(switch_status_t) switch_core_media_trickle_end_of_candidates(switch_core_session_t *session, int mline_index, const char *mid);
+
+/* Helper to decide if trickle is enabled/accepted for this session */
+SWITCH_DECLARE(int) switch_core_media_trickle_enabled(switch_core_session_t *session);
+SWITCH_DECLARE(int) switch_core_media_trickle_accept(switch_core_session_t *session);
+
+SWITCH_DECLARE(switch_bool_t) switch_rtp_trickle_is_registered(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(void) switch_rtp_trickle_emit_local_candidate(switch_rtp_t *rtp_session, const switch_rtp_ice_cand_t *cand, const char *mid, int mline_index, int end_of_candidates);
+SWITCH_DECLARE(void) switch_rtp_set_ice_role(switch_rtp_t *rtp_session, switch_bool_t controlling);
+SWITCH_DECLARE(void) switch_rtp_dtls_init_once(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(switch_status_t) switch_rtp_extmap_register(switch_rtp_t *rtp_session, uint8_t id, const char *uri);
+SWITCH_DECLARE(void) switch_rtp_mark_ice_connectivity_failed(switch_rtp_t *rtp_session, const char *reason);
+SWITCH_DECLARE(switch_status_t) switch_core_media_add_trickle_candidate(switch_core_session_t *session, int mline_index, const char *mid, const char *raw_candidate);
+SWITCH_DECLARE(switch_status_t) switch_core_media_trickle_remote_candidate(switch_core_session_t *session, const char *mid, int mline_index, const char *cand_line, int end_of_candidates);
+SWITCH_DECLARE(switch_status_t) switch_core_media_trickle_ingest_sdpfrag(switch_core_session_t *session, const char *frag_text);
+SWITCH_DECLARE(void) switch_core_media_trickle_recheck_all(switch_core_session_t *session, void *sdp_session, switch_sdp_type_t sdp_type);
+SWITCH_DECLARE(switch_status_t) switch_core_media_trickle_remote_candidate_and_check(switch_core_session_t *session, switch_media_handle_t *smh, void *sdp_session, switch_sdp_type_t sdp_type, const char *mid, int mline_index, const char *cand_line, int end_of_candidates);
+SWITCH_DECLARE(switch_status_t) switch_core_media_trickle_remote_candidate_and_recheck(switch_core_session_t *session, switch_media_handle_t *smh, void *sdp_session, switch_sdp_type_t sdp_type, const char *mid, int mline_index, const char *cand_line, int end_of_candidates);
 
 SWITCH_END_EXTERN_C
 #endif

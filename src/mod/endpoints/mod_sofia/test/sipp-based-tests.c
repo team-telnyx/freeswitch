@@ -698,7 +698,24 @@ skiptest:
 			}
 		}
 		FST_TEST_END()
+		FST_TEST_BEGIN(uac_trickle_ice_info)
+		{
+			const char *local_ip_v4 = switch_core_get_variable("local_ip_v4");
+			int sipp_ret;
 
+			sipp_ret = start_sipp_uac(local_ip_v4, 5080, "1212121212",
+					switch_core_sprintf(fst_pool, "sipp-scenarios/%s", "uac_trickle_ice_info.xml"),
+					"");
+
+			if (sipp_ret < 0 || sipp_ret == 127) {
+				fst_check(!"sipp not found");
+			} else {
+				switch_sleep(4000 * 1000);
+				kill_sipp();
+				fst_check(test_success == 0); /* we only check that sipp ran and FS didn't error */
+			}
+		}
+		FST_TEST_END()
 	}
 	FST_MODULE_END()
 }

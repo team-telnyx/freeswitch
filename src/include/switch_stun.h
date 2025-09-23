@@ -94,8 +94,8 @@ typedef enum {
 	SWITCH_STUN_ATTR_CONTROLLED         = 0x8029,
 	SWITCH_STUN_ATTR_CONTROLLING        = 0x802a,
 	SWITCH_STUN_ATTR_RESP_ORIGIN        = 0x802b,
-	SWITCH_STUN_ATTR_OTHER_ADDR         = 0x802c
-
+	SWITCH_STUN_ATTR_OTHER_ADDR         = 0x802c,
+	SWITCH_STUN_ATTR_NETWORK_INFO       = 0xc057
 } switch_stun_attribute_t;
 
 typedef enum {

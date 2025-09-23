@@ -46,6 +46,9 @@
 static switch_t38_options_t * switch_core_media_process_udptl(switch_core_session_t *session, sdp_session_t *sdp, sdp_media_t *m);
 static void switch_core_media_set_r_sdp_codec_string(switch_core_session_t *session, const char *codec_string, sdp_session_t *sdp, switch_sdp_type_t sdp_type);
 static void gen_ice(switch_core_session_t *session, switch_media_type_t type, const char *ip, switch_port_t port);
+static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t type, sdp_session_t *sdp, sdp_media_t *m, switch_sdp_type_t sdp_type);
+static switch_bool_t scm_should_use_m_port(switch_core_session_t *session, switch_rtp_engine_t *engine);
+
 //#define GOOGLE_ICE
 #define RTCP_MUX
 #define MAX_CODEC_CHECK_FRAMES 50//x:mod_sofia.h
@@ -58,6 +61,11 @@ static void gen_ice(switch_core_session_t *session, switch_media_type_t type, co
 #define TEXT_PERIOD_TIMEOUT 3000
 #define MAX_RED_FRAMES 25
 #define RED_PACKET_SIZE 100
+#define MAX_RTP_EXTENSIONS 10
+
+#ifndef TRICKLE_RECHECK_DEBOUNCE_US
+#define TRICKLE_RECHECK_DEBOUNCE_US 100000  /* 100 ms */
+#endif
 
 typedef enum {
 	SMF_INIT = (1 << 0),
@@ -84,6 +92,11 @@ struct media_helper {
 	switch_mutex_t *file_read_mutex;
 	switch_mutex_t *file_write_mutex;
 	int up;
+	int ready;
+};
+
+struct dtls_init_helper {
+	switch_core_session_t *session;
 	int ready;
 };
 
@@ -183,6 +196,7 @@ struct switch_rtp_engine_s {
 	uint8_t pli;
 	uint8_t nack;
 	uint8_t tmmbr;
+	uint8_t bundled_with_audio;
 	uint8_t no_crypto;
 	uint8_t dtls_controller;
 	uint8_t pass_codecs;
@@ -205,6 +219,10 @@ struct switch_rtp_engine_s {
 	void *engine_user_data;
 	int8_t engine_function_running;
 	switch_frame_buffer_t *write_fb;
+	uint8_t ice_remote_initiator;
+	switch_thread_rwlock_t *dtls_init_rwlock;
+	rtp_extension_t rtp_recv_extensions[MAX_RTP_EXTENSIONS];
+	rtp_extension_t rtp_send_extensions[MAX_RTP_EXTENSIONS];
 };
 
 #define MAX_REJ_STREAMS 10
@@ -273,6 +291,8 @@ struct switch_media_handle_s {
 
 	switch_time_t last_text_frame;
 	switch_time_t first_audio_frame;
+	uint8_t dtls_init_job;
+	struct dtls_init_helper dtls_init_helper;
 };
 
 switch_srtp_crypto_suite_t SUITES[CRYPTO_INVALID] = {
@@ -363,6 +383,131 @@ static int get_channels(const char *name, int dft)
 	}
 
 	return dft ? dft : 1;
+}
+
+#define TRICKLE_EVENT_SUBCLASS "sofia::trickle-ice"
+
+static int trickle_is_enabled(switch_core_session_t *session)
+{
+    switch_channel_t *channel;
+    const char *v;
+    int enabled;
+    channel = switch_core_session_get_channel(session);
+    v = switch_channel_get_variable(channel, "rtp_trickle_ice");
+    enabled = (v && (switch_true(v)));
+    return enabled;
+}
+
+static int trickle_accept_enabled(switch_core_session_t *session)
+{
+    return trickle_is_enabled(session) || switch_true(switch_channel_get_variable(switch_core_session_get_channel(session), "sip_trickle_accept"));
+}
+
+static switch_bool_t scm_should_use_m_port(switch_core_session_t *session, switch_rtp_engine_t *engine)
+{
+	if (!session || !engine) return SWITCH_TRUE;
+
+	if (trickle_accept_enabled(session)) {
+		if (engine->ice_in.is_chosen[0]) {
+			return SWITCH_TRUE;
+		}
+		return SWITCH_FALSE;
+	}
+
+	return SWITCH_TRUE;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_media_trickle_remote_candidate(switch_core_session_t *session, const char *mid,int mline_index, const char *cand_line, int end_of_candidates)
+{
+	switch_channel_t *channel;
+	switch_status_t st = SWITCH_STATUS_FALSE;
+
+	if (!session || (!end_of_candidates && (!cand_line || !*cand_line))) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	channel = switch_core_session_get_channel(session);
+
+	if (end_of_candidates) {
+		/* Handle end of candidates case - no candidate line processing needed */
+		switch_core_media_trickle_end_of_candidates(session, mline_index, mid);
+		st = SWITCH_STATUS_SUCCESS;
+	} else {
+		/* Process the candidate line */
+		if (strncasecmp(cand_line, "a=candidate:", 12) == 0) {
+			/* ok, nothing to do */
+		} else if (strncasecmp(cand_line, "candidate:", 10) == 0) {
+			char buf[1200];
+			switch_snprintf(buf, sizeof(buf), "a=%s", cand_line);
+			cand_line = switch_core_strdup(switch_core_session_get_pool(session), buf);
+		} else {
+			char buf[1200];
+			switch_snprintf(buf, sizeof(buf), "a=candidate:%s", cand_line);
+			cand_line = switch_core_strdup(switch_core_session_get_pool(session), buf);
+		}
+
+		st = switch_core_media_trickle_add_remote_candidate(session, mline_index, mid, cand_line);
+		if (st == SWITCH_STATUS_SUCCESS) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+							  "%s Added remote trickled ICE candidate (mid=%s, m=%d)\n",
+							  channel ? switch_channel_get_name(channel) : "unknown",
+							  mid ? mid : "(null)", mline_index);
+		} else {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+							  "%s Failed to add remote trickled ICE candidate (mid=%s, m=%d)\n", channel ? switch_channel_get_name(channel) : "unknown",
+							  mid ? mid : "(null)", mline_index);
+			return st;
+		}
+	}
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_media_trickle_ingest_sdpfrag(switch_core_session_t *session, const char *frag_text)
+{
+	const char *p, *line;
+	char mid[64] = {0};
+	int mline_index = -1,  saw_candidate = 0, eoc = 0;
+	switch_status_t overall = SWITCH_STATUS_FALSE;
+
+	if (!session || !frag_text) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	p = frag_text;
+	while (p && *p) {
+		const char *nl = strchr(p, '\n');
+		size_t len = nl ? (size_t)(nl - p) : strlen(p);
+		char buf[1200];
+
+		if (len >= sizeof(buf)) len = sizeof(buf) - 1;
+		memcpy(buf, p, len);
+		buf[len] = '\0';
+		line = buf;
+
+		if (len && buf[len-1] == '\r') buf[len-1] = '\0';
+
+		if (!strncasecmp(line, "a=mid:", 6)) {
+			switch_copy_string(mid, line + 6, sizeof(mid));
+		} else if (!strncasecmp(line, "a=end-of-candidates", 20)) {
+			eoc = 1;
+		} else if (!strncasecmp(line, "a=candidate:", 12)) {
+			if (switch_core_media_trickle_remote_candidate(session, mid[0] ? mid : NULL,
+			                                              mline_index, line, 0) == SWITCH_STATUS_SUCCESS) {
+				overall = SWITCH_STATUS_SUCCESS;
+				saw_candidate = 1;
+			}
+		}
+
+		p = nl ? nl + 1 : NULL;
+	}
+
+	if (!saw_candidate && eoc) {
+		switch_core_media_trickle_remote_candidate(session, mid[0] ? mid : NULL, mline_index, "candidate:", 1);
+		overall = SWITCH_STATUS_SUCCESS;
+	}
+
+	return overall;
 }
 
 SWITCH_DECLARE(uint32_t) switch_core_media_get_video_fps(switch_core_session_t *session)
@@ -628,7 +773,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_process_t38_passthru(switch_co
 		switch_snprintf(tmp, sizeof(tmp), "%d", a_engine->cur_payload_map->remote_sdp_port);
 		switch_channel_set_variable(session->channel, SWITCH_REMOTE_MEDIA_IP_VARIABLE, a_engine->cur_payload_map->remote_sdp_ip);
 		switch_channel_set_variable(session->channel, SWITCH_REMOTE_MEDIA_PORT_VARIABLE, tmp);
-		if (switch_rtp_set_remote_address(a_engine->rtp_session, a_engine->cur_payload_map->remote_sdp_ip,
+		if (!scm_should_use_m_port(session, a_engine)) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Trickle ICE on: deferring audio remote address from m= line\n");
+		} else if (switch_rtp_set_remote_address(a_engine->rtp_session, a_engine->cur_payload_map->remote_sdp_ip,
 										  a_engine->cur_payload_map->remote_sdp_port, 0, SWITCH_TRUE, &err) != SWITCH_STATUS_SUCCESS) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "AUDIO RTP REPORTS ERROR: [%s]\n", err);
 			switch_channel_hangup(session->channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
@@ -2446,6 +2593,10 @@ SWITCH_DECLARE(switch_status_t) switch_media_handle_create(switch_media_handle_t
 		session->media_handle->engines[SWITCH_MEDIA_TYPE_TEXT].cur_payload_map = session->media_handle->engines[SWITCH_MEDIA_TYPE_TEXT].payload_map;
 		session->media_handle->engines[SWITCH_MEDIA_TYPE_TEXT].cur_payload_map->current = 1;
 
+		switch_thread_rwlock_create(&session->media_handle->engines[SWITCH_MEDIA_TYPE_AUDIO].dtls_init_rwlock, switch_core_session_get_pool(session));
+		switch_thread_rwlock_create(&session->media_handle->engines[SWITCH_MEDIA_TYPE_VIDEO].dtls_init_rwlock, switch_core_session_get_pool(session));
+		switch_thread_rwlock_create(&session->media_handle->engines[SWITCH_MEDIA_TYPE_TEXT].dtls_init_rwlock, switch_core_session_get_pool(session));
+
 		switch_channel_set_flag(session->channel, CF_DTLS_OK);
 
 		status = SWITCH_STATUS_SUCCESS;
@@ -3463,10 +3614,15 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 		return SWITCH_STATUS_FALSE;
 	}
 
+	if (switch_thread_rwlock_tryrdlock(engine->dtls_init_rwlock) != SWITCH_STATUS_SUCCESS) {
+		return SWITCH_STATUS_INUSE;
+	}
+
 	if (smh->read_mutex[type] && switch_mutex_trylock(smh->read_mutex[type]) != SWITCH_STATUS_SUCCESS) {
 		/* return CNG, another thread is already reading  */
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG1, "%s is already being read for %s\n",
 						  switch_channel_get_name(session->channel), type2str(type));
+		switch_thread_rwlock_unlock(engine->dtls_init_rwlock);
 		return SWITCH_STATUS_INUSE;
 	}
 
@@ -4007,6 +4163,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 		switch_mutex_unlock(smh->read_mutex[type]);
 	}
 
+	switch_thread_rwlock_unlock(engine->dtls_init_rwlock);
+
 	return status;
 }
 
@@ -4034,8 +4192,13 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 
 	engine = &smh->engines[type];
 
+	if (switch_thread_rwlock_tryrdlock(engine->dtls_init_rwlock) != SWITCH_STATUS_SUCCESS) {
+		return SWITCH_STATUS_SUCCESS;
+	}
+
 	if (type == SWITCH_MEDIA_TYPE_VIDEO) {
 		if (engine->thread_write_lock && engine->thread_write_lock != switch_thread_self()) {
+			switch_thread_rwlock_unlock(engine->dtls_init_rwlock);
 			return SWITCH_STATUS_SUCCESS;
 		}
 	}
@@ -4044,6 +4207,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 		switch_media_flow_t audio_flow = switch_core_session_media_flow(session, SWITCH_MEDIA_TYPE_AUDIO);
 
 		if (audio_flow != SWITCH_MEDIA_FLOW_SENDRECV && audio_flow != SWITCH_MEDIA_FLOW_SENDONLY) {
+			switch_thread_rwlock_unlock(engine->dtls_init_rwlock);
 			return SWITCH_STATUS_SUCCESS;
 		}
 
@@ -4059,11 +4223,13 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 			if (switch_channel_ready(session->channel)) {
 				switch_yield(10000);
 			} else {
+				 switch_thread_rwlock_unlock(engine->dtls_init_rwlock);
 				return SWITCH_STATUS_GENERR;
 			}
 		}
 
 		if (!engine->read_codec.implementation || !switch_core_codec_ready(&engine->read_codec)) {
+			  switch_thread_rwlock_unlock(engine->dtls_init_rwlock);
 			return SWITCH_STATUS_GENERR;
 		}
 
@@ -4095,6 +4261,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 		}
 	}
 
+	switch_thread_rwlock_unlock(engine->dtls_init_rwlock);
 	return status;
 }
 
@@ -4691,7 +4858,11 @@ static switch_call_direction_t switch_ice_direction(switch_rtp_engine_t *engine,
 	}
 
 	if (switch_rtp_has_dtls() && dtls_ok(smh->session)) {
-		r = engine->dtls_controller ? SWITCH_CALL_DIRECTION_INBOUND : SWITCH_CALL_DIRECTION_OUTBOUND;
+		if (switch_channel_test_flag(session->channel, CF_OBSERVE_INITIATOR)) {
+			r = engine->ice_remote_initiator ? SWITCH_CALL_DIRECTION_INBOUND : SWITCH_CALL_DIRECTION_OUTBOUND;
+		} else {
+			r = engine->dtls_controller ? SWITCH_CALL_DIRECTION_INBOUND : SWITCH_CALL_DIRECTION_OUTBOUND;
+		}
 	} else {
 		if ((switch_channel_test_flag(session->channel, CF_REINVITE) || switch_channel_test_flag(session->channel, CF_RECOVERING))
 			&& switch_channel_test_flag(session->channel, CF_AVPF)) {
@@ -4793,18 +4964,136 @@ static switch_bool_t is_mdns(const char *ip)
 	return SWITCH_FALSE;
 }
 
+static int trickle_merge_rtp_remote_into_engine(switch_media_handle_t *smh, switch_media_type_t type)
+{
+	switch_core_session_t *session = smh ? smh->session : NULL;
+	switch_rtp_engine_t *engine;
+	switch_rtp_t *rtp;
+	int added = 0;
+	const switch_rtp_ice_cand_t *srcv = NULL;
+	uint32_t rc = 0;
+
+
+	if (!smh || !session) {
+		return 0;
+	}
+
+	engine = &smh->engines[type];
+	if (!engine) {
+		return 0;
+	}
+
+	rtp = engine->rtp_session;
+	if (!rtp) {
+		return 0;
+	}
+
+
+	rc = switch_rtp_get_remote_ice_candidates(rtp, &srcv);
+	if (!rc || !srcv) {
+		return 0;
+	}
+
+	{
+		uint32_t i;
+		for (i = 0; i < rc; ++i) {
+			const switch_rtp_ice_cand_t *src = &srcv[i];
+			int comp = src->component_id;
+			int cid;
+			int j, idx;
+			icand_t *dst;
+			icand_t *e;
+
+			if (comp < 1 || comp > 2) {
+				continue;
+			}
+			cid = comp - 1;
+
+			for (j = 0; j < engine->ice_in.cand_idx[cid]; ++j) {
+				e = &engine->ice_in.cands[j][cid];
+				if (e->component_id == comp &&
+				    e->con_addr && !strcmp(e->con_addr, src->ip) &&
+				    e->con_port == (switch_port_t)src->port) {
+					goto next_src;
+				}
+			}
+
+			idx = engine->ice_in.cand_idx[cid];
+			if (idx >= MAX_CAND) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+				                  "Trickle ICE: drop remote cand (foundation=%s %s:%d comp=%d) — capacity full\n",
+				                  src->foundation, src->ip, src->port, comp);
+				goto next_src;
+			}
+
+			dst = &engine->ice_in.cands[idx][cid];
+			dst->foundation   = switch_core_session_strdup(session, src->foundation);
+			dst->component_id = src->component_id;
+			dst->transport    = switch_core_session_strdup(session, src->transport);
+			dst->priority     = (uint32_t)src->priority;
+			dst->con_addr     = switch_core_session_strdup(session, src->ip);
+			dst->con_port     = (switch_port_t)src->port;
+			dst->cand_type    = switch_core_session_strdup(session, src->cand_type);
+			dst->raddr        = zstr(src->rel_addr) ? NULL : switch_core_session_strdup(session, src->rel_addr);
+			dst->rport        = (switch_port_t)src->rel_port;
+			dst->ready        = 1;
+
+			engine->ice_in.cand_idx[cid] = idx + 1;
+			added++;
+
+		next_src:
+			;
+		}
+	}
+
+	if (added) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+		                  "Trickle ICE: merged %d remote candidate(s) from RTP into engine list (%s)\n",
+		                  added,
+		                  type == SWITCH_MEDIA_TYPE_AUDIO ? "audio" :
+		                  type == SWITCH_MEDIA_TYPE_VIDEO ? "video" : "text");
+	}
+	return added;
+}
+
+static const char *resolve_candidate_acl(switch_core_session_t *session, switch_bool_t trickle_on)
+{
+	const char *cand_acl = NULL;
+
+	if (!session) {
+		return NULL;
+	}
+
+	cand_acl = switch_channel_get_variable(session->channel, "apply-candidate-acl");
+	if (cand_acl && *cand_acl) {
+		return cand_acl;
+	}
+
+	if (trickle_on) {
+		const char *global_default = switch_core_get_variable("rtp_trickle_ice_default_acl");
+		if (global_default && *global_default) {
+			return global_default;
+		}
+
+		return "wan.auto";
+	}
+
+	return NULL;
+}
+
 //?
-static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t type, sdp_session_t *sdp, sdp_media_t *m)
+static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t type, sdp_session_t *sdp, sdp_media_t *m, switch_sdp_type_t sdp_type)
 {
 	switch_rtp_engine_t *engine = &smh->engines[type];
 	sdp_attribute_t *attr = NULL, *attrs[2] = { 0 };
 	int i = 0, got_rtcp_mux = 0;
-	const char *val;
+	const char *val, *cand_acl = NULL;
 	int ice_seen = 0, cid = 0, ai = 0, attr_idx = 0, cand_seen = 0, relay_ok = 0;
 	int ignore_ice_mdns = 0;
 	char con_addr[256];
 	int ice_resolve = 0;
 	ip_t ip;
+	int trickle_on = trickle_accept_enabled(smh->session);
 
 	if (switch_true(switch_channel_get_variable_dup(smh->session->channel, "ignore_sdp_ice", SWITCH_FALSE, -1))) {
 		return SWITCH_STATUS_BREAK;
@@ -4814,17 +5103,42 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 		ignore_ice_mdns = 1;
 	}
 
+
+	if (switch_channel_var_true(smh->session->channel, "ice_observe_initiator")) {
+		switch_channel_set_flag(smh->session->channel, CF_OBSERVE_INITIATOR);
+		if (ice_seen && sdp_type == SDP_OFFER && !switch_channel_test_flag(smh->session->channel, CF_REINVITE)) {
+			engine->ice_remote_initiator = 1;
+		}
+	}
+
 	//if (engine->ice_in.is_chosen[0] && engine->ice_in.is_chosen[1]) {
 		//return SWITCH_STATUS_SUCCESS;
 	//}
+
+	if (trickle_on) {
+		if (engine->ice_in.is_chosen[0] && engine->ice_in.is_chosen[1]) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG, "check_ice(): Trickle ICE candidates already chosen, skip ICE processing\n");
+			return SWITCH_STATUS_SUCCESS;
+		}
+	} 
 
 	engine->ice_in.chosen[0] = 0;
 	engine->ice_in.chosen[1] = 0;
 	engine->ice_in.is_chosen[0] = 0;
 	engine->ice_in.is_chosen[1] = 0;
-	engine->ice_in.cand_idx[0] = 0;
-	engine->ice_in.cand_idx[1] = 0;
+	if (!trickle_on) {
+		engine->ice_in.cand_idx[0] = 0;
+		engine->ice_in.cand_idx[1] = 0;
+	}
+
 	engine->remote_ssrc = 0;
+
+	cand_acl = resolve_candidate_acl(smh->session, trickle_on);
+	if (cand_acl && *cand_acl) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG, "ICE: using candidate ACL \"%s\" (trickle:%s)\n", cand_acl, trickle_on ? "on" : "off");
+	} else {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG, "ICE: no candidate ACL resolved (trickle:%s) — will allow by default.\n", trickle_on ? "on" : "off");
+	}
 
 	if (m) {
 		attrs[0] = m->m_attributes;
@@ -4861,6 +5175,11 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 				engine->ice_in.options = switch_core_session_strdup(smh->session, attr->a_value);
 			} else if (!strcasecmp(attr->a_name, "ice-lite")) {
 				switch_channel_set_variable(smh->session->channel, "ice_lite_inbound", "true");
+			} else if (!strcasecmp(attr->a_name, "end-of-candidates")) {
+					const char *mid_hint = (type == SWITCH_MEDIA_TYPE_AUDIO) ? "audio" : (type == SWITCH_MEDIA_TYPE_VIDEO) ? "video" : NULL;
+					int mline_index_hint = (type == SWITCH_MEDIA_TYPE_AUDIO) ? 0 : (type == SWITCH_MEDIA_TYPE_VIDEO) ? 1 : -1;
+					switch_core_media_trickle_end_of_candidates(smh->session, mline_index_hint, mid_hint);
+					continue;
 			} else if (!strcasecmp(attr->a_name, "setup")) {
 				if (!strcasecmp(attr->a_value, "passive") ||
 					(!strcasecmp(attr->a_value, "actpass") && !switch_channel_test_flag(smh->session->channel, CF_REINVITE))) {
@@ -5060,7 +5379,35 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 		}
 	}
 
-	if (!ice_seen) {
+	if (trickle_accept_enabled(smh->session)) {
+		int merged = 0;
+		if (switch_true(switch_channel_get_variable(smh->session->channel, "rtp_trickle_ice"))) {
+			merged = trickle_merge_rtp_remote_into_engine(smh, type);
+			if (merged > 0) {
+				cand_seen = 1;
+				engine->new_ice = 1;
+			}
+		}
+	}
+
+	if (trickle_accept_enabled(smh->session)) {
+		if (!engine->cand_acl_count) {
+			const char *def_acl = switch_core_get_variable("rtp_trickle_ice_default_acl");
+
+			if (!def_acl || !*def_acl) {
+				def_acl = "wan.auto";
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_WARNING, "ICE: no candidate ACL configured for trickle; defaulting to \"%s\"\n", def_acl);
+			} else {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG, "ICE: using default trickle candidate ACL \"%s\"\n", def_acl);
+			}
+
+			if (engine->cand_acl_count < SWITCH_MAX_CAND_ACL) {
+				engine->cand_acl[engine->cand_acl_count++] = switch_core_session_strdup(smh->session, def_acl);
+			}
+		}
+	}
+
+	if (!ice_seen && !cand_seen) {
 		return SWITCH_STATUS_SUCCESS;
 	}
 
@@ -5120,6 +5467,18 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 			relay_ok = 1;
 			goto relay;
 		}
+	
+		if (trickle_accept_enabled(smh->session)) {
+			switch_rtp_engine_t *a_engine = engine;
+			if (a_engine && a_engine->rtp_session) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG, "%s Trickle ICE enabled. ICE agent prepared, connectivity checks suspended.\n", 
+					switch_channel_get_name(smh->session->channel));
+			} else {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG, "%s Trickle ICE enabled but RTP session not ready yet, will prepare later.\n", 
+					switch_channel_get_name(smh->session->channel));
+			}
+			 return SWITCH_STATUS_SUCCESS;
+		}
 
 		/* PUNT */
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG, "%s no suitable candidates found.\n",
@@ -5170,6 +5529,25 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 		switch_snprintf(tmp, sizeof(tmp), "%d", engine->ice_in.cands[engine->ice_in.chosen[0]][0].con_port);
 		switch_channel_set_variable(smh->session->channel, media_varname, engine->ice_in.cands[engine->ice_in.chosen[0]][0].con_addr);
 		switch_channel_set_variable(smh->session->channel, port_varname, tmp);
+		{
+			const icand_t *C = &engine->ice_in.cands[engine->ice_in.chosen[0]][0];
+			const char *pfx = (engine->type == SWITCH_MEDIA_TYPE_VIDEO) ? "remote_video_ice_" : (engine->type == SWITCH_MEDIA_TYPE_AUDIO) ? "remote_audio_ice_" : "remote_text_ice_";
+
+			if (C->foundation && *C->foundation) {
+				switch_channel_set_variable_printf(smh->session->channel, "%sfoundation", pfx, "%s", C->foundation);
+			}
+			switch_channel_set_variable_printf(smh->session->channel, "%spriority",  pfx, "%u", (unsigned)C->priority);
+			if (C->cand_type && *C->cand_type) {
+				switch_channel_set_variable_printf(smh->session->channel, "%stype",      pfx, "%s", C->cand_type);
+			}
+			if (C->transport && *C->transport) {
+				switch_channel_set_variable_printf(smh->session->channel, "%stransport", pfx, "%s", C->transport);
+			}
+			if (C->raddr && *C->raddr) {
+				switch_channel_set_variable_printf(smh->session->channel, "%srel_addr", pfx, "%s", C->raddr);
+				switch_channel_set_variable_printf(smh->session->channel, "%srel_port", pfx, "%u", (unsigned)C->rport);
+			}
+		}
 	}
 
 	if (engine->ice_in.cands[engine->ice_in.chosen[1]][1].con_port) {
@@ -5200,6 +5578,25 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 		switch_channel_set_variable(smh->session->channel, media_varname, engine->ice_in.cands[engine->ice_in.chosen[1]][1].con_addr);
 		switch_channel_set_variable(smh->session->channel, port_varname, tmp);
 
+		{
+			const icand_t *C = &engine->ice_in.cands[engine->ice_in.chosen[1]][1];
+			const char *pfx = (engine->type == SWITCH_MEDIA_TYPE_VIDEO) ? "remote_video_rtcp_ice_" : (engine->type == SWITCH_MEDIA_TYPE_AUDIO) ? "remote_audio_rtcp_ice_" : "remote_text_rtcp_ice_";
+
+			if (C->foundation && *C->foundation) {
+				switch_channel_set_variable_printf(smh->session->channel, "%sfoundation", pfx, "%s", C->foundation);
+			}
+			switch_channel_set_variable_printf(smh->session->channel, "%spriority",  pfx, "%u", (unsigned)C->priority);
+			if (C->cand_type && *C->cand_type) {
+				switch_channel_set_variable_printf(smh->session->channel, "%stype",      pfx, "%s", C->cand_type);
+			}
+			if (C->transport && *C->transport) {
+				switch_channel_set_variable_printf(smh->session->channel, "%stransport", pfx, "%s", C->transport);
+			}
+			if (C->raddr && *C->raddr) {
+				switch_channel_set_variable_printf(smh->session->channel, "%srel_addr", pfx, "%s", C->raddr);
+				switch_channel_set_variable_printf(smh->session->channel, "%srel_port", pfx, "%u", (unsigned)C->rport);
+			}
+		}
 	}
 
 
@@ -5304,11 +5701,18 @@ SWITCH_DECLARE(void) switch_core_session_set_ice(switch_core_session_t *session)
 	}
 
 	switch_channel_set_flag(session->channel, CF_VERBOSE_SDP);
-	switch_channel_set_flag(session->channel, CF_AVPF);
-	switch_channel_set_flag(session->channel, CF_ICE);
-	smh->mparams->rtcp_audio_interval_msec = SWITCH_RTCP_AUDIO_INTERVAL_MSEC;
-	smh->mparams->rtcp_video_interval_msec = SWITCH_RTCP_VIDEO_INTERVAL_MSEC;
 
+	/* Only enable AVPF if we are actually using secure media (DTLS or SDES).
+	   This avoids advertising RTP/AVPF without any crypto lines/fingerprint. */
+	if (switch_core_media_has_crypto(session)) {
+		switch_channel_set_flag(session->channel, CF_AVPF);
+	}
+
+	/* Keep ICE independent; this enables ICE capability on the channel. */
+	switch_channel_set_flag(session->channel, CF_ICE);
+
+	smh->mparams->rtcp_audio_interval_msec = SWITCH_RTCP_AUDIO_INTERVAL_MSEC;
+	smh->mparams->rtcp_video_interval_msec = SWITCH_RTCP_VIDEO_INTERVAL_MSEC; 
 }
 
 #define MAX_MATCHES 30
@@ -5915,6 +6319,24 @@ SWITCH_DECLARE(int16_t) switch_core_media_validate_common_audio_sdp(switch_core_
 	return match;
 }
 
+static inline void handle_audio_timeout(switch_core_session_t *session, switch_rtp_engine_t *a_engine)
+{
+	a_engine->media_timeout = 0;
+	a_engine->media_hold_timeout = 0;
+
+	if (switch_rtp_ready(a_engine->rtp_session)) {
+		   switch_rtp_set_max_missed_packets(a_engine->rtp_session, 0);
+		   a_engine->max_missed_hold_packets = 0;
+		   a_engine->max_missed_packets = 0;
+		   switch_rtp_set_media_timeout(a_engine->rtp_session, a_engine->media_timeout);
+	} else {
+		   switch_channel_set_variable(session->channel, "media_timeout_audio", "0");
+		   switch_channel_set_variable(session->channel, "media_hold_timeout_audio", "0");
+		   switch_channel_set_variable(session->channel, "rtp_timeout_sec", "0");
+		   switch_channel_set_variable(session->channel, "rtp_hold_timeout_sec", "0");
+	}
+}
+
 //?
 SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *session, const char *r_sdp, uint8_t *proceed, switch_sdp_type_t sdp_type)
 {
@@ -5929,7 +6351,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 	switch_channel_t *channel = switch_core_session_get_channel(session);
 	const char *val;
 	const char *crypto = NULL;
-	int got_crypto = 0, got_video_crypto = 0, got_audio = 0, saw_audio = 0, saw_video = 0, got_avp = 0, got_savp = 0, got_udptl = 0, got_webrtc = 0, got_text = 0, got_text_crypto = 0, got_msrp = 0;
+	int got_video_crypto = 0, got_audio = 0, saw_audio = 0, saw_video = 0, got_avp = 0, got_savp = 0, got_udptl = 0, got_webrtc = 0, got_text = 0, got_text_crypto = 0, got_msrp = 0;
 	int scrooge = 0;
 	sdp_parser_t *parser = NULL;
 	sdp_session_t *sdp;
@@ -6066,9 +6488,9 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 	}
 
 	switch_channel_set_variable(smh->session->channel, "ice_lite_inbound", "false");
-	check_ice(smh, SWITCH_MEDIA_TYPE_AUDIO, sdp, NULL);
-	check_ice(smh, SWITCH_MEDIA_TYPE_VIDEO, sdp, NULL);
-	check_ice(smh, SWITCH_MEDIA_TYPE_TEXT, sdp, NULL);
+	check_ice(smh, SWITCH_MEDIA_TYPE_AUDIO, sdp, NULL, sdp_type);
+	check_ice(smh, SWITCH_MEDIA_TYPE_VIDEO, sdp, NULL, sdp_type);
+	check_ice(smh, SWITCH_MEDIA_TYPE_TEXT, sdp, NULL, sdp_type);
 
 	if ((sdp->sdp_connection && sdp->sdp_connection->c_address && !strcmp(sdp->sdp_connection->c_address, "0.0.0.0"))) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "RFC2543 from March 1999 called; They want their 0.0.0.0 hold method back.....\n");
@@ -6093,6 +6515,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 	}
 	
 	for (m = sdp->sdp_media; m; m = m->m_next) {
+		 int got_crypto = 0;
 		sdp_connection_t *connection;
 		switch_core_session_t *other_session;
 
@@ -6346,8 +6769,9 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 							switch_snprintf(tmp, sizeof(tmp), "%d", a_engine->cur_payload_map->remote_sdp_port);
 							switch_channel_set_variable(session->channel, SWITCH_REMOTE_MEDIA_IP_VARIABLE, a_engine->cur_payload_map->remote_sdp_ip);
 							switch_channel_set_variable(session->channel, SWITCH_REMOTE_MEDIA_PORT_VARIABLE, tmp);
-
-							if (switch_rtp_set_remote_address(a_engine->rtp_session, a_engine->cur_payload_map->remote_sdp_ip,
+							if (!scm_should_use_m_port(session, a_engine)) {
+								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Trickle ICE on: deferring audio remote address from m= line\n");
+							} else if (switch_rtp_set_remote_address(a_engine->rtp_session, a_engine->cur_payload_map->remote_sdp_ip,
 															  a_engine->cur_payload_map->remote_sdp_port, 0, SWITCH_TRUE, &err) != SWITCH_STATUS_SUCCESS) {
 								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "AUDIO RTP REPORTS ERROR: [%s]\n", err);
 								switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
@@ -6436,49 +6860,46 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 				}
 			}
 
-			for (attr = sdp->sdp_attributes; attr; attr = attr->a_next) {
-				if (zstr(attr->a_name)) {
-					continue;
-				}
-
-
-				if (!strncasecmp(attr->a_name, "ice", 3)) {
-					ice++;
-				} else if (sendonly < 2 && !strcasecmp(attr->a_name, "sendonly")) {
-					sendonly = 1;
-					switch_channel_set_variable(session->channel, "media_audio_mode", "recvonly");
-				} else if (sendonly < 2 && !strcasecmp(attr->a_name, "inactive")) {
-					switch_channel_set_variable(session->channel, "media_audio_mode", "inactive");
-				} else if (!strcasecmp(attr->a_name, "recvonly")) {
-					switch_channel_set_variable(session->channel, "media_audio_mode", "sendonly");
-					recvonly = 1;
-
-					a_engine->media_timeout = 0;
-					a_engine->media_hold_timeout = 0;
-
-					if (switch_rtp_ready(a_engine->rtp_session)) {
-						switch_rtp_set_max_missed_packets(a_engine->rtp_session, 0);
-						a_engine->max_missed_hold_packets = 0;
-						a_engine->max_missed_packets = 0;
-						switch_rtp_set_media_timeout(a_engine->rtp_session, a_engine->media_timeout);
-					} else {
-						switch_channel_set_variable(session->channel, "media_timeout_audio", "0");
-						switch_channel_set_variable(session->channel, "media_hold_timeout_audio", "0");
-						switch_channel_set_variable(session->channel, "rtp_timeout_sec", "0");
-						switch_channel_set_variable(session->channel, "rtp_hold_timeout_sec", "0");
+			if (sdp->sdp_attributes) {
+				for (attr = sdp->sdp_attributes; attr; attr = attr->a_next) {
+					if (zstr(attr->a_name)) {
+						continue;
 					}
-				} else if (sendonly < 2 && !strcasecmp(attr->a_name, "sendrecv")) {
-					sendonly = 0;
-				} else if (!strcasecmp(attr->a_name, "ptime")) {
-					ptime = dptime = atoi(attr->a_value);
-				} else if (!strcasecmp(attr->a_name, "maxptime")) {
-					maxptime = dmaxptime = atoi(attr->a_value);
-				} else if (!strcasecmp(attr->a_name, "group")) {
-					switch_channel_set_variable(session->channel, "rtp_group", attr->a_value);
-				} else if (!strcasecmp(attr->a_name, "fingerprint") && !zstr(attr->a_value)) {
-					got_crypto = 1;
+
+					if (!strncasecmp(attr->a_name, "ice", 3)) {
+						ice++;
+					} else if (!strcasecmp(attr->a_name, "ptime")) {
+						 ptime = dptime = atoi(attr->a_value);
+					} else if (!strcasecmp(attr->a_name, "maxptime")) {
+						maxptime = dmaxptime = atoi(attr->a_value);
+					}
 				}
 			}
+
+			if (!ice && m->m_attributes) {
+				for (attr = m->m_attributes; attr; attr = attr->a_next) {
+					if (zstr(attr->a_name)) {
+						continue;
+					}
+
+					if (!strncasecmp(attr->a_name, "ice", 3)) {
+						ice++;
+					}
+				}
+			}
+
+			if (sendonly < 2 && m->m_mode == sdp_sendonly) {
+ 				sendonly = 1;
+ 				switch_channel_set_variable(session->channel, "media_audio_mode", "recvonly");
+ 			} else if (sendonly < 2 && m->m_mode == sdp_inactive) {
+ 				switch_channel_set_variable(session->channel, "media_audio_mode", "inactive");
+ 			} else if (m->m_mode == sdp_recvonly) {
+ 				switch_channel_set_variable(session->channel, "media_audio_mode", "sendonly");
+ 				recvonly = 1;
+ 				handle_audio_timeout(session, a_engine);
+ 			} else if (sendonly < 2 && m->m_mode == sdp_sendrecv) {
+ 				sendonly = 0;
+ 			}
 
 			if (sendonly == 2 && ice) {
 				sendonly = 0;
@@ -6554,7 +6975,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 					ptime = atoi(attr->a_value);
 				} else if (!strcasecmp(attr->a_name, "maxptime") && attr->a_value) {
 					maxptime = atoi(attr->a_value);
-				} else if (got_crypto < 1 && !strcasecmp(attr->a_name, "crypto") && !zstr(attr->a_value)) {
+				} else if (got_crypto < 2 && !strcasecmp(attr->a_name, "crypto") && !zstr(attr->a_value)) {
 					int crypto_tag;
 
 					if (!(smh->mparams->ndlb & SM_NDLB_ALLOW_CRYPTO_IN_AVP) &&
@@ -6569,8 +6990,9 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 					crypto = attr->a_value;
 					crypto_tag = atoi(crypto);
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "CRYPTO: Checking incoming crypto (crypto_tag=%d, crypto=%s)\n", crypto_tag, crypto);
-					got_crypto = switch_core_session_check_incoming_crypto(session,
-																		   "rtp_has_crypto", SWITCH_MEDIA_TYPE_AUDIO, crypto, crypto_tag, sdp_type);
+					if (switch_core_session_check_incoming_crypto(session, "rtp_has_crypto", SWITCH_MEDIA_TYPE_AUDIO, crypto, crypto_tag, sdp_type)) {
+						got_crypto += 2;
+					}
 
 				} else if (!strcasecmp(attr->a_name, "mid") && attr->a_value) {
 					switch_channel_set_variable(session->channel, "rtp_audio_mid", attr->a_value);
@@ -7108,7 +7530,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 				}
 
 				if (match) {
-					if (check_ice(smh, SWITCH_MEDIA_TYPE_AUDIO, sdp, m) == SWITCH_STATUS_FALSE) {
+					if (check_ice(smh, SWITCH_MEDIA_TYPE_AUDIO, sdp, m, sdp_type) == SWITCH_STATUS_FALSE) {
 						match = 0;
 						got_audio = 0;
 					} else {
@@ -7312,7 +7734,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 				switch_core_media_choose_port(session, SWITCH_MEDIA_TYPE_TEXT, 1);
 			}
 
-			check_ice(smh, SWITCH_MEDIA_TYPE_TEXT, sdp, m);
+			check_ice(smh, SWITCH_MEDIA_TYPE_TEXT, sdp, m, sdp_type);
 			//parse rtt
 
 		} else if (m->m_type == sdp_media_video) {
@@ -7625,7 +8047,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 				}
 
 				if (switch_core_media_set_video_codec(session, 0) == SWITCH_STATUS_SUCCESS) {
-					if (check_ice(smh, SWITCH_MEDIA_TYPE_VIDEO, sdp, m) == SWITCH_STATUS_FALSE) {
+					if (check_ice(smh, SWITCH_MEDIA_TYPE_VIDEO, sdp, m, sdp_type) == SWITCH_STATUS_FALSE) {
 						vmatch = 0;
 					}
 				}
@@ -8102,6 +8524,7 @@ static void *SWITCH_THREAD_FUNC video_write_thread(switch_thread_t *thread, void
 
 	v_engine = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
 
+	switch_thread_rwlock_rdlock(v_engine->dtls_init_rwlock);
 	switch_mutex_lock(smh->write_mutex[SWITCH_MEDIA_TYPE_VIDEO]);
 	v_engine->thread_write_lock = switch_thread_self();
 
@@ -8230,6 +8653,7 @@ static void *SWITCH_THREAD_FUNC video_write_thread(switch_thread_t *thread, void
 	v_engine->thread_write_lock = 0;
 	switch_mutex_unlock(smh->write_mutex[SWITCH_MEDIA_TYPE_VIDEO]);
 
+	switch_thread_rwlock_unlock(v_engine->dtls_init_rwlock);
 	switch_channel_clear_flag(session->channel, CF_VIDEO_WRITING);
 	smh->video_write_thread_running = 0;
 
@@ -8657,8 +9081,6 @@ static void *SWITCH_THREAD_FUNC text_helper_thread(switch_thread_t *thread, void
 
 	mh->up = 1;
 
-	switch_core_media_check_dtls(session, SWITCH_MEDIA_TYPE_TEXT);
-
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "%s Text thread started.\n", switch_channel_get_name(session->channel));
 
 	if (!switch_channel_test_flag(channel, CF_MSRP)) {
@@ -8830,8 +9252,6 @@ static void *SWITCH_THREAD_FUNC video_helper_thread(switch_thread_t *thread, voi
 
 	mh->up = 1;
 	switch_mutex_lock(mh->cond_mutex);
-
-	switch_core_media_check_dtls(session, SWITCH_MEDIA_TYPE_VIDEO);
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "%s Video thread started. Echo is %s\n",
 					  switch_channel_get_name(session->channel), switch_channel_test_flag(channel, CF_VIDEO_ECHO) ? "on" : "off");
@@ -9247,7 +9667,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_proxy_remote_addr(switch_core_
 				}
 
 
-				if (switch_rtp_set_remote_address(v_engine->rtp_session, v_engine->cur_payload_map->remote_sdp_ip,
+				if (!scm_should_use_m_port(session, v_engine)) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Trickle ICE on: deferring video remote address from m= line\n");
+				} else if (switch_rtp_set_remote_address(v_engine->rtp_session, v_engine->cur_payload_map->remote_sdp_ip,
 												  v_engine->cur_payload_map->remote_sdp_port, remote_rtcp_port, SWITCH_TRUE, &err) != SWITCH_STATUS_SUCCESS) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "VIDEO RTP REPORTS ERROR: [%s]\n", err);
 				} else {
@@ -9285,8 +9707,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_proxy_remote_addr(switch_core_
 					}
 				}
 
-
-				if (switch_rtp_set_remote_address(t_engine->rtp_session, t_engine->cur_payload_map->remote_sdp_ip,
+				if (!scm_should_use_m_port(session, t_engine)) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Trickle ICE on: deferring text remote address from m= line\n"); 
+				} else if (switch_rtp_set_remote_address(t_engine->rtp_session, t_engine->cur_payload_map->remote_sdp_ip,
 												  t_engine->cur_payload_map->remote_sdp_port, remote_rtcp_port, SWITCH_TRUE, &err) != SWITCH_STATUS_SUCCESS) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "TEXT RTP REPORTS ERROR: [%s]\n", err);
 				} else {
@@ -9331,7 +9754,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_proxy_remote_addr(switch_core_
 		}
 
 
-		if (switch_rtp_set_remote_address(a_engine->rtp_session, a_engine->cur_payload_map->remote_sdp_ip,
+		if (!scm_should_use_m_port(session, a_engine)) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Trickle ICE on: deferring audio remote address from m= line\n");
+		} else if (switch_rtp_set_remote_address(a_engine->rtp_session, a_engine->cur_payload_map->remote_sdp_ip,
 										  a_engine->cur_payload_map->remote_sdp_port, remote_rtcp_port, SWITCH_TRUE, &err) != SWITCH_STATUS_SUCCESS) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "AUDIO RTP REPORTS ERROR: [%s]\n", err);
 			status = SWITCH_STATUS_GENERR;
@@ -9979,7 +10404,9 @@ SWITCH_DECLARE(void) switch_core_media_deactivate_rtp(switch_core_session_t *ses
 	}
 
 	if (v_engine->rtp_session) {
-		switch_rtp_destroy(&v_engine->rtp_session);
+		if (!v_engine->bundled_with_audio) {
+			switch_rtp_destroy(&v_engine->rtp_session);
+		}
 	} else if (v_engine->local_sdp_port) {
 		switch_rtp_release_port(smh->mparams->rtpip, v_engine->local_sdp_port);
 	}
@@ -10097,11 +10524,40 @@ static void gen_ice(switch_core_session_t *session, switch_media_type_t type, co
 	}
 
 	engine->ice_out.cands[0][0].generation = "0";
-	//add rport stuff later
 
 	engine->ice_out.cands[0][0].ready = 1;
 
+	/* Dynamic ICE role: offerer is controlling unless remote is ice-lite; allow override via var "rtp_ice_role" */
+	{
+		const char *role_override = switch_channel_get_variable(session->channel, "rtp_ice_role");
+		switch_bool_t controlling = SWITCH_TRUE;
+		if (role_override) {
+			controlling = !strcasecmp(role_override, "controlling") ? SWITCH_TRUE : SWITCH_FALSE;
+		}
+		switch_rtp_set_ice_role(engine->rtp_session, controlling);
+	}
 
+	if (engine->rtp_session && switch_core_media_trickle_enabled(session) && switch_rtp_trickle_is_registered(engine->rtp_session)) {
+		switch_rtp_ice_cand_t cand;
+		int mline_index;
+		memset(&cand, 0, sizeof(cand));
+		mline_index = (type == SWITCH_MEDIA_TYPE_AUDIO) ? 0 :  
+						   (type == SWITCH_MEDIA_TYPE_VIDEO) ? 1 :
+						   (type == SWITCH_MEDIA_TYPE_TEXT)  ? 2 : 0;
+		if (engine->ice_out.cands[0][0].foundation) {
+			switch_snprintf(cand.foundation, sizeof(cand.foundation), "%s", engine->ice_out.cands[0][0].foundation);
+		}
+		cand.component_id = engine->ice_out.cands[0][0].component_id ? engine->ice_out.cands[0][0].component_id : 1;
+		switch_snprintf(cand.transport, sizeof(cand.transport), "%s", engine->ice_out.cands[0][0].transport ? engine->ice_out.cands[0][0].transport : "udp");
+		cand.priority = engine->ice_out.cands[0][0].priority;
+		switch_snprintf(cand.ip, sizeof(cand.ip), "%s", engine->ice_out.cands[0][0].con_addr ? engine->ice_out.cands[0][0].con_addr : "0.0.0.0");
+		cand.port = (int)engine->ice_out.cands[0][0].con_port;
+		switch_snprintf(cand.cand_type, sizeof(cand.cand_type), "%s", engine->ice_out.cands[0][0].cand_type ? engine->ice_out.cands[0][0].cand_type : "host");
+		cand.rel_addr[0] = '\0';
+		cand.rel_port = 0;
+		switch_rtp_trickle_emit_local_candidate(engine->rtp_session, &cand, NULL /* mid */, mline_index, 0 /* not end */);
+		switch_rtp_trickle_emit_local_candidate(engine->rtp_session, &cand, NULL /* mid */, mline_index, 1 /* end-of-candidates */);
+	}
 }
 
 SWITCH_DECLARE(void) switch_core_session_wake_video_thread(switch_core_session_t *session)
@@ -10389,7 +10845,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 			}
 		}
 
-		if (switch_rtp_set_remote_address(a_engine->rtp_session, a_engine->cur_payload_map->remote_sdp_ip, a_engine->cur_payload_map->remote_sdp_port,
+		if (!scm_should_use_m_port(session, a_engine)) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Trickle ICE on: deferring audio remote address from m= line\n");
+		} else if (switch_rtp_set_remote_address(a_engine->rtp_session, a_engine->cur_payload_map->remote_sdp_ip, a_engine->cur_payload_map->remote_sdp_port,
 										  remote_rtcp_port, SWITCH_TRUE, &err) != SWITCH_STATUS_SUCCESS) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "AUDIO RTP REPORTS ERROR: [%s]\n", err);
 		} else {
@@ -10470,6 +10928,15 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "Turning SWITCH_RTP_FLAG_AUTOADJ on, as required by telnyx_voicemail\n");
 				switch_rtp_set_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_AUTOADJ);
 			}
+		}
+
+		/* Register trickle ICE callback now that RTP session is created */
+		if (trickle_is_enabled(session)) {
+			const char *mid;
+			int mline_index;
+			mid = "0"; 
+			mline_index = 0; /* force audio */
+			switch_core_media_trickle_register(session, mid, mline_index);
 		}
 
 		if (switch_rtp_ready(a_engine->rtp_session)) {
@@ -10555,6 +11022,17 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "AUDIO RTP Engage EXT Audio Level for %s\n",
 							  switch_channel_get_name(switch_core_session_get_channel(session)));
+		}
+
+		/* Prepare trickle ICE if enabled and not already prepared */
+		if (trickle_accept_enabled(session) && a_engine->rtp_session) {
+			switch_rtp_prepare_trickle_ice(a_engine->rtp_session, IPR_RTP, &a_engine->ice_in);
+			if (!a_engine->rtcp_mux) {
+				switch_rtp_prepare_trickle_ice(a_engine->rtp_session, IPR_RTCP, &a_engine->ice_in);
+			}
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+								"%s Trickle ICE prepared for audio RTP session\n",
+								switch_channel_get_name(switch_core_session_get_channel(session)));
 		}
 
 		if (a_engine->ice_in.cands[a_engine->ice_in.chosen[0]][0].ready) {
@@ -11189,12 +11667,19 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 				flags[SWITCH_RTP_FLAG_TMMBR]++;
 			}
 			
-			v_engine->rtp_session = switch_rtp_new(a_engine->local_sdp_ip,
+			/* BUNDLE reuse: if enabled and audio RTP exists, share session */
+			if (switch_true(switch_channel_get_variable(session->channel, "rtp_use_bundle")) && v_engine->rtcp_mux > 0 && a_engine->rtp_session) {
+				v_engine->rtp_session = a_engine->rtp_session;
+				v_engine->bundled_with_audio = 1;
+			} else {
+				v_engine->rtp_session = switch_rtp_new(a_engine->local_sdp_ip,
 														 v_engine->local_sdp_port,
 														 v_engine->cur_payload_map->remote_sdp_ip,
 														 v_engine->cur_payload_map->remote_sdp_port,
 														 v_engine->cur_payload_map->pt,
 														 1, 90000, flags, NULL, &err, switch_core_session_get_pool(session));
+			}
+
 
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%sVIDEO RTP [%s] %s:%d->%s:%d codec: %u ms: %d [%s]\n",
 							  switch_channel_test_flag(session->channel, CF_PROXY_MEDIA) ? "PROXY " : "",
@@ -11469,7 +11954,8 @@ static void generate_m(switch_core_session_t *session, char *buf, size_t buflen,
 	//port, secure ? "S" : "", switch_channel_test_flag(session->channel, CF_AVPF) ? "F" : "");
 
 	/* Check if there is a crypto */
-	if (secure && !switch_channel_test_flag(session->channel, CF_DTLS)) {
+	if (secure && (!switch_channel_test_flag(session->channel, CF_DTLS) || a_engine->local_dtls_fingerprint.type)) {
+
 		int i;
 
 		for (i = 0; smh->crypto_suite_order[i] != CRYPTO_INVALID; i++) {
@@ -11763,7 +12249,9 @@ static void generate_m(switch_core_session_t *session, char *buf, size_t buflen,
 			}
 		}
 
-
+	if (switch_core_media_trickle_enabled(session)) {
+		switch_snprintf(buf + strlen(buf), buflen - strlen(buf), "a=ice-options:trickle\r\n");
+	}
 
 #ifdef GOOGLE_ICE
 		switch_snprintf(buf + strlen(buf), buflen - strlen(buf), "a=ice-options:google-ice\r\n");
@@ -11974,6 +12462,9 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 	const char* audio_mid = switch_channel_get_variable_dup(session->channel, "rtp_audio_mid", SWITCH_FALSE, -1);
 	const char* video_mid = switch_channel_get_variable_dup(session->channel, "rtp_video_mid", SWITCH_FALSE, -1);
 	const char *clear_previous_negotiation = NULL;
+	int trickle;
+	const char *use_bundle = switch_channel_get_variable(session->channel, "rtp_use_bundle");
+	const char *use_trickle = switch_core_media_trickle_enabled(session) ? "true" : NULL;
 
 	switch_assert(session);
 
@@ -11988,6 +12479,8 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 	include_external = switch_channel_var_true(session->channel, "include_external_ip");
 
 	use_rtcp_mux = switch_channel_get_variable(session->channel, "rtcp_mux");
+
+	trickle = trickle_is_enabled(session);
 
 	clear_previous_negotiation = switch_channel_get_variable(session->channel, "sdp_clear_previous_negotiation");
 
@@ -12043,6 +12536,10 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 
 		if (switch_true(switch_channel_get_variable(session->channel, "add_ice_candidates"))) {
 			switch_channel_set_flag(session->channel, CF_ICE);
+		}
+
+		if (switch_channel_var_true(session->channel, "offer_extended_media")) {
+			switch_channel_set_flag(session->channel, CF_AVPF_MOZ);
 		}
 
 		if ( switch_rtp_has_dtls() && dtls_ok(session)) {
@@ -12312,6 +12809,18 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 	}
 	
 	family = strchr(ip, ':') ? "IP6" : "IP4";
+
+	/* Optional Unified Plan BUNDLE grouping */
+	if (switch_true(use_bundle)) {
+		const char *am = audio_mid ? audio_mid : "0";
+		const char *vm = (v_engine && (v_engine->codec_negotiated || switch_channel_test_flag(session->channel, CF_VIDEO))) ? (video_mid ? video_mid : "1") : NULL;
+		if (vm) {
+			switch_snprintf(groupbuf, sizeof(groupbuf), "a=group:BUNDLE %s %s\r\n", am, vm);
+		} else {
+			switch_snprintf(groupbuf, sizeof(groupbuf), "a=group:BUNDLE %s\r\n", am);
+		}
+	}
+
 	switch_snprintf(buf, SDPBUFLEN,
 					"v=0\r\n"
 					"o=%s %010u %010u IN %s %s\r\n"
@@ -12330,9 +12839,37 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 		goto video;
 	}
 
+	/* Only advertise ICE in SDP if:
+	 *  - the channel is secure (DTLS or SDES), OR
+	 *  - the admin explicitly forces it with channel var:
+	 *    advertise_ice_when_remote_absent=true
+	 *  This avoids emitting ICE attributes for non-ICE/non-secure clients. */
 	if (switch_channel_test_flag(smh->session->channel, CF_ICE)) {
-		gen_ice(session, SWITCH_MEDIA_TYPE_AUDIO, ip, port);
-		switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=msid-semantic: WMS %s\r\n", smh->msid);
+		const char *adv_ice = switch_channel_get_variable(session->channel, "advertise_ice_when_remote_absent");
+		switch_bool_t force_advertise = switch_true(adv_ice);
+		if (switch_core_media_has_crypto(session) || force_advertise) {
+			gen_ice(session, SWITCH_MEDIA_TYPE_AUDIO, ip, port);
+			switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf),
+			                "a=msid-semantic: WMS %s\r\n", smh->msid);
+		}
+
+		/* RFC 8838/8840: Advertise Trickle support when enabled */
+		if (use_trickle) {
+			switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=ice-options:trickle\r\n");
+		}
+		/* RTP header extensions compatibility flag (JSEP/Unified Plan) */
+		switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=extmap-allow-mixed\r\n");
+
+		{
+			const char *mid_ext_id_str = switch_channel_get_variable(session->channel, "rtp_mid_ext_id");
+			int mid_ext_id = mid_ext_id_str ? atoi(mid_ext_id_str) : 1;
+
+			if (mid_ext_id < 1 || mid_ext_id > 14) { 
+				mid_ext_id = 1;
+			}
+		
+			switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=extmap:%d urn:ietf:params:rtp-hdrext:sdes:mid\r\n", mid_ext_id);
+		}
 	}
 
 	if (a_engine->codec_negotiated && !switch_channel_test_flag(session->channel, CF_NOSDP_REINVITE)) {
@@ -12343,6 +12880,16 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 
 		switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), " %d", a_engine->cur_payload_map->pt);
 
+		if (switch_rtp_ready(a_engine->rtp_session)) {
+			const char *mid_ext_id_str = switch_channel_get_variable(session->channel, "rtp_mid_ext_id");
+			uint8_t mid_ext_id = (uint8_t)(mid_ext_id_str ? atoi(mid_ext_id_str) : 1);
+			
+			if (mid_ext_id < 1 || mid_ext_id > 14) { 
+				mid_ext_id = 1;
+			}
+
+			switch_rtp_enable_mid(a_engine->rtp_session, mid_ext_id, audio_mid && *audio_mid ? audio_mid : "audio");
+		}
 
 		if (switch_media_handle_test_media_flag(smh, SCMF_MULTI_ANSWER_AUDIO)) {
 			switch_mutex_lock(smh->sdp_mutex);
@@ -12552,9 +13099,14 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 #ifdef GOOGLE_ICE
 			switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=ice-options:google-ice\r\n");
 #endif
+
+			if (trickle) {
+			/* advertise trickle capability */
+				switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=ice-options:trickle\r\n");
+			}
 		}
 
-		if (a_engine->crypto_type != CRYPTO_INVALID && !switch_channel_test_flag(session->channel, CF_DTLS) &&
+		if (a_engine->crypto_type != CRYPTO_INVALID && (!switch_channel_test_flag(session->channel, CF_DTLS) || a_engine->local_dtls_fingerprint.type) &&
 			!zstr(a_engine->ssec[a_engine->crypto_type].local_crypto_key) && switch_channel_test_flag(session->channel, CF_SECURE)) {
 
 			switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=crypto:%s\r\n", a_engine->ssec[a_engine->crypto_type].local_crypto_key);
@@ -12663,11 +13215,11 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 							get_media_profile_name(session,
 												   (switch_channel_test_flag(session->channel, CF_SECURE)
 													&& switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_OUTBOUND) ||
-												   a_engine->crypto_type != CRYPTO_INVALID || switch_channel_test_flag(session->channel, CF_DTLS), AVP_UNDEFINED));
+												   v_engine->crypto_type != CRYPTO_INVALID || switch_channel_test_flag(session->channel, CF_DTLS), AVP_UNDEFINED));
 		}
 	} else {
 		if (switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_INBOUND) {
-			if (switch_channel_test_flag(smh->session->channel, CF_DTLS)) {
+			if (switch_channel_test_flag(smh->session->channel, CF_DTLS) && !v_engine->local_dtls_fingerprint.type) {
 				v_engine->no_crypto = 1;
 			}
 		}
@@ -12697,7 +13249,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 								get_media_profile_name(session,
 													   (loops == 0 && switch_channel_test_flag(session->channel, CF_SECURE)
 														&& switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_OUTBOUND) ||
-													   a_engine->crypto_type != CRYPTO_INVALID || switch_channel_test_flag(session->channel, CF_DTLS), AVP_UNDEFINED));
+													   v_engine->crypto_type != CRYPTO_INVALID || switch_channel_test_flag(session->channel, CF_DTLS), AVP_UNDEFINED));
 
 
 
@@ -12922,6 +13474,17 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 					switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=mid:%s\r\n", video_mid ? video_mid : "video");
 				}
 				
+				if (switch_rtp_ready(v_engine->rtp_session)) {
+					const char *mid_ext_id_str = switch_channel_get_variable(session->channel, "rtp_mid_ext_id");
+					uint8_t mid_ext_id = (uint8_t)(mid_ext_id_str ? atoi(mid_ext_id_str) : 1);
+
+					if (mid_ext_id < 1 || mid_ext_id > 14) { 
+						mid_ext_id = 1;
+					}
+
+					switch_rtp_enable_mid(v_engine->rtp_session, mid_ext_id, video_mid && *video_mid ? video_mid : "video");
+				}
+
 				if (v_engine->smode == SWITCH_MEDIA_FLOW_SENDRECV) {
 					switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "%s", "a=sendrecv\r\n");
 				} else if (v_engine->smode == SWITCH_MEDIA_FLOW_SENDONLY) {
@@ -13025,7 +13588,12 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 					switch_stun_random_string(tmp2, 10, "0123456789");
 					switch_stun_random_string(tmp3, 10, "0123456789");
 
-					ice_out = &v_engine->ice_out;
+					
+				if (switch_true(switch_channel_get_variable(session->channel, "rtp_use_bundle"))) {
+					v_engine->ice_out.ufrag = a_engine->ice_out.ufrag;
+					v_engine->ice_out.pwd = a_engine->ice_out.pwd;
+				}
+ice_out = &v_engine->ice_out;
 
 
 					switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=ssrc:%u cname:%s\r\n", v_engine->ssrc, smh->cname);
@@ -13101,12 +13669,12 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 
 
 
-				if (loops == 0 && switch_channel_test_flag(session->channel, CF_SECURE) && !switch_channel_test_flag(session->channel, CF_DTLS)) {
+				if (loops == 0 && switch_channel_test_flag(session->channel, CF_SECURE) && (!switch_channel_test_flag(session->channel, CF_DTLS) || v_engine->local_dtls_fingerprint.type)) {
 
 					for (i = 0; smh->crypto_suite_order[i] != CRYPTO_INVALID; i++) {
 						switch_rtp_crypto_key_type_t j = SUITES[smh->crypto_suite_order[i]].type;
 
-						if ((a_engine->crypto_type == j || a_engine->crypto_type == CRYPTO_INVALID) && !zstr(a_engine->ssec[j].local_crypto_key)) {
+						if ((v_engine->crypto_type == j || v_engine->crypto_type == CRYPTO_INVALID) && !zstr(v_engine->ssec[j].local_crypto_key)) {
 							switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=crypto:%s\r\n", v_engine->ssec[j].local_crypto_key);
 						}
 					}
@@ -13222,7 +13790,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 							get_media_profile_name(session,
 												   (switch_channel_test_flag(session->channel, CF_SECURE)
 													&& switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_OUTBOUND) ||
-												   a_engine->crypto_type != CRYPTO_INVALID || switch_channel_test_flag(session->channel, CF_DTLS), AVP_UNDEFINED));
+												   t_engine->crypto_type != CRYPTO_INVALID || switch_channel_test_flag(session->channel, CF_DTLS), AVP_UNDEFINED));
 		}
 	} else if ((switch_channel_test_flag(session->channel, CF_WANT_RTT) || switch_channel_test_flag(session->channel, CF_RTT) ||
 				switch_channel_var_true(session->channel, "rtp_enable_text")) &&
@@ -13262,7 +13830,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 		}
 
 		if (switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_INBOUND) {
-			if (switch_channel_test_flag(smh->session->channel, CF_DTLS)) {
+			if (switch_channel_test_flag(smh->session->channel, CF_DTLS) && !t_engine->local_dtls_fingerprint.type) {
 				t_engine->no_crypto = 1;
 			}
 		}
@@ -13287,7 +13855,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 								get_media_profile_name(session,
 													   (loops == 0 && switch_channel_test_flag(session->channel, CF_SECURE)
 														&& switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_OUTBOUND) ||
-													   a_engine->crypto_type != CRYPTO_INVALID || switch_channel_test_flag(session->channel, CF_DTLS), AVP_UNDEFINED));
+													   t_engine->crypto_type != CRYPTO_INVALID || switch_channel_test_flag(session->channel, CF_DTLS), AVP_UNDEFINED));
 
 
 				/*****************************/
@@ -13442,7 +14010,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 
 
 
-				if (loops == 0 && switch_channel_test_flag(session->channel, CF_SECURE) && !switch_channel_test_flag(session->channel, CF_DTLS)) {
+				if (loops == 0 && switch_channel_test_flag(session->channel, CF_SECURE) && (!switch_channel_test_flag(session->channel, CF_DTLS) || t_engine->local_dtls_fingerprint.type)) {
 
 					for (i = 0; smh->crypto_suite_order[i] != CRYPTO_INVALID; i++) {
 						switch_rtp_crypto_key_type_t j = SUITES[smh->crypto_suite_order[i]].type;
@@ -14315,41 +14883,88 @@ static int check_engine(switch_rtp_engine_t *engine)
 	return 1;
 }
 
-SWITCH_DECLARE(switch_bool_t) switch_core_media_check_dtls(switch_core_session_t *session, switch_media_type_t type)
+static inline switch_status_t switch_core_media_check_dtls_ex(switch_core_session_t *session, switch_media_type_t type)
 {
 	switch_media_handle_t *smh;
 	switch_rtp_engine_t *engine;
-	int checking = 0;
-
+	int elapsed;
+	switch_time_t now, started;
+	int too_long = 30000;
+	const char *var;
+	
 	switch_assert(session);
 
 	if (!(smh = session->media_handle)) {
-		return SWITCH_FALSE;
-	}
-
-	if (!switch_channel_media_up(session->channel)) {
-		return SWITCH_FALSE;
+		return SWITCH_STATUS_GENERR;
 	}
 
 	if (!switch_channel_test_flag(session->channel, CF_DTLS)) {
-		return SWITCH_TRUE;
+		goto verified;
 	}
 
 	engine = &smh->engines[type];
 
+	if (!engine->rtp_session) {
+		return SWITCH_STATUS_GENERR;
+	}
+
 	if (engine->rmode == SWITCH_MEDIA_FLOW_DISABLED) {
-		return SWITCH_TRUE;
+		goto verified;
 	}
 
-	do {
-		if (engine->rtp_session) checking = check_engine(engine);
-	} while (switch_channel_ready(session->channel) && checking);
+	if ((var = switch_channel_get_variable(session->channel, "media_dtls_setup_timeout"))) {
+		int tmp = atoi(var);
 
-	if (!checking) {
-		return SWITCH_TRUE;
+		if (tmp > 0) {
+			too_long = tmp;
+		}
 	}
 
-	return SWITCH_FALSE;
+	if (!(started = switch_rtp_session_get_dtls_checks_started(engine->rtp_session))) {
+		started = switch_rtp_session_set_dtls_checks_started(engine->rtp_session, switch_micro_time_now());
+	}
+
+	if (too_long) {
+		now = switch_micro_time_now();
+		elapsed = (int)(now - started) / 1000;
+
+		if (elapsed > too_long) {
+			switch_channel_hangup(session->channel, SWITCH_CAUSE_MEDIA_TIMEOUT);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Hangup on %s DTLS timeout [%d]\n", type2str(type), too_long);
+
+			return SWITCH_STATUS_SUCCESS;
+		}
+	}
+
+	if (!check_engine(engine)) {
+		goto verified;
+	}
+
+	return SWITCH_STATUS_FALSE;
+
+verified:
+	switch (type) {
+	case SWITCH_MEDIA_TYPE_AUDIO :
+		break;
+	case SWITCH_MEDIA_TYPE_VIDEO :
+		switch_core_media_gen_key_frame(session);
+		break;
+	case SWITCH_MEDIA_TYPE_TEXT :
+		break;
+	default :
+		break;
+	}
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(switch_bool_t) switch_core_media_check_dtls(switch_core_session_t *session, switch_media_type_t type)
+{
+	if (switch_core_media_check_dtls_ex(session, type) != SWITCH_STATUS_SUCCESS) {
+		return SWITCH_FALSE;
+	}
+
+	return SWITCH_TRUE;
 }
 
 SWITCH_DECLARE(uint32_t) switch_core_media_get_orig_bitrate(switch_core_session_t *session, switch_media_type_t type) 
@@ -16517,10 +17132,16 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_video_frame(switch_cor
 		return SWITCH_STATUS_SUCCESS;
 	}
 
+	v_engine = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
+	if (switch_thread_rwlock_tryrdlock(v_engine->dtls_init_rwlock) != SWITCH_STATUS_SUCCESS) {
+		return SWITCH_STATUS_SUCCESS;
+	}
+
 	if (smh->write_mutex[SWITCH_MEDIA_TYPE_VIDEO] && switch_mutex_trylock(smh->write_mutex[SWITCH_MEDIA_TYPE_VIDEO]) != SWITCH_STATUS_SUCCESS) {
 		/* return CNG, another thread is already writing  */
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG1, "%s is already being written to for %s\n",
 						  switch_channel_get_name(session->channel), type2str(SWITCH_MEDIA_TYPE_VIDEO));
+		switch_thread_rwlock_unlock(v_engine->dtls_init_rwlock);
 		return SWITCH_STATUS_INUSE;
 	}
 
@@ -16696,6 +17317,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_video_frame(switch_cor
 	if (smh->write_mutex[SWITCH_MEDIA_TYPE_VIDEO]) {
 		switch_mutex_unlock(smh->write_mutex[SWITCH_MEDIA_TYPE_VIDEO]);
 	}
+
+	switch_thread_rwlock_unlock(v_engine->dtls_init_rwlock);
 
 	switch_img_free(&dup_img);
 
@@ -18394,6 +19017,511 @@ SWITCH_DECLARE(switch_codec_t*) switch_core_media_get_codec(switch_core_session_
     if (!engine) return NULL;
 
     return &engine->read_codec;
+}
+
+static void *SWITCH_THREAD_FUNC dtls_init_job(switch_thread_t *thread, void *obj)
+
+{
+	struct dtls_init_helper *dih = obj;
+	switch_core_session_t *session;
+	switch_channel_t *channel;
+	switch_media_handle_t *smh;
+	switch_status_t a_verified = SWITCH_STATUS_FALSE;
+	switch_status_t v_verified = SWITCH_STATUS_FALSE;
+	switch_status_t t_verified = SWITCH_STATUS_FALSE;
+	switch_rtp_engine_t *a_engine = NULL;
+	switch_rtp_engine_t *v_engine = NULL;
+	switch_rtp_engine_t *t_engine = NULL;
+	switch_time_t start = switch_time_now();
+
+	session = dih->session;
+	smh = session->media_handle;
+
+	a_engine = &smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
+	v_engine = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
+	t_engine = &smh->engines[SWITCH_MEDIA_TYPE_TEXT];
+
+	channel = switch_core_session_get_channel(session);
+
+	if (switch_core_session_read_lock(session) != SWITCH_STATUS_SUCCESS) {
+		dih->ready = -1;
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "%s DTLS init could not be started.\n", switch_channel_get_name(channel));
+
+		return NULL;
+	}
+
+	switch_thread_rwlock_wrlock(a_engine->dtls_init_rwlock);
+	switch_thread_rwlock_wrlock(v_engine->dtls_init_rwlock);
+	switch_thread_rwlock_wrlock(t_engine->dtls_init_rwlock);
+
+	dih->ready = 1;
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "%s DTLS init started.\n", switch_channel_get_name(channel));
+
+	do {
+		if (a_verified == SWITCH_STATUS_FALSE) {
+			a_verified = switch_core_media_check_dtls_ex(session, SWITCH_MEDIA_TYPE_AUDIO);
+			if (a_verified == SWITCH_STATUS_SUCCESS || a_verified == SWITCH_STATUS_GENERR) {
+				switch_thread_rwlock_unlock(a_engine->dtls_init_rwlock);
+				a_verified = SWITCH_STATUS_NOOP;
+			}
+		}
+
+		if (v_verified == SWITCH_STATUS_FALSE) {
+			v_verified = switch_core_media_check_dtls_ex(session, SWITCH_MEDIA_TYPE_VIDEO);
+			if (v_verified == SWITCH_STATUS_SUCCESS || v_verified == SWITCH_STATUS_GENERR) {
+				switch_thread_rwlock_unlock(v_engine->dtls_init_rwlock);
+				v_verified = SWITCH_STATUS_NOOP;
+			}
+		}
+
+		if (t_verified == SWITCH_STATUS_FALSE) {
+			t_verified = switch_core_media_check_dtls_ex(session, SWITCH_MEDIA_TYPE_TEXT);
+			if (t_verified == SWITCH_STATUS_SUCCESS || t_verified == SWITCH_STATUS_GENERR) {
+				switch_thread_rwlock_unlock(t_engine->dtls_init_rwlock);
+				t_verified = SWITCH_STATUS_NOOP;
+			}
+		}
+
+		switch_channel_check_signal(channel, SWITCH_FALSE);
+
+		if (!switch_channel_up_nosig(channel)) {
+			if (a_verified == SWITCH_STATUS_FALSE) {
+				switch_thread_rwlock_unlock(a_engine->dtls_init_rwlock);
+			}
+
+			if (v_verified == SWITCH_STATUS_FALSE) {
+				switch_thread_rwlock_unlock(v_engine->dtls_init_rwlock);
+			}
+
+			if (t_verified == SWITCH_STATUS_FALSE) {
+				switch_thread_rwlock_unlock(t_engine->dtls_init_rwlock);
+			}
+
+			break;
+		}
+
+	} while (a_verified == SWITCH_STATUS_FALSE || v_verified == SWITCH_STATUS_FALSE || t_verified == SWITCH_STATUS_FALSE);
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "%s DTLS init finished in [%" SWITCH_TIME_T_FMT " ms].\n", switch_channel_get_name(channel), (switch_time_now() - start) / 1000);
+	smh->dtls_init_job = 0;
+
+	switch_core_session_rwunlock(session);
+
+	return NULL;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_session_start_dtls_init_job(switch_core_session_t *session)
+{
+	switch_memory_pool_t *pool = switch_core_session_get_pool(session);
+	switch_thread_data_t *td;
+	switch_rtp_engine_t *a_engine = NULL;
+	switch_rtp_engine_t *v_engine = NULL;
+	switch_rtp_engine_t *t_engine = NULL;
+	switch_media_handle_t *smh;
+	switch_channel_t *channel;
+
+	if (!(smh = session->media_handle)) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	channel = switch_core_session_get_channel(session);
+	if (!switch_channel_test_flag(channel, CF_DTLS)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "%s DTLS init thread not needed - no DTLS.\n", switch_core_session_get_name(session));
+
+		return SWITCH_STATUS_SUCCESS;
+	}
+
+	if (smh->dtls_init_helper.ready) {
+		return SWITCH_STATUS_SUCCESS;
+	}
+
+	a_engine = &smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
+	v_engine = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
+	t_engine = &smh->engines[SWITCH_MEDIA_TYPE_TEXT];
+
+	switch_mutex_lock(smh->control_mutex);
+
+	if (smh->dtls_init_job) {
+		switch_mutex_unlock(smh->control_mutex);
+
+		return SWITCH_STATUS_FALSE;
+	}
+
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "%s Starting DTLS init thread\n", switch_core_session_get_name(session));
+
+	if (a_engine->rtp_session) {
+		switch_rtp_set_default_payload(a_engine->rtp_session, a_engine->cur_payload_map->pt);
+	}
+
+	if (v_engine->rtp_session) {
+		switch_rtp_set_default_payload(v_engine->rtp_session, v_engine->cur_payload_map->pt);
+	}
+
+	if (t_engine->rtp_session) {
+		switch_rtp_set_default_payload(t_engine->rtp_session, t_engine->cur_payload_map->pt);
+	}
+
+	smh->dtls_init_helper.session = session;
+	smh->dtls_init_helper.ready = 0;
+
+	td = switch_core_alloc(pool, sizeof(*td));
+	td->func = dtls_init_job;
+	td->obj = &smh->dtls_init_helper;
+	sprintf(td->name, "core/dtls/%"SWITCH_SIZE_T_FMT, switch_core_session_get_id(session));
+
+	smh->dtls_init_job = 1;
+
+	if (switch_thread_pool_launch_thread(&td) != SWITCH_STATUS_SUCCESS) {
+		smh->dtls_init_job = 0;
+	} else {
+
+		while (!smh->dtls_init_helper.ready) {
+			switch_cond_next();
+		}
+	}
+
+	switch_mutex_unlock(smh->control_mutex);
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_media_dtls_init_check_lock(switch_core_session_t *session, switch_media_type_t type)
+{
+	switch_media_handle_t *smh;
+	switch_rtp_engine_t *engine = NULL;
+
+	if (!(smh = session->media_handle)) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	engine = &smh->engines[type];
+
+	if (engine->dtls_init_rwlock && (switch_thread_rwlock_rdlock(engine->dtls_init_rwlock) == SWITCH_STATUS_SUCCESS)) {
+		switch_thread_rwlock_unlock(engine->dtls_init_rwlock);
+
+		return SWITCH_STATUS_SUCCESS;
+	}
+
+	return SWITCH_STATUS_FALSE;
+}
+
+SWITCH_DECLARE(switch_bool_t) switch_core_media_has_crypto(switch_core_session_t *session)
+{
+	return (switch_channel_test_flag(session->channel, CF_DTLS) ||
+			switch_channel_test_flag(session->channel, CF_SECURE));
+}
+
+static switch_status_t switch_core_media_set_extension(rtp_extension_t *extensions, uint8_t id, uint8_t type)
+{
+	uint8_t i = 0;
+
+	if (!extensions)
+		return SWITCH_STATUS_TERM;
+
+	while (i < MAX_RTP_EXTENSIONS) {
+
+		if (extensions[i].id == 0 || extensions[i].type == type) {
+			extensions[i].id = id;
+			extensions[i].type = type;
+			return SWITCH_STATUS_SUCCESS;
+		}
+		++i;
+	}
+
+	return SWITCH_STATUS_FALSE;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_media_set_recv_extension(switch_rtp_engine_t *engine, uint8_t id, uint8_t ext_type)
+{
+	if (!engine)
+		return SWITCH_STATUS_TERM;
+
+	return switch_core_media_set_extension(engine->rtp_recv_extensions, id, ext_type);
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_media_set_send_extension(switch_rtp_engine_t *engine, uint8_t id, uint8_t ext_type)
+{
+	if (!engine)
+		return SWITCH_STATUS_TERM;
+
+	return switch_core_media_set_extension(engine->rtp_send_extensions, id, ext_type);
+}
+
+static rtp_extension_t* switch_core_media_get_extension_by_id(rtp_extension_t *extensions, uint8_t id)
+{
+	uint8_t i = 0;
+
+	if (!extensions) return NULL;
+
+	while (i < MAX_RTP_EXTENSIONS) {
+
+		if (extensions[i].id == id) {
+			return &extensions[i];
+		}
+		++i;
+	}
+	return NULL;
+}
+
+SWITCH_DECLARE(rtp_extension_t *) switch_core_media_get_recv_extension_by_id(switch_rtp_engine_t *engine, uint8_t id)
+{
+	if (!engine) return NULL;
+	return switch_core_media_get_extension_by_id(engine->rtp_recv_extensions, id);
+}
+
+SWITCH_DECLARE(rtp_extension_t *) switch_core_media_get_send_extension_by_id(switch_rtp_engine_t *engine, uint8_t id)
+{
+	if (!engine) return NULL;
+	return switch_core_media_get_extension_by_id(engine->rtp_send_extensions, id);
+}
+
+static rtp_extension_t* switch_core_media_get_extension_by_type(rtp_extension_t *extensions, uint8_t type)
+{
+	uint8_t i = 0;
+
+	if (!extensions) return NULL;
+
+	while (i < MAX_RTP_EXTENSIONS) {
+
+		if (extensions[i].type == type) {
+			return &extensions[i];
+		}
+		++i;
+	}
+	return NULL;
+}
+
+SWITCH_DECLARE(rtp_extension_t *) switch_core_media_get_recv_extension_by_type(switch_rtp_engine_t *engine, uint8_t type)
+{
+	if (!engine) return NULL;
+	return switch_core_media_get_extension_by_type(engine->rtp_recv_extensions, type);
+}
+
+SWITCH_DECLARE(rtp_extension_t *) switch_core_media_get_send_extension_by_type(switch_rtp_engine_t *engine, uint8_t type)
+{
+	if (!engine) return NULL;
+	return switch_core_media_get_extension_by_type(engine->rtp_send_extensions, type);
+}
+
+static void scm_on_local_candidate(void *user_data, const char *mid, int mline_index, const switch_rtp_ice_cand_t *cand, int end_of_candidates)
+{
+	switch_core_session_t *session;
+	switch_event_t *ev;
+	switch_channel_t *channel;
+	char cand_line[512];
+	char rport_str[16] = "";
+	int wrote;
+
+	session = (switch_core_session_t *)user_data;
+	channel = switch_core_session_get_channel(session);
+	if (!channel) return;
+
+	if (cand->rel_port > 0) {
+		switch_snprintf(rport_str, sizeof(rport_str), "%d", cand->rel_port);
+	}
+
+	wrote = switch_snprintf(cand_line, sizeof(cand_line),
+							"a=candidate:%s %d %s %lu %s %d typ %s%s%s%s%s",
+							cand->foundation,
+							cand->component_id,
+							cand->transport,
+							cand->priority,
+							cand->ip,
+							cand->port,
+							cand->cand_type,
+							cand->rel_addr[0] ? " raddr " : "",
+							cand->rel_addr,
+							cand->rel_port ? " rport " : "",
+							cand->rel_port ? rport_str : "");
+	(void)wrote;
+
+	if (switch_event_create_subclass(&ev, SWITCH_EVENT_CUSTOM, TRICKLE_EVENT_SUBCLASS) == SWITCH_STATUS_SUCCESS) {
+		switch_event_add_header_string(ev, SWITCH_STACK_BOTTOM, "Call-UUID", switch_core_session_get_uuid(session));
+		switch_event_add_header_string(ev, SWITCH_STACK_BOTTOM, "a-candidate", cand_line);
+		switch_event_add_header_string(ev, SWITCH_STACK_BOTTOM, "mid", mid ? mid : "");
+		switch_event_add_header(ev, SWITCH_STACK_BOTTOM, "mline-index", "%d", mline_index);
+		switch_event_add_header(ev, SWITCH_STACK_BOTTOM, "end-of-candidates", "%d", end_of_candidates ? 1 : 0);
+		switch_event_fire(&ev);
+	}
+}
+
+static switch_media_type_t scm_type_from_mindex(int mline_index, const char *mid)
+{
+	if (mid && *mid) {
+		if (!strcmp(mid, "audio") || !strcmp(mid, "0")) return SWITCH_MEDIA_TYPE_AUDIO;
+		if (!strcmp(mid, "video") || !strcmp(mid, "1")) return SWITCH_MEDIA_TYPE_VIDEO;
+	}
+
+	if (mline_index == 0) return SWITCH_MEDIA_TYPE_AUDIO;
+	if (mline_index == 1) return SWITCH_MEDIA_TYPE_VIDEO;
+	return SWITCH_MEDIA_TYPE_AUDIO; /* safe default */
+}
+
+SWITCH_DECLARE(void) switch_core_media_trickle_register(switch_core_session_t *session, const char *mid, int mline_index)
+{
+	switch_media_type_t type;
+	switch_rtp_t *rtp;
+	type = scm_type_from_mindex(mline_index, mid);
+	rtp  = switch_core_media_get_rtp_session(session, type);
+
+	if (rtp) {
+		switch_rtp_set_ice_candidate_cb(rtp, scm_on_local_candidate, (void *)session);
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+			"Trickle ICE callback registered for %s media (mid=%s, mline=%d)\n",
+			type == SWITCH_MEDIA_TYPE_AUDIO ? "audio" : 
+			type == SWITCH_MEDIA_TYPE_VIDEO ? "video" : "text",
+			mid ? mid : "(null)", mline_index);
+	} else {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+			"Failed to register trickle ICE callback - no RTP session for %s media (mid=%s, mline=%d)\n",
+			type == SWITCH_MEDIA_TYPE_AUDIO ? "audio" : 
+			type == SWITCH_MEDIA_TYPE_VIDEO ? "video" : "text",
+			mid ? mid : "(null)", mline_index);
+	}
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_media_trickle_add_remote_candidate(switch_core_session_t *session, int mline_index, const char *mid, const char *cand_line)
+{
+	switch_media_type_t type;
+	switch_rtp_t *rtp;
+	type = scm_type_from_mindex(mline_index, mid);
+	rtp  = switch_core_media_get_rtp_session(session, type);
+	if (!rtp) return SWITCH_STATUS_FALSE;
+	return switch_rtp_add_trickle_remote_candidate(rtp, mline_index, mid, cand_line);
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_media_trickle_end_of_candidates(switch_core_session_t *session, int mline_index, const char *mid)
+{
+	switch_media_type_t type;
+	switch_rtp_t *rtp;
+	type = scm_type_from_mindex(mline_index, mid);
+	rtp  = switch_core_media_get_rtp_session(session, type);
+	if (!rtp) return SWITCH_STATUS_FALSE;
+	return switch_rtp_trickle_end_of_candidates(rtp, mline_index, mid);
+}
+
+SWITCH_DECLARE(int) switch_core_media_trickle_enabled(switch_core_session_t *session) { return trickle_is_enabled(session); }
+SWITCH_DECLARE(int) switch_core_media_trickle_accept(switch_core_session_t *session) { return trickle_accept_enabled(session); }
+
+SWITCH_DECLARE(switch_status_t) switch_core_media_add_trickle_candidate(switch_core_session_t *session, int mline_index, const char *mid, const char *raw_candidate)
+{
+	switch_channel_t *channel;
+	switch_rtp_t *rtp = NULL;
+
+	if (!session || zstr(raw_candidate)) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	channel = switch_core_session_get_channel(session);
+	if (!channel) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	{
+		switch_media_type_t mtype = SWITCH_MEDIA_TYPE_AUDIO;
+
+		if ((mid && !zstr(mid) && !strcasecmp(mid, "video")) || mline_index == 1) {
+			mtype = SWITCH_MEDIA_TYPE_VIDEO;
+		}
+
+		rtp = switch_core_media_get_rtp_session(session, mtype);
+	}
+
+	if (!rtp) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Trickle ICE: no RTP found for m=%d mid=%s\n", mline_index, switch_str_nil(mid));
+		return SWITCH_STATUS_FALSE;
+	}
+
+	return switch_rtp_add_trickle_remote_candidate(rtp, mline_index, mid, raw_candidate);
+}
+
+SWITCH_DECLARE(void) switch_core_media_trickle_recheck_all(switch_core_session_t *session, void *sdp_session, switch_sdp_type_t sdp_type)
+{
+	switch_media_handle_t *smh = switch_core_session_get_media_handle(session);
+	sdp_session_t *parsed_sdp = (sdp_session_t*)sdp_session;
+	
+	if (!smh || !parsed_sdp) return;
+
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, 
+		"Trickle recheck: Using provided parsed SDP session\n");
+	
+	/* Find media descriptors for each media type and call check_ice */
+	for (sdp_media_t *m = parsed_sdp->sdp_media; m; m = m->m_next) {
+		if (m->m_type == sdp_media_audio) {
+			check_ice(smh, SWITCH_MEDIA_TYPE_AUDIO, parsed_sdp, m, sdp_type);
+		} else if (m->m_type == sdp_media_video) {
+			check_ice(smh, SWITCH_MEDIA_TYPE_VIDEO, parsed_sdp, m, sdp_type);
+		} else if (m->m_type == sdp_media_text) {
+			check_ice(smh, SWITCH_MEDIA_TYPE_TEXT, parsed_sdp, m, sdp_type);
+		}
+	}
+}
+
+static void trickle_maybe_recheck_ice(switch_core_session_t *session, switch_media_handle_t *smh, void *sdp_session, switch_sdp_type_t sdp_type, int force_now)
+{
+	switch_channel_t *chan;
+	uint64_t now_us, last_us = 0;
+	const char *last_s;
+	sdp_session_t *parsed_sdp = (sdp_session_t*)sdp_session;
+
+	if (!session || !smh || !parsed_sdp) return;
+
+	chan = switch_core_session_get_channel(session);
+	now_us = switch_micro_time_now();
+	last_s = chan ? switch_channel_get_variable(chan, "trickle_last_check_us") : NULL;
+	if (last_s) last_us = (uint64_t) strtoull(last_s, NULL, 10);
+
+	if (!force_now && last_us && (now_us - last_us) < TRICKLE_RECHECK_DEBOUNCE_US) {
+		return;
+	}
+
+	/* Find media descriptors for each media type and call check_ice */
+	for (sdp_media_t *m = parsed_sdp->sdp_media; m; m = m->m_next) {
+		if (m->m_type == sdp_media_audio) {
+			check_ice(smh, SWITCH_MEDIA_TYPE_AUDIO, parsed_sdp, m, sdp_type);
+		} else if (m->m_type == sdp_media_video) {
+			check_ice(smh, SWITCH_MEDIA_TYPE_VIDEO, parsed_sdp, m, sdp_type);
+		} else if (m->m_type == sdp_media_text) {
+			check_ice(smh, SWITCH_MEDIA_TYPE_TEXT, parsed_sdp, m, sdp_type);
+		}
+	}
+
+	if (chan) {
+		switch_channel_set_variable_printf(chan, "trickle_last_check_us", "%" PRIu64, now_us);
+	}
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_media_trickle_remote_candidate_and_check(switch_core_session_t *session, 
+									switch_media_handle_t *smh, void *sdp_session, switch_sdp_type_t sdp_type,
+									const char *mid, int mline_index,
+									const char *cand_line, int end_of_candidates)
+{
+	switch_status_t st = switch_core_media_trickle_remote_candidate(session, mid, mline_index, cand_line, end_of_candidates);
+	if (st == SWITCH_STATUS_SUCCESS) {
+		trickle_maybe_recheck_ice(session, smh, sdp_session, sdp_type, end_of_candidates ? 1 : 0);
+	}
+	return st;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_media_trickle_remote_candidate_and_recheck(switch_core_session_t *session,
+												switch_media_handle_t *smh,
+												void *sdp_session,
+												switch_sdp_type_t sdp_type,
+												const char *mid,
+												int mline_index,
+												const char *cand_line,
+												int end_of_candidates)
+{
+	switch_status_t st;
+
+	st = switch_core_media_trickle_remote_candidate(session, mid, mline_index, cand_line, end_of_candidates);
+	if (st != SWITCH_STATUS_SUCCESS) {
+		return st;
+	}
+
+	switch_core_media_trickle_recheck_all(session, sdp_session, sdp_type);
+	return SWITCH_STATUS_SUCCESS;
 }
 
 /* For Emacs:
