@@ -86,6 +86,16 @@ struct switch_ivr_dmachine {
 	uint8_t pinging;
 };
 
+/* Byte-size buffers for decoded/PCM frames:
+   Opus worst case (48k, 60ms, stereo, 16-bit) ≈ 11,520 bytes */
+#ifndef EAVESDROP_FRAME_BYTES
+#define EAVESDROP_FRAME_BYTES 16384
+#endif
+
+#ifndef RECORD_FRAME_BYTES
+#define RECORD_FRAME_BYTES 16384
+#endif
+
 static const char *get_recording_var(switch_channel_t *channel, switch_event_t *vars, const char *name);
 static int recording_var_true(switch_channel_t *channel, switch_event_t *vars, const char *name);
 static switch_status_t speech_on_dtmf(switch_core_session_t *session, const switch_dtmf_t *dtmf, switch_dtmf_direction_t direction);
@@ -1347,11 +1357,11 @@ static void *SWITCH_THREAD_FUNC recording_thread(switch_thread_t *thread, void *
 	}
 
 	rh = switch_core_media_bug_get_user_data(bug);
-	switch_buffer_create_dynamic(&rh->thread_buffer, SWITCH_RECOMMENDED_BUFFER_SIZE, SWITCH_RECOMMENDED_BUFFER_SIZE, 0);
+	switch_buffer_create_dynamic(&rh->thread_buffer, RECORD_FRAME_BYTES, RECORD_FRAME_BYTES, 0);
 	rh->thread_ready = 1;
 
 	channels = switch_core_media_bug_test_flag(bug, SMBF_STEREO) ? 2 : rh->read_impl.number_of_channels;
-	data = switch_core_alloc(rh->helper_pool, SWITCH_RECOMMENDED_BUFFER_SIZE);
+	data = switch_core_alloc(rh->helper_pool, RECORD_FRAME_BYTES);
 
 	switch_mutex_lock(rh->cond_mutex);
 
@@ -1678,7 +1688,7 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 				switch_core_file_close(&rh->out_fh);
 			} else if (rh->fh) {
 				switch_size_t len;
-				uint8_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
+				uint8_t data[RECORD_FRAME_BYTES];
 				switch_frame_t frame = { 0 };
 				const char *file_trimmed_ms = NULL;
 				const char *file_size = NULL;
@@ -1701,7 +1711,7 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 				}
 
 				frame.data = data;
-				frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
+				frame.buflen = RECORD_FRAME_BYTES;
 
 				while (switch_core_media_bug_read(bug, &frame, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
 					len = (switch_size_t) frame.datalen / 2;
@@ -1783,13 +1793,13 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 		
 		if (rh->fh) {
 			switch_size_t len;
-			uint8_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
+			uint8_t data[RECORD_FRAME_BYTES];
 			switch_frame_t frame = { 0 };
 			switch_status_t status;
 			int i = 0;
 
 			frame.data = data;
-			frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
+			frame.buflen = RECORD_FRAME_BYTES;
 
 			for (;;) {
 				status = switch_core_media_bug_read(bug, &frame, i++ == 0 ? SWITCH_FALSE : SWITCH_TRUE);
@@ -2069,8 +2079,8 @@ struct eavesdrop_pvt {
 	switch_codec_implementation_t tread_impl;
 	switch_audio_resampler_t *resampler;
 	switch_mutex_t *resample_mutex;
-	uint8_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
-	uint8_t resample_data[SWITCH_RECOMMENDED_BUFFER_SIZE];
+	uint8_t data[EAVESDROP_FRAME_BYTES];
+	uint8_t resample_data[EAVESDROP_FRAME_BYTES];
 };
 
 
@@ -2094,7 +2104,7 @@ static switch_status_t video_eavesdrop_callback(switch_core_session_t *session, 
 static switch_bool_t eavesdrop_callback(switch_media_bug_t *bug, void *user_data, switch_abc_type_t type)
 {
 	struct eavesdrop_pvt *ep = (struct eavesdrop_pvt *) user_data;
-	uint8_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
+	uint8_t data[EAVESDROP_FRAME_BYTES];
 	switch_frame_t frame = { 0 };
 	switch_core_session_t *session = switch_core_media_bug_get_session(bug);
 	switch_channel_t *e_channel = switch_core_session_get_channel(ep->eavesdropper);
@@ -2102,7 +2112,7 @@ static switch_bool_t eavesdrop_callback(switch_media_bug_t *bug, void *user_data
 	switch_frame_t *nframe = NULL;
 	
 	frame.data = data;
-	frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
+	frame.buflen = EAVESDROP_FRAME_BYTES;
 
 	show_spy = switch_core_media_bug_test_flag(bug, SMBF_SPY_VIDEO_STREAM) || switch_core_media_bug_test_flag(bug, SMBF_SPY_VIDEO_STREAM_BLEG);
 	
@@ -2279,12 +2289,12 @@ static switch_bool_t eavesdrop_callback(switch_media_bug_t *bug, void *user_data
 
 	if (nframe) {
 		switch_frame_t frame = *nframe;
-		uint8_t buf[SWITCH_RECOMMENDED_BUFFER_SIZE] = "";
+		uint8_t buf[EAVESDROP_FRAME_BYTES] = "";
 		
 		frame.data = buf;
 		frame.codec = nframe->codec;
 		
-		memcpy(frame.data, nframe->data, nframe->datalen);
+		memcpy(frame.data, nframe->data, nframe->datalen > sizeof(buf) ? sizeof(buf) : nframe->datalen);
 
 		if (switch_core_session_write_frame(ep->eavesdropper, &frame, SWITCH_IO_FLAG_NONE, 0) != SWITCH_STATUS_SUCCESS) {
 			return SWITCH_FALSE;
