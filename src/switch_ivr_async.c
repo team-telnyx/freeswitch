@@ -91,7 +91,6 @@ struct switch_ivr_dmachine {
 
 #ifndef SWITCH_MAX_L16
 #define SWITCH_MAX_L16 16384
-#endif
 
 static const char *get_recording_var(switch_channel_t *channel, switch_event_t *vars, const char *name);
 static int recording_var_true(switch_channel_t *channel, switch_event_t *vars, const char *name);
@@ -2162,6 +2161,7 @@ static switch_status_t video_eavesdrop_callback(switch_core_session_t *session, 
 static switch_bool_t eavesdrop_callback(switch_media_bug_t *bug, void *user_data, switch_abc_type_t type)
 {
 	struct eavesdrop_pvt *ep = (struct eavesdrop_pvt *) user_data;
+	uint8_t data[EAVESDROP_FRAME_BYTES];
 	switch_frame_t frame = { 0 };
 	switch_core_session_t *session = switch_core_media_bug_get_session(bug);
 	switch_channel_t *e_channel = switch_core_session_get_channel(ep->eavesdropper);
