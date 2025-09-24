@@ -1250,6 +1250,7 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 		switch_size_t updated_samples_out = current_samples_out;
 		const char *last_record_index_str = switch_channel_get_variable(channel, "last_record_index");
 		const char *prev_record_samples_str = switch_channel_get_variable(channel, "record_samples");
+		const char *record_label = get_recording_var(channel, rh->variables, "record_label");
 		int record_index = 1;
 
 		if (!zstr(last_record_index_str) && switch_is_number(last_record_index_str)) {
@@ -1269,7 +1270,7 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 			switch_size_t updated_record_ms = current_record_ms;
 			const char *prev_record_sec_str = switch_channel_get_variable(channel, "record_seconds");
 			const char *prev_record_ms_str = switch_channel_get_variable(channel, "record_ms");
-			char buffer_name[32];
+			char buffer_name[64];
 
 			snprintf(buffer_name, sizeof(buffer_name), "record_samples_%d", record_index);
 			switch_channel_set_variable_printf(channel, buffer_name, "%d", current_samples_out);
@@ -1286,8 +1287,49 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 				updated_record_ms += atoi(prev_record_ms_str);
 			}
 
-			switch_channel_set_variable_printf(channel, "record_seconds", "%d", updated_record_seconds);
-			switch_channel_set_variable_printf(channel, "record_ms", "%d", updated_record_ms);
+			/* Handle labeled recording variables */
+			if (!zstr(record_label)) {
+				/* Generate labeled variables for this specific recording */
+				snprintf(buffer_name, sizeof(buffer_name), "record_%s_samples_%d", record_label, record_index);
+				switch_channel_set_variable_printf(channel, buffer_name, "%d", current_samples_out);
+				snprintf(buffer_name, sizeof(buffer_name), "record_%s_seconds_%d", record_label, record_index);
+				switch_channel_set_variable_printf(channel, buffer_name, "%d", current_record_seconds);
+				snprintf(buffer_name, sizeof(buffer_name), "record_%s_ms_%d", record_label, record_index);
+				switch_channel_set_variable_printf(channel, buffer_name, "%d", current_record_ms);
+				snprintf(buffer_name, sizeof(buffer_name), "record_%s_url_%d", record_label, record_index);
+				switch_channel_set_variable_printf(channel, buffer_name, "%s", !zstr(rh->file) ? rh->file : "");
+
+				/* Generate cumulative labeled variables */
+				snprintf(buffer_name, sizeof(buffer_name), "record_%s_samples", record_label);
+				const char *prev_labeled_samples_str = switch_channel_get_variable(channel, buffer_name);
+				switch_size_t updated_labeled_samples = current_samples_out;
+				if (!zstr(prev_labeled_samples_str) && switch_is_number(prev_labeled_samples_str)) {
+					updated_labeled_samples += atoi(prev_labeled_samples_str);
+				}
+				switch_channel_set_variable_printf(channel, buffer_name, "%d", updated_labeled_samples);
+
+				snprintf(buffer_name, sizeof(buffer_name), "record_%s_seconds", record_label);
+				const char *prev_labeled_sec_str = switch_channel_get_variable(channel, buffer_name);
+				snprintf(buffer_name, sizeof(buffer_name), "record_%s_ms", record_label);
+				const char *prev_labeled_ms_str = switch_channel_get_variable(channel, buffer_name);
+				switch_size_t updated_labeled_seconds = current_record_seconds;
+				switch_size_t updated_labeled_ms = current_record_ms;
+
+				if ((!zstr(prev_labeled_sec_str) && switch_is_number(prev_labeled_sec_str))
+					&& !zstr(prev_labeled_ms_str) && switch_is_number(prev_labeled_ms_str)) {
+					updated_labeled_seconds += atoi(prev_labeled_sec_str);
+					updated_labeled_ms += atoi(prev_labeled_ms_str);
+				}
+
+				snprintf(buffer_name, sizeof(buffer_name), "record_%s_seconds", record_label);
+				switch_channel_set_variable_printf(channel, buffer_name, "%d", updated_labeled_seconds);
+				snprintf(buffer_name, sizeof(buffer_name), "record_%s_ms", record_label);
+				switch_channel_set_variable_printf(channel, buffer_name, "%d", updated_labeled_ms);
+			} else {
+				/* No label provided - use standard record_ms variables for backward compatibility */
+				switch_channel_set_variable_printf(channel, "record_seconds", "%d", updated_record_seconds);
+				switch_channel_set_variable_printf(channel, "record_ms", "%d", updated_record_ms);
+			}
 		}
 	}
 
