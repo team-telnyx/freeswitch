@@ -2103,11 +2103,11 @@ SWITCH_DECLARE(int) switch_core_session_check_incoming_crypto(switch_core_sessio
 			switch_channel_set_variable_printf(session->channel, "srtp_remote_audio_crypto_type", "%s", switch_core_media_crypto_type2str(ctype));
 		} else if (engine->type == SWITCH_MEDIA_TYPE_VIDEO) {
 			switch_channel_set_variable(session->channel, "srtp_remote_video_crypto_key", crypto);
-			switch_channel_set_variable_printf(session->channel, "srtp_remote_audio_crypto_tag", "%d", crypto_tag);
+			switch_channel_set_variable_printf(session->channel, "srtp_remote_video_crypto_tag", "%d", crypto_tag);
 			switch_channel_set_variable_printf(session->channel, "srtp_remote_video_crypto_type", "%s", switch_core_media_crypto_type2str(ctype));
 		} else if (engine->type == SWITCH_MEDIA_TYPE_TEXT) {
 			switch_channel_set_variable(session->channel, "srtp_remote_text_crypto_key", crypto);
-			switch_channel_set_variable_printf(session->channel, "srtp_remote_audio_crypto_tag", "%d", crypto_tag);
+			switch_channel_set_variable_printf(session->channel, "srtp_remote_text_crypto_tag", "%d", crypto_tag);
 			switch_channel_set_variable_printf(session->channel, "srtp_remote_text_crypto_type", "%s", switch_core_media_crypto_type2str(ctype));
 		}
 
