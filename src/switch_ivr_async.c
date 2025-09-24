@@ -2169,15 +2169,20 @@ static switch_bool_t eavesdrop_callback(switch_media_bug_t *bug, void *user_data
 				uint32_t datalen_to_write = frame.datalen;
 
 				/* Apply resampling if needed */
-				if (ep->resampler && frame.datalen > 0) {
+				if (ep->tread_impl.actual_samples_per_second != ep->read_impl.actual_samples_per_second &&
+				    ep->resampler && frame.datalen > 0) {
 					int16_t *original_data = (int16_t *)frame.data;
-					int original_samples = frame.datalen / 2 / ep->tread_impl.number_of_channels;
+					int original_samples = frame.datalen / 2 / frame.channels;
 
 					switch_mutex_lock(ep->resample_mutex);
 					switch_resample_process(ep->resampler, original_data, original_samples);
 
 					/* Copy resampled data to resample buffer */
-					memcpy(ep->resample_data, ep->resampler->to, ep->resampler->to_len * 2 * ep->tread_impl.number_of_channels);
+					{
+						uint32_t out_bytes = ep->resampler->to_len * 2 * ep->tread_impl.number_of_channels;
+						if (out_bytes > sizeof(ep->resample_data)) out_bytes = sizeof(ep->resample_data);
+						memcpy(ep->resample_data, ep->resampler->to, out_bytes);
+					}
 					data_to_write = ep->resample_data;
 					datalen_to_write = ep->resampler->to_len * 2 * ep->tread_impl.number_of_channels;
 
