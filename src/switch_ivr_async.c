@@ -1271,7 +1271,13 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 			const char *prev_record_sec_str = switch_channel_get_variable(channel, "record_seconds");
 			const char *prev_record_ms_str = switch_channel_get_variable(channel, "record_ms");
 			char buffer_name[64];
-
+			const char *prev_labeled_samples_str = switch_channel_get_variable(channel, buffer_name);
+			const char *prev_labeled_sec_str = switch_channel_get_variable(channel, buffer_name);
+			const char *prev_labeled_ms_str = switch_channel_get_variable(channel, buffer_name);
+			switch_size_t updated_labeled_samples = current_samples_out;
+			switch_size_t updated_labeled_seconds = current_record_seconds;
+			switch_size_t updated_labeled_ms = current_record_ms;
+			
 			snprintf(buffer_name, sizeof(buffer_name), "record_samples_%d", record_index);
 			switch_channel_set_variable_printf(channel, buffer_name, "%d", current_samples_out);
 			snprintf(buffer_name, sizeof(buffer_name), "record_seconds_%d", record_index);
@@ -1301,19 +1307,13 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 
 				/* Generate cumulative labeled variables */
 				snprintf(buffer_name, sizeof(buffer_name), "record_%s_samples", record_label);
-				const char *prev_labeled_samples_str = switch_channel_get_variable(channel, buffer_name);
-				switch_size_t updated_labeled_samples = current_samples_out;
 				if (!zstr(prev_labeled_samples_str) && switch_is_number(prev_labeled_samples_str)) {
 					updated_labeled_samples += atoi(prev_labeled_samples_str);
 				}
 				switch_channel_set_variable_printf(channel, buffer_name, "%d", updated_labeled_samples);
 
 				snprintf(buffer_name, sizeof(buffer_name), "record_%s_seconds", record_label);
-				const char *prev_labeled_sec_str = switch_channel_get_variable(channel, buffer_name);
 				snprintf(buffer_name, sizeof(buffer_name), "record_%s_ms", record_label);
-				const char *prev_labeled_ms_str = switch_channel_get_variable(channel, buffer_name);
-				switch_size_t updated_labeled_seconds = current_record_seconds;
-				switch_size_t updated_labeled_ms = current_record_ms;
 
 				if ((!zstr(prev_labeled_sec_str) && switch_is_number(prev_labeled_sec_str))
 					&& !zstr(prev_labeled_ms_str) && switch_is_number(prev_labeled_ms_str)) {
