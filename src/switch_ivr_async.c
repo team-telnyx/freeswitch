@@ -2943,9 +2943,29 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 			}
 
 			if (buffered) {
+				uint32_t buffer_inuse = switch_buffer_inuse(ep->buffer);
 				buff_min_len = lcm * 2;
-				if (switch_buffer_inuse(ep->buffer) < buff_min_len) {
-					continue;
+
+				/* Cap excessive buffer requirements for high sample rate mismatches */
+				if (buff_min_len > SWITCH_RECOMMENDED_BUFFER_SIZE * 4) {
+					buff_min_len = SWITCH_RECOMMENDED_BUFFER_SIZE * 2;
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG10,
+									  "Eavesdrop: Capping excessive buff_min_len from %d to %d\n",
+									  (int)(lcm * 2), buff_min_len);
+				}
+
+				/* If buffer has data but less than ideal size, process what we have */
+				if (buffer_inuse < buff_min_len) {
+					if (buffer_inuse >= len) {
+						/* We have at least one packet worth of data, use it */
+						buff_min_len = len;
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG10,
+										  "Eavesdrop: Processing partial buffer %d bytes (wanted %d)\n",
+										  buffer_inuse, (int)(lcm * 2));
+					} else {
+						/* Not enough for even one packet, wait for more */
+						continue;
+					}
 				}
 			} else {
 				buff_min_len = len;
