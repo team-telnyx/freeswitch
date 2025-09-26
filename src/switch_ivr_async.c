@@ -1298,24 +1298,26 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 				
 				/* Add to previous values if they exist */
 				if (!zstr(prev_labeled_sec_str) && switch_is_number(prev_labeled_sec_str)) {
-					labeled_record_seconds += atoi(prev_labeled_sec_str);
+					labeled_record_seconds += switch_safe_atoi(prev_labeled_sec_str, 0);
+					
+					/* Only accumulate ms if seconds variable exists */
+					if (!zstr(prev_labeled_ms_str) && switch_is_number(prev_labeled_ms_str)) {
+						labeled_record_ms += switch_safe_atoi(prev_labeled_ms_str, 0);
+					}
 				} else {
 					/* First recording with this label */
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
 						"Creating new CDR variables for label '%s': record_%s_seconds, record_%s_ms\n",
 						rh->record_label, rh->record_label, rh->record_label);
-				}
-				
-				if (!zstr(prev_labeled_ms_str) && switch_is_number(prev_labeled_ms_str)) {
-					labeled_record_ms += atoi(prev_labeled_ms_str);
+					/* Do not accumulate ms if seconds variable is missing */
 				}
 				
 				/* Set the labeled CDR variables */
 				snprintf(buffer_name, sizeof(buffer_name), "record_%s_seconds", rh->record_label);
-				switch_channel_set_variable_printf(channel, buffer_name, "%d", labeled_record_seconds);
+				switch_channel_set_variable_printf(channel, buffer_name, "%" SWITCH_SIZE_T_FMT, labeled_record_seconds);
 				
 				snprintf(buffer_name, sizeof(buffer_name), "record_%s_ms", rh->record_label);
-				switch_channel_set_variable_printf(channel, buffer_name, "%d", labeled_record_ms);
+				switch_channel_set_variable_printf(channel, buffer_name, "%" SWITCH_SIZE_T_FMT, labeled_record_ms);
 				
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
 					"Recording stopped with label '%s': current=%ds/%dms, total=%ds/%dms\n",
@@ -1326,12 +1328,12 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 				/* For non-labeled recordings, accumulate in record_seconds and record_ms */
 				if ((!zstr(prev_record_sec_str) && switch_is_number(prev_record_sec_str))
 					&& !zstr(prev_record_ms_str) && switch_is_number(prev_record_ms_str)) {
-					updated_record_seconds += atoi(prev_record_sec_str);
-					updated_record_ms += atoi(prev_record_ms_str);
+					updated_record_seconds += switch_safe_atoi(prev_record_sec_str, 0);
+					updated_record_ms += switch_safe_atoi(prev_record_ms_str, 0);
 				}
 
-				switch_channel_set_variable_printf(channel, "record_seconds", "%d", updated_record_seconds);
-				switch_channel_set_variable_printf(channel, "record_ms", "%d", updated_record_ms);
+				switch_channel_set_variable_printf(channel, "record_seconds", "%" SWITCH_SIZE_T_FMT, updated_record_seconds);
+				switch_channel_set_variable_printf(channel, "record_ms", "%" SWITCH_SIZE_T_FMT, updated_record_ms);
 				
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
 					"Recording stopped without label: current=%ds/%dms, total=%ds/%dms\n",
@@ -6309,3 +6311,4 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_video_write_overlay_session(switch_co
  * For VIM:
  * vim:set softtabstop=4 shiftwidth=4 tabstop=4 noet:
  */
+
