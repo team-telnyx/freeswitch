@@ -1326,10 +1326,13 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 					(int)labeled_record_seconds, (int)labeled_record_ms);
 			} else {
 				/* For non-labeled recordings, accumulate in record_seconds and record_ms */
-				if ((!zstr(prev_record_sec_str) && switch_is_number(prev_record_sec_str))
-					&& !zstr(prev_record_ms_str) && switch_is_number(prev_record_ms_str)) {
+				if (!zstr(prev_record_sec_str) && switch_is_number(prev_record_sec_str)) {
 					updated_record_seconds += switch_safe_atoi(prev_record_sec_str, 0);
-					updated_record_ms += switch_safe_atoi(prev_record_ms_str, 0);
+					
+					/* Only accumulate ms if seconds variable exists (consistent with labeled logic) */
+					if (!zstr(prev_record_ms_str) && switch_is_number(prev_record_ms_str)) {
+						updated_record_ms += switch_safe_atoi(prev_record_ms_str, 0);
+					}
 				}
 
 				switch_channel_set_variable_printf(channel, "record_seconds", "%" SWITCH_SIZE_T_FMT, updated_record_seconds);
@@ -6311,4 +6314,3 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_video_write_overlay_session(switch_co
  * For VIM:
  * vim:set softtabstop=4 shiftwidth=4 tabstop=4 noet:
  */
-
