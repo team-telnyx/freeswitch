@@ -1316,10 +1316,10 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 				
 				/* Set the labeled CDR variables */
 				snprintf(buffer_name, sizeof(buffer_name), "record_%s_seconds", rh->record_label);
-				switch_channel_set_variable_printf(channel, buffer_name, "%" SWITCH_SIZE_T_FMT, labeled_record_seconds);
+				switch_channel_set_variable_printf(channel, buffer_name, "%d", labeled_record_seconds);
 				
 				snprintf(buffer_name, sizeof(buffer_name), "record_%s_ms", rh->record_label);
-				switch_channel_set_variable_printf(channel, buffer_name, "%" SWITCH_SIZE_T_FMT, labeled_record_ms);
+				switch_channel_set_variable_printf(channel, buffer_name, "%d", labeled_record_ms);
 				
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
 					"Recording stopped with label '%s': current=%ds/%dms, total=%ds/%dms\n",
@@ -1343,8 +1343,8 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 					}
 				}
 
-				switch_channel_set_variable_printf(channel, "record_seconds", "%" SWITCH_SIZE_T_FMT, updated_record_seconds);
-				switch_channel_set_variable_printf(channel, "record_ms", "%" SWITCH_SIZE_T_FMT, updated_record_ms);
+				switch_channel_set_variable_printf(channel, "record_seconds", "%d", updated_record_seconds);
+				switch_channel_set_variable_printf(channel, "record_ms", "%d", updated_record_ms);
 				
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
 					"Recording stopped without label: current=%ds/%dms, total=%ds/%dms\n",
@@ -6322,3 +6322,4 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_video_write_overlay_session(switch_co
  * For VIM:
  * vim:set softtabstop=4 shiftwidth=4 tabstop=4 noet:
  */
+
