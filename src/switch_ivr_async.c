@@ -1288,6 +1288,8 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 				switch_size_t labeled_record_ms = current_record_ms;
 				const char *prev_labeled_sec_str;
 				const char *prev_labeled_ms_str;
+				int prev_sec;
+				int prev_ms;
 				
 				/* Get previous labeled seconds and ms if they exist */
 				snprintf(buffer_name, sizeof(buffer_name), "record_%s_seconds", rh->record_label);
@@ -1298,11 +1300,17 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 				
 				/* Add to previous values if they exist */
 				if (!zstr(prev_labeled_sec_str) && switch_is_number(prev_labeled_sec_str)) {
-					labeled_record_seconds += switch_safe_atoi(prev_labeled_sec_str, 0);
+					prev_sec = switch_safe_atoi(prev_labeled_sec_str, 0);
+					if (prev_sec >= 0) {
+						labeled_record_seconds += (switch_size_t)prev_sec;
+					}
 					
 					/* Only accumulate ms if seconds variable exists */
 					if (!zstr(prev_labeled_ms_str) && switch_is_number(prev_labeled_ms_str)) {
-						labeled_record_ms += switch_safe_atoi(prev_labeled_ms_str, 0);
+						prev_ms = switch_safe_atoi(prev_labeled_ms_str, 0);
+						if (prev_ms >= 0) {
+							labeled_record_ms += (switch_size_t)prev_ms;
+						}
 					}
 				} else {
 					/* First recording with this label */
@@ -1327,11 +1335,17 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 			} else {
 				/* For non-labeled recordings, accumulate in record_seconds and record_ms */
 				if (!zstr(prev_record_sec_str) && switch_is_number(prev_record_sec_str)) {
-					updated_record_seconds += switch_safe_atoi(prev_record_sec_str, 0);
+					int prev_sec = switch_safe_atoi(prev_record_sec_str, 0);
+					if (prev_sec >= 0) {
+						updated_record_seconds += (switch_size_t)prev_sec;
+					}
 					
 					/* Only accumulate ms if seconds variable exists (consistent with labeled logic) */
 					if (!zstr(prev_record_ms_str) && switch_is_number(prev_record_ms_str)) {
-						updated_record_ms += switch_safe_atoi(prev_record_ms_str, 0);
+						int prev_ms = switch_safe_atoi(prev_record_ms_str, 0);
+						if (prev_ms >= 0) {
+							updated_record_ms += (switch_size_t)prev_ms;
+						}
 					}
 				}
 
