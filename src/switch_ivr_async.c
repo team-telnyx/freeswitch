@@ -1270,6 +1270,12 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 			const char *prev_record_sec_str = switch_channel_get_variable(channel, "record_seconds");
 			const char *prev_record_ms_str = switch_channel_get_variable(channel, "record_ms");
 			char buffer_name[32];
+			
+			/* Check for record_label in recording variables */
+			const char *record_label = NULL;
+			if (rh->variables) {
+				record_label = switch_event_get_header(rh->variables, "record_label");
+			}
 
 			snprintf(buffer_name, sizeof(buffer_name), "record_samples_%d", record_index);
 			switch_channel_set_variable_printf(channel, buffer_name, "%d", current_samples_out);
@@ -1280,14 +1286,44 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 			snprintf(buffer_name, sizeof(buffer_name), "record_url_%d", record_index);
 			switch_channel_set_variable_printf(channel, buffer_name, "%s", !zstr(rh->file) ? rh->file : "");
 
-			if ((!zstr(prev_record_sec_str) && switch_is_number(prev_record_sec_str))
-				&& !zstr(prev_record_ms_str) && switch_is_number(prev_record_ms_str)) {
-				updated_record_seconds += atoi(prev_record_sec_str);
-				updated_record_ms += atoi(prev_record_ms_str);
-			}
+			/* Handle labeled vs unlabeled recording statistics */
+			if (!zstr(record_label)) {
+				/* This is a labeled recording - generate labeled variables */
+				char labeled_seconds_var[64];
+				char labeled_ms_var[64];
+				const char *prev_labeled_sec_str;
+				const char *prev_labeled_ms_str;
+				switch_size_t updated_labeled_seconds = current_record_seconds;
+				switch_size_t updated_labeled_ms = current_record_ms;
+				
+				snprintf(labeled_seconds_var, sizeof(labeled_seconds_var), "record_%s_seconds", record_label);
+				snprintf(labeled_ms_var, sizeof(labeled_ms_var), "record_%s_ms", record_label);
+				
+				prev_labeled_sec_str = switch_channel_get_variable(channel, labeled_seconds_var);
+				prev_labeled_ms_str = switch_channel_get_variable(channel, labeled_ms_var);
+				
+				if ((!zstr(prev_labeled_sec_str) && switch_is_number(prev_labeled_sec_str))
+					&& !zstr(prev_labeled_ms_str) && switch_is_number(prev_labeled_ms_str)) {
+					updated_labeled_seconds += atoi(prev_labeled_sec_str);
+					updated_labeled_ms += atoi(prev_labeled_ms_str);
+				}
+				
+				switch_channel_set_variable_printf(channel, labeled_seconds_var, "%d", updated_labeled_seconds);
+				switch_channel_set_variable_printf(channel, labeled_ms_var, "%d", updated_labeled_ms);
+				
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(switch_core_session_locate(switch_channel_get_uuid(channel))), 
+					SWITCH_LOG_DEBUG, "Recording with label '%s': %d ms\n", record_label, updated_labeled_ms);
+			} else {
+				/* This is an unlabeled recording - generate standard variables for billing */
+				if ((!zstr(prev_record_sec_str) && switch_is_number(prev_record_sec_str))
+					&& !zstr(prev_record_ms_str) && switch_is_number(prev_record_ms_str)) {
+					updated_record_seconds += atoi(prev_record_sec_str);
+					updated_record_ms += atoi(prev_record_ms_str);
+				}
 
-			switch_channel_set_variable_printf(channel, "record_seconds", "%d", updated_record_seconds);
-			switch_channel_set_variable_printf(channel, "record_ms", "%d", updated_record_ms);
+				switch_channel_set_variable_printf(channel, "record_seconds", "%d", updated_record_seconds);
+				switch_channel_set_variable_printf(channel, "record_ms", "%d", updated_record_ms);
+			}
 		}
 	}
 
