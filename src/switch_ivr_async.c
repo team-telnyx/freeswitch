@@ -1312,12 +1312,6 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 							labeled_record_ms += (switch_size_t)prev_ms;
 						}
 					}
-				} else {
-					/* First recording with this label */
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-						"Creating new CDR variables for label '%s': record_%s_seconds, record_%s_ms\n",
-						rh->record_label, rh->record_label, rh->record_label);
-					/* Do not accumulate ms if seconds variable is missing */
 				}
 				
 				/* Set the labeled CDR variables */
@@ -1340,7 +1334,7 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 						updated_record_seconds += (switch_size_t)prev_sec;
 					}
 					
-					/* Only accumulate ms if seconds variable exists (consistent with labeled logic) */
+					/* Only accumulate ms if seconds variable exists; note: this is not fully consistent with labeled logic, which always sets ms */
 					if (!zstr(prev_record_ms_str) && switch_is_number(prev_record_ms_str)) {
 						int prev_ms = switch_safe_atoi(prev_record_ms_str, 0);
 						if (prev_ms >= 0) {
