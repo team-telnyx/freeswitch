@@ -3596,15 +3596,10 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 				"Recording started with label: %s\n", rh->record_label);
 		} else {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-				"No record_label found in recording parameters\n");
+				"Recording started without label (standard recording)\n");
 		}
 	} else {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-			"No parameters found in file handle\n");
-	}
-	
-	if (zstr(rh->record_label)) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, 
 			"Recording started without label (standard recording)\n");
 	}
 
@@ -6322,4 +6317,5 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_video_write_overlay_session(switch_co
  * For VIM:
  * vim:set softtabstop=4 shiftwidth=4 tabstop=4 noet:
  */
+
 
