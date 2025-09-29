@@ -1298,19 +1298,14 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 				snprintf(buffer_name, sizeof(buffer_name), "record_%s_ms", rh->record_label);
 				prev_labeled_ms_str = switch_channel_get_variable(channel, buffer_name);
 				
-				/* Add to previous values if they exist */
-				if (!zstr(prev_labeled_sec_str) && switch_is_number(prev_labeled_sec_str)) {
+				/* Add to previous values if both exist (like original code) */
+				if ((!zstr(prev_labeled_sec_str) && switch_is_number(prev_labeled_sec_str))
+					&& (!zstr(prev_labeled_ms_str) && switch_is_number(prev_labeled_ms_str))) {
 					prev_sec = switch_safe_atoi(prev_labeled_sec_str, 0);
-					if (prev_sec >= 0) {
+					prev_ms = switch_safe_atoi(prev_labeled_ms_str, 0);
+					if (prev_sec >= 0 && prev_ms >= 0) {
 						labeled_record_seconds += (switch_size_t)prev_sec;
-					}
-					
-					/* Only accumulate ms if seconds variable exists */
-					if (!zstr(prev_labeled_ms_str) && switch_is_number(prev_labeled_ms_str)) {
-						prev_ms = switch_safe_atoi(prev_labeled_ms_str, 0);
-						if (prev_ms >= 0) {
-							labeled_record_ms += (switch_size_t)prev_ms;
-						}
+						labeled_record_ms += (switch_size_t)prev_ms;
 					}
 				}
 				
@@ -1328,18 +1323,14 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 					(int)labeled_record_seconds, (int)labeled_record_ms);
 			} else {
 				/* For non-labeled recordings, accumulate in record_seconds and record_ms */
-				if (!zstr(prev_record_sec_str) && switch_is_number(prev_record_sec_str)) {
+				/* Use same logic as original code - both variables must exist */
+				if ((!zstr(prev_record_sec_str) && switch_is_number(prev_record_sec_str))
+					&& (!zstr(prev_record_ms_str) && switch_is_number(prev_record_ms_str))) {
 					int prev_sec = switch_safe_atoi(prev_record_sec_str, 0);
-					if (prev_sec >= 0) {
+					int prev_ms = switch_safe_atoi(prev_record_ms_str, 0);
+					if (prev_sec >= 0 && prev_ms >= 0) {
 						updated_record_seconds += (switch_size_t)prev_sec;
-					}
-					
-					/* Only accumulate ms if seconds variable exists; note: this is not fully consistent with labeled logic, which always sets ms */
-					if (!zstr(prev_record_ms_str) && switch_is_number(prev_record_ms_str)) {
-						int prev_ms = switch_safe_atoi(prev_record_ms_str, 0);
-						if (prev_ms >= 0) {
-							updated_record_ms += (switch_size_t)prev_ms;
-						}
+						updated_record_ms += (switch_size_t)prev_ms;
 					}
 				}
 
@@ -6317,3 +6308,4 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_video_write_overlay_session(switch_co
  * For VIM:
  * vim:set softtabstop=4 shiftwidth=4 tabstop=4 noet:
  */
+
