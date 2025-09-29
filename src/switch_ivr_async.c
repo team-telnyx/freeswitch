@@ -2136,8 +2136,11 @@ struct eavesdrop_pvt {
 	switch_codec_implementation_t tread_impl;
 	switch_audio_resampler_t *resampler;
 	switch_mutex_t *resample_mutex;
+	switch_audio_resampler_t *reverse_resampler;
+	switch_mutex_t *reverse_resample_mutex;
 	uint8_t *data;
 	uint8_t *resample_data;
+	uint8_t *reverse_resample_data;
 	uint8_t *frame_data;
 };
 
@@ -2302,19 +2305,98 @@ static switch_bool_t eavesdrop_callback(switch_media_bug_t *bug, void *user_data
 		{
 			if (switch_test_flag(ep, ED_MUX_WRITE)) {
 				switch_frame_t *rframe = switch_core_media_bug_get_write_replace_frame(bug);
+				int channels = rframe->channels ? rframe->channels : 1;
+				uint32_t required_bytes;
+				void *data_to_merge = data;
+				uint32_t merge_samples = 0;
+				uint32_t buffer_inuse;
+				uint32_t input_samples;
 
-				if (switch_buffer_inuse(ep->w_buffer) >= rframe->datalen) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+								  "WRITE_REPLACE: rframe->samples=%u, rframe->datalen=%u, channels=%d\n",
+								  rframe->samples, rframe->datalen, channels);
+
+				/* Calculate how much data we need from w_buffer */
+				if (ep->reverse_resampler) {
+					/* Calculate input samples needed to produce rframe->samples output samples */
+					input_samples = (uint32_t)((double)rframe->samples * ep->reverse_resampler->rfactor);
+					required_bytes = input_samples * 2 * ep->read_impl.number_of_channels;
+
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+									  "WRITE_REPLACE: Reverse resampler active - rfactor=%.3f, input_samples=%u, required_bytes=%u\n",
+									  ep->reverse_resampler->rfactor, input_samples, required_bytes);
+				} else {
+					required_bytes = rframe->datalen;
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+									  "WRITE_REPLACE: No resampler, required_bytes=%u\n", required_bytes);
+				}
+
+				buffer_inuse = switch_buffer_inuse(ep->w_buffer);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+								  "WRITE_REPLACE: buffer_inuse=%u, required_bytes=%u\n",
+								  buffer_inuse, required_bytes);
+
+				if (buffer_inuse >= required_bytes) {
 					uint32_t bytes;
-					int channels = rframe->channels ? rframe->channels : 1;
+					uint32_t old_datalen;
 
 					switch_buffer_lock(ep->w_buffer);
-					bytes = (uint32_t) switch_buffer_read(ep->w_buffer, ep->data, rframe->datalen);
+					bytes = (uint32_t) switch_buffer_read(ep->w_buffer, ep->data, required_bytes);
 
-					rframe->datalen = switch_merge_sln(rframe->data, rframe->samples, (int16_t *) ep->data, bytes / 2, channels) * 2 * channels;
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+									  "WRITE_REPLACE: Read %u bytes from w_buffer\n", bytes);
+
+					/* Apply reverse resampling if needed */
+					if (ep->reverse_resampler && bytes > 0) {
+						int16_t *original_data = (int16_t *)data;
+						int original_samples = bytes / 2 / ep->read_impl.number_of_channels;
+
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+										  "WRITE_REPLACE: Before resampling - original_samples=%d, read_impl_rate=%dHz, tread_impl_rate=%dHz\n",
+										  original_samples, ep->read_impl.actual_samples_per_second, ep->tread_impl.actual_samples_per_second);
+
+						switch_mutex_lock(ep->reverse_resample_mutex);
+						switch_resample_process(ep->reverse_resampler, original_data, original_samples);
+
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+										  "WRITE_REPLACE: After resampling - output_samples=%u\n",
+										  (uint32_t)ep->reverse_resampler->to_len);
+
+						/* Copy resampled data to reverse resample buffer */
+						memcpy(ep->reverse_resample_data, ep->reverse_resampler->to, ep->reverse_resampler->to_len * 2 * ep->read_impl.number_of_channels);
+						data_to_merge = ep->reverse_resample_data;
+						merge_samples = ep->reverse_resampler->to_len;
+
+						switch_mutex_unlock(ep->reverse_resample_mutex);
+
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG10,
+										  "Eavesdrop write callback: Reverse resampled %d->%d samples, %dHz->%dHz\n",
+										  original_samples, (int)ep->reverse_resampler->to_len,
+										  ep->read_impl.actual_samples_per_second,
+										  ep->tread_impl.actual_samples_per_second);
+					} else {
+						merge_samples = bytes / 2;
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+										  "WRITE_REPLACE: No resampling needed, merge_samples=%u\n", merge_samples);
+					}
+
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+									  "WRITE_REPLACE: Merging - rframe->samples=%u, merge_samples=%u, channels=%d\n",
+									  rframe->samples, merge_samples, channels);
+
+					old_datalen = rframe->datalen;
+					rframe->datalen = switch_merge_sln(rframe->data, rframe->samples, (int16_t *) data_to_merge, merge_samples, channels) * 2 * channels;
 					rframe->samples = rframe->datalen / 2;
+
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+									  "WRITE_REPLACE: After merge - old_datalen=%u, new_datalen=%u, new_samples=%u\n",
+									  old_datalen, rframe->datalen, rframe->samples);
 
 					switch_buffer_unlock(ep->w_buffer);
 					switch_core_media_bug_set_write_replace_frame(bug, rframe);
+				} else {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+									  "WRITE_REPLACE: Not enough data in buffer, skipping\n");
 				}
 			}
 		}
@@ -2654,6 +2736,29 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 								  "Eavesdrop: Unable to create resampler\n");
 				goto end;
 			}
+
+			/* Initialize reverse resampler for write direction */
+			switch_mutex_init(&ep->reverse_resample_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
+
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+							  "Eavesdrop: Creating reverse resampler %dHz->%dHz for write direction (decoded_bytes_per_packet=%u, channels=%d)\n",
+							  read_impl.actual_samples_per_second, tread_impl.actual_samples_per_second,
+							  read_impl.decoded_bytes_per_packet, read_impl.number_of_channels);
+
+			if (switch_resample_create(&ep->reverse_resampler,
+									   read_impl.actual_samples_per_second,
+									   tread_impl.actual_samples_per_second,
+									   read_impl.decoded_bytes_per_packet,
+									   SWITCH_RESAMPLE_QUALITY,
+									   read_impl.number_of_channels) != SWITCH_STATUS_SUCCESS) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+								  "Eavesdrop: Unable to create reverse resampler\n");
+				goto end;
+			}
+
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+							  "Eavesdrop: Reverse resampler created - factor=%f, rfactor=%f\n",
+							  ep->reverse_resampler->factor, ep->reverse_resampler->rfactor);
 		}
 
 		codec_initialized = 1;
@@ -3124,6 +3229,11 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 			switch_safe_free(ep->data);
 			switch_safe_free(ep->resample_data);
 			switch_safe_free(ep->frame_data);
+
+			if (ep->reverse_resampler) {
+				switch_resample_destroy(&ep->reverse_resampler);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Eavesdrop: Destroyed reverse resampler\n");
+			}
 		}
 
 		switch_core_session_rwunlock(tsession);
