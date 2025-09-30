@@ -1288,8 +1288,6 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 				switch_size_t labeled_record_ms = current_record_ms;
 				const char *prev_labeled_sec_str;
 				const char *prev_labeled_ms_str;
-				int prev_sec;
-				int prev_ms;
 				
 				/* Get previous labeled seconds and ms if they exist */
 				snprintf(buffer_name, sizeof(buffer_name), "record_%s_seconds", rh->record_label);
@@ -1301,11 +1299,15 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 				/* Add to previous values if both exist (like original code) */
 				if ((!zstr(prev_labeled_sec_str) && switch_is_number(prev_labeled_sec_str))
 					&& (!zstr(prev_labeled_ms_str) && switch_is_number(prev_labeled_ms_str))) {
-					prev_sec = switch_safe_atoi(prev_labeled_sec_str, 0);
-					prev_ms = switch_safe_atoi(prev_labeled_ms_str, 0);
+					int prev_sec = switch_safe_atoi(prev_labeled_sec_str, 0);
+					int prev_ms = switch_safe_atoi(prev_labeled_ms_str, 0);
 					if (prev_sec >= 0 && prev_ms >= 0) {
 						labeled_record_seconds += (switch_size_t)prev_sec;
 						labeled_record_ms += (switch_size_t)prev_ms;
+					} else {
+						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+							"Skipping negative recording values for label '%s': seconds=%d, ms=%d\n",
+							rh->record_label, prev_sec, prev_ms);
 					}
 				}
 				
@@ -1331,6 +1333,10 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 					if (prev_sec >= 0 && prev_ms >= 0) {
 						updated_record_seconds += (switch_size_t)prev_sec;
 						updated_record_ms += (switch_size_t)prev_ms;
+					} else {
+						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+							"Skipping negative recording values: seconds=%d, ms=%d\n",
+							prev_sec, prev_ms);
 					}
 				}
 
