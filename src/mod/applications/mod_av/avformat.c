@@ -2126,8 +2126,6 @@ static int avio_interrupt_cb(void *ctx)
 	if (!zstr(context->rw_timeout)) {
 		switch_time_t timeout_us = atoi(context->rw_timeout);
 		switch_time_t elapsed_us = current_time_us - context->connect_start_time;
-		double elapsed_seconds = elapsed_us / 1000000.0;
-		double timeout_seconds = timeout_us / 1000000.0;
 
 		if (elapsed_us > timeout_us) {
 			return 1;  // Interrupted due to timeout
