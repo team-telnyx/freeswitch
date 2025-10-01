@@ -339,6 +339,8 @@ static const char* CRYPTO_KEY_PARAM_METHOD[CRYPTO_KEY_PARAM_METHOD_INVALID] = {
 	[CRYPTO_KEY_PARAM_METHOD_INLINE] = "inline",
 };
 
+#define CRYPTO_KEY_PARAM_METHOD_INLINE_LEN 7  /* strlen("inline:") */
+
 static inline switch_media_flow_t sdp_media_flow(unsigned in)
 {
 	switch(in) {
@@ -1688,20 +1690,33 @@ static void switch_core_session_get_recovery_crypto_key(switch_core_session_t *s
 		// Recreate local and remote crypto key
 		if (ct) {
 			const char *local_crypto_key = NULL;
+			const char *inline_ptr = NULL;
+			const char *remote_key_material = NULL;
 
-			// Recreate the remote crypto key format: <tag> <algorithm> inline:<key>
-			engine->ssec[engine->crypto_type].remote_crypto_key = switch_core_session_sprintf(session, 
-				"%d %s inline:%s", engine->ssec[engine->crypto_type].crypto_tag, ct, remote_crypto_key);
+			inline_ptr = switch_stristr("inline:", remote_crypto_key);
+			if (inline_ptr) {
+				remote_key_material = inline_ptr + CRYPTO_KEY_PARAM_METHOD_INLINE_LEN;
+			} else {
+				remote_key_material = remote_crypto_key;
+			}
 
-			// Recreate the local crypto key format:<tag> <algorithm> inline:<key>
+			// Recreate remote crypto key with correct tag and algorithm
+			engine->ssec[engine->crypto_type].remote_crypto_key = switch_core_session_sprintf(session,
+				"%d %s inline:%s", engine->ssec[engine->crypto_type].crypto_tag, ct, remote_key_material);
+
+			// Recreate local crypto key with correct tag and algorithm
 			local_crypto_key = switch_channel_get_variable(session->channel, lastkeyvar);
 			if (local_crypto_key) {
-				engine->ssec[engine->crypto_type].local_crypto_key = switch_core_session_strdup(session, local_crypto_key);
+				inline_ptr = switch_stristr("inline:", local_crypto_key);
+				if (inline_ptr) {
+					local_crypto_key = inline_ptr + CRYPTO_KEY_PARAM_METHOD_INLINE_LEN;
+				}
 			} else {
-				// If its missing, attempt to recreate it using remote key.
-				engine->ssec[engine->crypto_type].local_crypto_key = switch_core_session_sprintf(session,
-					"%d %s inline:%s", engine->ssec[engine->crypto_type].crypto_tag, ct, remote_crypto_key);
+				local_crypto_key = remote_key_material;
 			}
+
+			engine->ssec[engine->crypto_type].local_crypto_key = switch_core_session_sprintf(session,
+				"%d %s inline:%s", engine->ssec[engine->crypto_type].crypto_tag, ct, local_crypto_key);
 		}
 
 		if (engine->ssec[engine->crypto_type].local_crypto_key && engine->ssec[engine->crypto_type].remote_crypto_key) {
@@ -2103,11 +2118,11 @@ SWITCH_DECLARE(int) switch_core_session_check_incoming_crypto(switch_core_sessio
 			switch_channel_set_variable_printf(session->channel, "srtp_remote_audio_crypto_type", "%s", switch_core_media_crypto_type2str(ctype));
 		} else if (engine->type == SWITCH_MEDIA_TYPE_VIDEO) {
 			switch_channel_set_variable(session->channel, "srtp_remote_video_crypto_key", crypto);
-			switch_channel_set_variable_printf(session->channel, "srtp_remote_audio_crypto_tag", "%d", crypto_tag);
+			switch_channel_set_variable_printf(session->channel, "srtp_remote_video_crypto_tag", "%d", crypto_tag);
 			switch_channel_set_variable_printf(session->channel, "srtp_remote_video_crypto_type", "%s", switch_core_media_crypto_type2str(ctype));
 		} else if (engine->type == SWITCH_MEDIA_TYPE_TEXT) {
 			switch_channel_set_variable(session->channel, "srtp_remote_text_crypto_key", crypto);
-			switch_channel_set_variable_printf(session->channel, "srtp_remote_audio_crypto_tag", "%d", crypto_tag);
+			switch_channel_set_variable_printf(session->channel, "srtp_remote_text_crypto_tag", "%d", crypto_tag);
 			switch_channel_set_variable_printf(session->channel, "srtp_remote_text_crypto_type", "%s", switch_core_media_crypto_type2str(ctype));
 		}
 
