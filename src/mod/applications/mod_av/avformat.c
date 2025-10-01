@@ -176,7 +176,7 @@ struct av_file_context {
 	switch_time_t last_vid_write;
 	int audio_timer;
 
-	unsigned int connect_start_time;
+	switch_time_t connect_start_time;
 	const char *rw_timeout;
 	
 	switch_bool_t no_video_decode;
@@ -2109,15 +2109,32 @@ GCC_DIAG_ON(deprecated-declarations)
 	return NULL;
 }
 
-static int avio_interrupt_cb(void *ctx) 
-{ 
+static int avio_interrupt_cb(void *ctx)
+{
 	av_file_context_t* context = (av_file_context_t*)ctx;
-	
+	switch_time_t current_time_us = switch_time_now();
+
 	if (context == NULL) {
 		return 0;
-	} else {
-		return context->closed;
 	}
+
+	if (context->closed) {
+		return 1;  // Interrupted due to close
+	}
+
+	// Check timeout if configured
+	if (!zstr(context->rw_timeout)) {
+		switch_time_t timeout_us = atoi(context->rw_timeout);
+		switch_time_t elapsed_us = current_time_us - context->connect_start_time;
+		double elapsed_seconds = elapsed_us / 1000000.0;
+		double timeout_seconds = timeout_us / 1000000.0;
+
+		if (elapsed_us > timeout_us) {
+			return 1;  // Interrupted due to timeout
+		}
+	}
+
+	return 0;
 } 
 
 static switch_status_t av_file_open(switch_file_handle_t *handle, const char *path)
@@ -2322,7 +2339,7 @@ static switch_status_t av_file_open(switch_file_handle_t *handle, const char *pa
 #if (LIBAVFORMAT_VERSION_MAJOR < LIBAVFORMAT_V)
 			av_dict_set(&dict, "rw_timeout", context->rw_timeout, 0);
 #endif
-			context->connect_start_time = switch_time_now() / 1000;
+			context->connect_start_time = switch_time_now();
 #if (LIBAVFORMAT_VERSION_MAJOR < LIBAVFORMAT_V)
 			ret = avio_open2(&context->fc->pb, file, AVIO_FLAG_WRITE, &cb, &dict);
 #else
