@@ -1035,12 +1035,12 @@ SWITCH_MODULE_LOAD_FUNCTION(core_pcm_load)
 	mpf = 10000;
 	for (countb = 12; countb > 0; countb--) {
 		switch_core_codec_add_implementation(pool, codec_interface,
-											 SWITCH_CODEC_TYPE_AUDIO, 11, "L24", NULL, rate, rate, rate * 24,
+											 SWITCH_CODEC_TYPE_AUDIO, 96, "L24", NULL, rate, rate, rate * 24,
 											 mpf * countb, spf * countb, bpf * countb, ebpf * countb, 1, spf * countb,
 											 switch_l24_init, switch_l24_encode, switch_l24_decode, switch_l24_destroy);
 
 		switch_core_codec_add_implementation(pool, codec_interface,
-											 SWITCH_CODEC_TYPE_AUDIO, 11, "L24", NULL, rate, rate, rate * 24 * 2,
+											 SWITCH_CODEC_TYPE_AUDIO, 96, "L24", NULL, rate, rate, rate * 24 * 2,
 											 mpf * countb, spf * countb, bpf * countb * 2, ebpf * countb * 2, 2, spf * countb,
 											 switch_l24_init, switch_l24_encode, switch_l24_decode, switch_l24_destroy);
 	}
@@ -1052,12 +1052,12 @@ SWITCH_MODULE_LOAD_FUNCTION(core_pcm_load)
 	ebpf = 480; /* 160 samples * 3 bytes per sample (wire 24-bit format) */
 	for (countb = 12; countb > 0; countb--) {
 		switch_core_codec_add_implementation(pool, codec_interface,
-											 SWITCH_CODEC_TYPE_AUDIO, 11, "L24", NULL, rate, rate, rate * 24,
+											 SWITCH_CODEC_TYPE_AUDIO, 96, "L24", NULL, rate, rate, rate * 24,
 											 mpf * countb, spf * countb, bpf * countb, ebpf * countb, 1, spf * countb,
 											 switch_l24_init, switch_l24_encode, switch_l24_decode, switch_l24_destroy);
 
 		switch_core_codec_add_implementation(pool, codec_interface,
-											 SWITCH_CODEC_TYPE_AUDIO, 11, "L24", NULL, rate, rate, rate * 24 * 2,
+											 SWITCH_CODEC_TYPE_AUDIO, 96, "L24", NULL, rate, rate, rate * 24 * 2,
 											 mpf * countb, spf * countb, bpf * countb * 2, ebpf * countb * 2, 2, spf * countb,
 											 switch_l24_init, switch_l24_encode, switch_l24_decode, switch_l24_destroy);
 	}
@@ -1069,12 +1069,12 @@ SWITCH_MODULE_LOAD_FUNCTION(core_pcm_load)
 	ebpf = 960; /* 320 samples * 3 bytes per sample (wire 24-bit format) */
 	for (countb = 6; countb > 0; countb--) {
 		switch_core_codec_add_implementation(pool, codec_interface,
-											 SWITCH_CODEC_TYPE_AUDIO, 11, "L24", NULL, rate, rate, rate * 24,
+											 SWITCH_CODEC_TYPE_AUDIO, 96, "L24", NULL, rate, rate, rate * 24,
 											 mpf * countb, spf * countb, bpf * countb, ebpf * countb, 1, spf * countb,
 											 switch_l24_init, switch_l24_encode, switch_l24_decode, switch_l24_destroy);
 
 		switch_core_codec_add_implementation(pool, codec_interface,
-											 SWITCH_CODEC_TYPE_AUDIO, 11, "L24", NULL, rate, rate, rate * 24 * 2,
+											 SWITCH_CODEC_TYPE_AUDIO, 96, "L24", NULL, rate, rate, rate * 24 * 2,
 											 mpf * countb, spf * countb, bpf * countb * 2, ebpf * countb * 2, 2, spf * countb,
 											 switch_l24_init, switch_l24_encode, switch_l24_decode, switch_l24_destroy);
 	}
@@ -1086,12 +1086,12 @@ SWITCH_MODULE_LOAD_FUNCTION(core_pcm_load)
 	ebpf = 1440; /* 480 samples * 3 bytes per sample (wire 24-bit format) */
 	for (countb = 6; countb > 0; countb--) {
 		switch_core_codec_add_implementation(pool, codec_interface,
-											 SWITCH_CODEC_TYPE_AUDIO, 11, "L24", NULL, rate, rate, rate * 24,
+											 SWITCH_CODEC_TYPE_AUDIO, 96, "L24", NULL, rate, rate, rate * 24,
 											 mpf * countb, spf * countb, bpf * countb, ebpf * countb, 1, spf * countb,
 											 switch_l24_init, switch_l24_encode, switch_l24_decode, switch_l24_destroy);
 
 		switch_core_codec_add_implementation(pool, codec_interface,
-											 SWITCH_CODEC_TYPE_AUDIO, 11, "L24", NULL, rate, rate, rate * 24 * 2,
+											 SWITCH_CODEC_TYPE_AUDIO, 96, "L24", NULL, rate, rate, rate * 24 * 2,
 											 mpf * countb, spf * countb, bpf * countb * 2, ebpf * countb * 2, 2, spf * countb,
 											 switch_l24_init, switch_l24_encode, switch_l24_decode, switch_l24_destroy);
 	}
