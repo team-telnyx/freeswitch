@@ -440,10 +440,8 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 			switch_channel_t *channel = NULL;
 			if (session) {
 				channel = switch_core_session_get_channel(session);
-				if (channel) {
-					switch_channel_set_variable(channel, "suppress_cng", "true");
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Turning CNG off (silence suppression off, suppress_cng=true) due to silence-supp-off=true\n");
-				}
+				switch_channel_set_variable(channel, "suppress_cng", "true");
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Turning CNG off (silence suppression off, suppress_cng=true) due to silence-supp-off=true\n");
 			} else {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Cannot turn silence suppression off - session missing\n");
 			}
