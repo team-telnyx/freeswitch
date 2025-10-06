@@ -2186,11 +2186,12 @@ static switch_bool_t eavesdrop_callback(switch_media_bug_t *bug, void *user_data
 					switch_mutex_unlock(ep->resample_mutex);
 
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG10,
-									  "Eavesdrop callback: Resampled %d->%d samples (%u->%u bytes), %dHz->%dHz\n",
+									  "Eavesdrop callback: Resampled %d->%d samples (%u->%u bytes), %dHz->%dHz, %d channels\n",
 									  original_samples, (int)ep->resampler->to_len,
 									  frame.datalen, datalen_to_write,
 									  ep->tread_impl.actual_samples_per_second,
-									  ep->read_impl.actual_samples_per_second);
+									  ep->read_impl.actual_samples_per_second,
+									  ep->tread_impl.number_of_channels);
 				}
 
 				switch_buffer_lock(ep->buffer);
@@ -2579,8 +2580,9 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 			switch_mutex_init(&ep->resample_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-							  "Eavesdrop: Creating resampler %dHz->%dHz for sample rate conversion\n",
-							  tread_impl.actual_samples_per_second, read_impl.actual_samples_per_second);
+							  "Eavesdrop: Creating resampler %dHz->%dHz for sample rate conversion, %d channels\n",
+							  tread_impl.actual_samples_per_second, read_impl.actual_samples_per_second,
+							  tread_impl.number_of_channels);
 
 			if (switch_resample_create(&ep->resampler,
 									   tread_impl.actual_samples_per_second,
