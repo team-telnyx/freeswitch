@@ -159,8 +159,10 @@ FST_CORE_BEGIN("./conf")
 		/* Test Case 1: UAC scenario - Receive INVITE with SDP, then RE-INVITE without SDP (2 times) */
 		FST_SESSION_BEGIN(uac_invite_with_sdp_reinvite_no_sdp)
 		{
-			switch_channel_t *channel = switch_core_session_get_channel(fst_session);
+			switch_channel_t *channel;
+			const char *sdp;
 			
+			channel = switch_core_session_get_channel(fst_session);
 			fst_requires(channel != NULL);
 			
 			/* Step 1: Receive INVITE with SDP */
@@ -168,7 +170,7 @@ FST_CORE_BEGIN("./conf")
 			fst_check(switch_channel_test_flag(channel, CF_3PCC));
 			
 			/* Verify SDP was set */
-			const char *sdp = switch_channel_get_variable(channel, "switch_r_sdp");
+			sdp = switch_channel_get_variable(channel, "switch_r_sdp");
 			fst_check(sdp != NULL);
 			fst_check_string_has(sdp, "m=audio");
 			
@@ -188,8 +190,10 @@ FST_CORE_BEGIN("./conf")
 		/* Test Case 2: UAC scenario - Receive INVITE without SDP, then RE-INVITE without SDP (2 times) */
 		FST_SESSION_BEGIN(uac_invite_no_sdp_reinvite_no_sdp)
 		{
-			switch_channel_t *channel = switch_core_session_get_channel(fst_session);
+			switch_channel_t *channel;
+			const char *sdp;
 			
+			channel = switch_core_session_get_channel(fst_session);
 			fst_requires(channel != NULL);
 			
 			/* Step 1: Receive INVITE without SDP */
@@ -197,7 +201,7 @@ FST_CORE_BEGIN("./conf")
 			fst_check(switch_channel_test_flag(channel, CF_3PCC));
 			
 			/* Verify no SDP was set */
-			const char *sdp = switch_channel_get_variable(channel, "switch_r_sdp");
+			sdp = switch_channel_get_variable(channel, "switch_r_sdp");
 			fst_check(sdp == NULL);
 			
 			/* Step 2: Receive RE-INVITE without SDP (first time) */
@@ -216,8 +220,10 @@ FST_CORE_BEGIN("./conf")
 		/* Test Case 3: UAC scenario - Receive INVITE with SDP (SRTP), then RE-INVITE without SDP (2 times) same crypto key */
 		FST_SESSION_BEGIN(uac_invite_srtp_reinvite_no_sdp_same_key)
 		{
-			switch_channel_t *channel = switch_core_session_get_channel(fst_session);
+			switch_channel_t *channel;
+			const char *sdp;
 			
+			channel = switch_core_session_get_channel(fst_session);
 			fst_requires(channel != NULL);
 			
 			/* Step 1: Receive INVITE with SDP (SRTP) */
@@ -225,7 +231,7 @@ FST_CORE_BEGIN("./conf")
 			fst_check(switch_channel_test_flag(channel, CF_3PCC));
 			
 			/* Verify SRTP SDP was set */
-			const char *sdp = switch_channel_get_variable(channel, "switch_r_sdp");
+			sdp = switch_channel_get_variable(channel, "switch_r_sdp");
 			fst_check(sdp != NULL);
 			fst_check_string_has(sdp, "RTP/SAVP");
 			fst_check_string_has(sdp, "a=crypto:");
@@ -247,8 +253,10 @@ FST_CORE_BEGIN("./conf")
 		/* Test Case 4: UAC scenario - Receive INVITE with SDP (SRTP), then RE-INVITE without SDP (2 times) different crypto key */
 		FST_SESSION_BEGIN(uac_invite_srtp_reinvite_no_sdp_diff_key)
 		{
-			switch_channel_t *channel = switch_core_session_get_channel(fst_session);
+			switch_channel_t *channel;
+			const char *sdp;
 			
+			channel = switch_core_session_get_channel(fst_session);
 			fst_requires(channel != NULL);
 			
 			/* Step 1: Receive INVITE with SDP (SRTP) */
@@ -256,7 +264,7 @@ FST_CORE_BEGIN("./conf")
 			fst_check(switch_channel_test_flag(channel, CF_3PCC));
 			
 			/* Verify SRTP SDP was set */
-			const char *sdp = switch_channel_get_variable(channel, "switch_r_sdp");
+			sdp = switch_channel_get_variable(channel, "switch_r_sdp");
 			fst_check(sdp != NULL);
 			fst_check_string_has(sdp, "RTP/SAVP");
 			fst_check_string_has(sdp, "a=crypto:");
@@ -280,7 +288,8 @@ FST_CORE_BEGIN("./conf")
 		/* Test Case 5: UAC scenario - Receive INVITE without SDP, then RE-INVITE without SDP (2 times) same crypto key */
 		FST_SESSION_BEGIN(uac_invite_no_sdp_reinvite_no_sdp_same_key)
 		{
-			switch_channel_t *channel = switch_core_session_get_channel(fst_session);
+			switch_channel_t *channel;
+			channel = switch_core_session_get_channel(fst_session);
 			
 			fst_requires(channel != NULL);
 			
@@ -307,7 +316,8 @@ FST_CORE_BEGIN("./conf")
 		/* Test Case 6: UAC scenario - Receive INVITE without SDP, then RE-INVITE without SDP (2 times) different crypto key */
 		FST_SESSION_BEGIN(uac_invite_no_sdp_reinvite_no_sdp_diff_key)
 		{
-			switch_channel_t *channel = switch_core_session_get_channel(fst_session);
+			switch_channel_t *channel;
+			channel = switch_core_session_get_channel(fst_session);
 			
 			fst_requires(channel != NULL);
 			
@@ -335,8 +345,10 @@ FST_CORE_BEGIN("./conf")
 		/* Test Case 7: UAS scenario - Send INVITE with SDP, then receive RE-INVITE without SDP (2 times) */
 		FST_SESSION_BEGIN(uas_send_invite_with_sdp_receive_reinvite_no_sdp)
 		{
-			switch_channel_t *channel = switch_core_session_get_channel(fst_session);
+			switch_channel_t *channel;
+			const char *local_sdp;
 			
+			channel = switch_core_session_get_channel(fst_session);
 			fst_requires(channel != NULL);
 			
 			/* Step 1: Simulate sending INVITE with SDP (UAS behavior) */
@@ -344,7 +356,7 @@ FST_CORE_BEGIN("./conf")
 			switch_channel_set_variable(channel, "switch_l_sdp", sample_sdp_with_audio);
 			
 			/* Verify local SDP was set */
-			const char *local_sdp = switch_channel_get_variable(channel, "switch_l_sdp");
+			local_sdp = switch_channel_get_variable(channel, "switch_l_sdp");
 			fst_check(local_sdp != NULL);
 			fst_check_string_has(local_sdp, "m=audio");
 			
@@ -364,7 +376,10 @@ FST_CORE_BEGIN("./conf")
 		/* Test Case 8: UAS scenario - Send INVITE with SDP, then receive RE-INVITE without SDP (2 times) */
 		FST_SESSION_BEGIN(uas_send_invite_with_sdp_receive_reinvite_no_sdp_2)
 		{
-			switch_channel_t *channel = switch_core_session_get_channel(fst_session);
+			switch_channel_t *channel;
+			const char *local_sdp;
+			
+			channel = switch_core_session_get_channel(fst_session);
 			
 			fst_requires(channel != NULL);
 			
@@ -373,7 +388,7 @@ FST_CORE_BEGIN("./conf")
 			switch_channel_set_variable(channel, "switch_l_sdp", sample_sdp_with_audio);
 			
 			/* Verify local SDP was set */
-			const char *local_sdp = switch_channel_get_variable(channel, "switch_l_sdp");
+			local_sdp = switch_channel_get_variable(channel, "switch_l_sdp");
 			fst_check(local_sdp != NULL);
 			fst_check_string_has(local_sdp, "m=audio");
 			
@@ -393,7 +408,10 @@ FST_CORE_BEGIN("./conf")
 		/* Test Case 9: UAS scenario - Send INVITE with SDP (SRTP), then receive RE-INVITE without SDP (2 times) same crypto key */
 		FST_SESSION_BEGIN(uas_send_invite_srtp_receive_reinvite_no_sdp_same_key)
 		{
-			switch_channel_t *channel = switch_core_session_get_channel(fst_session);
+			switch_channel_t *channel;
+			const char *local_sdp;
+			
+			channel = switch_core_session_get_channel(fst_session);
 			
 			fst_requires(channel != NULL);
 			
@@ -402,7 +420,7 @@ FST_CORE_BEGIN("./conf")
 			switch_channel_set_variable(channel, "switch_l_sdp", sample_sdp_with_srtp);
 			
 			/* Verify SRTP local SDP was set */
-			const char *local_sdp = switch_channel_get_variable(channel, "switch_l_sdp");
+			local_sdp = switch_channel_get_variable(channel, "switch_l_sdp");
 			fst_check(local_sdp != NULL);
 			fst_check_string_has(local_sdp, "RTP/SAVP");
 			fst_check_string_has(local_sdp, "a=crypto:");
@@ -423,7 +441,10 @@ FST_CORE_BEGIN("./conf")
 		/* Test Case 10: UAS scenario - Send INVITE with SDP (SRTP), then receive RE-INVITE without SDP (2 times) different crypto key */
 		FST_SESSION_BEGIN(uas_send_invite_srtp_receive_reinvite_no_sdp_diff_key)
 		{
-			switch_channel_t *channel = switch_core_session_get_channel(fst_session);
+			switch_channel_t *channel;
+			const char *local_sdp;
+			
+			channel = switch_core_session_get_channel(fst_session);
 			
 			fst_requires(channel != NULL);
 			
@@ -432,7 +453,7 @@ FST_CORE_BEGIN("./conf")
 			switch_channel_set_variable(channel, "switch_l_sdp", sample_sdp_with_srtp);
 			
 			/* Verify SRTP local SDP was set */
-			const char *local_sdp = switch_channel_get_variable(channel, "switch_l_sdp");
+			local_sdp = switch_channel_get_variable(channel, "switch_l_sdp");
 			fst_check(local_sdp != NULL);
 			fst_check_string_has(local_sdp, "RTP/SAVP");
 			fst_check_string_has(local_sdp, "a=crypto:");
@@ -456,7 +477,8 @@ FST_CORE_BEGIN("./conf")
 		/* Test Case 11: UAS scenario - Send INVITE without SDP (SRTP), then receive RE-INVITE without SDP (2 times) same crypto key */
 		FST_SESSION_BEGIN(uas_send_invite_no_sdp_srtp_receive_reinvite_no_sdp_same_key)
 		{
-			switch_channel_t *channel = switch_core_session_get_channel(fst_session);
+			switch_channel_t *channel;
+			channel = switch_core_session_get_channel(fst_session);
 			
 			fst_requires(channel != NULL);
 			
@@ -483,7 +505,8 @@ FST_CORE_BEGIN("./conf")
 		/* Test Case 12: UAS scenario - Send INVITE without SDP (SRTP), then receive RE-INVITE without SDP (2 times) different crypto key */
 		FST_SESSION_BEGIN(uas_send_invite_no_sdp_srtp_receive_reinvite_no_sdp_diff_key)
 		{
-			switch_channel_t *channel = switch_core_session_get_channel(fst_session);
+			switch_channel_t *channel;
+			channel = switch_core_session_get_channel(fst_session);
 			
 			fst_requires(channel != NULL);
 			
