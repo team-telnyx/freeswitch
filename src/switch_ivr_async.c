@@ -2338,7 +2338,11 @@ static switch_bool_t eavesdrop_callback(switch_media_bug_t *bug, void *user_data
 						switch_resample_process(ep->reverse_resampler, original_data, original_samples);
 
 						/* Copy resampled data to reverse resample buffer */
-						memcpy(ep->reverse_resample_data, ep->reverse_resampler->to, ep->reverse_resampler->to_len * 2 * ep->read_impl.number_of_channels);
+						{
+							uint32_t out_bytes = ep->reverse_resampler->to_len * 2 * ep->read_impl.number_of_channels;
+							if (out_bytes > SWITCH_MAX_L16) out_bytes = SWITCH_MAX_L16;
+							memcpy(ep->reverse_resample_data, ep->reverse_resampler->to, out_bytes);
+						}
 						data_to_merge = ep->reverse_resample_data;
 						merge_samples = ep->reverse_resampler->to_len;
 
