@@ -2643,6 +2643,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 
 		switch_zmalloc(ep->data, SWITCH_MAX_L16);
 		switch_zmalloc(ep->resample_data, SWITCH_MAX_L16);
+		switch_zmalloc(ep->reverse_resample_data, SWITCH_MAX_L16);
 		switch_zmalloc(ep->frame_data, SWITCH_MAX_L16);
 
 		if (switch_channel_pre_answer(channel) != SWITCH_STATUS_SUCCESS) {
@@ -3192,6 +3193,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 
 			switch_safe_free(ep->data);
 			switch_safe_free(ep->resample_data);
+			switch_safe_free(ep->reverse_resample_data);
 			switch_safe_free(ep->frame_data);
 
 			if (ep->reverse_resampler) {
