@@ -2307,7 +2307,7 @@ static switch_bool_t eavesdrop_callback(switch_media_bug_t *bug, void *user_data
 				switch_frame_t *rframe = switch_core_media_bug_get_write_replace_frame(bug);
 				int channels = rframe->channels ? rframe->channels : 1;
 				uint32_t required_bytes;
-				void *data_to_merge = data;
+				void *data_to_merge = ep->data;
 				uint32_t merge_samples = 0;
 				uint32_t buffer_inuse;
 				uint32_t input_samples;
@@ -2331,7 +2331,7 @@ static switch_bool_t eavesdrop_callback(switch_media_bug_t *bug, void *user_data
 
 					/* Apply reverse resampling if needed */
 					if (ep->reverse_resampler && bytes > 0) {
-						int16_t *original_data = (int16_t *)data;
+						int16_t *original_data = (int16_t *)ep->data;
 						int original_samples = bytes / 2 / ep->read_impl.number_of_channels;
 
 						switch_mutex_lock(ep->reverse_resample_mutex);
