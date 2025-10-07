@@ -1789,7 +1789,6 @@ static switch_status_t signal_bridge_on_hangup(switch_core_session_t *session)
 			switch_channel_set_variable(other_channel, "call_uuid", switch_core_session_get_uuid(other_session));
 
 			if (switch_channel_up_nosig(other_channel)) {
-
 				if (switch_channel_test_flag(other_channel, CF_REMOTE_RECOVERED)) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Call recovered remotely: Prevent terminating via bridge:%s.\n", uuid);
 					hup = 0;
