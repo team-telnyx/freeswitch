@@ -31,10 +31,10 @@
 #include <switch.h>
 #include <test/switch_test.h>
 
-/* Sample SDP for testing */
-static const char *sample_sdp_audio =
+/* SDP templates with placeholders for session_id and session_version */
+static const char *sdp_audio_template =
 	"v=0\r\n"
-	"o=FreeSWITCH 1234567890 1234567891 IN IP4 192.168.1.100\r\n"
+	"o=FreeSWITCH %u %u IN IP4 192.168.1.100\r\n"
 	"s=FreeSWITCH\r\n"
 	"c=IN IP4 192.168.1.100\r\n"
 	"t=0 0\r\n"
@@ -44,9 +44,9 @@ static const char *sample_sdp_audio =
 	"a=rtpmap:101 telephone-event/8000\r\n"
 	"a=fmtp:101 0-16\r\n";
 
-static const char *sample_sdp_srtp =
+static const char *sdp_srtp_template =
 	"v=0\r\n"
-	"o=FreeSWITCH 1234567890 1234567891 IN IP4 192.168.1.100\r\n"
+	"o=FreeSWITCH %u %u IN IP4 192.168.1.100\r\n"
 	"s=FreeSWITCH\r\n"
 	"c=IN IP4 192.168.1.100\r\n"
 	"t=0 0\r\n"
@@ -57,9 +57,9 @@ static const char *sample_sdp_srtp =
 	"a=fmtp:101 0-16\r\n"
 	"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:WnD7c1ksDGs+dq5PI6rV/1Pj8+eSRCZQ8JWaGaQA\r\n";
 
-static const char *sample_sdp_srtp_key2 =
+static const char *sdp_srtp_key2_template =
 	"v=0\r\n"
-	"o=FreeSWITCH 1234567890 1234567892 IN IP4 192.168.1.100\r\n"
+	"o=FreeSWITCH %u %u IN IP4 192.168.1.100\r\n"
 	"s=FreeSWITCH\r\n"
 	"c=IN IP4 192.168.1.100\r\n"
 	"t=0 0\r\n"
@@ -69,6 +69,34 @@ static const char *sample_sdp_srtp_key2 =
 	"a=rtpmap:101 telephone-event/8000\r\n"
 	"a=fmtp:101 0-16\r\n"
 	"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:XoE8d2ltEHt+er6QJ7sW/2Qk9+fTSDaR9KXbHbRB\r\n";
+
+/* Buffers to hold dynamically generated SDP strings */
+static char sample_sdp_audio[1024];
+static char sample_sdp_srtp[1024];
+static char sample_sdp_srtp_key2[1024];
+
+/* Generate dynamic SDP strings with unique session IDs */
+static void generate_sdp_samples(void)
+{
+	uint32_t session_id;
+	uint32_t session_version;
+
+	/* Generate session ID */
+	session_id = (uint32_t)switch_epoch_time_now(NULL) - (rand() % 64000 + 1);
+	session_version = session_id + 1;
+
+	/* Generate audio SDP */
+	snprintf(sample_sdp_audio, sizeof(sample_sdp_audio), sdp_audio_template,
+		session_id, session_version);
+
+	/* Generate SRTP SDP with same session ID, same version */
+	snprintf(sample_sdp_srtp, sizeof(sample_sdp_srtp), sdp_srtp_template,
+		session_id, session_version);
+
+	/* Generate SRTP SDP with same session ID, incremented version */
+	snprintf(sample_sdp_srtp_key2, sizeof(sample_sdp_srtp_key2), sdp_srtp_key2_template,
+		session_id, session_version + 1);
+}
 
 /* Helper to simulate receiving INVITE with SDP */
 static void simulate_invite_with_sdp(switch_core_session_t *session, const char *sdp)
@@ -150,6 +178,7 @@ FST_CORE_BEGIN("./conf")
 		FST_SETUP_BEGIN()
 		{
 			fst_requires_module("mod_loopback");
+			generate_sdp_samples();
 		}
 		FST_SETUP_END()
 
