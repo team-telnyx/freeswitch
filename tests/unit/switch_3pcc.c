@@ -101,9 +101,8 @@ static void generate_sdp_samples(void)
 /* Helper to simulate receiving INVITE with SDP */
 static void simulate_invite_with_sdp(switch_core_session_t *session, const char *sdp)
 {
-	switch_channel_t *channel;
+	switch_channel_t *channel = switch_core_session_get_channel(session);
 
-	channel = switch_core_session_get_channel(session);
 	if (!channel) return;
 
 	switch_channel_set_flag(channel, CF_3PCC);
@@ -116,9 +115,8 @@ static void simulate_invite_with_sdp(switch_core_session_t *session, const char 
 /* Helper to simulate receiving INVITE without SDP */
 static void simulate_invite_no_sdp(switch_core_session_t *session)
 {
-	switch_channel_t *channel;
+	switch_channel_t *channel = switch_core_session_get_channel(session);
 
-	channel = switch_core_session_get_channel(session);
 	if (!channel) return;
 
 	switch_channel_set_flag(channel, CF_3PCC);
@@ -130,10 +128,9 @@ static void simulate_invite_no_sdp(switch_core_session_t *session)
 /* Helper to simulate RE-INVITE without SDP */
 static void simulate_reinvite_no_sdp(switch_core_session_t *session, int sequence)
 {
-	switch_channel_t *channel;
+	switch_channel_t *channel = switch_core_session_get_channel(session);
 	char seq_marker[64];
 
-	channel = switch_core_session_get_channel(session);
 	if (!channel) return;
 
 	snprintf(seq_marker, sizeof(seq_marker), "reinvite_no_sdp_%d", sequence);
@@ -146,9 +143,8 @@ static void simulate_reinvite_no_sdp(switch_core_session_t *session, int sequenc
 /* Helper to set local SDP for UAS scenarios */
 static void set_local_sdp(switch_core_session_t *session, const char *sdp)
 {
-	switch_channel_t *channel;
+	switch_channel_t *channel = switch_core_session_get_channel(session);
 
-	channel = switch_core_session_get_channel(session);
 	if (!channel) return;
 
 	switch_channel_set_variable(channel, SWITCH_L_SDP_VARIABLE, sdp);
