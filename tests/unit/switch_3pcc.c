@@ -508,7 +508,8 @@ FST_CORE_BEGIN("./conf")
 			switch_core_media_params_t *mparams;
 			switch_media_handle_t *media_handle;
 			switch_status_t status;
-			const char *r_sdp;
+			switch_rtp_t *rtp_session;
+			const char *crypto_type;
 			uint8_t match;
 			uint8_t p;
 
@@ -550,12 +551,26 @@ FST_CORE_BEGIN("./conf")
 			status = switch_core_media_activate_rtp(fst_session);
 			fst_check(status == SWITCH_STATUS_SUCCESS);
 
-			/* Verify SRTP is confirmed */
-			r_sdp = switch_channel_get_variable(channel, "rtp_secure_audio_confirmed");
-			fst_check(r_sdp != NULL);
+			/* ========== COMPREHENSIVE SRTP VALIDATION ========== */
+
+			/* 1. Verify CF_SECURE flag is still set */
+			fst_check(switch_channel_test_flag(channel, CF_SECURE));
+
+			/* 2. Get RTP session */
+			rtp_session = switch_core_media_get_rtp_session(fst_session, SWITCH_MEDIA_TYPE_AUDIO);
+			fst_requires(rtp_session != NULL);
+
+			/* 3. Verify SRTP flags are set on RTP session */
+			fst_check(switch_rtp_test_flag(rtp_session, SWITCH_RTP_FLAG_SECURE_SEND));
+			fst_check(switch_rtp_test_flag(rtp_session, SWITCH_RTP_FLAG_SECURE_RECV));
+
+			/* 4. Verify crypto type variable is set */
+			crypto_type = switch_channel_get_variable(channel, "rtp_has_crypto");
+			fst_check(crypto_type != NULL);
+			fst_check(strstr(crypto_type, "AES_CM_128_HMAC_SHA1") != NULL);
 
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(fst_session), SWITCH_LOG_INFO,
-				"Integration Test 12 PASS: UAC with actual SRTP media activation\n");
+				"Integration Test 12 PASS: UAC with actual SRTP media activation - ALL VALIDATIONS PASSED\n");
 
 			/* Cleanup */
 			switch_media_handle_destroy(fst_session);
@@ -569,7 +584,8 @@ FST_CORE_BEGIN("./conf")
 			switch_core_media_params_t *mparams;
 			switch_media_handle_t *media_handle;
 			switch_status_t status;
-			const char *confirmed;
+			switch_rtp_t *rtp_session;
+			const char *crypto_type;
 			uint8_t match;
 			uint8_t p;
 
@@ -609,16 +625,27 @@ FST_CORE_BEGIN("./conf")
 			status = switch_core_media_activate_rtp(fst_session);
 			fst_check(status == SWITCH_STATUS_SUCCESS);
 
-			/* Verify SRTP is confirmed */
-			confirmed = switch_channel_get_variable(channel, "rtp_secure_audio_confirmed");
-			fst_check(confirmed != NULL);
+			/* ========== COMPREHENSIVE SRTP VALIDATION ========== */
 
-			/* Verify both 3PCC_PROXY and SECURE flags are set */
+			/* 1. Verify both 3PCC_PROXY and SECURE flags are set */
 			fst_check(switch_channel_test_flag(channel, CF_3PCC_PROXY));
 			fst_check(switch_channel_test_flag(channel, CF_SECURE));
 
+			/* 2. Get RTP session */
+			rtp_session = switch_core_media_get_rtp_session(fst_session, SWITCH_MEDIA_TYPE_AUDIO);
+			fst_requires(rtp_session != NULL);
+
+			/* 3. Verify SRTP flags are set on RTP session */
+			fst_check(switch_rtp_test_flag(rtp_session, SWITCH_RTP_FLAG_SECURE_SEND));
+			fst_check(switch_rtp_test_flag(rtp_session, SWITCH_RTP_FLAG_SECURE_RECV));
+
+			/* 4. Verify crypto type variable is set */
+			crypto_type = switch_channel_get_variable(channel, "rtp_has_crypto");
+			fst_check(crypto_type != NULL);
+			fst_check(strstr(crypto_type, "AES_CM_128_HMAC_SHA1") != NULL);
+
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(fst_session), SWITCH_LOG_INFO,
-				"Integration Test 13 PASS: UAS 3PCC with actual SRTP media activation\n");
+				"Integration Test 13 PASS: UAS 3PCC with actual SRTP media activation - ALL VALIDATIONS PASSED\n");
 
 			/* Cleanup */
 			switch_media_handle_destroy(fst_session);
