@@ -22,7 +22,7 @@
  * the Initial Developer. All Rights Reserved.
  *
  * Contributor(s):
- * AI SWE Agent <openhands@all-hands.dev>
+ * Tuan Nguyen <tuan@telnyx.com>
  *
  * switch_3pcc.c -- tests 3PCC (Third Party Call Control) scenarios
  *
