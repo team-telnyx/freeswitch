@@ -215,8 +215,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 					switch_yield(20000);
 					return SWITCH_STATUS_SUCCESS;
 				}
+				switch_mutex_lock(session->read_codec->mutex);
 				(*frame)->codec = session->read_codec;
-				switch_mutex_unlock(session->codec_read_mutex);
 				status = SWITCH_STATUS_SUCCESS;
 				is_inuse = 1;
 				goto cnt_with_cng;
@@ -1046,6 +1046,7 @@ cnt_with_cng:
 		}
 	}
 
+	switch_yield(22000);
 	switch_mutex_unlock(session->read_codec->mutex);
 	switch_mutex_unlock(session->codec_read_mutex);
 
