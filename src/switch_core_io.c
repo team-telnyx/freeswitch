@@ -1046,7 +1046,6 @@ cnt_with_cng:
 		}
 	}
 
-	switch_yield(22000);
 	switch_mutex_unlock(session->read_codec->mutex);
 	switch_mutex_unlock(session->codec_read_mutex);
 
