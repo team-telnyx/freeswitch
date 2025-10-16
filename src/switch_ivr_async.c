@@ -2675,7 +2675,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 			switch_mutex_init(&ep->resample_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-							  "Eavesdrop: Creating resampler %dHz->%dHz for sample rate conversion, %d channels (using read_impl params)\n",
+							  "Eavesdrop: Creating resampler %dHz->%dHz for sample rate conversion, %d channels\n",
 							  tread_impl.actual_samples_per_second, read_impl.actual_samples_per_second,
 							  read_impl.number_of_channels);
 
@@ -2694,7 +2694,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 			switch_mutex_init(&ep->reverse_resample_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-							  "Eavesdrop: Creating reverse resampler %dHz->%dHz for write direction (decoded_bytes_per_packet=%u, channels=%d, using read_impl params)\n",
+							  "Eavesdrop: Creating reverse resampler %dHz->%dHz for write direction (decoded_bytes_per_packet=%u, channels=%d)\n",
 							  read_impl.actual_samples_per_second, tread_impl.actual_samples_per_second,
 							  read_impl.decoded_bytes_per_packet, read_impl.number_of_channels);
 
