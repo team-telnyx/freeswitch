@@ -7434,7 +7434,9 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 						switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
 					} else if ((!strcmp(profile->sipip, p_contact->m_url->url_host))
 							   || (profile->extsipip && !strcmp(profile->extsipip, p_contact->m_url->url_host))
-							   || (switch_xml_locate_domain(p_contact->m_url->url_host, NULL, &root, &domain) == SWITCH_STATUS_SUCCESS)) {
+							   || (status != 302 && switch_xml_locate_domain(p_contact->m_url->url_host, NULL, &root, &domain) == SWITCH_STATUS_SUCCESS)) {
+						/* For 302: Skip directory lookup to prevent HTTP requests to directory
+						 * For 300/301/305: Keep original behavior with directory lookup */
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Redirect: Transfering to %s\n",
 										  p_contact->m_url->url_user);
 
@@ -7444,8 +7446,14 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 
 						switch_ivr_session_transfer(a_session, p_contact->m_url->url_user, NULL, NULL);
 						switch_channel_hangup(channel, SWITCH_CAUSE_REDIRECTION_TO_NEW_DESTINATION);
-						switch_xml_free(root);
+						if (status != 302 && root) {
+							switch_xml_free(root);
+						}
 					} else {
+						/* External redirect: 
+						 * - For 302: Always treated as external (no directory lookup)
+						 * - For 300/301/305: External only if not found in directory
+						 */
 						invite_contact = sofia_glue_strip_uri(full_contact);
 						tech_pvt->redirected = switch_core_session_strdup(session, invite_contact);
 						free(invite_contact);
