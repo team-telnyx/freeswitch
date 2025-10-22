@@ -104,6 +104,7 @@ static const switch_payload_t INVALID_PT = 255;
 
 #define MAX_RTP_EXTENSIONS 10
 #define SWITCH_HAVE_ICE 1 
+#define HAVE_MID_EXT 0
 
 static switch_port_t START_PORT = RTP_START_PORT;
 static switch_port_t END_PORT = RTP_END_PORT;
@@ -332,7 +333,9 @@ typedef struct ts_normalised_s {
 	uint32_t dtmf_ts;
 } ts_normalised_t;
 
-static void rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_t *send_msg);
+#if HAVE_MID_EXT
+static void rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_t *send_msg, switch_size_t *bytes);
+#endif
 struct trickle_cb_ctx {
 	switch_ice_candidate_cb_t cb;
 	void *user_data;
@@ -590,6 +593,29 @@ SWITCH_DECLARE(void) switch_rtp_handle_extensions(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session);
 static switch_status_t switch_rtp_sendto(switch_rtp_t *rtp_session, switch_socket_t *sock, switch_sockaddr_t *where, int32_t flags, rtp_msg_t *send_msg, switch_size_t *len);
 
+SWITCH_DECLARE(switch_status_t) switch_rtp_get_extension_info(
+        switch_rtp_t *rtp_session,
+        switch_rtp_ext_info_t *info)
+{
+	if (!rtp_session || !info) return SWITCH_STATUS_FALSE;
+
+	memset(info, 0, sizeof(*info));
+
+	switch_mutex_lock(rtp_session->write_mutex);
+
+	if (rtp_session->write_msg.header.x && rtp_session->write_msg.ext) {
+		info->has_ext = SWITCH_TRUE;
+		info->profile = (uint16_t)ntohs(rtp_session->write_msg.ext->profile);
+		info->length_words = (uint16_t)ntohs(rtp_session->write_msg.ext->length);
+	} else if (rtp_session->send_msg.header.x && rtp_session->send_msg.ext) {
+		info->has_ext = SWITCH_TRUE;
+		info->profile = (uint16_t)ntohs(rtp_session->send_msg.ext->profile);
+		info->length_words = (uint16_t)ntohs(rtp_session->send_msg.ext->length);
+	}
+
+	switch_mutex_unlock(rtp_session->write_mutex);
+	return SWITCH_STATUS_SUCCESS;
+}
 
 #define rtp_type(rtp_session) rtp_session->flags[SWITCH_RTP_FLAG_TEXT] ?  "text" : (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] ? "video" : "audio")
 
@@ -608,17 +634,31 @@ typedef struct trickle_eoc_kv_s {
 
 static trickle_eoc_kv_t *g_trickle_eoc_head = NULL;
 static int g_trickle_eoc_size = 0;
+static switch_mutex_t *g_trickle_eoc_mutex = NULL;
 
 static int trickle_eoc_is_sealed(const void *rtp, const char *mid, int mline_index)
 {
-	trickle_eoc_kv_t *it = g_trickle_eoc_head;
+	trickle_eoc_kv_t *it;
+	int found = 0;
+
+	if (g_trickle_eoc_mutex) {
+		switch_mutex_lock(g_trickle_eoc_mutex);
+	}
+
+	it = g_trickle_eoc_head;
 	while (it) {
 		if (it->rtp == rtp && it->mline_index == mline_index && strcmp(it->mid, mid ? mid : "") == 0) {
-			return 1;
+			found = 1;
+			break;
 		}
 		it = it->next;
 	}
-	return 0;
+
+	if (g_trickle_eoc_mutex) {
+		switch_mutex_unlock(g_trickle_eoc_mutex);
+	}
+
+	return found;
 }
 
 static void trickle_eoc_seal(switch_rtp_t *rtp_session, const char *mid, int mline_index)
@@ -657,8 +697,9 @@ static void trickle_eoc_seal(switch_rtp_t *rtp_session, const char *mid, int mli
 		n->mid[0] = '\0';
 	}
 
-	n->next = g_trickle_eoc_head;
-	g_trickle_eoc_head = n;
+	if (g_trickle_eoc_mutex) {
+		switch_mutex_lock(g_trickle_eoc_mutex);
+	}
 
 	if (g_trickle_eoc_size >= TRICKLE_EOC_MAX_ENTRIES) {
 		trickle_eoc_kv_t *it = g_trickle_eoc_head, *prev = NULL;
@@ -673,15 +714,25 @@ static void trickle_eoc_seal(switch_rtp_t *rtp_session, const char *mid, int mli
 			if (g_trickle_eoc_size > 0) g_trickle_eoc_size--;
 		}
 	}
-	
+
 	n->next = g_trickle_eoc_head;
 	g_trickle_eoc_head = n;
 	g_trickle_eoc_size++;
+
+	if (g_trickle_eoc_mutex) {
+		switch_mutex_unlock(g_trickle_eoc_mutex);
+	}
 }
 
 static void trickle_eoc_cleanup(const void *rtp)
 {
-	trickle_eoc_kv_t *it = g_trickle_eoc_head, *prev = NULL;
+	trickle_eoc_kv_t *it, *prev = NULL;
+
+	if (g_trickle_eoc_mutex) {
+		switch_mutex_lock(g_trickle_eoc_mutex);
+	}
+
+	it = g_trickle_eoc_head;
 	while (it) {
 		if (it->rtp == rtp) {
 			trickle_eoc_kv_t *stale = it;
@@ -697,6 +748,10 @@ static void trickle_eoc_cleanup(const void *rtp)
 		}
 		prev = it;
 		it = it->next;
+	}
+
+	if (g_trickle_eoc_mutex) {
+		switch_mutex_unlock(g_trickle_eoc_mutex);
 	}
 }
 
@@ -1740,6 +1795,7 @@ SWITCH_DECLARE(void) switch_rtp_init(switch_memory_pool_t *pool)
 	}
 #endif
 	switch_mutex_init(&port_lock, SWITCH_MUTEX_NESTED, pool);
+	switch_mutex_init(&g_trickle_eoc_mutex, SWITCH_MUTEX_NESTED, pool);
 	switch_rtp_dtls_init();
 	global_init = 1;
 }
@@ -5345,14 +5401,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_create(switch_rtp_t **new_rtp_session
 	memset(&rtp_session->fork, 0, sizeof(rtp_session->fork));
 
 	{
-<<<<<<< ours
-		const char *v = NULL;
-		if (channel) {
-			v = switch_channel_get_variable(channel, "debug_rtp");
-		}
-=======
 		const char *v = rtp_channel_var_dup(channel, "debug_rtp");
->>>>>>> theirs
 		if (!zstr(v) && switch_true(v)) {
 			rtp_session->flags[SWITCH_RTP_FLAG_DEBUG_RTP_READ]++;
 			rtp_session->flags[SWITCH_RTP_FLAG_DEBUG_RTP_WRITE]++;
@@ -5362,14 +5411,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_create(switch_rtp_t **new_rtp_session
 	rtp_session->poll_timeout_s = poll_timeout_s;
 
 	{
-<<<<<<< ours
-		const char *v = NULL;
-		if (channel) {
-			v = switch_channel_get_variable(channel, "telnyx_rtp_poll_timeout_s");
-		}
-=======
 		const char *v = rtp_channel_var_dup(channel, "telnyx_rtp_poll_timeout_s");
->>>>>>> theirs
 		if (!zstr(v)) {
 			if (!switch_is_number(v)) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "RTP blocking mode poll timeout variable set but is not a number - ignoring\n");
@@ -5385,14 +5427,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_create(switch_rtp_t **new_rtp_session
 	rtp_session->publish_stats_interval_ms = RTP_PUBLISH_STATS_INTERVAL_MS;
 	
 	{
-<<<<<<< ours
-		const char *v = NULL;
-		if (channel) {
-			v = switch_channel_get_variable(channel, "telnyx_rtp_publish_stats_interval_ms");
-		}
-=======
 		const char *v = rtp_channel_var_dup(channel, "telnyx_rtp_publish_stats_interval_ms");
->>>>>>> theirs
 		if (!zstr(v)) {
 			if (!switch_is_number(v)) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "RTP publish stats interval variable is set but is not a number - ignoring\n");
@@ -6082,8 +6117,10 @@ SWITCH_DECLARE(void) switch_rtp_destroy(switch_rtp_t **rtp_session)
 
 	sock = (*rtp_session)->sock_input;
 	(*rtp_session)->sock_input = NULL;
-	switch_socket_close(sock);
-
+	if (sock) {
+		switch_socket_close(sock);
+	}
+	
 	if ((*rtp_session)->sock_output != sock) {
 		sock = (*rtp_session)->sock_output;
 		(*rtp_session)->sock_output = NULL;
@@ -9874,8 +9911,18 @@ fork_done:
 				rtp_add_extension_header(rtp_session, send_msg, abs(score), data, &bytes);
 			}
 		}
+#if HAVE_MID_EXT
+		if (rtp_session->ext_mid.enabled && rtp_session->ext_mid.ext_id > 0) {
+			rtp_add_mid_extension(rtp_session, send_msg, &bytes);
+		}
 
-		rtp_add_mid_extension(rtp_session, send_msg);
+		if (send_msg->header.x && send_msg->ext) {
+			uint16_t ext_words = ntohs(send_msg->ext->length);
+			/* 4 bytes (profile+length) + 4*words of extension data */
+			bytes = (switch_size_t)(datalen + rtp_header_len + 4 + (ext_words * 4));
+		}
+#endif
+
 #ifdef ENABLE_SRTP
 		switch_mutex_lock(rtp_session->ice_mutex);
 		if (rtp_session->flags[SWITCH_RTP_FLAG_SECURE_SEND]) {
@@ -10513,6 +10560,17 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_write_raw(switch_rtp_t *rtp_session, 
 			int sbytes = (int) *bytes;
 			srtp_err_status_t stat;
 
+#if HAVE_MID_EXT
+			if (rtp_session->write_msg.header.x && rtp_session->write_msg.ext) {
+				uint16_t ext_words = ntohs(rtp_session->write_msg.ext->length);
+				 /* 4 bytes (profile+length) + 4*words of extension data */
+				int ext_bytes = 4 + ((int)ext_words * 4);
+
+				sbytes += ext_bytes;
+				*bytes += ext_bytes;
+			}
+#endif
+
 			if (rtp_session->flags[SWITCH_RTP_FLAG_SECURE_SEND_RESET]) {
 				switch_rtp_clear_flag(rtp_session, SWITCH_RTP_FLAG_SECURE_SEND_RESET);
 				srtp_dealloc(rtp_session->send_ctx[rtp_session->srtp_idx_rtp]);
@@ -10556,6 +10614,13 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_write_raw(switch_rtp_t *rtp_session, 
 
 SWITCH_DECLARE(uint32_t) switch_rtp_get_ssrc(switch_rtp_t *rtp_session)
 {
+	return rtp_session->ssrc;
+}
+
+SWITCH_DECLARE(uint32_t) switch_rtp_get_new_ssrc(switch_rtp_t *rtp_session)
+{
+	if (!rtp_session) return 0;
+	rtp_session->ssrc = (uint32_t) ((intptr_t) &rtp_session * (switch_time_t)switch_epoch_time_now(NULL));
 	return rtp_session->ssrc;
 }
 
@@ -10905,11 +10970,12 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_enable_mid(switch_rtp_t *rtp_session,
     return SWITCH_STATUS_SUCCESS;
 }
 
-static void rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_t *send_msg)
+#if HAVE_MID_EXT
+static void rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_t *send_msg, switch_size_t *bytes)
 {
     uint8_t *ext_ptr;
     uint16_t words, new_words;
-    size_t payload_len, ext_bytes;
+    size_t payload_len, ext_bytes, need_bytes = 0;
     uint8_t len_field, pad;
 
     if (!rtp_session->ext_mid.enabled) return;
@@ -10918,11 +10984,50 @@ static void rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_t *send_msg
     if (!payload_len) return;
     if (payload_len > 16) payload_len = 16;
 
+	{
+		uint16_t words_now = 0;
+		size_t needed = 4 /* profile+length */ + 1 /* id/len */ + payload_len;
+		
+		if (send_msg->header.x && send_msg->ext) {
+			words_now = ntohs(send_msg->ext->length);
+			needed += (size_t)words_now * 4;
+		}
+		if (needed > SWITCH_RTP_MAX_BUF_LEN) return;
+	}
+
     if (!send_msg->header.x) {
+        uint8_t len_field_tmp = (uint8_t)(payload_len - 1);
+        size_t ext_data_bytes = 1 + payload_len;
+        uint8_t pad_tmp = (uint8_t)((4 - (ext_data_bytes & 3)) & 3);
+        need_bytes = 4 + ext_data_bytes + pad_tmp;
+
+        memmove(send_msg->body + need_bytes, send_msg->body, (size_t)(*bytes - rtp_header_len));
         send_msg->header.x = 1;
+        send_msg->ebody = send_msg->body; /* ext header starts here */
         send_msg->ext = (switch_rtp_hdr_ext_t *) send_msg->ebody;
         send_msg->ext->profile = htons(0xBEDE);
-        send_msg->ext->length = htons(0);
+        send_msg->ext->length  = 0;
+
+        ext_ptr = (uint8_t *)send_msg->ext + 4;
+        *ext_ptr++ = (rtp_session->ext_mid.ext_id << 4) | (len_field_tmp & 0x0F);
+        memcpy(ext_ptr, rtp_session->ext_mid.mid, payload_len);
+        ext_ptr += payload_len;
+        if (pad_tmp) {
+            memset(ext_ptr, 0, pad_tmp);
+            ext_ptr += pad_tmp;
+        }
+
+        /* Length is in 32-bit words following the 4-byte header */
+        send_msg->ext->length = htons((uint16_t)((ext_ptr - ((uint8_t *)send_msg->ext + 4)) / 4));
+
+        *bytes += (switch_size_t)need_bytes;
+        return;
+    } else if (!send_msg->ext) {
+        /* If x is set but ext is NULL, initialize it */
+        send_msg->ext = (switch_rtp_hdr_ext_t *) send_msg->ebody;
+        if (!send_msg->ext) return;
+        send_msg->ext->profile = htons(0xBEDE);
+        send_msg->ext->length = 0;
     }
 
     if (!send_msg->ext || ntohs(send_msg->ext->profile) != 0xBEDE) return;
@@ -10941,12 +11046,14 @@ static void rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_t *send_msg
         memset(ext_ptr, 0, pad);
         ext_ptr += pad;
         ext_bytes += pad;
-    }
+		*bytes += pad;
+	}
 
     new_words = (uint16_t)(ext_bytes / 4);
     send_msg->ext->length = htons(new_words);
+	*bytes += (switch_size_t)(1 + payload_len);
 }
-
+#endif
 
 SWITCH_DECLARE(void) switch_rtp_set_ice_candidate_cb(switch_rtp_t *rtp_session, switch_ice_candidate_cb_t cb, void *user_data)
 {
@@ -11255,6 +11362,10 @@ SWITCH_DECLARE(void) switch_rtp_trickle_emit_local_candidate(switch_rtp_t *rtp_s
 	}
 
 	if (!cand && end_of_candidates) {
+		/* Check if EOC is already sealed to avoid duplicate EOC emissions */
+		if (trickle_eoc_is_sealed(rtp_session, mid ? mid : "", mline_index)) {
+			return;
+		}
 		cb(ud, mid, mline_index, NULL, 1);
 		trickle_eoc_seal(rtp_session, mid ? mid : "", mline_index);
 		return;

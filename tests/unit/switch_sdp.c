@@ -159,10 +159,13 @@ static int parse_cand(const char *line, switch_sdp_cand_t *out) {
     tok=strtok_r(NULL," ",&save); if(!tok) return 0; str_cp(out->ip,tok,sizeof(out->ip));
     tok=strtok_r(NULL," ",&save); if(!tok) return 0; out->port=(uint32_t)strtoul(tok,NULL,10);
     while ((tok=strtok_r(NULL," ",&save))) {
-        if (strcmp(tok,"typ")==0)       { tok=strtok_r(NULL," ",&save); if(!tok)break; tolower_cp(out->type,tok,sizeof(out->type)); saw_typ=1; }
-        else if (strcmp(tok,"raddr")==0){ tok=strtok_r(NULL," ",&save); if(!tok)break; str_cp(out->raddr,tok,sizeof(out->raddr)); }
-        else if (strcmp(tok,"rport")==0){ tok=strtok_r(NULL," ",&save); if(!tok)break; out->rport=(uint32_t)strtoul(tok,NULL,10); }
-        else if (strcmp(tok,"tcptype")==0){ tok=strtok_r(NULL," ",&save); if(!tok)break; tolower_cp(out->tcp_type,tok,sizeof(out->tcp_type)); }
+        if (!strcmp(tok,"typ")) { tok=strtok_r(NULL," ",&save); if(!tok)break; tolower_cp(out->type,tok,sizeof(out->type)); saw_typ=1; }
+        else if (!strcmp(tok,"raddr")) { tok=strtok_r(NULL," ",&save); if(!tok)break; str_cp(out->raddr,tok,sizeof(out->raddr)); }
+        else if (!strcmp(tok,"rport")) { tok=strtok_r(NULL," ",&save); if(!tok)break; out->rport=(uint32_t)strtoul(tok,NULL,10); }
+        else if (!strcmp(tok,"tcptype")) { tok=strtok_r(NULL," ",&save); if(!tok)break; tolower_cp(out->tcp_type,tok,sizeof(out->tcp_type)); }
+        else if (!strcmp(tok,"generation")) { (void)strtok_r(NULL," ",&save); }
+        else if (!strcmp(tok,"network-cost")) { (void)strtok_r(NULL," ",&save); }
+        else { (void)strtok_r(NULL," ",&save); }
     }
     return saw_typ;
 }
@@ -192,6 +195,7 @@ static switch_status_t collect_remote_sdp_info_from_session(switch_core_session_
     sdp_media_t *sm;
     sdp_attribute_t *a;
     const char *val;
+    char *norm = NULL;
 
     if (!session || !out) {
         return SWITCH_STATUS_FALSE;
@@ -206,6 +210,8 @@ static switch_status_t collect_remote_sdp_info_from_session(switch_core_session_
     r_sdp = switch_channel_get_variable(channel, "sip_remote_sdp_str");
     if (!r_sdp || !*r_sdp) r_sdp = switch_channel_get_variable(channel, "remote_sdp_str");
     if (!r_sdp || !*r_sdp) r_sdp = switch_channel_get_variable(channel, "remote_sdp");
+	if (!r_sdp || !*r_sdp) r_sdp = switch_channel_get_variable(channel, "sip_remote_sdp");
+	if (!r_sdp || !*r_sdp) r_sdp = switch_channel_get_variable(channel, "remote_sdp");
 
 	if (!r_sdp || !*r_sdp) {
 		const char *peer_uuid = switch_channel_get_partner_uuid(channel);
@@ -239,7 +245,22 @@ static switch_status_t collect_remote_sdp_info_from_session(switch_core_session_
         return SWITCH_STATUS_FALSE;
     }
 
-    parser = sdp_parse(NULL, r_sdp, (int)strlen(r_sdp), 0);
+    {
+        size_t n = strlen(r_sdp), j = 0;
+        norm = (char *)switch_core_alloc(switch_core_session_get_pool(session), n * 2 + 4);
+        for (size_t i = 0; i < n; ++i) {
+            if (r_sdp[i] == '\n') {
+                if (i && r_sdp[i-1] != '\r') norm[j++] = '\r';
+                norm[j++] = '\n';
+            } else {
+                norm[j++] = r_sdp[i];
+            }
+        }
+        norm[j] = '\0';
+    }
+
+    parser = sdp_parse(NULL, norm, (int)strlen(norm), 0);
+    
     if (!parser) {
         return SWITCH_STATUS_FALSE;
     }

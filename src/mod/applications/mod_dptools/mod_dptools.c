@@ -1492,6 +1492,9 @@ SWITCH_STANDARD_APP(answer_function)
 		if (switch_stristr("debug_video", arg)) {
 			switch_channel_set_flag_recursive(channel, CF_VIDEO_DEBUG_READ);
 		}
+		if (switch_stristr("bundle_media", arg)) {
+			switch_channel_set_flag_recursive(channel, CF_BUNDLE_MEDIA);
+		}
 	}
 
 	switch_channel_answer(channel);
@@ -1561,6 +1564,9 @@ SWITCH_STANDARD_APP(pre_answer_function)
 	if (!zstr(arg)) {
 		if (switch_stristr("is_conference", arg)) {
 			switch_channel_set_flag(channel, CF_CONFERENCE);
+		}
+		if (switch_stristr("bundle_media", arg)) {
+			switch_channel_set_flag(channel, CF_BUNDLE_MEDIA);
 		}
 	}
 

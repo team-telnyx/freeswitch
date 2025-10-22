@@ -86,7 +86,7 @@ static switch_status_t make_session_and_rtp(switch_core_session_t **out_session,
 	switch_call_cause_t cause = SWITCH_CAUSE_NONE, cancel = SWITCH_CAUSE_NONE;
 	switch_core_session_t *session = NULL;
 
-	const char *br = "{absolute_codec_string=L16@8000h@20i,rtp_disable_crypto=true}loopback/9999";
+	const char *br = "{absolute_codec_string=L16@8000h@20i,rtp_disable_crypto=true}null/+15553334444";
 
 
 	 st = switch_ivr_originate(
@@ -202,6 +202,33 @@ FCT_BGN()
 			switch_core_session_rwunlock(session);
 			}
 		FCT_TEST_END();
+		FCT_TEST_BGN(mid_extension_header_size)
+        {
+			switch_core_session_t *session = NULL; switch_rtp_t *rtp = NULL;
+        
+			fct_req(make_session_and_rtp(&session, &rtp) == SWITCH_STATUS_SUCCESS && session != NULL);
+            fct_req(rtp != NULL);
+
+            fct_chk(switch_rtp_enable_mid(rtp, TEST_MID_EXT_ID, "0") == SWITCH_STATUS_SUCCESS);
+
+            {
+                switch_status_t st;
+				uint8_t p[20] = {0xFF}; switch_size_t bytes = sizeof(p);
+                st = switch_rtp_write_raw(rtp, p, &bytes, SWITCH_TRUE);
+				fct_chk(st == SWITCH_STATUS_SUCCESS);
+				{
+					switch_rtp_ext_info_t info = {0};
+                    fct_chk(switch_rtp_get_extension_info(rtp, &info) == SWITCH_STATUS_SUCCESS);
+                    fct_chk(info.has_ext == SWITCH_TRUE);
+                    fct_chk(info.profile == 0xBEDE);
+                    /* one element "0": 1 (id/len) + 1 (payload) => padded to 4 => >=1 word */
+                    fct_chk(info.length_words >= 1);
+                }
+			}
+            cleanup_rtp(&rtp);
+            cleanup_session_and_media(session);
+        }
+        FCT_TEST_END();
 
 		FCT_TEST_BGN(session_and_rtp_smoke)
 		{

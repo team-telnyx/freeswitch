@@ -11,6 +11,10 @@ noinst_PROGRAMS += switch_sdp
 switch_sdp_SOURCES = switch_sdp.c
 switch_sdp_CFLAGS  = $(AM_CFLAGS) $(SOFIA_SIP_CFLAGS)
 switch_sdp_LDADD   = $(switch_builddir)/libfreeswitch.la $(SOFIA_SIP_LIBS)
+
+switch_trickle_ice_SOURCES = switch_trickle_ice.c
+switch_trickle_ice_CFLAGS  = $(AM_CFLAGS) $(SOFIA_SIP_CFLAGS)
+switch_trickle_ice_LDADD   = $(switch_builddir)/libfreeswitch.la $(SOFIA_SIP_LIBS)
 endif
 
 if HAVE_PCAP

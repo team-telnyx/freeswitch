@@ -2,11 +2,13 @@
 #include <switch_rtp.h>
 #include <test/switch_test.h>
 #include "switch_telnyx.h"
+#include <sofia-sip/sdp.h>
 
 #define USE_SWITCH_RTP_NEW_IPPORT 1
 
 extern char *fst_getenv_default(const char *, char *, switch_bool_t);
 static void _silence_unused(void) { (void)fst_getenv_default; }
+static const char *rx_host = "127.0.0.1";
 
 typedef struct trickle_captured_s {
 	int called;
@@ -63,8 +65,6 @@ static void on_local_candidate_cb_2(void *user_data,
 	}
 }
 
-static switch_rtp_t *wait_for_rtp_session(switch_core_session_t *session, switch_media_type_t type, uint32_t timeout_ms);
- 
 static switch_status_t make_real_rtp(switch_memory_pool_t *pool,
                                      switch_rtp_t **out_rtp,
                                      const char **out_err)
@@ -95,34 +95,77 @@ static switch_status_t make_real_rtp(switch_memory_pool_t *pool,
 }
 
 
-static switch_status_t make_session_and_rtp(switch_core_session_t **out_session,
-                                            switch_rtp_t **out_rtp)
+/* Declare the production trickle ICE function */
+extern switch_status_t switch_core_media_trickle_remote_candidate_and_recheck(switch_core_session_t *session, switch_media_handle_t *smh, void *sdp_session, switch_sdp_type_t sdp_type, const char *mid, int mline_index, const char *cand_line, int end_of_candidates);
+
+static void cleanup_rtp(switch_rtp_t **rtp)
+{
+	if (rtp && *rtp) {
+		switch_rtp_destroy(rtp);
+	}
+}
+
+static void cleanup_session_and_media(switch_core_session_t *session)
+{
+	switch_media_handle_t *smh = NULL;
+
+	if (!session) return;
+
+	/* Clean up media handle and RTP sessions to free DTLS contexts */
+	smh = switch_core_session_get_media_handle(session);
+	if (smh) {
+		/* Deactivate RTP which will call switch_rtp_destroy internally */
+		switch_core_media_deactivate_rtp(session);
+	}
+
+	switch_channel_hangup(switch_core_session_get_channel(session), SWITCH_CAUSE_NORMAL_CLEARING);
+	switch_core_session_rwunlock(session);
+}
+
+static void cleanup_session_media_and_sdp(switch_core_session_t *session, void *sdp_session, sdp_parser_t *parser)
+{
+	/* Clean up SDP parser if allocated */
+	if (parser) {
+		sdp_parser_free(parser);
+	}
+	cleanup_session_and_media(session);
+}
+
+static switch_status_t make_session_and_rtp_with_sdp(switch_core_session_t **out_session,
+                                                      switch_rtp_t **out_rtp,
+                                                      void **out_sdp_session,
+                                                      sdp_parser_t **out_parser)
 {
 	switch_status_t st;
 	switch_call_cause_t cause = SWITCH_CAUSE_NONE, cancel = SWITCH_CAUSE_NONE;
 	switch_core_session_t *session = NULL;
-	switch_rtp_t *rtp = NULL;
+	switch_media_handle_t *media_handle;
+	switch_core_media_params_t *mparams;
+	switch_status_t status;
+	switch_channel_t *chan = NULL;
+	char *r_sdp;
+	uint8_t match = 0, p = 0;
 
-	 const char *br =        "{"
-          "absolute_codec_string=PCMU,"
-          "codec_string=PCMU,"
-          "codec_ms=20,"
-          "rtp_disable_crypto=true,"
-          "rtp_enable_timer=false,"
-          "rtp_timer_name=none,"
-          "hangup_after_bridge=false,"
-          "ignore_early_media=true,"
-          "loopback_bowout=false,"
-          "media_webrtc=false,"
-          "rtp_trickle_ice=true"
-       "}loopback/9999";
+	const char *br = "{"
+		"absolute_codec_string=PCMU,"
+		"codec_string=PCMU,"
+		"codec_ms=20,"
+		"rtp_disable_crypto=true,"
+		"rtp_enable_timer=false,"
+		"rtp_timer_name=none,"
+		"hangup_after_bridge=false,"
+		"ignore_early_media=true,"
+		"loopback_bowout=false,"
+		"media_webrtc=false,"
+		"rtp_trickle_ice=true"
+		"}loopback/9999";
 
 	st = switch_ivr_originate(
 			NULL,                  /* a-leg session */
 			&session,              /* out: b-leg */
 			&cause,                /* out: cause */
 			br,                    /* bridgeto */
-			10,                     /* timeout (sec) */
+			5,                     /* timeout (sec) */
 			NULL, NULL, NULL, NULL,/* table, cid_name, cid_num, outbound_profile_uuid */
 			NULL,                  /* ovars (NULL, since we inlined) */
 			SOF_NONE,              /* flags */
@@ -131,76 +174,106 @@ static switch_status_t make_session_and_rtp(switch_core_session_t **out_session,
 
 	if (st != SWITCH_STATUS_SUCCESS || !session) return SWITCH_STATUS_FALSE;
 
-	{
-		switch_channel_t *chan = switch_core_session_get_channel(session);
-		switch_channel_wait_for_state(chan, NULL, CS_CONSUME_MEDIA);
-		switch_yield(100000);
+	chan = switch_core_session_get_channel(session);
+
+	mparams = switch_core_session_alloc(session, sizeof(switch_core_media_params_t));
+	mparams->inbound_codec_string = switch_core_session_strdup(session, "PCMU");
+	mparams->outbound_codec_string = switch_core_session_strdup(session, "PCMU");
+	mparams->rtpip = switch_core_session_strdup(session, (char *)rx_host);
+	mparams->rtpip4 = switch_core_session_strdup(session, (char *)rx_host);
+
+	status = switch_media_handle_create(&media_handle, session, mparams);
+	if (status != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "switch_media_handle_create() failed\n");
+		return SWITCH_STATUS_FALSE;
 	}
 
-	if (switch_core_media_prepare_codecs(session, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) goto fail;
-	if (switch_core_media_choose_ports(session, SWITCH_TRUE, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) goto fail;
-	if (switch_core_media_activate_rtp(session) != SWITCH_STATUS_SUCCESS) goto fail;
-	
-	{
-		switch_channel_t *channel = switch_core_session_get_channel(session);
-		if (!channel) goto fail;
+	switch_channel_set_variable(chan, "absolute_codec_string", "PCMU");
+	switch_channel_set_variable(chan, "send_silence_when_idle", "-1");
+	switch_channel_set_variable(chan, "rtp_timer_name", "soft");
+	switch_channel_set_variable(chan, "media_timeout", "1000");
+	switch_channel_set_variable(chan, "rtp_trickle_ice", "true");
 
-		{
-			switch_time_t waited = 0;
-			while (switch_channel_get_state(channel) != CS_EXECUTE &&
-				switch_channel_get_state(channel) != CS_CONSUME_MEDIA &&
-				waited < 3000000) {
-				switch_yield(10000);
-				waited += 10000;
-			}
-		}
+	r_sdp = switch_core_session_sprintf(session,
+			"v=0\n"
+			"o=- 1683118194 1683118195 IN IP4 0.0.0.0\n"
+			"s=-\n"
+			"t=0 0\n"
+			"a=group:BUNDLE 0\n"
+			"a=extmap-allow-mixed\n"
+			"m=audio 9 UDP/TLS/RTP/SAVPF 0\n"
+			"c=IN IP4 0.0.0.0\n"
+			"a=ice-ufrag:aZJpsl00bYnjrOZtkCFMtKhFC/CHAfcv\n"
+			"a=ice-pwd:aNniSnLLp43SSsJrz6TNPty1zPrxZNzh\n"
+			"a=ice-options:trickle\n"
+			"a=rtcp-mux\n"
+			"a=setup:active\n"
+			"a=rtpmap:0 PCMU/8000\n"
+			"a=ssrc:2588681350 msid:user199999@host-a1132918 webrtctransceiver0\n"
+			"a=ssrc:2588681350 cname:user19999@host-a1132918\n"
+			"a=sendrecv\n"
+			"a=fingerprint:sha-256 17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4\n"
+			"a=mid:0\n"
+			"a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\n"
+			"a=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time\n"
+			"a=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\n"
+			"a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid\n"
+			"a=msid:de61dc02-51d0-4164-9d7a-b74141a4548e 9dc86822-54a5-4506-8476-9be2238be778\n"
+			"a=rtcp-rsize\n");
 
-		{
-			switch_time_t waited = 0;
-			while (!switch_channel_media_ready(channel) && waited < 3000000) {
-				switch_yield(10000);
-				waited += 10000;
+	if (switch_core_media_prepare_codecs(session, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to prepare codecs\n");
+		goto fail;
+	}
+
+	match = switch_core_media_negotiate_sdp(session, r_sdp, &p, SDP_OFFER);
+
+	if (match) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "SDP negotiation successful (match=%d, proceed=%d)\n", match, p);
+	} else {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to negotiate SDP\n");
+		goto fail;
+	}
+
+	/* Parse SDP for trickle ICE */
+	if (out_sdp_session) {
+		sdp_parser_t *parser = sdp_parse(NULL, r_sdp, strlen(r_sdp), 0);
+		if (parser) {
+			sdp_session_t *parsed_sdp = sdp_session(parser);
+			if (parsed_sdp) {
+				*out_sdp_session = (void*)parsed_sdp;
+				if (out_parser) {
+					*out_parser = parser;
+				}
+			} else {
+				*out_sdp_session = NULL;
+				sdp_parser_free(parser);
+				if (out_parser) {
+					*out_parser = NULL;
+				}
 			}
-			if (!switch_channel_media_ready(channel)) goto fail;
+		} else {
+			*out_sdp_session = NULL;
+			if (out_parser) {
+				*out_parser = NULL;
+			}
 		}
 	}
 
-	{
-		switch_media_handle_t *smh = switch_core_session_get_media_handle(session);
-		
-		if (smh) {
-			switch_core_media_prepare_codecs(session, SWITCH_FALSE);
-			switch_core_media_choose_ports(session, SWITCH_TRUE, SWITCH_FALSE);
-			switch_core_media_activate_rtp(session);
-			rtp = wait_for_rtp_session(session, SWITCH_MEDIA_TYPE_AUDIO, 3000 /* ms */);
-			if (!rtp) {
-				switch_yield(100000);
-				rtp = switch_core_media_get_rtp_session(session, SWITCH_MEDIA_TYPE_AUDIO);
-				if (!rtp) goto fail;
-			}
-			rtp = switch_core_media_get_rtp_session(session, SWITCH_MEDIA_TYPE_AUDIO);
-		}
+	if (switch_core_media_choose_ports(session, SWITCH_TRUE, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to choose ports\n");
+		goto fail;
 	}
-   
-	if (!rtp) goto fail;
-	
+	if (switch_core_media_activate_rtp(session) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to activate RTP\n");
+		goto fail;
+	}
+
 	*out_session = session;
 	*out_rtp = switch_core_media_get_rtp_session(session, SWITCH_MEDIA_TYPE_AUDIO);
 	if (!*out_rtp) {
-		switch_channel_t *ch = switch_core_session_get_channel(session);
-		const char *peer_uuid = ch ? switch_channel_get_partner_uuid(ch) : NULL;
-		if (peer_uuid && *peer_uuid) {
-			switch_core_session_t *peer = switch_core_session_locate(peer_uuid);
-			if (peer) {
-				if (switch_core_media_prepare_codecs(peer, SWITCH_FALSE) == SWITCH_STATUS_SUCCESS &&
-					switch_core_media_choose_ports(peer, SWITCH_TRUE, SWITCH_FALSE) == SWITCH_STATUS_SUCCESS &&
-					switch_core_media_activate_rtp(peer) == SWITCH_STATUS_SUCCESS) {
-					*out_rtp = switch_core_media_get_rtp_session(peer, SWITCH_MEDIA_TYPE_AUDIO);
-				}
-				switch_core_session_rwunlock(peer);
-			}
-		}
-		if (!*out_rtp) goto fail;
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to get RTP session\n");
+		goto fail;
 	}
 
 	return SWITCH_STATUS_SUCCESS;
@@ -209,26 +282,6 @@ fail:
 	switch_channel_hangup(switch_core_session_get_channel(session), SWITCH_CAUSE_NORMAL_CLEARING);
 	switch_core_session_rwunlock(session);
 	return SWITCH_STATUS_FALSE;
-}
-
-static switch_rtp_t *wait_for_rtp_session(switch_core_session_t *session, switch_media_type_t type, uint32_t timeout_ms)
-{
-    uint32_t waited = 0;
-    switch_rtp_t *rtp = NULL;
-	while (waited < timeout_ms) {
-        rtp = switch_core_media_get_rtp_session(session, type);
-        if (rtp) return rtp;
-        switch_yield(10000);
-        waited += 10000;
-    }
-    return NULL;
-}
-
-static void cleanup_session_and_media(switch_core_session_t *session)
-{
-	if (!session) return;
-	switch_channel_hangup(switch_core_session_get_channel(session), SWITCH_CAUSE_NORMAL_CLEARING);
-	switch_core_session_rwunlock(session);
 }
 
 static volatile int trickle_ev_seen = 0;
@@ -282,12 +335,20 @@ FCT_BGN()
 		{
 			switch_core_session_t *session = NULL;
 			switch_rtp_t *rtp = NULL; trickle_captured_t cap; switch_rtp_ice_cand_t c;
+			void *sdp_session = NULL;
+			sdp_parser_t *parser = NULL;
 
 			memset(&cap, 0, sizeof(cap));
-			fct_req(make_session_and_rtp(&session, &rtp) == SWITCH_STATUS_SUCCESS && rtp != NULL);
- 
+			fct_req(make_session_and_rtp_with_sdp(&session, &rtp, &sdp_session, &parser) == SWITCH_STATUS_SUCCESS && rtp != NULL);
 
+			/* make_session_and_rtp_with_sdp() auto-registers a callback because rtp_trickle_ice=true */
+			fct_chk(switch_rtp_trickle_is_registered(rtp) == SWITCH_TRUE);
+
+			/* unregister the auto-registered callback */
+			switch_rtp_set_ice_candidate_cb(rtp, NULL, NULL);
 			fct_chk(switch_rtp_trickle_is_registered(rtp) == SWITCH_FALSE);
+
+			/* Now register our test callback */
 
 			switch_rtp_set_ice_candidate_cb(rtp, on_local_candidate_cb, &cap);
 			fct_chk(switch_rtp_trickle_is_registered(rtp) == SWITCH_TRUE);
@@ -303,7 +364,7 @@ FCT_BGN()
 			/* unregister by setting cb = NULL */
 			switch_rtp_set_ice_candidate_cb(rtp, NULL, NULL);
 			fct_chk(switch_rtp_trickle_is_registered(rtp) == SWITCH_FALSE);
-			cleanup_session_and_media(session);
+			cleanup_session_media_and_sdp(session, sdp_session, parser);
 		}
 		FCT_TEST_END();
 
@@ -331,6 +392,7 @@ FCT_BGN()
 			fct_chk(strcmp(cap.last_cand.ip, "cb2-192.168.100.5") == 0);
 			fct_chk(cap.last_cand.port == 50100);
 			fct_chk(cap.last_cand.priority == 300u);
+			cleanup_rtp(&rtp);
 		}
 		FCT_TEST_END();
 
@@ -350,6 +412,7 @@ FCT_BGN()
 			fct_chk(cap.called == 1);
 			fct_chk(cap.last_cand.component_id == 2);
 			fct_chk(strcmp(cap.last_cand.ip, "192.168.113.9") == 0);
+			cleanup_rtp(&rtp);
 		}
 		FCT_TEST_END();
 
@@ -368,6 +431,7 @@ FCT_BGN()
 			fct_chk(cap.last_eoc == 1);
 			/* last_cand is zeroed */
 			fct_chk(cap.last_cand.component_id == 0 && cap.last_cand.port == 0);
+			cleanup_rtp(&rtp);
 		}
 		FCT_TEST_END();
 
@@ -391,6 +455,7 @@ FCT_BGN()
 			fst_check(cap.last_cand.component_id == 0 && cap.last_cand.port == 0);
 			
 			fst_check(cap.last_cand.ip[0] == '\0');
+			cleanup_rtp(&rtp);
 		}
 		FCT_TEST_END();
 
@@ -411,6 +476,7 @@ FCT_BGN()
 
 			switch_rtp_trickle_emit_local_candidate(rtp, &c, "video", 1, 0);
 			fct_chk(cap.called == 2 && strcmp(cap.last_mid, "video") == 0 && cap.last_mline == 1);
+			cleanup_rtp(&rtp);
 		}
 		FCT_TEST_END();
 
@@ -430,6 +496,7 @@ FCT_BGN()
 			fct_chk(cap.called == 1);
 			fct_chk(strcmp(cap.last_mid, "(null)") == 0);
 			fct_chk(cap.last_mline == 2);
+			cleanup_rtp(&rtp);
 		}
 		FCT_TEST_END();
 
@@ -453,6 +520,7 @@ FCT_BGN()
 			fct_chk(cap.called == 50);
 			fct_chk(strcmp(cap.last_cand.transport, "udp") == 0);
 			fct_chk(cap.last_cand.port == 20000 + 49);
+			cleanup_rtp(&rtp);
 		}
 		FCT_TEST_END();
 		FCT_TEST_BGN(trickle_emit_fires_custom_event)
@@ -461,11 +529,13 @@ FCT_BGN()
 			switch_status_t st;
 			switch_rtp_t *rtp;
 			switch_rtp_ice_cand_t c;
+			void *sdp_session = NULL;
+			sdp_parser_t *parser = NULL;
 
 			/* bind listener */
 			switch_event_bind("trickle-ut", SWITCH_EVENT_CUSTOM, "sofia::trickle-ice", trickle_event_handler, NULL);
 
-			st = make_session_and_rtp(&session, &rtp);
+			st = make_session_and_rtp_with_sdp(&session, &rtp, &sdp_session, &parser);
 			fst_requires(st == SWITCH_STATUS_SUCCESS && session && rtp);
 
 			/* register trickle on audio */
@@ -496,8 +566,7 @@ FCT_BGN()
 			fct_chk(strstr(last_cand_line, "a=candidate:1 1 udp") != NULL);
 
 			switch_event_unbind_callback(trickle_event_handler);
-			switch_channel_hangup(switch_core_session_get_channel(session), SWITCH_CAUSE_NORMAL_CLEARING);
-			switch_core_session_rwunlock(session);
+			cleanup_session_media_and_sdp(session, sdp_session, parser);
 		}
 		FCT_TEST_END();
 		FCT_TEST_BGN(unregister_stops_emission)
@@ -519,12 +588,15 @@ FCT_BGN()
 			fct_chk(switch_rtp_trickle_is_registered(rtp) == SWITCH_FALSE);
 
 			memset(&c, 0, sizeof(c));
-			c.component_id = 2;+			switch_snprintf(c.ip, sizeof(c.ip), "%s", "10.10.10.11");
+			c.component_id = 2;
+			switch_snprintf(c.ip, sizeof(c.ip), "%s", "10.10.10.11");
 			switch_snprintf(c.transport, sizeof(c.transport), "%s", "udp");
 			c.port = 30002; c.priority = 5678u;
 			switch_rtp_trickle_emit_local_candidate(rtp, &c, "audio", 0, 0);
 
 			fct_chk(cap.called == 1);
+
+			cleanup_rtp(&rtp);
 		}
 		FCT_TEST_END();
 		FCT_TEST_BGN(emit_local_candidates_EOC)
@@ -534,11 +606,13 @@ FCT_BGN()
 			trickle_captured_t cap;
 			switch_status_t st;
 			switch_rtp_ice_cand_t c;
+			void *sdp_session = NULL;
+			sdp_parser_t *parser = NULL;
 
 			memset(&cap, 0, sizeof(cap));
 			memset(&c, 0, sizeof(c));
 
-			st = make_session_and_rtp(&session, &rtp);
+			st = make_session_and_rtp_with_sdp(&session, &rtp, &sdp_session, &parser);
 			fst_requires(st == SWITCH_STATUS_SUCCESS && session && rtp);
 
 			switch_rtp_set_ice_candidate_cb(rtp, on_local_candidate_cb, &cap);
@@ -562,7 +636,7 @@ FCT_BGN()
 			fst_xcheck(cap.called == 2, "NULL-candidate EOC should be ignored after seal");
 
 			switch_rtp_set_ice_candidate_cb(rtp, NULL, NULL);
-			cleanup_session_and_media(session);
+			cleanup_session_media_and_sdp(session, sdp_session, parser);
 		}
 		FCT_TEST_END();
 		FCT_TEST_BGN(emit_local_candidate_after_destroy)
@@ -613,6 +687,98 @@ FCT_BGN()
 			switch_rtp_destroy(&rtp2);
 		}
 		FCT_TEST_END();
+
+	/* Test ACL filtering: private IP rejected, public IP chosen */
+	FCT_TEST_BGN(test_acl_filtering_chooses_public_ip)
+	{
+		switch_core_session_t *session = NULL;
+		switch_rtp_t *rtp = NULL;
+		switch_status_t st;
+		switch_media_handle_t *smh = NULL;
+		void *sdp_session = NULL;
+		sdp_parser_t *parser = NULL;
+		/* Create a real session to simulate production environment */
+		st = make_session_and_rtp_with_sdp(&session, &rtp, &sdp_session, &parser);
+		fst_requires(st == SWITCH_STATUS_SUCCESS);
+		fst_requires(session != NULL);
+		fst_requires(rtp != NULL);
+
+		/* Get the media handle from the session */
+		smh = switch_core_session_get_media_handle(session);
+		fst_requires(smh != NULL);
+
+		/* Test the full production trickle ICE workflow */
+		/* This should replicate the exact sequence from the production logs */
+
+		/* First candidate: host candidate (private IP - should be rejected by ACL) */
+		st = switch_core_media_trickle_remote_candidate_and_recheck(
+			session, smh, sdp_session, SDP_TYPE_REQUEST,
+			"0", 0,
+			"candidate:2913552865 1 udp 24977407 192.168.0.1 49412 typ host raddr 162.120.214.184 rport 55197",
+			0
+		);
+		fst_check(st == SWITCH_STATUS_SUCCESS);
+
+		/* Second candidate: IPv6 srflx candidate (should be dropped - no network path) */
+		st = switch_core_media_trickle_remote_candidate_and_recheck(
+			session, smh, sdp_session, SDP_TYPE_REQUEST,
+			"0", 0,
+			"candidate:265031753 1 udp 1685921537 fd7a:115c:a1e0:ab12:4843:cd96:625d:273b 18215 typ srflx raddr 100.69.211.204 rport 54081",
+			0
+		);
+		fst_check(st == SWITCH_STATUS_SUCCESS);
+
+		/* Third candidate: .local hostname candidate (should be dropped - not an IP) */
+		st = switch_core_media_trickle_remote_candidate_and_recheck(
+			session, smh, sdp_session, SDP_TYPE_REQUEST,
+			"0", 0,
+			"candidate:265031753 1 udp 1685921535 490f301c-75b1-45ea-b4ef-259ba8aade9b.local 18215 typ host raddr 100.69.211.204 rport 54081",
+			0
+		);
+		fst_check(st == SWITCH_STATUS_SUCCESS);
+
+		/* Fourth candidate: public IP srflx candidate (THIS SHOULD BE CHOSEN!) */
+		st = switch_core_media_trickle_remote_candidate_and_recheck(
+			session, smh, sdp_session, SDP_TYPE_REQUEST,
+			"0", 0,
+			"candidate:265031753 1 udp 1685921533 50.114.144.39 18215 typ srflx raddr 100.69.211.204 rport 54081",
+			0
+		);
+		fst_check(st == SWITCH_STATUS_SUCCESS);
+
+		/* Test end-of-candidates marker */
+		st = switch_core_media_trickle_remote_candidate_and_recheck(
+			session, smh, sdp_session, SDP_TYPE_REQUEST,
+			"0", 0,
+			NULL,
+			1  /* end_of_candidates */
+		);
+		fst_check(st == SWITCH_STATUS_SUCCESS);
+
+		/* Verify the correct candidate was chosen using the new helper function */
+		{
+			char *chosen_addr = NULL;
+			switch_port_t chosen_port = 0;
+
+			st = switch_core_media_get_chosen_ice_candidate(session, SWITCH_MEDIA_TYPE_AUDIO, &chosen_addr, &chosen_port);
+			fst_check(st == SWITCH_STATUS_SUCCESS);
+
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+				"Chosen ICE candidate: %s:%d\n",
+				chosen_addr ? chosen_addr : "(null)", chosen_port);
+
+			/* Verify the correct candidate was chosen:
+			 * - NOT the private IP 192.168.0.1:49412
+			 * - SHOULD BE the public IP 50.114.144.39:18215 */
+			fst_check_string_equals(chosen_addr, "50.114.144.39");
+			fst_check(chosen_port == 18215);
+		}
+
+		switch_sleep(1000 * 1000);
+		cleanup_session_media_and_sdp(session, sdp_session, parser);
+	}
+	FCT_TEST_END();
+	
 	}
 
 	FCT_FIXTURE_SUITE_END();

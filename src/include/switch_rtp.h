@@ -125,6 +125,7 @@ typedef struct ice_s {
 	char *pwd;
 	char *options;
 	switch_bool_t controlling;
+	switch_bool_t end_of_candidates;
 } ice_t;
 
 struct switch_rtcp_report_block {
@@ -846,6 +847,17 @@ typedef void (*switch_ice_candidate_cb_t)(
 	int end_of_candidates /* boolean */
 );
 
+typedef struct switch_rtp_ext_info_s {
+	switch_bool_t has_ext;   /* header.x */
+	uint16_t profile;        /* ext->profile (host order) */
+	uint16_t length_words;   /* ext->length (host order, 32-bit words) */
+} switch_rtp_ext_info_t;
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_get_extension_info(
+	switch_rtp_t *rtp_session,
+	switch_rtp_ext_info_t *info
+);
+
 SWITCH_DECLARE(void) switch_rtp_set_ice_candidate_cb(switch_rtp_t *rtp_session, switch_ice_candidate_cb_t cb, void *user_data);
 SWITCH_DECLARE(switch_status_t) switch_rtp_add_trickle_remote_candidate(switch_rtp_t *rtp_session, int mline_index, const char *mid, const char *cand_line);
 SWITCH_DECLARE(switch_status_t) switch_rtp_trickle_end_of_candidates(switch_rtp_t *rtp_session, int mline_index, const char *mid);
@@ -855,6 +867,7 @@ SWITCH_DECLARE(uint32_t) switch_rtp_get_us_per_packet(switch_rtp_t *rtp_session)
 SWITCH_DECLARE(switch_bool_t) switch_rtp_using_timer(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(void) switch_rtp_prepare_trickle_ice(switch_rtp_t *rtp_session, ice_proto_t proto, ice_t *ice_params);
 SWITCH_DECLARE(uint32_t) switch_rtp_get_remote_ice_candidates(const switch_rtp_t *rtp, const switch_rtp_ice_cand_t **out_vec);
+SWITCH_DECLARE(uint32_t) switch_rtp_get_new_ssrc(switch_rtp_t *rtp_session);
 /*!
   \}
 */

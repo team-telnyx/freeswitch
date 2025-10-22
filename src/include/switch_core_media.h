@@ -474,6 +474,29 @@ SWITCH_DECLARE(rtp_extension_t *) switch_core_media_get_send_extension_by_id(swi
 SWITCH_DECLARE(rtp_extension_t *) switch_core_media_get_recv_extension_by_type(switch_rtp_engine_t *engine, uint8_t type);
 SWITCH_DECLARE(rtp_extension_t *) switch_core_media_get_send_extension_by_type(switch_rtp_engine_t *engine, uint8_t type);
 
+/**
+ * Validates and resolves an ICE candidate address for both traditional and trickle ICE
+ * Returns SWITCH_TRUE if valid and resolved_addr is populated, SWITCH_FALSE if should be skipped
+ *
+ * @param smh - Media handle
+ * @param cand_addr - Input candidate address (can be IP or hostname)
+ * @param ignore_ice_mdns - Whether to filter out mDNS candidates (.local addresses)
+ * @param ice_resolve - Whether to attempt hostname resolution for non-IP addresses
+ * @param media_type_str - "audio" or "video" string for logging
+ * @param cid - Candidate ID (0 for RTP, 1 for RTCP)
+ * @param resolved_addr - Output buffer for resolved IP address
+ * @param resolved_addr_size - Size of resolved_addr buffer
+ * @return SWITCH_TRUE if candidate is valid, SWITCH_FALSE if should be skipped
+ */
+SWITCH_DECLARE(switch_bool_t) switch_core_media_validate_ice_candidate_address(switch_media_handle_t *smh,
+																				const char *cand_addr,
+																				switch_bool_t ignore_ice_mdns,
+																				switch_bool_t ice_resolve,
+																				const char *media_type_str,
+																				int cid,
+																				char *resolved_addr,
+																				size_t resolved_addr_size);
+																				
 SWITCH_DECLARE(void) switch_core_media_trickle_register(switch_core_session_t *session, const char *mid, int mline_index);
 
 SWITCH_DECLARE(switch_status_t) switch_core_media_trickle_add_remote_candidate(switch_core_session_t *session, int mline_index, const char *mid, const char *cand_line);
@@ -496,6 +519,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_trickle_ingest_sdpfrag(switch_
 SWITCH_DECLARE(void) switch_core_media_trickle_recheck_all(switch_core_session_t *session, void *sdp_session, switch_sdp_type_t sdp_type);
 SWITCH_DECLARE(switch_status_t) switch_core_media_trickle_remote_candidate_and_check(switch_core_session_t *session, switch_media_handle_t *smh, void *sdp_session, switch_sdp_type_t sdp_type, const char *mid, int mline_index, const char *cand_line, int end_of_candidates);
 SWITCH_DECLARE(switch_status_t) switch_core_media_trickle_remote_candidate_and_recheck(switch_core_session_t *session, switch_media_handle_t *smh, void *sdp_session, switch_sdp_type_t sdp_type, const char *mid, int mline_index, const char *cand_line, int end_of_candidates);
+SWITCH_DECLARE(switch_status_t) switch_core_media_get_chosen_ice_candidate(switch_core_session_t *session, switch_media_type_t type, char **out_addr, switch_port_t *out_port);
 
 SWITCH_END_EXTERN_C
 #endif
