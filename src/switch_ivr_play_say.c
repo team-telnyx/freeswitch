@@ -3232,7 +3232,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_speak_text(switch_core_session_t *ses
 		}
 	}
 
-	switch_core_session_reset(session, SWITCH_FALSE, SWITCH_TRUE);
+	switch_core_session_reset(session, SWITCH_FALSE, SWITCH_FALSE);
 	arg_recursion_check_stop(args);
 
 	return status;
