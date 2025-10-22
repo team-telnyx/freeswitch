@@ -854,6 +854,7 @@ struct sofia_profile {
 	sofia_auth_algs_t auth_algs[SOFIA_MAX_REG_ALGS];
 	uint8_t disable_recovery_record_route_fixup;
 	switch_call_cause_t telnyx_sip_proxy_timeout_hangup_cause;
+	char *redirect_no_lookup_domains;
 };
 
 

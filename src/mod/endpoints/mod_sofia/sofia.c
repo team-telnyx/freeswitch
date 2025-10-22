@@ -6476,6 +6476,8 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						} else {
 							profile->telnyx_sip_proxy_timeout_hangup_cause = 0;
 						}
+					} else if (!strcasecmp(var, "redirect-no-lookup-domains")) {
+						profile->redirect_no_lookup_domains = switch_core_strdup(profile->pool, val);
 					} else if (!strcasecmp(var, "default-ringback")) {
 						profile->default_ringback = switch_core_strdup(profile->pool, val);
 					} else if (!strcasecmp(var, "ringback-on-mismatch-media")) {
@@ -6996,6 +6998,29 @@ static void sofia_handle_sip_r_options(switch_core_session_t *session, int statu
 	}
 }
 
+/* Check if we should skip directory lookup for 302 redirects */
+static switch_bool_t sofia_should_skip_directory_lookup(sofia_profile_t *profile, int status, const char *host)
+{
+	char domains[1024], *list[64];
+	int i, n;
+	
+	if (status != 302 || zstr(profile->redirect_no_lookup_domains) || zstr(host))
+		return SWITCH_FALSE;
+	
+	switch_copy_string(domains, profile->redirect_no_lookup_domains, sizeof(domains));
+	n = switch_separate_string(domains, ',', list, 64);
+	
+	for (i = 0; i < n; i++) {
+		while (*list[i] == ' ' || *list[i] == '\t') list[i]++;
+		if (!zstr(list[i]) && !strcasecmp(host, list[i])) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, 
+				"Skipping directory lookup for 302 redirect to %s\n", host);
+			return SWITCH_TRUE;
+		}
+	}
+	return SWITCH_FALSE;
+}
+
 static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status,
 									  char const *phrase,
 									  nua_t *nua, sofia_profile_t *profile, nua_handle_t *nh, sofia_private_t *sofia_private, sip_t const *sip,
@@ -7434,9 +7459,8 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 						switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
 					} else if ((!strcmp(profile->sipip, p_contact->m_url->url_host))
 							   || (profile->extsipip && !strcmp(profile->extsipip, p_contact->m_url->url_host))
-							   || (status != 302 && switch_xml_locate_domain(p_contact->m_url->url_host, NULL, &root, &domain) == SWITCH_STATUS_SUCCESS)) {
-						/* For 302: Skip directory lookup to prevent HTTP requests to directory
-						 * For 300/301/305: Keep original behavior with directory lookup */
+							   || (!sofia_should_skip_directory_lookup(profile, status, p_contact->m_url->url_host)
+								   && (switch_xml_locate_domain(p_contact->m_url->url_host, NULL, &root, &domain) == SWITCH_STATUS_SUCCESS))) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Redirect: Transfering to %s\n",
 										  p_contact->m_url->url_user);
 
@@ -7446,14 +7470,10 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 
 						switch_ivr_session_transfer(a_session, p_contact->m_url->url_user, NULL, NULL);
 						switch_channel_hangup(channel, SWITCH_CAUSE_REDIRECTION_TO_NEW_DESTINATION);
-						if (status != 302 && root) {
+						if (root) {
 							switch_xml_free(root);
 						}
 					} else {
-						/* External redirect: 
-						 * - For 302: Always treated as external (no directory lookup)
-						 * - For 300/301/305: External only if not found in directory
-						 */
 						invite_contact = sofia_glue_strip_uri(full_contact);
 						tech_pvt->redirected = switch_core_session_strdup(session, invite_contact);
 						free(invite_contact);
