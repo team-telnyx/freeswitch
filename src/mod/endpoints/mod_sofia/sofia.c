@@ -6468,6 +6468,8 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						} else {
 							sofia_clear_pflag(profile, PFLAG_DISABLE_AUTH_CHALLENGE_RESPONSE);
 						}
+					} else if (!strcasecmp(var, "redirect-no-lookup-domains")) {
+						profile->redirect_no_lookup_domains = switch_core_strdup(profile->pool, val);
 					} else if (!strcasecmp(var, "telnyx-sip-proxy-timeout-hangup-cause") && !zstr(val)) {
 						switch_call_cause_t timeout_cause;
 						timeout_cause = switch_channel_str2cause(val);
@@ -6476,8 +6478,6 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						} else {
 							profile->telnyx_sip_proxy_timeout_hangup_cause = 0;
 						}
-					} else if (!strcasecmp(var, "redirect-no-lookup-domains")) {
-						profile->redirect_no_lookup_domains = switch_core_strdup(profile->pool, val);
 					} else if (!strcasecmp(var, "default-ringback")) {
 						profile->default_ringback = switch_core_strdup(profile->pool, val);
 					} else if (!strcasecmp(var, "ringback-on-mismatch-media")) {
@@ -7004,8 +7004,8 @@ static switch_bool_t sofia_should_skip_directory_lookup(sofia_profile_t *profile
 	char domains[1024], *list[64];
 	int i, n;
 	
-	/* Handle all redirect status codes: 300, 302 */
-	if ((status != 300 && status != 302) 
+	/* Handle all redirect status codes: 300, 301, 302, 305 */
+	if ((status != 300 && status != 301 && status != 302 && status != 305) 
 		|| zstr(profile->redirect_no_lookup_domains) || zstr(host))
 		return SWITCH_FALSE;
 	
