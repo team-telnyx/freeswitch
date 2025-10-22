@@ -6998,22 +6998,25 @@ static void sofia_handle_sip_r_options(switch_core_session_t *session, int statu
 	}
 }
 
-/* Check if we should skip directory lookup for 302 redirects */
+/* Check if we should skip directory lookup for 3xx redirects */
 static switch_bool_t sofia_should_skip_directory_lookup(sofia_profile_t *profile, int status, const char *host)
 {
 	char domains[1024], *list[64];
-	int i;
+	int i, n;
 	
-	if (status != 302 || zstr(profile->redirect_no_lookup_domains) || zstr(host))
+	/* Handle all redirect status codes: 300, 302 */
+	if ((status != 300 && status != 302) 
+		|| zstr(profile->redirect_no_lookup_domains) || zstr(host))
 		return SWITCH_FALSE;
 	
 	switch_copy_string(domains, profile->redirect_no_lookup_domains, sizeof(domains));
+	n = switch_separate_string(domains, ',', list, 64);
 	
-	for (i = 0; i < switch_separate_string(domains, ',', list, 64); i++) {
+	for (i = 0; i < n; ++i) {
 		list[i] = switch_strip_spaces(list[i], SWITCH_FALSE);
 		if (!zstr(list[i]) && !strcasecmp(host, list[i])) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, 
-				"Skipping directory lookup for 302 redirect to %s\n", host);
+				"Skipping directory lookup for %d redirect to %s\n", status, host);
 			return SWITCH_TRUE;
 		}
 	}
