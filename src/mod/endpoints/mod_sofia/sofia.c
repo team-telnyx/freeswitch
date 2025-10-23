@@ -6474,11 +6474,11 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						/* Pre-parse domains at config time for better runtime performance */
 						if (!zstr(val)) {
 							char *domains = switch_core_strdup(profile->pool, val);
-							char *list[64];
-							char *valid_domains[64];
+							char *list[SOFIA_MAX_REDIRECT_NO_LOOKUP_DOMAINS];
+							char *valid_domains[SOFIA_MAX_REDIRECT_NO_LOOKUP_DOMAINS];
 							int i, n, valid_count = 0;
 							
-							n = switch_separate_string(domains, ',', list, 64);
+							n = switch_separate_string(domains, ',', list, SOFIA_MAX_REDIRECT_NO_LOOKUP_DOMAINS);
 							
 							/* First pass: count valid domains after trimming */
 							for (i = 0; i < n; ++i) {
@@ -7506,9 +7506,7 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 
 						switch_ivr_session_transfer(a_session, p_contact->m_url->url_user, NULL, NULL);
 						switch_channel_hangup(channel, SWITCH_CAUSE_REDIRECTION_TO_NEW_DESTINATION);
-						if (root) {
-							switch_xml_free(root);
-						}
+						switch_xml_free(root);
 					} else {
 						invite_contact = sofia_glue_strip_uri(full_contact);
 						tech_pvt->redirected = switch_core_session_strdup(session, invite_contact);

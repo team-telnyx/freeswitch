@@ -51,6 +51,7 @@
 #include <switch.h>
 #define SOFIA_NAT_SESSION_TIMEOUT 90
 #define SOFIA_MAX_ACL 100
+#define SOFIA_MAX_REDIRECT_NO_LOOKUP_DOMAINS 64
 #ifdef _MSC_VER
 #define HAVE_FUNCTION 1
 #else
