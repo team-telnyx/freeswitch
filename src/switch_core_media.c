@@ -2718,12 +2718,13 @@ static switch_bool_t is_codec_match(const char *lcodec, const char *rcodec)
 	return SWITCH_FALSE;
 }
 
-static void merge_codec_string(switch_core_session_t *session, const char *preferred_codecs, const char *codecs, bool by_sampling_rate, char **codec_lists)
+static void merge_codec_string(switch_core_session_t *session, const char *preferred_codecs, const char *codecs, bool order_by_rate, char **codec_lists)
 {
 	char *tmp_prefer_codecs[SWITCH_MAX_CODECS];
 	char *tmp_codecs[SWITCH_MAX_CODECS];
 	int pref_codecs_count = 0, codecs_count = 0, i = 0, j = 0, k = 0, l = 0;
 	switch_stream_handle_t stream = { 0 };
+	char (*fmtp)[MAX_FMTP_LEN] = NULL;
 
 	if (zstr(codecs) || zstr(preferred_codecs) || !codec_lists) {
 		return;
@@ -2752,12 +2753,13 @@ static void merge_codec_string(switch_core_session_t *session, const char *prefe
 		}
 	}
 
-	if (by_sampling_rate && pref_codecs_count > 0 && codecs_count > 0) {
-		char fmtp[SWITCH_MAX_CODECS][MAX_FMTP_LEN];
+	if (order_by_rate && pref_codecs_count > 0 && codecs_count > 0) {
 		const switch_codec_implementation_t *priority_codec_array[1];
 		const switch_codec_implementation_t *codec_array[SWITCH_MAX_CODECS];
 		int codec_array_count = 0;
 		int closest_rate_index = -1;
+
+		switch_zmalloc(fmtp, SWITCH_MAX_CODECS * MAX_FMTP_LEN);
 
 		if (switch_loadable_module_get_codecs_sorted(priority_codec_array, fmtp, 1, tmp_prefer_codecs, 1) <= 0) {
 			goto end;
@@ -2772,10 +2774,9 @@ static void merge_codec_string(switch_core_session_t *session, const char *prefe
 			goto end;
 		}
 
-		// TODO
-		// If the codec list contain unsupported or invalid codec, 
-		// we will need to locate it from the tmp_codecs and rewrite it.
-		// For now, we will just return the current codec order.
+		/* If the codec list contain unsupported or invalid codec,
+		 * we will need to locate it from the tmp_codecs and rewrite it.
+		 * For now, we will just return the current codec order. */
 		if (codec_array_count != codecs_count) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Found invalid/unsupported codec: %s\n", codecs);
 			goto end;
@@ -2817,6 +2818,7 @@ static void merge_codec_string(switch_core_session_t *session, const char *prefe
 	}
 
 end:
+	switch_safe_free(fmtp);
 
 	if (k > 0) {
 		SWITCH_STANDARD_STREAM(stream);
@@ -16141,6 +16143,7 @@ SWITCH_DECLARE (void) switch_core_media_recover_session(switch_core_session_t *s
 	// Restore crypto keys before SDP generation so they are included in the SDP
 	switch_core_session_get_recovery_crypto_key(session, SWITCH_MEDIA_TYPE_AUDIO);
 	switch_core_session_get_recovery_crypto_key(session, SWITCH_MEDIA_TYPE_VIDEO);
+	switch_core_session_get_recovery_crypto_key(session, SWITCH_MEDIA_TYPE_TEXT);
 
 	switch_core_media_gen_local_sdp(session, SDP_OFFER, NULL, 0, NULL, 1);
 	switch_core_media_set_video_codec(session, 1);

@@ -2654,33 +2654,17 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 			goto end;
 		}
 
-		if (tread_impl.decoded_bytes_per_packet < read_impl.decoded_bytes_per_packet) {
-			if (switch_core_codec_init(&codec,
-									   "L16",
-									   NULL,
-									   NULL,
-									   read_impl.actual_samples_per_second,
-									   read_impl.microseconds_per_packet / 1000,
-									   read_impl.number_of_channels,
-									   SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
-									   NULL, switch_core_session_get_pool(session)) != SWITCH_STATUS_SUCCESS) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Cannot init codec\n");
-				goto end;
-			}
-		} else {
-			if (switch_core_codec_init(&codec,
+		if (switch_core_codec_init(&codec,
 								   "L16",
 								   NULL,
 								   NULL,
-								   tread_impl.actual_samples_per_second,
-								   tread_impl.microseconds_per_packet / 1000,
-								   tread_impl.number_of_channels,
+								   read_impl.actual_samples_per_second,
+								   read_impl.microseconds_per_packet / 1000,
+								   read_impl.number_of_channels,
 								   SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
 								   NULL, switch_core_session_get_pool(session)) != SWITCH_STATUS_SUCCESS) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Cannot init codec\n");
 			goto end;
-			}
-			buffered = 0;
 		}
 
 		ep->read_impl = read_impl;
@@ -2693,14 +2677,14 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 							  "Eavesdrop: Creating resampler %dHz->%dHz for sample rate conversion, %d channels\n",
 							  tread_impl.actual_samples_per_second, read_impl.actual_samples_per_second,
-							  tread_impl.number_of_channels);
+							  read_impl.number_of_channels);
 
 			if (switch_resample_create(&ep->resampler,
 									   tread_impl.actual_samples_per_second,
 									   read_impl.actual_samples_per_second,
-									   tread_impl.decoded_bytes_per_packet,
+									   read_impl.decoded_bytes_per_packet,
 									   SWITCH_RESAMPLE_QUALITY,
-									   tread_impl.number_of_channels) != SWITCH_STATUS_SUCCESS) {
+									   read_impl.number_of_channels) != SWITCH_STATUS_SUCCESS) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
 								  "Eavesdrop: Unable to create resampler\n");
 				goto end;
@@ -2717,17 +2701,13 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 			if (switch_resample_create(&ep->reverse_resampler,
 									   read_impl.actual_samples_per_second,
 									   tread_impl.actual_samples_per_second,
-									   read_impl.decoded_bytes_per_packet,
+									   tread_impl.decoded_bytes_per_packet,
 									   SWITCH_RESAMPLE_QUALITY,
 									   read_impl.number_of_channels) != SWITCH_STATUS_SUCCESS) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
 								  "Eavesdrop: Unable to create reverse resampler\n");
 				goto end;
 			}
-
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-							  "Eavesdrop: Reverse resampler created - factor=%f, rfactor=%f\n",
-							  ep->reverse_resampler->factor, ep->reverse_resampler->rfactor);
 		}
 
 		codec_initialized = 1;
