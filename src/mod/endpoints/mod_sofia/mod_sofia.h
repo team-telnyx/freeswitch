@@ -855,6 +855,8 @@ struct sofia_profile {
 	uint8_t disable_recovery_record_route_fixup;
 	switch_call_cause_t telnyx_sip_proxy_timeout_hangup_cause;
 	char *redirect_no_lookup_domains;
+	char **redirect_no_lookup_domains_list;
+	int redirect_no_lookup_domains_count;
 };
 
 
