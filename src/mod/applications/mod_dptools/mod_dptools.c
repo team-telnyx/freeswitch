@@ -2308,71 +2308,55 @@ SWITCH_STANDARD_APP(stop_dtmf_session_function)
 SWITCH_STANDARD_APP(dtmf_session_generate_function)
 {
 	switch_bool_t do_read = SWITCH_TRUE;
-	switch_bool_t do_ringback = SWITCH_TRUE;  /* DEFAULT: ringback is ON */
 	switch_channel_t *channel = switch_core_session_get_channel(session);
-	char *mydata = NULL;
-	char *argv[4] = { 0 };
-	int argc = 0;
-	int i;
-
-	if (!zstr(data)) {
-		mydata = switch_core_session_strdup(session, data);
-		argc = switch_separate_string(mydata, ' ', argv, (sizeof(argv) / sizeof(argv[0])));
-		
-		for (i = 0; i < argc; ++i) {
-			if (!strcasecmp(argv[i], "write")) {
-				do_read = SWITCH_FALSE;
-			} else if (!strcasecmp(argv[i], "no_ringback") || !strcasecmp(argv[i], "noringback")) {
-				/* Allow disabling ringback for backward compatibility if needed */
-				do_ringback = SWITCH_FALSE;
-			}
-		}
+	
+	/* Check for write parameter to control DTMF direction */
+	if (!zstr(data) && !strcasecmp(data, "write")) {
+		do_read = SWITCH_FALSE;
 	}
 	
 	/* Start DTMF generation */
 	switch_ivr_inband_dtmf_generate_session(session, do_read);
 	
-	/* Start ringback tone by default (unless explicitly disabled) */
-	if (do_ringback) {
-		/* Skip ringback if channel is already answered */
-		if (switch_channel_test_flag(channel, CF_ANSWERED)) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, 
-							  "Channel already answered, skipping ringback generation\n");
-		} else {
-			const char *ringback_tone = NULL;
-			const char *uuid = switch_core_session_get_uuid(session);
-			const char *existing_api_on_answer = NULL;
-			
-			/* Check for custom ringback tone in channel variable, otherwise use US ring */
-			ringback_tone = switch_channel_get_variable(channel, "ringback");
-			if (zstr(ringback_tone)) {
-				ringback_tone = "tone_stream://%(2000,4000,440,480);loops=-1";
-			}
-			
-			/* Pre-answer the channel if not already in early media */
-			if (!switch_channel_test_flag(channel, CF_EARLY_MEDIA)) {
-				switch_channel_pre_answer(channel);
-			}
+	/* Always start ringback tone (this is the whole point!) */
+	/* Skip ringback if channel is already answered */
+	if (switch_channel_test_flag(channel, CF_ANSWERED)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, 
+						  "Channel already answered, skipping ringback generation\n");
+	} else {
+		const char *ringback_tone = NULL;
+		const char *uuid = switch_core_session_get_uuid(session);
+		const char *existing_api_on_answer = NULL;
 		
-			/* Start broadcasting ringback tone to A-leg */
-			switch_ivr_broadcast(uuid, ringback_tone, SMF_ECHO_ALEG | SMF_LOOP);
-			
-			/* Set up API command to stop ringback on answer */
-			/* Note: api_on_answer only executes one command, so we check if one exists first */
-			existing_api_on_answer = switch_channel_get_variable(channel, "api_on_answer");
-			if (zstr(existing_api_on_answer)) {
-				switch_channel_set_variable_printf(channel, "api_on_answer", "uuid_break %s all", uuid);
-			} else {
-				/* If there's already an api_on_answer, log a warning but don't override it */
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, 
-								  "api_on_answer already set to '%s', not overriding for ringback. "
-								  "Ringback may not stop automatically on answer.\n", existing_api_on_answer);
-			}
-			
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, 
-							  "Started DTMF generation with ringback on channel %s\n", 
-							  switch_channel_get_name(channel));
+		/* Check for custom ringback tone in channel variable, otherwise use US ring */
+		ringback_tone = switch_channel_get_variable(channel, "ringback");
+		if (zstr(ringback_tone)) {
+			ringback_tone = "tone_stream://%(2000,4000,440,480);loops=-1";
 		}
+		
+		/* Pre-answer the channel if not already in early media */
+		if (!switch_channel_test_flag(channel, CF_EARLY_MEDIA)) {
+			switch_channel_pre_answer(channel);
+		}
+		
+		/* Start broadcasting ringback tone to A-leg */
+		switch_ivr_broadcast(uuid, ringback_tone, SMF_ECHO_ALEG | SMF_LOOP);
+		
+		/* Set up API command to stop ringback on answer */
+		/* Note: api_on_answer only executes one command, so we check if one exists first */
+		existing_api_on_answer = switch_channel_get_variable(channel, "api_on_answer");
+		if (zstr(existing_api_on_answer)) {
+			switch_channel_set_variable_printf(channel, "api_on_answer", "uuid_break %s all", uuid);
+		} else {
+			/* If there's already an api_on_answer, log a warning but don't override it */
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, 
+							  "api_on_answer already set to '%s', not overriding for ringback. "
+							  "Ringback may not stop automatically on answer.\n", existing_api_on_answer);
+		}
+		
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, 
+						  "Started DTMF generation with ringback on channel %s\n", 
+						  switch_channel_get_name(channel));
 	}
 }
 
@@ -6844,7 +6828,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_dptools_load)
 	SWITCH_ADD_APP(app_interface, "start_dtmf", "Detect dtmf", "Detect inband dtmf on the session", dtmf_session_function, "", SAF_MEDIA_TAP);
 	SWITCH_ADD_APP(app_interface, "stop_dtmf_generate", "stop inband dtmf generation", "Stop generating inband dtmf.",
 				   stop_dtmf_session_generate_function, "[write]", SAF_NONE);
-	SWITCH_ADD_APP(app_interface, "start_dtmf_generate", "Generate dtmf with ringback", "Generate inband dtmf on the session with automatic ringback", dtmf_session_generate_function, "[write] [no_ringback]",
+	SWITCH_ADD_APP(app_interface, "start_dtmf_generate", "Generate dtmf with automatic ringback", "Generate inband dtmf on the session with automatic ringback tone", dtmf_session_generate_function, "[write]",
 				   SAF_NONE);
 	SWITCH_ADD_APP(app_interface, "stop_tone_detect", "stop detecting tones", "Stop detecting tones", stop_fax_detect_session_function, "", SAF_NONE);
 	SWITCH_ADD_APP(app_interface, "fax_detect", "Detect faxes", "Detect fax send tone", fax_detect_session_function, "", SAF_MEDIA_TAP);
