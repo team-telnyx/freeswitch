@@ -6269,7 +6269,9 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_broadcast(const char *uuid, const cha
 				if ((flags & SMF_LOOP)) {
 					switch_event_add_header(event, SWITCH_STACK_BOTTOM, "loops", "%d", -1);
 				}
-				if ((flags & SMF_HOLD_BLEG)) {
+
+				/* Don't hold bleg if the application doesn't require media. */
+				if ((flags & SMF_HOLD_BLEG) && !(app_flags & SAF_SUPPORT_NOMEDIA)) {
 					switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "hold-bleg", "true");
 				}
 
