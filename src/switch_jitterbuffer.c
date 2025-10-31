@@ -265,6 +265,7 @@ static inline switch_jb_node_t *new_node(switch_jb_t *jb)
 			switch_mutex_unlock(jb->list_mutex);
 			switch_mutex_unlock(jb->mutex);
 			switch_jb_reset(jb);
+			switch_mutex_lock(jb->mutex);
 			return NULL;
 		}
 		
