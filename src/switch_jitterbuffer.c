@@ -262,8 +262,9 @@ static inline switch_jb_node_t *new_node(switch_jb_t *jb)
 		if (jb->allocated_nodes > jb->max_frame_len * mult) {
 			jb_debug(jb, 2, "ALLOCATED FRAMES TOO HIGH! %d\n", jb->allocated_nodes);
 			jb->jitter.stats.reset_too_big++;
-			switch_jb_reset(jb);
 			switch_mutex_unlock(jb->list_mutex);
+			switch_mutex_unlock(jb->mutex);
+			switch_jb_reset(jb);
 			return NULL;
 		}
 		
