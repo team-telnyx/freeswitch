@@ -451,6 +451,7 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 	const char *banner_file = NULL;
 	int played_banner = 0, banner_counter = 0;
 	int pass_val = 0, last_pass_val = 0;
+	int sent_cng = 0;
 
 #ifdef SWITCH_VIDEO_IN_THREADS
 	struct vid_helper vh = { 0 };
@@ -592,6 +593,11 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 		if (max_continuous_silence_ms > 0 && max_continuous_silence_ms < 5000) {
 			max_continuous_silence_ms = 5000; 
 		}
+	if (switch_channel_var_true(chan_a, "bridge_forward_cng_once")) {
+#if DEBUG_RTP
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_NOTICE, "Audio bridge thread: accept_cng %p\n", (void*)session_a);
+#endif
+		switch_channel_set_flag(chan_b, CF_FORWARD_CNG_ONCE);
 	}
 
 	if ((silence_var = switch_channel_get_variable(chan_a, "bridge_generate_comfort_noise"))) {
@@ -1116,6 +1122,12 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_NOTICE, "Audio bridge thread: skip write frame, reason: CF_ACCEPT_CNG %p %p -> %p\n", (void*)session_b, (void*)session_a, (void*)session_b);
 #endif
 					continue;
+				} else if (switch_channel_test_flag(chan_b, CF_FORWARD_CNG_ONCE)) {
+					if (!sent_cng) {
+						sent_cng = 1;
+					} else {
+						continue;
+					}
 				}
 			} else {
 				if (silence_threshold && is_silence_frame(read_frame, silence_threshold, &read_impl)) {
@@ -1127,6 +1139,7 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 				} else {
 					total_silence_frame_ms = 0;
 				}
+				sent_cng = 0;
 			}
 
 			if (switch_channel_test_flag(chan_a, CF_BRIDGE_NOWRITE)) {
