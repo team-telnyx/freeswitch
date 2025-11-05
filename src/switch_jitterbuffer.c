@@ -263,6 +263,10 @@ static inline switch_jb_node_t *new_node(switch_jb_t *jb)
 			jb_debug(jb, 2, "ALLOCATED FRAMES TOO HIGH! %d\n", jb->allocated_nodes);
 			jb->jitter.stats.reset_too_big++;
 			switch_mutex_unlock(jb->list_mutex);
+			/* Unlock jb->mutex before calling switch_jb_reset to avoid deadlock.
+			 * switch_jb_reset() needs to acquire the channel mutex (via switch_channel_set_variable_printf)
+			 * and then locks jb->mutex internally. If we hold jb->mutex here, we could deadlock with
+			 * another thread that holds the channel mutex and is waiting for jb->mutex. */
 			switch_mutex_unlock(jb->mutex);
 			switch_jb_reset(jb);
 			switch_mutex_lock(jb->mutex);
