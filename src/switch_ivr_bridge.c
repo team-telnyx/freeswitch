@@ -595,6 +595,8 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 		if (max_continuous_silence_ms > 0 && max_continuous_silence_ms < 5000) {
 			max_continuous_silence_ms = 5000; 
 		}
+	}
+	
 	if (switch_channel_var_true(chan_a, "bridge_forward_cng_once")) {
 #if DEBUG_RTP
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_NOTICE, "Audio bridge thread: forward_cng %p\n", (void*)session_a);
