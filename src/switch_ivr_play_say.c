@@ -3232,6 +3232,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_speak_text(switch_core_session_t *ses
 		}
 	}
 
+	/* Reset session buffers and resamplers without resetting read codec.
+	 * This preserves read codec configuration for subsequent operations, i.e. recording. */
 	switch_core_session_reset(session, SWITCH_FALSE, SWITCH_FALSE);
 	arg_recursion_check_stop(args);
 
