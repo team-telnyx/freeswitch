@@ -961,15 +961,59 @@ static http_profile_t *url_cache_http_profile_find(url_cache_t *cache, const cha
 }
 
 /**
- * Find a profile by domain name
+ * Find a profile by domain name or IP/CIDR
  */
 static http_profile_t *url_cache_http_profile_find_by_fqdn(url_cache_t *cache, const char *url)
 {
+	http_profile_t *profile = NULL;
+
 	if (cache && !zstr(url)) {
 		char fqdn[DOMAIN_BUF_SIZE];
+		uint32_t ip = 0;
+		ip_t ip6;
+		switch_bool_t is_ipv4 = SWITCH_FALSE, is_ipv6 = SWITCH_FALSE;
+
 		parse_domain(url, fqdn, DOMAIN_BUF_SIZE);
-		if (!zstr_buf(fqdn)) {
-			return (http_profile_t *)switch_core_hash_find(cache->fqdn_profiles, fqdn);
+		if (zstr_buf(fqdn)) {
+			return NULL;
+		}
+
+		profile = (http_profile_t *)switch_core_hash_find(cache->fqdn_profiles, fqdn);
+		if (profile) {
+			return profile;
+		}
+
+		if (switch_inet_pton(AF_INET, fqdn, &ip) == 1) {
+			is_ipv4 = SWITCH_TRUE;
+		} else if (switch_inet_pton(AF_INET6, fqdn, &ip6) == 1) {
+			is_ipv6 = SWITCH_TRUE;
+		}
+
+		if (is_ipv4 || is_ipv6) {
+			switch_hash_index_t *hi;
+			for (hi = switch_core_hash_first(cache->profiles); hi; hi = switch_core_hash_next(&hi)) {
+				void *val;
+				http_profile_t *check_profile;
+
+				switch_core_hash_this(hi, NULL, NULL, &val);
+				check_profile = (http_profile_t *)val;
+
+				if (check_profile && check_profile->ip_acl) {
+					switch_bool_t match = SWITCH_FALSE;
+
+					if (is_ipv4) {
+						match = switch_network_list_validate_ip(check_profile->ip_acl, ip);
+					} else if (is_ipv6) {
+						match = switch_network_list_validate_ip6_token(check_profile->ip_acl, ip6, NULL);
+					}
+
+					if (match) {
+						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
+							"URL host '%s' matched profile '%s' via IP ACL\n", fqdn, check_profile->name);
+						return check_profile;
+					}
+				}
+			}
 		}
 	}
 	return NULL;
@@ -1917,6 +1961,7 @@ static switch_status_t do_config(url_cache_t *cache)
 				profile_obj->header_names = NULL;
 				profile_obj->header_values = NULL;
 				profile_obj->bind_ip = NULL;
+				profile_obj->ip_acl = NULL;
 				profile_obj->append_headers_ptr = NULL;
 				profile_obj->finalise_put_ptr = NULL;
 
@@ -1946,14 +1991,46 @@ static switch_status_t do_config(url_cache_t *cache)
 
 				domains = switch_xml_child(profile, "domains");
 				if (domains) {
-					switch_xml_t domain;
+					switch_xml_t domain, cidr;
+					switch_bool_t has_cidr = SWITCH_FALSE;
+
+					if (switch_xml_child(domains, "cidr")) {
+						has_cidr = SWITCH_TRUE;
+					}
+
+					if (has_cidr) {
+						char acl_name[256];
+						snprintf(acl_name, sizeof(acl_name), "http_cache_profile_%s", name);
+						if (switch_network_list_create(&profile_obj->ip_acl, acl_name, SWITCH_FALSE, cache->pool) == SWITCH_STATUS_SUCCESS) {
+							switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Created IP ACL for profile \"%s\"\n", name);
+						}
+					}
+
 					for (domain = switch_xml_child(domains, "domain"); domain; domain = domain->next) {
 						const char *fqdn = switch_xml_attr_soft(domain, "name");
 						if (!zstr(fqdn)) {
-							switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Adding profile \"%s\" domain \"%s\" to cache\n", name, fqdn);
+							switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+								"Adding profile \"%s\" domain \"%s\" for exact matching\n", name, fqdn);
 							switch_core_hash_insert(cache->fqdn_profiles, fqdn, profile_obj);
 						} else {
 							switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "HTTP profile domain missing name!\n");
+						}
+					}
+
+					for (cidr = switch_xml_child(domains, "cidr"); cidr; cidr = cidr->next) {
+						const char *cidr_str = switch_xml_attr_soft(cidr, "name");
+						if (!zstr(cidr_str)) {
+							if (profile_obj->ip_acl) {
+								if (switch_network_list_add_cidr(profile_obj->ip_acl, cidr_str, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
+									switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+										"Added CIDR \"%s\" to profile \"%s\" ACL\n", cidr_str, name);
+								} else {
+									switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+										"Failed to add CIDR \"%s\" to profile \"%s\" ACL\n", cidr_str, name);
+								}
+							}
+						} else {
+							switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "HTTP profile CIDR missing name!\n");
 						}
 					}
 				}
