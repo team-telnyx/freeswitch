@@ -418,6 +418,11 @@ static switch_status_t http_put(url_cache_t *cache, http_profile_t *profile, swi
 		switch_curl_easy_setopt(curl_handle, CURLOPT_FOLLOWLOCATION, 1);
 		switch_curl_easy_setopt(curl_handle, CURLOPT_MAXREDIRS, 10);
 		switch_curl_easy_setopt(curl_handle, CURLOPT_USERAGENT, "freeswitch-http-cache/1.0");
+		if (profile && !zstr(profile->bind_ip)) {
+			switch_curl_easy_setopt(curl_handle, CURLOPT_INTERFACE, profile->bind_ip);
+		} else if (!zstr(cache->bind_ip)) {
+			switch_curl_easy_setopt(curl_handle, CURLOPT_INTERFACE, cache->bind_ip);
+		}
 		if (cache->connect_timeout > 0) {
 			switch_curl_easy_setopt(curl_handle, CURLOPT_CONNECTTIMEOUT, cache->connect_timeout);
 		}
@@ -1226,7 +1231,10 @@ static switch_status_t http_get(url_cache_t *cache, http_profile_t *profile, cac
 		switch_curl_easy_setopt(curl_handle, CURLOPT_WRITEHEADER, (void *) url);
 		switch_curl_easy_setopt(curl_handle, CURLOPT_USERAGENT, "freeswitch-http-cache/1.0");
 		switch_curl_easy_setopt(curl_handle, CURLOPT_ERRORBUFFER, errbuf);
-		if (!zstr(cache->bind_ip)) {
+		/* use profile bind_ip if available, otherwise use global cache bind_ip */
+		if (profile && !zstr(profile->bind_ip)) {
+			switch_curl_easy_setopt(curl_handle, CURLOPT_INTERFACE, profile->bind_ip);
+		} else if (!zstr(cache->bind_ip)) {
 			switch_curl_easy_setopt(curl_handle, CURLOPT_INTERFACE, cache->bind_ip);
 		}
 		if (cache->connect_timeout > 0) {
@@ -1742,9 +1750,21 @@ static switch_curl_slist_t *default_append_headers(http_profile_t *profile, swit
 static switch_status_t default_config_profile(switch_xml_t xml, http_profile_t *profile, switch_memory_pool_t *pool)
 {
 	int i, header_count = 0;
-	switch_xml_t header;
+	switch_xml_t header, param;
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Configuring default profile\n");
+
+	for (param = switch_xml_child(xml, "param"); param; param = param->next) {
+		char *var = (char *) switch_xml_attr_soft(param, "name");
+		char *val = (char *) switch_xml_attr_soft(param, "value");
+
+		if (!strcasecmp(var, "bind-ip")) {
+			profile->bind_ip = switch_core_strdup(pool, val);
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Profile bind-ip set to %s\n", val);
+		} else {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Unsupported param: %s\n", var);
+		}
+	}
 
 	for (header = switch_xml_child(xml, "header"); header; header = header->next) {
 		header_count++;
@@ -1896,6 +1916,7 @@ static switch_status_t do_config(url_cache_t *cache)
 				profile_obj->header_count = 0;
 				profile_obj->header_names = NULL;
 				profile_obj->header_values = NULL;
+				profile_obj->bind_ip = NULL;
 				profile_obj->append_headers_ptr = NULL;
 				profile_obj->finalise_put_ptr = NULL;
 

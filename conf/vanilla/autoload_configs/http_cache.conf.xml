@@ -17,5 +17,53 @@
     <!--param name="connect-timeout" value="300"/-->
     <!-- default is 300 seconds, override here -->
     <!--param name="download-timeout" value="300"/-->
+    <!-- global bind IP (optional) - can be overridden per profile -->
+    <!--param name="bind-ip" value="192.168.1.100"/-->
   </settings>
+
+  <profiles>
+    <!-- Example AWS S3 profile with bind-ip -->
+    <!--
+    <profile name="aws-s3-profile">
+      <aws-s3>
+        <access-key-id>AKIAIOSFODNN7EXAMPLE</access-key-id>
+        <secret-access-key>wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY</secret-access-key>
+        <region>us-east-1</region>
+        <base-domain>s3.amazonaws.com</base-domain>
+        <bind-ip>192.168.1.100</bind-ip>
+      </aws-s3>
+      <domains>
+        <domain name="s3.amazonaws.com"/>
+        <domain name="s3.us-east-1.amazonaws.com"/>
+      </domains>
+    </profile>
+    -->
+
+    <!-- Example Azure Blob profile with bind-ip -->
+    <!--
+    <profile name="azure-profile">
+      <azure-blob>
+        <secret-access-key>YOUR_BASE64_ENCODED_KEY</secret-access-key>
+        <base-domain>blob.core.windows.net</base-domain>
+        <bind-ip>192.168.1.101</bind-ip>
+      </azure-blob>
+      <domains>
+        <domain name="myaccount.blob.core.windows.net"/>
+      </domains>
+    </profile>
+    -->
+
+    <!-- Example default profile with bind-ip and custom headers -->
+    <!--
+    <profile name="custom-http">
+      <default>
+        <param name="bind-ip" value="192.168.1.102"/>
+        <header name="X-Custom-Header">CustomValue</header>
+      </default>
+      <domains>
+        <domain name="example.com"/>
+      </domains>
+    </profile>
+    -->
+  </profiles>
 </configuration>
