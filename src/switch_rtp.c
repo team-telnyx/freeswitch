@@ -4611,6 +4611,8 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_add_crypto_key(switch_rtp_t *rtp_sess
 	srtp_master_key_t		**mkis = NULL;
 	srtp_master_key_t		*mki = NULL;
 	int mki_idx = 0;
+	int prev_recv_mki = rtp_session->flags[SWITCH_RTP_FLAG_SECURE_RECV_MKI] ? 1 : 0;
+	int prev_send_mki = rtp_session->flags[SWITCH_RTP_FLAG_SECURE_SEND_MKI] ? 1 : 0;
 
 	keysalt_len = switch_core_media_crypto_keysalt_len(ssec->crypto_type);
 
@@ -4873,7 +4875,31 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_add_crypto_key(switch_rtp_t *rtp_sess
 		policy->ssrc.type = ssrc_any_inbound;
 
 		if (rtp_session->flags[SWITCH_RTP_FLAG_SECURE_RECV] && idx == 0 && rtp_session->recv_ctx[idx]) {
-			rtp_session->flags[SWITCH_RTP_FLAG_SECURE_RECV_RESET] = 1;
+			/* Check if crypto suite and key material have actually changed - if not, preserve SRTP session state (ROC, replay window) */
+			switch_rtp_crypto_key_t *prev_key = crypto_key->next;
+			int key_changed = 1;
+			int mki_changed = 0;
+			int new_mki_used = rtp_session->flags[SWITCH_RTP_FLAG_SECURE_RECV_MKI] ? 1 : 0;
+
+			if (prev_recv_mki != new_mki_used) {
+				mki_changed = 1;
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_INFO,
+								  "CRYPTO: RECV MKI usage changed (was=%d, now=%d) - resetting SRTP context\n",
+								  prev_recv_mki, new_mki_used);
+			}
+
+			if (!mki_changed && prev_key && prev_key->type == crypto_key->type &&
+			    memcmp(prev_key->keysalt, crypto_key->keysalt, keysalt_len) == 0) {
+				key_changed = 0;
+			}
+
+			if (key_changed || mki_changed) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_INFO,
+								  "CRYPTO: RECV key changed (tag=%u->%u, type=%d->%d, mki_changed=%d) - resetting SRTP context\n",
+								  prev_key ? prev_key->index : 0, index,
+								  prev_key ? prev_key->type : 0, crypto_key->type, mki_changed);
+				rtp_session->flags[SWITCH_RTP_FLAG_SECURE_RECV_RESET] = 1;
+			}
 		} else {
 			if ((stat = srtp_create(&rtp_session->recv_ctx[idx], policy)) || !rtp_session->recv_ctx[idx]) {
 				status = SWITCH_STATUS_FALSE;
@@ -4895,7 +4921,31 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_add_crypto_key(switch_rtp_t *rtp_sess
 		//policy->ssrc.value = rtp_session->ssrc;
 
 		if (rtp_session->flags[SWITCH_RTP_FLAG_SECURE_SEND] && idx == 0 && rtp_session->send_ctx[idx]) {
-			rtp_session->flags[SWITCH_RTP_FLAG_SECURE_SEND_RESET] = 1;
+			/* Check if crypto suite and key material have actually changed - if not, preserve SRTP session state */
+			switch_rtp_crypto_key_t *prev_key = crypto_key->next;
+			int key_changed = 1;
+			int mki_changed = 0;
+			int new_mki_used = rtp_session->flags[SWITCH_RTP_FLAG_SECURE_SEND_MKI] ? 1 : 0;
+
+			if (prev_send_mki != new_mki_used) {
+				mki_changed = 1;
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_INFO,
+								  "CRYPTO: SEND MKI usage changed (was=%d, now=%d) - resetting SRTP context\n",
+								  prev_send_mki, new_mki_used);
+			}
+
+			if (!mki_changed && prev_key && prev_key->type == crypto_key->type &&
+			    memcmp(prev_key->keysalt, crypto_key->keysalt, keysalt_len) == 0) {
+				key_changed = 0;
+			}
+
+			if (key_changed || mki_changed) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_INFO,
+								  "CRYPTO: SEND key changed (tag=%u->%u, type=%d->%d, mki_changed=%d) - resetting SRTP context\n",
+								  prev_key ? prev_key->index : 0, index,
+								  prev_key ? prev_key->type : 0, crypto_key->type, mki_changed);
+				rtp_session->flags[SWITCH_RTP_FLAG_SECURE_SEND_RESET] = 1;
+			}
 		} else {
 			if ((stat = srtp_create(&rtp_session->send_ctx[idx], policy)) || !rtp_session->send_ctx[idx]) {
 				status = SWITCH_STATUS_FALSE;
