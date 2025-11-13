@@ -969,6 +969,8 @@ static http_profile_t *url_cache_http_profile_find_by_fqdn(url_cache_t *cache, c
 
 	if (cache && !zstr(url)) {
 		char fqdn[DOMAIN_BUF_SIZE];
+		char host[DOMAIN_BUF_SIZE];
+		char *port;
 		uint32_t ip = 0;
 		ip_t ip6;
 		switch_bool_t is_ipv4 = SWITCH_FALSE, is_ipv6 = SWITCH_FALSE;
@@ -978,14 +980,39 @@ static http_profile_t *url_cache_http_profile_find_by_fqdn(url_cache_t *cache, c
 			return NULL;
 		}
 
+		/* First try exact domain name match (includes port) */
 		profile = (http_profile_t *)switch_core_hash_find(cache->fqdn_profiles, fqdn);
 		if (profile) {
 			return profile;
 		}
 
-		if (switch_inet_pton(AF_INET, fqdn, &ip) == 1) {
+		switch_copy_string(host, fqdn, DOMAIN_BUF_SIZE);
+		port = strchr(host, ':');
+		if (port) {
+			if (host[0] == '[') {
+				/* IPv6 with port - find closing bracket */
+				char *bracket = strchr(host, ']');
+				if (bracket && bracket[1] == ':') {
+					memmove(host, host + 1, bracket - host);
+					host[bracket - host - 1] = '\0';
+				}
+			} else {
+				/* IPv4 with port, or IPv6 without brackets */
+				int colon_count = 0;
+				char *p;
+				for (p = host; *p; p++) {
+					if (*p == ':') ++colon_count;
+				}
+				if (colon_count == 1) {
+					*port = '\0';
+				}
+			}
+		}
+
+		if (switch_inet_pton(AF_INET, host, &ip) == 1) {
 			is_ipv4 = SWITCH_TRUE;
-		} else if (switch_inet_pton(AF_INET6, fqdn, &ip6) == 1) {
+			ip = ntohl(ip);
+		} else if (switch_inet_pton(AF_INET6, host, &ip6) == 1) {
 			is_ipv6 = SWITCH_TRUE;
 		}
 
