@@ -1749,7 +1749,6 @@ static switch_status_t load_config(switch_memory_pool_t* pool)
 
 	/* Create default profile from global settings */
 	globals.default_profile = switch_core_alloc(globals.pool, sizeof(shout_profile_t));
-	memset(globals.default_profile, 0, sizeof(shout_profile_t));
 	switch_set_string(globals.default_profile->name, "default");
 	switch_set_string(globals.default_profile->decoder, globals.decoder);
 	globals.default_profile->bind_ip = globals.bind_ip;
@@ -1773,7 +1772,6 @@ static switch_status_t load_config(switch_memory_pool_t* pool)
 			}
 
 			profile = switch_core_alloc(globals.pool, sizeof(shout_profile_t));
-			memset(profile, 0, sizeof(shout_profile_t));
 			switch_set_string(profile->name, profile_name);
 
 			/* Copy default values from global settings */

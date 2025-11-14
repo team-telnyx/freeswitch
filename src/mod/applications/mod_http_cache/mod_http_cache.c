@@ -987,17 +987,39 @@ static http_profile_t *url_cache_http_profile_find_by_fqdn(url_cache_t *cache, c
 		}
 
 		switch_copy_string(host, fqdn, DOMAIN_BUF_SIZE);
-		port = strchr(host, ':');
-		if (port) {
-			if (host[0] == '[') {
-				/* IPv6 with port - find closing bracket */
-				char *bracket = strchr(host, ']');
-				if (bracket && bracket[1] == ':') {
-					memmove(host, host + 1, bracket - host);
-					host[bracket - host - 1] = '\0';
-				}
+
+		/* Handle IPv6 addresses with brackets */
+		if (host[0] == '[') {
+			char *bracket_close = strchr(host, ']');
+			if (!bracket_close) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+					"Malformed IPv6 address in URL '%s': opening bracket '[' without closing bracket ']'\n", fqdn);
+				return NULL;
+			}
+
+			if (bracket_close[1] == ':') {
+				memmove(host, host + 1, bracket_close - host - 1);
+				host[bracket_close - host - 1] = '\0';
+			} else if (bracket_close[1] == '\0') {
+				memmove(host, host + 1, bracket_close - host - 1);
+				host[bracket_close - host - 1] = '\0';
 			} else {
-				/* IPv4 with port, or IPv6 without brackets */
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+					"Malformed IPv6 address in URL '%s': invalid character '%c' after closing bracket ']'\n",
+					fqdn, bracket_close[1]);
+				return NULL;
+			}
+		} else {
+			/* IPv4 with port, or IPv6 without brackets */
+			char *bracket_close = strchr(host, ']');
+			if (bracket_close) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+					"Malformed IPv6 address in URL '%s': closing bracket ']' without opening bracket '['\n", fqdn);
+				return NULL;
+			}
+
+			port = strchr(host, ':');
+			if (port) {
 				int colon_count = 0;
 				char *p;
 				for (p = host; *p; p++) {
