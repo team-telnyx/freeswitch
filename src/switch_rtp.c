@@ -4891,6 +4891,9 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_add_crypto_key(switch_rtp_t *rtp_sess
 			if (!mki_changed && prev_key && prev_key->type == crypto_key->type &&
 			    memcmp(prev_key->keysalt, crypto_key->keysalt, keysalt_len) == 0) {
 				key_changed = 0;
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_INFO,
+								  "CRYPTO: RECV key unchanged (tag=%u->%u, type=%d, suite same, key same, mki=%d->%d) - preserving SRTP session state\n",
+								  prev_key->index, index, crypto_key->type, prev_recv_mki, new_mki_used);
 			}
 
 			if (key_changed || mki_changed) {
@@ -4937,6 +4940,9 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_add_crypto_key(switch_rtp_t *rtp_sess
 			if (!mki_changed && prev_key && prev_key->type == crypto_key->type &&
 			    memcmp(prev_key->keysalt, crypto_key->keysalt, keysalt_len) == 0) {
 				key_changed = 0;
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_INFO,
+								  "CRYPTO: SEND key unchanged (tag=%u->%u, type=%d, suite same, key same, mki=%d->%d) - preserving SRTP session state\n",
+								  prev_key->index, index, crypto_key->type, prev_send_mki, new_mki_used);
 			}
 
 			if (key_changed || mki_changed) {
