@@ -2738,7 +2738,10 @@ GCC_DIAG_ON(deprecated-declarations)
 					if ((context->errs % 10) == 0) {
 						char ebuf[255] = "";
 
-						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Error while writing audio frame: %d %s\n", ret, get_error_text(ret, ebuf, sizeof(ebuf)));
+						char uuid_buf[SWITCH_UUID_FORMATTED_LENGTH + 1] = "";
+
+							switch_uuid_str(uuid_buf, sizeof(uuid_buf));
+							switch_log_printf(SWITCH_CHANNEL_UUID_LOG(uuid_buf), SWITCH_LOG_ERROR, "Error while writing audio frame: %d %s\n", ret, get_error_text(ret, ebuf, sizeof(ebuf)));
 						if ((ret == -5 || ret == -104) && handle->stream_name) {
 							context->errs = 1001;
 						}
