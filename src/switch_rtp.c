@@ -4689,6 +4689,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_add_crypto_key(switch_rtp_t *rtp_sess
 
 	crypto_key->type = ssec->crypto_type;
 	crypto_key->index = index;
+	crypto_key->keylen = keysalt_len;
 	memcpy(crypto_key->keysalt, keysalt, keysalt_len);
 	crypto_key->next = rtp_session->crypto_keys[direction];
 	rtp_session->crypto_keys[direction] = crypto_key;
@@ -4889,6 +4890,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_add_crypto_key(switch_rtp_t *rtp_sess
 			}
 
 			if (!mki_changed && prev_key && prev_key->type == crypto_key->type &&
+			    prev_key->keylen == keysalt_len &&
 			    memcmp(prev_key->keysalt, crypto_key->keysalt, keysalt_len) == 0) {
 				key_changed = 0;
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_INFO,
@@ -4938,6 +4940,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_add_crypto_key(switch_rtp_t *rtp_sess
 			}
 
 			if (!mki_changed && prev_key && prev_key->type == crypto_key->type &&
+			    prev_key->keylen == keysalt_len &&
 			    memcmp(prev_key->keysalt, crypto_key->keysalt, keysalt_len) == 0) {
 				key_changed = 0;
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_INFO,
