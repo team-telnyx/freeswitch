@@ -2540,6 +2540,11 @@ static switch_status_t av_file_write(switch_file_handle_t *handle, void *data, s
 	int inuse;
 	int sample_start = 0;
 	AVCodecContext *c = NULL;
+	const char *uuid = NULL;
+
+	if (handle->params) {
+		uuid = switch_event_get_header(handle->params, "session");
+	}
 
 	if (!switch_test_flag(handle, SWITCH_FILE_FLAG_WRITE)) {
 		return SWITCH_STATUS_FALSE;
@@ -2738,10 +2743,7 @@ GCC_DIAG_ON(deprecated-declarations)
 					if ((context->errs % 10) == 0) {
 						char ebuf[255] = "";
 
-						char uuid_buf[SWITCH_UUID_FORMATTED_LENGTH + 1] = "";
-
-							switch_uuid_str(uuid_buf, sizeof(uuid_buf));
-							switch_log_printf(SWITCH_CHANNEL_UUID_LOG(uuid_buf), SWITCH_LOG_ERROR, "Error while writing audio frame: %d %s\n", ret, get_error_text(ret, ebuf, sizeof(ebuf)));
+						switch_log_printf(SWITCH_CHANNEL_UUID_LOG(uuid), SWITCH_LOG_ERROR, "Error while writing audio frame: %d %s\n", ret, get_error_text(ret, ebuf, sizeof(ebuf)));
 						if ((ret == -5 || ret == -104) && handle->stream_name) {
 							context->errs = 1001;
 						}
