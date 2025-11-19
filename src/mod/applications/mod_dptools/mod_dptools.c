@@ -3213,7 +3213,7 @@ SWITCH_STANDARD_APP(endless_playback_function)
 		switch_channel_set_variable(channel, SWITCH_CURRENT_APPLICATION_RESPONSE_VARIABLE, "FILE NOT FOUND");
 		break;
 	default:
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Could not play the media correctly. status: %d\n", status);
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Could not play the media correctly. status: %d\n", status);
 		switch_channel_set_variable_printf(channel, SWITCH_CURRENT_APPLICATION_RESPONSE_VARIABLE, "PLAYBACK ERROR: %d", status);
 		break;
 	}
@@ -3263,7 +3263,7 @@ SWITCH_STANDARD_APP(loop_playback_function)
 		switch_channel_set_variable(channel, SWITCH_CURRENT_APPLICATION_RESPONSE_VARIABLE, "FILE NOT FOUND");
 		break;
 	default:
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Could not play the media correctly. status: %d\n", status);
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Could not play the media correctly. status: %d\n", status);
 		switch_channel_set_variable_printf(channel, SWITCH_CURRENT_APPLICATION_RESPONSE_VARIABLE, "PLAYBACK ERROR: %d", status);
 		break;
 	}
