@@ -4185,7 +4185,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 			} else
 				frames = 1;
 
-			samples = frames * (frame->codec ? frame->codec->implementation->samples_per_packet : engine->read_impl.samples_per_packet);
+			samples = frames * engine->read_impl.samples_per_packet;
 		}
 	}
 
