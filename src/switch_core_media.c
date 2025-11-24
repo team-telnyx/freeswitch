@@ -2873,12 +2873,13 @@ static switch_bool_t is_codec_match(const char *lcodec, const char *rcodec)
 	return SWITCH_FALSE;
 }
 
-static void merge_codec_string(switch_core_session_t *session, const char *preferred_codecs, const char *codecs, bool by_sampling_rate, char **codec_lists)
+static void merge_codec_string(switch_core_session_t *session, const char *preferred_codecs, const char *codecs, bool order_by_rate, char **codec_lists)
 {
 	char *tmp_prefer_codecs[SWITCH_MAX_CODECS];
 	char *tmp_codecs[SWITCH_MAX_CODECS];
 	int pref_codecs_count = 0, codecs_count = 0, i = 0, j = 0, k = 0, l = 0;
 	switch_stream_handle_t stream = { 0 };
+	char (*fmtp)[MAX_FMTP_LEN] = NULL;
 
 	if (zstr(codecs) || zstr(preferred_codecs) || !codec_lists) {
 		return;
@@ -2907,12 +2908,13 @@ static void merge_codec_string(switch_core_session_t *session, const char *prefe
 		}
 	}
 
-	if (by_sampling_rate && pref_codecs_count > 0 && codecs_count > 0) {
-		char fmtp[SWITCH_MAX_CODECS][MAX_FMTP_LEN];
+	if (order_by_rate && pref_codecs_count > 0 && codecs_count > 0) {
 		const switch_codec_implementation_t *priority_codec_array[1];
 		const switch_codec_implementation_t *codec_array[SWITCH_MAX_CODECS];
 		int codec_array_count = 0;
 		int closest_rate_index = -1;
+
+		switch_zmalloc(fmtp, SWITCH_MAX_CODECS * MAX_FMTP_LEN);
 
 		if (switch_loadable_module_get_codecs_sorted(priority_codec_array, fmtp, 1, tmp_prefer_codecs, 1) <= 0) {
 			goto end;
@@ -2927,10 +2929,9 @@ static void merge_codec_string(switch_core_session_t *session, const char *prefe
 			goto end;
 		}
 
-		// TODO
-		// If the codec list contain unsupported or invalid codec, 
-		// we will need to locate it from the tmp_codecs and rewrite it.
-		// For now, we will just return the current codec order.
+		/* If the codec list contain unsupported or invalid codec,
+		 * we will need to locate it from the tmp_codecs and rewrite it.
+		 * For now, we will just return the current codec order. */
 		if (codec_array_count != codecs_count) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Found invalid/unsupported codec: %s\n", codecs);
 			goto end;
@@ -2972,6 +2973,7 @@ static void merge_codec_string(switch_core_session_t *session, const char *prefe
 	}
 
 end:
+	switch_safe_free(fmtp);
 
 	if (k > 0) {
 		SWITCH_STANDARD_STREAM(stream);
@@ -7736,15 +7738,11 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 					}
 					pmap->codec_ms = mimp->microseconds_per_packet / 1000;
 					pmap->bitrate = mimp->bits_per_second;
-					pmap->channels = mmap->rm_params ? atoi(mmap->rm_params) : 1;
+					pmap->channels = mimp->number_of_channels;
 
 					if (!strcasecmp((char *) mmap->rm_encoding, "opus")) {
-						if (pmap->channels == 1) {
-							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Invalid SDP for opus.  Don't ask.. but it needs a /2\n");
-							pmap->adv_channels = 1;
-						} else {
-							pmap->adv_channels = 2; /* IKR ???*/
-						}
+						// Set adv_channels to what remote advertised, not based on our internal channels
+						pmap->adv_channels = mmap->rm_params ? atoi(mmap->rm_params) : 2;
 						if (!zstr((char *) mmap->rm_fmtp) && switch_stristr("stereo=1", (char *) mmap->rm_fmtp)) {
 							uint32_t allow_channels = switch_core_max_audio_channels(0);
 							if (!allow_channels || allow_channels >= 2) { /*default*/
@@ -13161,6 +13159,47 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 
 	}
 
+	/* Update partner leg's media mode when generating SDP answer for reINVITE */
+	if (sdp_type == SDP_ANSWER && switch_channel_test_flag(session->channel, CF_REINVITE)) {
+		switch_core_session_t *other_session = NULL;
+		switch_media_flow_t new_smode = SWITCH_MEDIA_FLOW_SENDRECV;
+		switch_media_flow_t opp_smode = SWITCH_MEDIA_FLOW_SENDRECV;
+		switch_media_handle_t *other_smh = NULL;
+		switch_rtp_engine_t *other_engine = NULL;
+		const char *dummy_str = NULL;
+
+		if (!strcasecmp(sr, "sendonly")) {
+			new_smode = SWITCH_MEDIA_FLOW_SENDONLY;
+		} else if (!strcasecmp(sr, "recvonly")) {
+			new_smode = SWITCH_MEDIA_FLOW_RECVONLY;
+		} else if (!strcasecmp(sr, "inactive")) {
+			new_smode = SWITCH_MEDIA_FLOW_INACTIVE;
+		}
+
+		media_flow_get_mode(new_smode, &dummy_str, &opp_smode);
+
+		if (switch_core_session_get_partner(session, &other_session) == SWITCH_STATUS_SUCCESS) {
+			other_smh = other_session->media_handle;
+			if (other_smh) {
+				other_engine = &other_smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
+				/* Only update partner's smode if partner's endpoint is not on hold
+				 * When we transition to sendrecv/recvonly (can receive), only update if partner can send */
+				if (new_smode == SWITCH_MEDIA_FLOW_SENDRECV || new_smode == SWITCH_MEDIA_FLOW_RECVONLY) {
+					if (other_engine->rmode != SWITCH_MEDIA_FLOW_INACTIVE) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG, 
+						"Updating partner media mode to %d\n", opp_smode);
+						other_engine->smode = opp_smode;
+					}
+				} else {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG, 
+						"Updating partner media mode to %d\n", opp_smode);
+					other_engine->smode = opp_smode;
+				}
+			}
+			switch_core_session_rwunlock(other_session);
+		}
+	}
+
 	if (!smh->owner_id) {
 		smh->owner_id = (uint32_t)(switch_time_t)switch_epoch_time_now(NULL) - port;
 	}
@@ -17050,6 +17089,7 @@ SWITCH_DECLARE (void) switch_core_media_recover_session(switch_core_session_t *s
 	// Restore crypto keys before SDP generation so they are included in the SDP
 	switch_core_session_get_recovery_crypto_key(session, SWITCH_MEDIA_TYPE_AUDIO);
 	switch_core_session_get_recovery_crypto_key(session, SWITCH_MEDIA_TYPE_VIDEO);
+	switch_core_session_get_recovery_crypto_key(session, SWITCH_MEDIA_TYPE_TEXT);
 
 	switch_core_media_gen_local_sdp(session, SDP_OFFER, NULL, 0, NULL, 1);
 	switch_core_media_set_video_codec(session, 1);
@@ -19113,7 +19153,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 				session->enc_write_frame.codec = session->write_codec;
 				session->enc_write_frame.samples = enc_frame->datalen / sizeof(int16_t) / session->write_impl.number_of_channels;
 				session->enc_write_frame.channels = session->write_impl.number_of_channels;
-				if (frame->codec->implementation->samples_per_packet != session->write_impl.samples_per_packet) {
+				if (frame->codec->implementation->samples_per_packet != session->write_impl.samples_per_packet ||
+					frame->codec->implementation->samples_per_second != session->write_impl.samples_per_second) {
 					session->enc_write_frame.timestamp = 0;
 				} else {
 					session->enc_write_frame.timestamp = frame->timestamp;
