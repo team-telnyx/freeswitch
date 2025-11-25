@@ -6900,21 +6900,18 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 					}
 
 					/*
-					 * Check Opus codec fmtp compatibility.
-					 * Verify that remote fmtp parameters (bitrate, stereo, sample rates) are compatible with local implementation.
+					 * Check codec fmtp compatibility.
 					 */
-					if (!match && !strcasecmp(map->rm_encoding, "opus") && !strcasecmp(imp->iananame, "opus")) {
-						if (imp->matches_fmtp) {
-							if (SWITCH_STATUS_SUCCESS != imp->matches_fmtp(map->rm_fmtp, imp->fmtp)) {
-								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
-									"Codec Match FAILED: Opus fmtp mismatch [%s:%d] remote_fmtp=[%s] local_fmtp=[%s]\n",
-									rm_encoding, map->rm_pt, map->rm_fmtp ? map->rm_fmtp : "(none)", imp->fmtp ? imp->fmtp : "(none)");
-							} else {
-								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-									"Codec Match: Opus fmtp match successful [%s:%d] remote_fmtp=[%s] local_fmtp=[%s]\n",
-									rm_encoding, map->rm_pt, map->rm_fmtp ? map->rm_fmtp : "(none)", imp->fmtp ? imp->fmtp : "(none)");
-								match = 1;
-							}
+					if (!match && imp->matches_fmtp) {
+						if (SWITCH_STATUS_SUCCESS != imp->matches_fmtp(map->rm_fmtp, imp->fmtp)) {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+								"Codec Match FAILED: fmtp mismatch [%s:%d] remote_fmtp=[%s] local_fmtp=[%s]\n",
+								rm_encoding, map->rm_pt, map->rm_fmtp ? map->rm_fmtp : "(none)", imp->fmtp ? imp->fmtp : "(none)");
+						} else {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+								"Codec Match: fmtp match successful [%s:%d] remote_fmtp=[%s] local_fmtp=[%s]\n",
+								rm_encoding, map->rm_pt, map->rm_fmtp ? map->rm_fmtp : "(none)", imp->fmtp ? imp->fmtp : "(none)");
+							match = 1;
 						}
 					}
 
