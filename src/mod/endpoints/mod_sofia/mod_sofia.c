@@ -232,10 +232,15 @@ static switch_status_t sofia_pre_validate_remote_sdp(switch_core_session_t *sess
 
 	result = switch_core_media_pre_validate_offer(session, r_sdp, params);
 	if (result < 0) {
+		private_object_t *tech_pvt = (private_object_t *) switch_core_session_get_private(session);
 		const char *rtp_secure_media = switch_event_get_header(params, "rtp_secure_media");
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
 			"SDP offer pre-validation failed with secure_media=%s\n",
 			rtp_secure_media ? rtp_secure_media : "none");
+		if (tech_pvt) {
+			tech_pvt->respond_code = 488;
+			tech_pvt->respond_phrase = switch_core_session_strdup(tech_pvt->session, "Media Encryption Required B3");	
+		}
 		switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
 		return SWITCH_STATUS_FALSE;
 	}
