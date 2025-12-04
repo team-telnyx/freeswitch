@@ -239,7 +239,7 @@ static switch_status_t sofia_pre_validate_remote_sdp(switch_core_session_t *sess
 			rtp_secure_media ? rtp_secure_media : "none");
 		if (tech_pvt) {
 			tech_pvt->respond_code = 488;
-			tech_pvt->respond_phrase = switch_core_session_strdup(tech_pvt->session, "Media Encryption Required B3");	
+			tech_pvt->respond_phrase = switch_core_session_strdup(tech_pvt->session, "Media Encryption Required B3");
 		}
 		switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
 		return SWITCH_STATUS_FALSE;
