@@ -454,17 +454,31 @@ static switch_status_t switch_opus_matches_fmtp(const char *fmtp, const char *co
 	
 	/* Check maxplaybackrate compatibility if specified */
 	if (remote_settings.maxplaybackrate && local_settings.maxplaybackrate) {
-		if (remote_settings.maxplaybackrate > local_settings.maxplaybackrate) {
-			/* Remote wants higher playback rate than we support */
-			return SWITCH_STATUS_FALSE;
+		if (opus_prefs.asymmetric_samplerates) {
+			if (remote_settings.maxplaybackrate > local_settings.maxplaybackrate) {
+				/* Remote wants higher playback rate than we support */
+				return SWITCH_STATUS_FALSE;
+			}
+		} else {
+			if (remote_settings.maxplaybackrate != local_settings.maxplaybackrate) {
+				/* Remote wants different playback rate than we support */
+				return SWITCH_STATUS_FALSE;
+			}
 		}
 	}
-	
+
 	/* Check sprop-maxcapturerate compatibility if specified */
 	if (remote_settings.sprop_maxcapturerate && local_settings.sprop_maxcapturerate) {
-		if (remote_settings.sprop_maxcapturerate > local_settings.sprop_maxcapturerate) {
-			/* Remote wants higher capture rate than we support */
-			return SWITCH_STATUS_FALSE;
+		if (opus_prefs.asymmetric_samplerates) {
+			if (remote_settings.sprop_maxcapturerate > local_settings.sprop_maxcapturerate) {
+				/* Remote wants higher capture rate than we support */
+				return SWITCH_STATUS_FALSE;
+			}
+		} else {
+			if (remote_settings.sprop_maxcapturerate != local_settings.sprop_maxcapturerate) {
+				/* Remote wants different capture rate than we support */
+				return SWITCH_STATUS_FALSE;
+			}
 		}
 	}
 	
