@@ -656,7 +656,6 @@ SWITCH_STANDARD_DIALPLAN(dialplan_hunt)
 					goto done;
 				}
 
-				switch_caller_extension_add_application(session, extension, "log", "INFO Telnyx Call Recovery: Auto-answering same-node recovery call");
 				switch_caller_extension_add_application(session, extension, "set", "telnyx_force_cdr=false");
 				switch_caller_extension_add_application(session, extension, "answer", NULL);
 				switch_caller_extension_add_application(session, extension, "sleep", "200");
