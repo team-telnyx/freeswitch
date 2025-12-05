@@ -408,16 +408,7 @@ static switch_status_t switch_opus_matches_fmtp(const char *fmtp, const char *co
 		/* If we can't parse local fmtp, consider it a match (fallback behavior) */
 		return SWITCH_STATUS_SUCCESS;
 	}
-	
-	/* Check bitrate compatibility (maxaveragebitrate) */
-	if (remote_settings.maxaveragebitrate && local_settings.maxaveragebitrate) {
-		/* If both specify maxaveragebitrate, remote should not exceed local */
-		if (remote_settings.maxaveragebitrate > local_settings.maxaveragebitrate) {
-			/* Remote wants higher bitrate than we support */
-			return SWITCH_STATUS_FALSE;
-		}
-	}
-	
+
 	/* Check bitrate compatibility (bits_per_second from fmtp) */
 	if (remote_fmtp.bits_per_second && local_fmtp.bits_per_second) {
 		/* If both specify bitrates, they should be compatible */
@@ -427,7 +418,7 @@ static switch_status_t switch_opus_matches_fmtp(const char *fmtp, const char *co
 			return SWITCH_STATUS_FALSE;
 		}
 	}
-	
+
 	/* Check stereo compatibility */
 	if (remote_fmtp.stereo && !local_fmtp.stereo) {
 		/* Remote wants stereo but we only support mono */
