@@ -146,6 +146,7 @@ static switch_status_t sofia_on_init(switch_core_session_t *session)
 	return status;
 }
 
+/* Extract media security preference from caller extension applications before processing by dialplan*/
 static void sofia_pre_extract_media_security_preference(switch_core_session_t *session, switch_event_t **params)
 {
 	switch_channel_t *channel = switch_core_session_get_channel(session);
@@ -209,6 +210,7 @@ static void sofia_pre_extract_media_security_preference(switch_core_session_t *s
 	switch_event_add_header_string(*params, SWITCH_STACK_BOTTOM, "rtp_secure_media", last_secure_media);
 }
 
+/* Perform pre validation of inbound remote SDP before processing dialplan commands*/
 static switch_status_t sofia_pre_validate_remote_sdp(switch_core_session_t *session,
 															sofia_profile_t *profile,
 															switch_event_t *params)

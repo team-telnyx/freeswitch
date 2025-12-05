@@ -6026,15 +6026,14 @@ SWITCH_DECLARE(int16_t) switch_core_media_validate_common_audio_sdp(switch_core_
 	return match;
 }
 
+/* Perform pre validation of remote sdp based on event params such as rtp_secure_media*/
 SWITCH_DECLARE(int) switch_core_media_pre_validate_offer(switch_core_session_t *session, const char *r_sdp, switch_event_t *params)
 {
-	const char *var = NULL;
 	const char *val = NULL;
 	char *tmp = NULL;
 	char *suites = NULL;
 	const char *mode_str = NULL;
-	char *fields[CRYPTO_INVALID+1];
-	int argc = 0, i = 0, j = 0, k = 0;
+	int i = 0, j = 0, k = 0;
 	switch_rtp_crypto_key_type_t suite_order[CRYPTO_INVALID+1] = { 0 };
 	int crypto_required = 0;
 	sdp_parser_t *parser = NULL;
@@ -6065,6 +6064,8 @@ SWITCH_DECLARE(int) switch_core_media_pre_validate_offer(switch_core_session_t *
 	if (!zstr(rtp_secure_media)) {
 		val = rtp_secure_media;
 	} else {
+		const char *var = NULL;
+
 		if (switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_INBOUND) {
 			var = "rtp_secure_media_inbound";
 		} else {
@@ -6115,7 +6116,8 @@ SWITCH_DECLARE(int) switch_core_media_pre_validate_offer(switch_core_session_t *
 	crypto_required = (crypto_mode == CRYPTO_MODE_MANDATORY);
 
 	if (crypto_mode != CRYPTO_MODE_FORBIDDEN && !zstr(suites)) {
-		argc = switch_split(suites, ':', fields);
+		char *fields[CRYPTO_INVALID+1];
+		int argc = switch_split(suites, ':', fields);
 
 		for (i = 0; i < argc && i < CRYPTO_INVALID; i++) {
 			int ok = 0;
@@ -6159,6 +6161,7 @@ SWITCH_DECLARE(int) switch_core_media_pre_validate_offer(switch_core_session_t *
 		return 0;
 	}
 
+	/* Validate crypto/fingerprint in SDP */
 	for (m = sdp->sdp_media; m; m = m->m_next) {
 		if (m->m_type == sdp_media_audio || m->m_type == sdp_media_video) {
 
@@ -6215,7 +6218,7 @@ SWITCH_DECLARE(int) switch_core_media_pre_validate_offer(switch_core_session_t *
 							if (!strncasecmp(key_params, "inline:", 7)) {
 								char *key_material = key_params + 7;
 
-								if (zstr(key_material) || *key_material == ' ' || *key_material == '\0') {
+								if (zstr(key_material) || *key_material == ' ') {
 									goto done;
 								}
 							} else {
