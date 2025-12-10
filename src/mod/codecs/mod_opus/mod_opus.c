@@ -389,8 +389,9 @@ static switch_status_t switch_opus_matches_fmtp(const char *fmtp, const char *co
 	switch_codec_fmtp_t local_fmtp = { 0 };
 	opus_codec_settings_t remote_settings = { 0 };
 	opus_codec_settings_t local_settings = { 0 };
-	int remote_ptime = 0;
-	int local_ptime = 0;
+	int remote_ptime_pref = 0, local_ptime_pref = 0;
+	int remote_ptime_min = 0, remote_ptime_max = 0;
+	int local_ptime_min = 0, local_ptime_max = 0;
 	
 	if (!fmtp || !codec_fmtp) {
 		/* If either fmtp is missing, consider it a match (fallback behavior) */
@@ -412,27 +413,71 @@ static switch_status_t switch_opus_matches_fmtp(const char *fmtp, const char *co
 	}
 
 	/* Check ptime compatibility */
+	/* ptime is preferred packetization interval, minptime/maxptime define acceptable range */
 	if (remote_fmtp.microseconds_per_packet) {
-		remote_ptime = remote_fmtp.microseconds_per_packet / 1000;
-	} else if (remote_fmtp.min_ptime) {
-		remote_ptime = remote_fmtp.min_ptime;
-	} else {
-		remote_ptime = remote_fmtp.max_ptime;
+		remote_ptime_pref = remote_fmtp.microseconds_per_packet / 1000;
+	}
+	if (remote_fmtp.min_ptime) {
+		remote_ptime_min = remote_fmtp.min_ptime;
+	}
+	if (remote_fmtp.max_ptime) {
+		remote_ptime_max = remote_fmtp.max_ptime;
 	}
 
 	if (local_fmtp.microseconds_per_packet) {
-		local_ptime = local_fmtp.microseconds_per_packet / 1000;
-	} else if (local_fmtp.min_ptime) {
-		local_ptime = local_fmtp.min_ptime;
-	} else {
-		local_ptime = local_fmtp.max_ptime;
+		local_ptime_pref = local_fmtp.microseconds_per_packet / 1000;
+	}
+	if (local_fmtp.min_ptime) {
+		local_ptime_min = local_fmtp.min_ptime;
+	}
+	if (local_fmtp.max_ptime) {
+		local_ptime_max = local_fmtp.max_ptime;
 	}
 
-	if (remote_ptime && local_ptime) {
-		if (remote_ptime != local_ptime) {
+	/* Check if remote's preferred ptime is acceptable to local */
+	if (remote_ptime_pref) {
+		if (local_ptime_min && remote_ptime_pref < local_ptime_min) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG10,
-				"Opus fmtp match FAILED: ptime mismatch - remote_ptime=%d local_ptime=%d [remote_fmtp=%s] [local_fmtp=%s]\n",
-				remote_ptime, local_ptime, fmtp ? fmtp : "(none)", codec_fmtp ? codec_fmtp : "(none)");
+				"Opus fmtp match FAILED: ptime mismatch - remote_ptime=%d < local_minptime=%d [remote_fmtp=%s] [local_fmtp=%s]\n",
+				remote_ptime_pref, local_ptime_min, fmtp ? fmtp : "(none)", codec_fmtp ? codec_fmtp : "(none)");
+			return SWITCH_STATUS_FALSE;
+		}
+		if (local_ptime_max && remote_ptime_pref > local_ptime_max) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG10,
+				"Opus fmtp match FAILED: ptime mismatch - remote_ptime=%d > local_maxptime=%d [remote_fmtp=%s] [local_fmtp=%s]\n",
+				remote_ptime_pref, local_ptime_max, fmtp ? fmtp : "(none)", codec_fmtp ? codec_fmtp : "(none)");
+			return SWITCH_STATUS_FALSE;
+		}
+	}
+
+	/* Check if local's preferred ptime is acceptable to remote */
+	if (local_ptime_pref) {
+		if (remote_ptime_min && local_ptime_pref < remote_ptime_min) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG10,
+				"Opus fmtp match FAILED: ptime mismatch - local_ptime=%d < remote_minptime=%d [remote_fmtp=%s] [local_fmtp=%s]\n",
+				local_ptime_pref, remote_ptime_min, fmtp ? fmtp : "(none)", codec_fmtp ? codec_fmtp : "(none)");
+			return SWITCH_STATUS_FALSE;
+		}
+		if (remote_ptime_max && local_ptime_pref > remote_ptime_max) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG10,
+				"Opus fmtp match FAILED: ptime mismatch - local_ptime=%d > remote_maxptime=%d [remote_fmtp=%s] [local_fmtp=%s]\n",
+				local_ptime_pref, remote_ptime_max, fmtp ? fmtp : "(none)", codec_fmtp ? codec_fmtp : "(none)");
+			return SWITCH_STATUS_FALSE;
+		}
+	}
+
+	/* If both specify only min/max without preferred ptime, check range overlap */
+	if (!remote_ptime_pref && !local_ptime_pref) {
+		if (remote_ptime_min && local_ptime_max && remote_ptime_min > local_ptime_max) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG10,
+				"Opus fmtp match FAILED: ptime range mismatch - remote_minptime=%d > local_maxptime=%d [remote_fmtp=%s] [local_fmtp=%s]\n",
+				remote_ptime_min, local_ptime_max, fmtp ? fmtp : "(none)", codec_fmtp ? codec_fmtp : "(none)");
+			return SWITCH_STATUS_FALSE;
+		}
+		if (local_ptime_min && remote_ptime_max && local_ptime_min > remote_ptime_max) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG10,
+				"Opus fmtp match FAILED: ptime range mismatch - local_minptime=%d > remote_maxptime=%d [remote_fmtp=%s] [local_fmtp=%s]\n",
+				local_ptime_min, remote_ptime_max, fmtp ? fmtp : "(none)", codec_fmtp ? codec_fmtp : "(none)");
 			return SWITCH_STATUS_FALSE;
 		}
 	}
@@ -487,7 +532,6 @@ static switch_status_t switch_opus_matches_fmtp(const char *fmtp, const char *co
 	/* sprop-maxcapturerate indicates what the sender can send */
 	/* maxplaybackrate indicates what the receiver can decode */
 	/* For compatibility: sender's sprop must be <= receiver's maxplaybackrate */
-
 	/* Check: Can we decode what remote sends? */
 	if (remote_settings.sprop_maxcapturerate && local_settings.maxplaybackrate) {
 		if (remote_settings.sprop_maxcapturerate > local_settings.maxplaybackrate) {
