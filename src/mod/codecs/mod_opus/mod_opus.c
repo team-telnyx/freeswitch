@@ -383,6 +383,187 @@ static char *gen_fmtp(opus_codec_settings_t *settings, switch_memory_pool_t *poo
 
 }
 
+static switch_status_t switch_opus_matches_fmtp(const char *fmtp, const char *codec_fmtp)
+{
+	switch_codec_fmtp_t remote_fmtp = { 0 };
+	switch_codec_fmtp_t local_fmtp = { 0 };
+	opus_codec_settings_t remote_settings = { 0 };
+	opus_codec_settings_t local_settings = { 0 };
+	int remote_ptime_pref = 0, local_ptime_pref = 0;
+	int remote_ptime_min = 0, remote_ptime_max = 0;
+	int local_ptime_min = 0, local_ptime_max = 0;
+	
+	if (!fmtp || !codec_fmtp) {
+		/* If either fmtp is missing, consider it a match (fallback behavior) */
+		return SWITCH_STATUS_SUCCESS;
+	}
+	
+	/* Parse remote fmtp */
+	remote_fmtp.private_info = &remote_settings;
+	if (switch_opus_fmtp_parse(fmtp, &remote_fmtp) != SWITCH_STATUS_SUCCESS) {
+		/* If we can't parse remote fmtp, consider it a match (fallback behavior) */
+		return SWITCH_STATUS_SUCCESS;
+	}
+	
+	/* Parse local codec fmtp */
+	local_fmtp.private_info = &local_settings;
+	if (switch_opus_fmtp_parse(codec_fmtp, &local_fmtp) != SWITCH_STATUS_SUCCESS) {
+		/* If we can't parse local fmtp, consider it a match (fallback behavior) */
+		return SWITCH_STATUS_SUCCESS;
+	}
+
+	/* Check ptime compatibility */
+	/* ptime is preferred packetization interval, minptime/maxptime define acceptable range */
+	if (remote_fmtp.microseconds_per_packet) {
+		remote_ptime_pref = remote_fmtp.microseconds_per_packet / 1000;
+	}
+	if (remote_fmtp.min_ptime) {
+		remote_ptime_min = remote_fmtp.min_ptime;
+	}
+	if (remote_fmtp.max_ptime) {
+		remote_ptime_max = remote_fmtp.max_ptime;
+	}
+
+	if (local_fmtp.microseconds_per_packet) {
+		local_ptime_pref = local_fmtp.microseconds_per_packet / 1000;
+	}
+	if (local_fmtp.min_ptime) {
+		local_ptime_min = local_fmtp.min_ptime;
+	}
+	if (local_fmtp.max_ptime) {
+		local_ptime_max = local_fmtp.max_ptime;
+	}
+
+	/* Check if remote's preferred ptime is acceptable to local */
+	if (remote_ptime_pref) {
+		if (local_ptime_min && remote_ptime_pref < local_ptime_min) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG10,
+				"Opus fmtp match FAILED: ptime mismatch - remote_ptime=%d < local_minptime=%d [remote_fmtp=%s] [local_fmtp=%s]\n",
+				remote_ptime_pref, local_ptime_min, fmtp ? fmtp : "(none)", codec_fmtp ? codec_fmtp : "(none)");
+			return SWITCH_STATUS_FALSE;
+		}
+		if (local_ptime_max && remote_ptime_pref > local_ptime_max) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG10,
+				"Opus fmtp match FAILED: ptime mismatch - remote_ptime=%d > local_maxptime=%d [remote_fmtp=%s] [local_fmtp=%s]\n",
+				remote_ptime_pref, local_ptime_max, fmtp ? fmtp : "(none)", codec_fmtp ? codec_fmtp : "(none)");
+			return SWITCH_STATUS_FALSE;
+		}
+	}
+
+	/* Check if local's preferred ptime is acceptable to remote */
+	if (local_ptime_pref) {
+		if (remote_ptime_min && local_ptime_pref < remote_ptime_min) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG10,
+				"Opus fmtp match FAILED: ptime mismatch - local_ptime=%d < remote_minptime=%d [remote_fmtp=%s] [local_fmtp=%s]\n",
+				local_ptime_pref, remote_ptime_min, fmtp ? fmtp : "(none)", codec_fmtp ? codec_fmtp : "(none)");
+			return SWITCH_STATUS_FALSE;
+		}
+		if (remote_ptime_max && local_ptime_pref > remote_ptime_max) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG10,
+				"Opus fmtp match FAILED: ptime mismatch - local_ptime=%d > remote_maxptime=%d [remote_fmtp=%s] [local_fmtp=%s]\n",
+				local_ptime_pref, remote_ptime_max, fmtp ? fmtp : "(none)", codec_fmtp ? codec_fmtp : "(none)");
+			return SWITCH_STATUS_FALSE;
+		}
+	}
+
+	/* If both specify only min/max without preferred ptime, check range overlap */
+	if (!remote_ptime_pref && !local_ptime_pref) {
+		if (remote_ptime_min && local_ptime_max && remote_ptime_min > local_ptime_max) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG10,
+				"Opus fmtp match FAILED: ptime range mismatch - remote_minptime=%d > local_maxptime=%d [remote_fmtp=%s] [local_fmtp=%s]\n",
+				remote_ptime_min, local_ptime_max, fmtp ? fmtp : "(none)", codec_fmtp ? codec_fmtp : "(none)");
+			return SWITCH_STATUS_FALSE;
+		}
+		if (local_ptime_min && remote_ptime_max && local_ptime_min > remote_ptime_max) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG10,
+				"Opus fmtp match FAILED: ptime range mismatch - local_minptime=%d > remote_maxptime=%d [remote_fmtp=%s] [local_fmtp=%s]\n",
+				local_ptime_min, remote_ptime_max, fmtp ? fmtp : "(none)", codec_fmtp ? codec_fmtp : "(none)");
+			return SWITCH_STATUS_FALSE;
+		}
+	}
+
+	/* Check bitrate compatibility (bits_per_second from fmtp) */
+	if (remote_fmtp.bits_per_second && local_fmtp.bits_per_second) {
+		/* If both specify bitrates, they should be compatible */
+		/* Allow some flexibility - remote can request lower than local */
+		if (remote_fmtp.bits_per_second > local_fmtp.bits_per_second) {
+			/* Remote wants higher bitrate than we support */
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG10,
+				"Opus fmtp match FAILED: bitrate mismatch - remote_bits_per_second=%d local_bits_per_second=%d [remote_fmtp=%s] [local_fmtp=%s]\n",
+				remote_fmtp.bits_per_second, local_fmtp.bits_per_second, fmtp ? fmtp : "(none)", codec_fmtp ? codec_fmtp : "(none)");
+			return SWITCH_STATUS_FALSE;
+		}
+	}
+
+	/* Check stereo compatibility */
+	if (remote_fmtp.stereo && !local_fmtp.stereo) {
+		/* Remote wants stereo but we only support mono */
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG10,
+			"Opus fmtp match FAILED: stereo mismatch - remote wants stereo but local only supports mono [remote_fmtp=%s] [local_fmtp=%s]\n",
+			fmtp ? fmtp : "(none)", codec_fmtp ? codec_fmtp : "(none)");
+		return SWITCH_STATUS_FALSE;
+	}
+	
+	/* Check sprop-stereo compatibility */
+	if (remote_fmtp.sprop_stereo && !local_fmtp.sprop_stereo && !local_fmtp.stereo) {
+		/* Remote advertises stereo capability but we don't support it */
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG10,
+			"Opus fmtp match FAILED: sprop-stereo mismatch - remote advertises stereo but local doesn't support it [remote_fmtp=%s] [local_fmtp=%s]\n",
+			fmtp ? fmtp : "(none)", codec_fmtp ? codec_fmtp : "(none)");
+		return SWITCH_STATUS_FALSE;
+	}
+	
+	/* Check sample rate compatibility via sprop-maxcapturerate */
+	if (remote_fmtp.actual_samples_per_second && local_fmtp.actual_samples_per_second) {
+		/* Both specify actual sample rates - they should match or be compatible */
+		if (remote_fmtp.actual_samples_per_second != local_fmtp.actual_samples_per_second) {
+			/* Check if they're compatible (e.g., 16000 vs 48000 might be OK) */
+			/* For now, require exact match or allow remote to be lower */
+			if (remote_fmtp.actual_samples_per_second > local_fmtp.actual_samples_per_second) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG10,
+					"Opus fmtp match FAILED: sample rate mismatch - remote_actual_samples_per_second=%d local_actual_samples_per_second=%d [remote_fmtp=%s] [local_fmtp=%s]\n",
+					remote_fmtp.actual_samples_per_second, local_fmtp.actual_samples_per_second, fmtp ? fmtp : "(none)", codec_fmtp ? codec_fmtp : "(none)");
+				return SWITCH_STATUS_FALSE;
+			}
+		}
+	}
+	
+	/* Check bidirectional sprop-maxcapturerate / maxplaybackrate compatibility */
+	/* sprop-maxcapturerate indicates what the sender can send */
+	/* maxplaybackrate indicates what the receiver can decode */
+	/* For compatibility: sender's sprop must be <= receiver's maxplaybackrate */
+	/* Check: Can we decode what remote sends? */
+	if (remote_settings.sprop_maxcapturerate && local_settings.maxplaybackrate) {
+		if (remote_settings.sprop_maxcapturerate > local_settings.maxplaybackrate) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG10,
+				"Opus fmtp match FAILED: remote can send higher rate than we can decode - remote_sprop_maxcapturerate=%d local_maxplaybackrate=%d [remote_fmtp=%s] [local_fmtp=%s]\n",
+				remote_settings.sprop_maxcapturerate, local_settings.maxplaybackrate, fmtp ? fmtp : "(none)", codec_fmtp ? codec_fmtp : "(none)");
+			return SWITCH_STATUS_FALSE;
+		}
+		/* Without asymmetric rates, also require exact match if both sprop values specified */
+		if (!opus_prefs.asymmetric_samplerates && local_settings.sprop_maxcapturerate && 
+		    remote_settings.sprop_maxcapturerate != local_settings.sprop_maxcapturerate) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG10,
+				"Opus fmtp match FAILED: sprop-maxcapturerate mismatch - remote_sprop_maxcapturerate=%d local_sprop_maxcapturerate=%d (asymmetric_samplerates disabled) [remote_fmtp=%s] [local_fmtp=%s]\n",
+				remote_settings.sprop_maxcapturerate, local_settings.sprop_maxcapturerate, fmtp ? fmtp : "(none)", codec_fmtp ? codec_fmtp : "(none)");
+			return SWITCH_STATUS_FALSE;
+		}
+	}
+
+	/* Check: Can remote decode what we send? */
+	if (local_settings.sprop_maxcapturerate && remote_settings.maxplaybackrate) {
+		if (local_settings.sprop_maxcapturerate > remote_settings.maxplaybackrate) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG10,
+				"Opus fmtp match FAILED: we can send higher rate than remote can decode - local_sprop_maxcapturerate=%d remote_maxplaybackrate=%d [remote_fmtp=%s] [local_fmtp=%s]\n",
+				local_settings.sprop_maxcapturerate, remote_settings.maxplaybackrate, fmtp ? fmtp : "(none)", codec_fmtp ? codec_fmtp : "(none)");
+			return SWITCH_STATUS_FALSE;
+		}
+	}
+
+	/* If we get here, the fmtp parameters are compatible */
+	return SWITCH_STATUS_SUCCESS;
+}
+
 static switch_bool_t switch_opus_has_fec(const uint8_t* payload,int payload_length_bytes)
 {
 	/* nb_silk_frames: number of silk-frames (10 or 20 ms) in an opus frame:  0, 1, 2 or 3 */
@@ -1459,6 +1640,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_opus_load)
 											 switch_opus_destroy);	/* deinitalize a codec handle using this implementation */
 
 		codec_interface->implementations->codec_control = switch_opus_control;
+		codec_interface->implementations->matches_fmtp = switch_opus_matches_fmtp;
 
 		settings.stereo = 1;
 

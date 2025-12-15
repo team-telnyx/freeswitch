@@ -6343,7 +6343,8 @@ SWITCH_DECLARE(int16_t) switch_core_media_validate_common_audio_sdp(switch_core_
 							!switch_true(switch_channel_get_variable(session->channel, "rtp_allow_crypto_in_avp"))) {
 						if (m->m_proto != sdp_proto_srtp && !got_webrtc) {
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "a=crypto in RTP/AVP, refer to rfc3711\n");
-							return 0;
+							match = 0;
+							goto done;
 						}
 					}
 
@@ -6353,7 +6354,8 @@ SWITCH_DECLARE(int16_t) switch_core_media_validate_common_audio_sdp(switch_core_
 
 			if (got_crypto == -1 && got_savp && !got_avp && !got_webrtc) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Declining invite with only SAVP because secure media is administratively disabled\n");
-				return 0;
+				match = 0;
+				goto done;
 			}
 
 			connection = sdp->sdp_connection;
@@ -6363,7 +6365,8 @@ SWITCH_DECLARE(int16_t) switch_core_media_validate_common_audio_sdp(switch_core_
 
 			if (!connection) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Cannot find a c= line in the sdp at media or session level!\n");
-				return 0;
+				match = 0;
+				goto done;
 			}
 
 			if (connection->c_addrtype == sdp_addr_ip6) {
@@ -6371,7 +6374,8 @@ SWITCH_DECLARE(int16_t) switch_core_media_validate_common_audio_sdp(switch_core_
 					|| ((val = switch_channel_get_variable(session->channel, "sdp_reject_ipv6")) && switch_true(val))) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Reject IPv6 media address: %s!\n"
 						, connection->c_address ? connection->c_address : "<MISSING>");
-					return 0;
+					match = 0;
+					goto done;
 				}
 			}
 
@@ -6549,14 +6553,20 @@ SWITCH_DECLARE(int16_t) switch_core_media_validate_common_audio_sdp(switch_core_
 			}
 
 			if (match) {
-				return match;
+				goto done;
 			}
 		}
 	}
 
 	if (no_audio) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "No Audio found! Skip audio validation.\n");
-		return -1;
+		match = -1;
+	}
+
+done:
+
+	if (parser) {
+		sdp_parser_free(parser);
 	}
 
 	return match;
@@ -6578,6 +6588,247 @@ static inline void handle_audio_timeout(switch_core_session_t *session, switch_r
 		   switch_channel_set_variable(session->channel, "rtp_timeout_sec", "0");
 		   switch_channel_set_variable(session->channel, "rtp_hold_timeout_sec", "0");
 	}
+}
+
+/* Perform pre validation of remote sdp based on event params such as rtp_secure_media*/
+SWITCH_DECLARE(int) switch_core_media_pre_validate_offer(switch_core_session_t *session, const char *r_sdp, switch_event_t *params)
+{
+	const char *val = NULL;
+	char *tmp = NULL;
+	char *suites = NULL;
+	const char *mode_str = NULL;
+	int i = 0, j = 0, k = 0;
+	switch_rtp_crypto_key_type_t suite_order[CRYPTO_INVALID+1] = { 0 };
+	int crypto_required = 0;
+	sdp_parser_t *parser = NULL;
+	sdp_session_t *sdp;
+	sdp_media_t *m;
+	sdp_attribute_t *attr;
+	int valid_crypto = 0;
+	int has_crypto = 0;
+	int crypto_mode = CRYPTO_MODE_OPTIONAL;
+	const char *rtp_secure_media = NULL;
+
+	if (zstr(r_sdp)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "No SDP\n");
+		return 0;
+	}
+
+	if (!session || !session->channel) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "No Session or Channel\n");
+		return 0;
+	}
+
+	/* Extract rtp_secure_media from params event if provided */
+	if (params) {
+		rtp_secure_media = switch_event_get_header(params, "rtp_secure_media");
+	}
+
+	/* Use parameter if provided, otherwise fall back to channel variables */
+	if (!zstr(rtp_secure_media)) {
+		val = rtp_secure_media;
+	} else {
+		const char *var = NULL;
+
+		if (switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_INBOUND) {
+			var = "rtp_secure_media_inbound";
+		} else {
+			var = "rtp_secure_media_outbound";
+		}
+
+		if (!(val = switch_channel_get_variable(session->channel, var))) {
+			val = switch_channel_get_variable(session->channel, "rtp_secure_media");
+		}
+	}
+
+	if (val) {
+		tmp = switch_core_session_strdup(session, val);
+		if ((suites = strchr(tmp, ':'))) {
+			*suites++ = '\0';
+		}
+		mode_str = tmp;
+	}
+
+	if (zstr(suites)) {
+		const char *suites_var = switch_channel_get_variable(session->channel, "rtp_secure_media_suites");
+		if (suites_var) {
+			suites = switch_core_session_strdup(session, suites_var);
+		}
+	}
+
+	if (zstr(mode_str)) {
+		if (switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_INBOUND && !switch_channel_test_flag(session->channel, CF_RECOVERING)) {
+			mode_str = "optional";
+		} else {
+			mode_str = "forbidden";
+		}
+	}
+
+	if (!strcasecmp(mode_str, "optional")) {
+		crypto_mode = CRYPTO_MODE_OPTIONAL;
+	} else if (switch_true(mode_str) || !strcasecmp(mode_str, "mandatory")) {
+		crypto_mode = CRYPTO_MODE_MANDATORY;
+	} else {
+		crypto_mode = CRYPTO_MODE_FORBIDDEN;
+	}
+
+	/* No need to validate crypto if it's optional */
+	if (crypto_mode == CRYPTO_MODE_OPTIONAL) {
+		return 0;
+	}
+
+	crypto_required = (crypto_mode == CRYPTO_MODE_MANDATORY);
+
+	if (crypto_mode != CRYPTO_MODE_FORBIDDEN && !zstr(suites)) {
+		char *fields[CRYPTO_INVALID+1];
+		int argc = switch_split(suites, ':', fields);
+
+		for (i = 0; i < argc && i < CRYPTO_INVALID; i++) {
+			int ok = 0;
+
+			for (j = 0; j < CRYPTO_INVALID; j++) {
+				if (!strcasecmp(fields[i], SUITES[j].name) ||
+					(!zstr(SUITES[j].alias) && !strcasecmp(fields[i], SUITES[j].alias))) {
+					if (k < CRYPTO_INVALID) {
+						suite_order[k++] = SUITES[j].type;
+					}
+					ok++;
+					break;
+				}
+			}
+
+			if (!ok) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+								"Invalid crypto suite configured: %s\n", fields[i]);
+			}
+		}
+
+		if (k == 0) {
+			for (i = 0; i < CRYPTO_INVALID; i++) {
+				suite_order[k++] = SUITES[i].type;
+			}
+		}
+	} else {
+		for (i = 0; i < CRYPTO_INVALID; i++) {
+			suite_order[k++] = SUITES[i].type;
+		}
+	}
+
+	if (!(parser = sdp_parse(NULL, r_sdp, (int) strlen(r_sdp), 0))) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Failed to init SDP parser\n");
+		return 0;
+	}
+
+	if (!(sdp = sdp_session(parser))) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Failed to parse SDP\n");
+		sdp_parser_free(parser);
+		return 0;
+	}
+
+	/* Validate crypto/fingerprint in SDP */
+	for (m = sdp->sdp_media; m; m = m->m_next) {
+		if (m->m_type == sdp_media_audio || m->m_type == sdp_media_video) {
+
+			for (attr = m->m_attributes; attr; attr = attr->a_next) {
+				if (!strcasecmp(attr->a_name, "crypto")) {
+					int suite_valid = 0, len = 0;
+					char *p = NULL;
+					const char *tag_str = NULL;
+					long crypto_tag = 0;
+
+					has_crypto = 1;
+
+					if (!attr->a_value) {
+						goto done;
+					}
+
+					tag_str = attr->a_value;
+					crypto_tag = strtol(tag_str, &p, 10);
+
+					if (crypto_tag < 1 || p == tag_str) {
+						goto done;
+					}
+
+					if (p && *p == ' ') {
+						char *suite_name = p + 1;
+						char *end = strchr(suite_name, ' ');
+
+						if (!end) {
+							goto done;
+						}
+
+						len = end - suite_name;
+
+						/* Validate suite against configured suites */
+						for (i = 0; i < k; i++) {
+							size_t suite_name_len = strlen(SUITES[suite_order[i]].name);
+							size_t suite_alias_len = zstr(SUITES[suite_order[i]].alias) ? 0 : strlen(SUITES[suite_order[i]].alias);
+
+							int name_match = (!strncasecmp(suite_name, SUITES[suite_order[i]].name, len) &&
+											 suite_name_len == (size_t)len);
+							int alias_match = (suite_alias_len > 0 &&
+											  !strncasecmp(suite_name, SUITES[suite_order[i]].alias, len) &&
+											  suite_alias_len == (size_t)len);
+
+							if (name_match || alias_match) {
+								suite_valid = 1;
+								break;
+							}
+						}
+
+						if (suite_valid) {
+							char *key_params = end + 1;
+
+							if (!strncasecmp(key_params, "inline:", 7)) {
+								char *key_material = key_params + 7;
+
+								if (zstr(key_material) || *key_material == ' ') {
+									goto done;
+								}
+							} else {
+								goto done;
+							}
+						}
+					} else {
+						goto done;
+					}
+
+					if (!suite_valid) {
+						goto done;
+					}
+				} else if (!strcasecmp(attr->a_name, "fingerprint")) {
+					has_crypto = 1;
+				}
+			}
+		}
+	}
+
+	/* If we reach here, we have a valid crypto/fingerprint format in the SDP */
+	valid_crypto = 1;
+
+done:
+
+	sdp_parser_free(parser);
+
+	if (!valid_crypto) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+						"Invalid crypto/fingerprint in SDP (mode=%s)\n", mode_str);
+		return -1;
+	}
+
+	if (crypto_mode == CRYPTO_MODE_FORBIDDEN && has_crypto) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+						"Secure media forbidden but crypto/fingerprint present in SDP (mode=%s)\n", mode_str);
+		return -1;
+	}
+
+	if (crypto_required && !has_crypto) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+						"Secure media required but no crypto/fingerprint in SDP (mode=%s)\n", mode_str);
+		return -1;
+	}
+
+	return 0;
 }
 
 //?
@@ -7521,6 +7772,22 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 									match = 0;
 								}
 							}
+						}
+					}
+
+					/*
+					 * Check codec fmtp compatibility.
+					 */
+					if (!match && imp->matches_fmtp && !strcasecmp(map->rm_encoding, imp->iananame)) {
+						if (SWITCH_STATUS_SUCCESS != imp->matches_fmtp(map->rm_fmtp, imp->fmtp)) {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+								"Codec Match FAILED: fmtp mismatch [%s:%d] remote_fmtp=[%s] local_fmtp=[%s]\n",
+								rm_encoding, map->rm_pt, map->rm_fmtp ? map->rm_fmtp : "(none)", imp->fmtp ? imp->fmtp : "(none)");
+						} else {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+								"Codec Match: fmtp match successful [%s:%d] remote_fmtp=[%s] local_fmtp=[%s]\n",
+								rm_encoding, map->rm_pt, map->rm_fmtp ? map->rm_fmtp : "(none)", imp->fmtp ? imp->fmtp : "(none)");
+							match = 1;
 						}
 					}
 
@@ -16574,7 +16841,7 @@ static void switch_core_media_set_r_sdp_codec_string(switch_core_session_t *sess
 						}
 
 						if (match) {
-							if (imp->matches_fmtp && map->rm_fmtp) {
+							if (imp->matches_fmtp  && map->rm_fmtp && !strcasecmp(map->rm_encoding, imp->iananame)) {
 								switch_status_t match_result = imp->matches_fmtp(imp->fmtp, map->rm_fmtp);
 								if (match_result == SWITCH_STATUS_SUCCESS) {
 									add_audio_codec(map, imp, ptime, imp->fmtp, buf, sizeof(buf));
