@@ -522,6 +522,7 @@ SWITCH_DECLARE(void) switch_core_media_trickle_recheck_all(switch_core_session_t
 SWITCH_DECLARE(switch_status_t) switch_core_media_trickle_remote_candidate_and_check(switch_core_session_t *session, switch_media_handle_t *smh, void *sdp_session, switch_sdp_type_t sdp_type, const char *mid, int mline_index, const char *cand_line, int end_of_candidates);
 SWITCH_DECLARE(switch_status_t) switch_core_media_trickle_remote_candidate_and_recheck(switch_core_session_t *session, switch_media_handle_t *smh, void *sdp_session, switch_sdp_type_t sdp_type, const char *mid, int mline_index, const char *cand_line, int end_of_candidates);
 SWITCH_DECLARE(switch_status_t) switch_core_media_get_chosen_ice_candidate(switch_core_session_t *session, switch_media_type_t type, char **out_addr, switch_port_t *out_port);
+SWITCH_DECLARE(char *) switch_core_media_get_local_sdp_str(switch_core_session_t *session);
 
 SWITCH_END_EXTERN_C
 #endif

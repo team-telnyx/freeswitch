@@ -616,6 +616,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_codec_reset(switch_codec_t *codec)
 	codec->implementation->destroy(codec);
 	codec->implementation->init(codec, codec->flags, NULL);
 
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(codec->session), SWITCH_LOG_DEBUG, "Codec reset. [%s][%d][%d]\n", codec->implementation->iananame, codec->implementation->actual_samples_per_second, codec->implementation->samples_per_second);
+
 	return SWITCH_STATUS_SUCCESS;
 }
 
