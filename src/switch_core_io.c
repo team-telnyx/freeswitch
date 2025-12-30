@@ -509,7 +509,7 @@ cnt_with_cng:
 					if (!switch_core_codec_ready(&session->bug_codec) && switch_core_codec_ready(read_frame->codec)) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Setting BUG Codec %s:%d\n",
 										  read_frame->codec->implementation->iananame, read_frame->codec->implementation->ianacode);
-						switch_core_codec_copy(read_frame->codec, &session->bug_codec, NULL, NULL);
+						switch_core_codec_copy(read_frame->codec, &session->bug_codec, NULL, session->pool);
 						if (!switch_core_codec_ready(&session->bug_codec)) {
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "%s Error setting BUG codec %s!\n",
 											  switch_core_session_get_name(session), read_frame->codec->implementation->iananame);
@@ -612,7 +612,7 @@ cnt_with_cng:
 					switch_mutex_lock(session->resample_mutex);
 
 					status = switch_resample_create(&session->read_resampler,
-													read_frame->codec->implementation->actual_samples_per_second,
+													codec_impl.actual_samples_per_second,
 													session->read_impl.actual_samples_per_second,
 													session->read_impl.decoded_bytes_per_packet, SWITCH_RESAMPLE_QUALITY,
 													session->read_impl.number_of_channels);

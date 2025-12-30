@@ -1750,7 +1750,7 @@ static int get_netmask(struct sockaddr_in *me, int *mask)
 
 
 	if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-		goto end;
+		return -1;
 	}
 
 	if (ioctl(sock, SIOCGIFCONF, (char *) &ifconf) < 0) {
@@ -1936,7 +1936,9 @@ SWITCH_DECLARE(switch_status_t) switch_find_local_ip(char *buf, int len, int *ma
 	if (!getnameinfo((const struct sockaddr *) &l_address, l_address_len, buf, len, NULL, 0, NI_NUMERICHOST)) {
 		status = SWITCH_STATUS_SUCCESS;
 		if (mask) {
-			get_netmask((struct sockaddr_in *) &l_address, mask);
+			if (get_netmask((struct sockaddr_in *) &l_address, mask)) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Error getting netmask.\n");
+			}
 		}
 	}
 #else
@@ -1976,7 +1978,9 @@ SWITCH_DECLARE(switch_status_t) switch_find_local_ip(char *buf, int len, int *ma
 
 			switch_copy_string(buf, get_addr(abuf, sizeof(abuf), (struct sockaddr *) &iface_out, sizeof(struct sockaddr_storage)), len);
 			if (mask) {
-				get_netmask((struct sockaddr_in *) &iface_out, mask);
+				if (get_netmask((struct sockaddr_in *) &iface_out, mask)) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Error getting netmask.\n");
+				}
 			}
 
 			status = SWITCH_STATUS_SUCCESS;

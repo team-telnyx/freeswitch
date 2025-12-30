@@ -51,8 +51,11 @@ int ServiceDaemon::pre_initialize()
   
   TELNYX_ASSERT(!_runDir.empty());
   
-  ::chdir(_runDir.c_str());
-  
+ if (::chdir(_runDir.c_str()) != 0) {
+     std::cerr << "Failed to chdir to " << _runDir << ": " << strerror(errno) << std::endl;
+     return -1;
+ }
+
   return 0;
 }
 

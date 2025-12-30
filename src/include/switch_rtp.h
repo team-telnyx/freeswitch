@@ -868,6 +868,27 @@ SWITCH_DECLARE(switch_bool_t) switch_rtp_using_timer(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(void) switch_rtp_prepare_trickle_ice(switch_rtp_t *rtp_session, ice_proto_t proto, ice_t *ice_params);
 SWITCH_DECLARE(uint32_t) switch_rtp_get_remote_ice_candidates(const switch_rtp_t *rtp, const switch_rtp_ice_cand_t **out_vec);
 SWITCH_DECLARE(uint32_t) switch_rtp_get_new_ssrc(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(void) switch_rtp_session_set_bundle(switch_rtp_t *rtp_session, switch_bool_t is_bundle);
+SWITCH_DECLARE(switch_bool_t) switch_rtp_session_get_bundle(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(void) switch_rtp_session_set_bundle_master(switch_rtp_t *rtp_session, switch_bool_t is_bundle_master);
+SWITCH_DECLARE(switch_bool_t) switch_rtp_session_get_bundle_master(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(void) switch_rtp_session_set_bundle_ssrc(switch_rtp_t *rtp_session, uint32_t ssrc);
+SWITCH_DECLARE(uint32_t) switch_rtp_session_get_bundle_ssrc(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(void) switch_rtp_session_set_bundle_group_id(switch_rtp_t *rtp_session, const char * group_id);
+SWITCH_DECLARE(char *) switch_rtp_session_get_bundle_group_id(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(void) switch_rtp_ice_end_of_candidates(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(uint32_t) switch_rtp_session_get_recv_msg_ts(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(uint32_t) switch_rtp_session_get_send_msg_ts(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(uint16_t) switch_rtp_session_get_recv_msg_seq(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(uint16_t) switch_rtp_session_get_send_msg_seq(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(uint8_t) switch_rtp_session_get_recv_msg_m(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(uint8_t) switch_rtp_session_get_send_msg_m(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(const char *) switch_rtp_session_get_recv_mid(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(rtp_extension_t *) switch_rtp_get_send_ext(switch_rtp_t *rtp_session, uint8_t type);
+SWITCH_DECLARE(void) switch_rtp_set_rtp_ext_total_size(switch_rtp_t *rtp_session, uint8_t len);
+SWITCH_DECLARE(uint32_t) switch_rtp_get_rtp_ext_total_size(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(uint8_t) switch_rtp_get_rtp_ext_recv_total_size(switch_rtp_t *rtp_session);
+
 /*!
   \}
 */

@@ -4078,7 +4078,7 @@ SWITCH_STANDARD_API(uuid_media_params_function)
 		goto end;
 	} else {
 		if ((tsession = switch_core_session_locate(argv[0]))) {
-			switch_channel_t *channel = switch_core_session_get_channel(session);
+			switch_channel_t *channel = switch_core_session_get_channel(tsession);
 
 			if (switch_false(argv[1])) {
 				switch_channel_clear_flag(channel, CF_MANUAL_MEDIA_PARAMS);
