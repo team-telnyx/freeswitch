@@ -10113,7 +10113,7 @@ fork_done:
 		}
 #if HAVE_MID_EXT
 		if (rtp_session->ext_mid.enabled && rtp_session->ext_mid.ext_id > 0) {
-			rtp_add_mid_extension(rtp_session, send_msg, &bytes, rtp_header_len);
+			rtp_add_mid_extension(rtp_session, send_msg, &bytes, rtp_header_len + (send_msg->header.cc * 4));
 		}
 #endif
 		if (send_msg->header.x && send_msg->ext) {
@@ -10722,9 +10722,9 @@ SWITCH_DECLARE(int) switch_rtp_write_manual(switch_rtp_t *rtp_session,
 	rtp_session->write_msg.header.m = m;
 	memcpy(rtp_session->write_msg.body, data, datalen);
 
-	bytes = rtp_header_len + datalen;
+	bytes = rtp_header_len + (rtp_session->write_msg.header.cc * 4) + datalen;
 
-	rtp_add_mid_extension(rtp_session, &rtp_session->write_msg, &bytes, rtp_header_len);
+	rtp_add_mid_extension(rtp_session, &rtp_session->write_msg, &bytes, rtp_header_len + (rtp_session->write_msg.header.cc * 4));
 
 	if (switch_rtp_write_raw(rtp_session, (void *) &rtp_session->write_msg, &bytes, SWITCH_TRUE) != SWITCH_STATUS_SUCCESS) {
 		rtp_session->seq--;
@@ -11269,104 +11269,123 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_enable_mid(switch_rtp_t *rtp_session,
 }
 
 #if HAVE_MID_EXT
-static void rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_t *send_msg, switch_size_t *bytes, size_t header_len) 
+static void rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_t *send_msg, switch_size_t *bytes, size_t header_len)
 {
 	uint8_t *body;
-	size_t payload_len;
 	uint8_t elem_hdr;
-	size_t cur_payload_bytes;
+	uint8_t payload_len;
+	size_t csrc_len;
 
-	uint16_t words;
-	size_t ext_payload_len;
-	uint8_t *payload_start, *rtp_payload;
-	size_t add_bytes, new_payload_len, pad_needed, delta;
-	uint8_t *p;
-
-	size_t new_ext_payload, pad, total_insert, payload_bytes;
-
-	if (!rtp_session || !send_msg || !bytes) return;
+	if (!(rtp_session && send_msg && bytes)) return;
 	if (!rtp_session->ext_mid.enabled) return;
+	if (rtp_session->ext_mid.ext_id < 1 || rtp_session->ext_mid.ext_id > 14) return;
+	if (rtp_session->ext_mid.mid[0] == '\0') return;
 
-	payload_len = 0;
-	if (rtp_session->ext_mid.mid[0] != '\0') {
-		payload_len = strlen(rtp_session->ext_mid.mid);
-	}
-	if (!payload_len) return;
+	payload_len = (uint8_t)strlen(rtp_session->ext_mid.mid);
 	if (payload_len > 16) payload_len = 16;
+	if (!payload_len) return;
 
-	elem_hdr = (uint8_t)(((rtp_session->ext_mid.ext_id & 0x0F) << 4) |
-                         ((uint8_t)((payload_len - 1) & 0x0F)));
+	elem_hdr = (uint8_t)(((rtp_session->ext_mid.ext_id & 0x0F) << 4) | ((payload_len - 1) & 0x0F));
 
 	body = (uint8_t *)send_msg->body;
 
-	if (!send_msg->header.x || !(body[0] == 0xBE && body[1] == 0xDE)) {
-		new_ext_payload = 1 + payload_len;          /* element header + value */
-		pad = (4 - (new_ext_payload & 3)) & 3;
-		total_insert = 4 + new_ext_payload + pad;   /* 0xBEDE hdr + payload + pad */
+	if (header_len < rtp_header_len) header_len = rtp_header_len;
+	csrc_len = header_len - rtp_header_len;
+	if (*bytes < header_len) return;
 
-		if (*bytes > rtp_header_len) {
-			payload_bytes = *bytes - rtp_header_len;
-			memmove(body + total_insert, body, payload_bytes);
-		} else {
-			payload_bytes = 0;
+	{
+		uint8_t *ext_hdr = body + csrc_len;
+
+		if (send_msg->header.x && ext_hdr[0] == 0xBE && ext_hdr[1] == 0xDE) {
+			uint16_t ext_words = (uint16_t)((ext_hdr[2] << 8) | ext_hdr[3]);
+			size_t ext_payload_len = (size_t)ext_words * 4;
+			uint8_t *ext_payload = ext_hdr + 4;
+			uint8_t *rtp_payload = ext_payload + ext_payload_len;
+			switch_size_t base = (switch_size_t)(header_len + 4 + ext_payload_len);
+
+			if (*bytes < base) return;
+
+			{
+				size_t rtp_payload_bytes = (size_t)(*bytes - base);
+				size_t needed = 1 + payload_len;
+				size_t trailing_pad = 0;
+				size_t insert_at;
+				size_t pad_needed;
+				size_t delta;
+
+				if (ext_payload_len) {
+					size_t i = ext_payload_len;
+					while (i > 0 && ext_payload[i - 1] == 0x00) {
+						trailing_pad++;
+						i--;
+					}
+				}
+
+				if (trailing_pad >= needed) {
+					insert_at = ext_payload_len - trailing_pad;
+					ext_payload[insert_at] = elem_hdr;
+					memcpy(ext_payload + insert_at + 1, rtp_session->ext_mid.mid, payload_len);
+					if (trailing_pad > needed) {
+						memset(ext_payload + insert_at + needed, 0, trailing_pad - needed);
+					}
+					return;
+				}
+
+				insert_at = ext_payload_len - trailing_pad;
+				{
+					size_t new_payload_len_no_pad = ext_payload_len + (needed - trailing_pad);
+					pad_needed = (4 - (new_payload_len_no_pad & 3)) & 3;
+					delta = (needed - trailing_pad) + pad_needed;
+
+					if (rtp_payload_bytes) {
+						memmove(rtp_payload + delta, rtp_payload, rtp_payload_bytes);
+					}
+
+					ext_payload[insert_at] = elem_hdr;
+					memcpy(ext_payload + insert_at + 1, rtp_session->ext_mid.mid, payload_len);
+
+					if (pad_needed) memset(ext_payload + new_payload_len_no_pad, 0, pad_needed);
+
+					{
+						uint16_t new_words = (uint16_t)((new_payload_len_no_pad + pad_needed) / 4);
+						ext_hdr[2] = (uint8_t)((new_words >> 8) & 0xFF);
+						ext_hdr[3] = (uint8_t)(new_words & 0xFF);
+					}
+
+					*bytes += (switch_size_t)delta;
+					return;
+				}
+			}
 		}
 
-		/* 0xBEDE header */
-		body[0] = 0xBE; body[1] = 0xDE;
-		words = (uint16_t)((new_ext_payload + pad) / 4);
-		body[2] = (uint8_t)((words >> 8) & 0xFF);
-		body[3] = (uint8_t)(words & 0xFF);
+		{
+			size_t needed = 1 + payload_len;
+			size_t pad_needed = (4 - (needed & 3)) & 3;
+			size_t total_insert = 4 + needed + pad_needed;
+			uint8_t *rtp_payload = ext_hdr;
+			size_t rtp_payload_bytes = (size_t)(*bytes - header_len);
 
-		/* MID element */
-		body[4] = elem_hdr;
-		memcpy(body + 5, rtp_session->ext_mid.mid, payload_len);
-		if (pad) memset(body + 5 + payload_len, 0, pad);
+			if (rtp_payload_bytes) {
+				memmove(rtp_payload + total_insert, rtp_payload, rtp_payload_bytes);
+			}
 
-		rtp_session->ext_has_ext      = SWITCH_TRUE;
-		rtp_session->ext_profile      = 0xBEDE;
-		rtp_session->ext_length_words = words;
+			ext_hdr[0] = 0xBE;
+			ext_hdr[1] = 0xDE;
+			{
+				uint16_t words = (uint16_t)((needed + pad_needed) / 4);
+				ext_hdr[2] = (uint8_t)((words >> 8) & 0xFF);
+				ext_hdr[3] = (uint8_t)(words & 0xFF);
+			}
 
-		send_msg->header.x = 1;
-		*bytes += total_insert;
-		return;
+			ext_hdr[4] = elem_hdr;
+			memcpy(ext_hdr + 5, rtp_session->ext_mid.mid, payload_len);
+			if (pad_needed) memset(ext_hdr + 5 + payload_len, 0, pad_needed);
+
+			send_msg->header.x = 1;
+			*bytes += (switch_size_t)total_insert;
+			return;
+		}
 	}
-
-	words = (uint16_t)((((uint16_t)body[2]) << 8) | ((uint16_t)body[3]));
-	ext_payload_len = (size_t)words * 4;
-
-	payload_start = body + 4;
-	rtp_payload = payload_start + ext_payload_len;
-
-	if (*bytes > rtp_header_len + 4 + ext_payload_len) {
-		cur_payload_bytes = *bytes - rtp_header_len - 4 - ext_payload_len;
-	} else {
-		cur_payload_bytes = 0;
-	}
-
-	add_bytes = 1 + payload_len; /* elem header + value */
-	new_payload_len = ext_payload_len + add_bytes;
-	pad_needed = (4 - (new_payload_len & 3)) & 3;
-	delta = (new_payload_len + pad_needed) - ext_payload_len;
-
-	if (cur_payload_bytes) {
-		memmove(rtp_payload + delta, rtp_payload, cur_payload_bytes);
-	}
-
-	p = payload_start + ext_payload_len;
-	*p++ = elem_hdr;
-	memcpy(p, rtp_session->ext_mid.mid, payload_len);
-	p += payload_len;
-	if (pad_needed) memset(p, 0, pad_needed);
-
-	words = (uint16_t)((new_payload_len + pad_needed) / 4);
-	body[2] = (uint8_t)((words >> 8) & 0xFF);
-	body[3] = (uint8_t)(words & 0xFF);
-
-	rtp_session->ext_has_ext      = SWITCH_TRUE;
-	rtp_session->ext_profile      = 0xBEDE;
-	rtp_session->ext_length_words = words;
-
-	*bytes += delta;
 }
 #endif
 

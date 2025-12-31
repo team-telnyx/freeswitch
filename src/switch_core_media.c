@@ -12452,7 +12452,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 
 				if (video_mid) {
 					if (mid_ext) {
-						switch_safe_atoi(mid_ext, 1);
+						mid_ext_id = switch_safe_atoi(mid_ext, 1);
 					}
 				
 					if (!mid_ext_id) mid_ext_id = 1;
@@ -13248,17 +13248,19 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 	//int vp8 = 0;
 	//int red = 0;
 	payload_map_t *pmap;
-	int is_outbound = switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_OUTBOUND;
+	uint8_t is_outbound = switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_OUTBOUND;
 	const char *vbw;
 	int bw = 256, i = 0;
 	uint8_t fir = 0, nack = 0, pli = 0, tmmbr = 0, has_vid = 0;
 	const char *use_rtcp_mux = NULL;
-	int include_external;
+	uint8_t include_external;
 	const char* audio_mid = switch_channel_get_variable_dup(session->channel, "rtp_audio_mid", SWITCH_FALSE, -1);
 	const char* video_mid = switch_channel_get_variable_dup(session->channel, "rtp_video_mid", SWITCH_FALSE, -1);
 	const char *clear_previous_negotiation = NULL;
-	int trickle, want_bundle = 0;
+	uint8_t trickle, want_bundle = 0;
 	const char *use_trickle = switch_core_media_trickle_enabled(session) ? "true" : NULL;
+	switch_bool_t bundle_requested = SWITCH_FALSE;
+	switch_bool_t want_video_mline = SWITCH_FALSE;
 
 	switch_assert(session);
 
@@ -13662,9 +13664,22 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 			want_bundle = 1;
 		}
 
+		bundle_requested = switch_channel_test_flag(session->channel, CF_BUNDLE_MEDIA) || switch_true(switch_channel_get_variable(session->channel, "rtp_use_bundle"));
+		want_bundle = bundle_requested;
+
 		if (want_bundle) {
 			const char *audio_mid = switch_channel_get_variable_dup(session->channel, "rtp_audio_mid", SWITCH_FALSE, -1);
 			const char *video_mid = switch_channel_get_variable_dup(session->channel, "rtp_video_mid", SWITCH_FALSE, -1);
+
+			if (zstr(audio_mid) || !strcmp(audio_mid, "0")) {
+				audio_mid = "audio";
+			}
+			if (!zstr(video_mid) && !strcmp(video_mid, "1")) {
+				video_mid = "video";
+			}
+			if (!zstr(video_mid) && !zstr(audio_mid) && !strcasecmp(video_mid, audio_mid)) {
+				video_mid = "video";
+			}
 
 			if (!zstr(audio_mid)) {
 				if (!zstr(video_mid)) {
@@ -14110,7 +14125,12 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 
  video:
 
-	if (!has_vid) {
+	want_video_mline = has_vid || (bundle_requested && !zstr(video_mid));
+	if (!want_video_mline && switch_channel_test_flag(session->channel, CF_VIDEO_SDP_RECVD)) {
+		want_video_mline = SWITCH_TRUE;
+	}
+
+	if (!want_video_mline) {
 		if (switch_channel_test_flag(session->channel, CF_VIDEO_SDP_RECVD)) {
 			switch_channel_clear_flag(session->channel, CF_VIDEO_SDP_RECVD);
 			switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "m=video 0 %s 19\r\n",
@@ -14139,7 +14159,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 			int loops;
 			int got_vid = 0;
 
-			if (switch_channel_test_flag(session->channel, CF_BUNDLE_MEDIA)) {
+			if (bundle_requested) {
 				v_port = (int)port;
 			}
 			
