@@ -2205,13 +2205,13 @@ static void handle_replace_frame(switch_media_bug_t *bug, struct eavesdrop_pvt *
 			data_to_merge = ep->reverse_resample_data;
 			merge_samples = ep->reverse_resampler->to_len;
 
-			switch_mutex_unlock(ep->reverse_resample_mutex);
-
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG10,
 								"Eavesdrop %s callback: Reverse resampled %d->%d samples, %dHz->%dHz\n",
 								log_prefix, original_samples, (int)ep->reverse_resampler->to_len,
 								ep->read_impl.actual_samples_per_second,
 								ep->tread_impl.actual_samples_per_second);
+
+			switch_mutex_unlock(ep->reverse_resample_mutex);
 		} else {
 			merge_samples = bytes / 2;
 		}
