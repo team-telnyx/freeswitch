@@ -2141,7 +2141,8 @@ struct eavesdrop_pvt {
 	uint8_t *r_data;
 	uint8_t *w_data;
 	uint8_t *resample_data;
-	uint8_t *reverse_resample_data;
+	uint8_t *r_reverse_resample_data;
+	uint8_t *w_reverse_resample_data;
 	uint8_t *frame_data;
 };
 
@@ -2192,17 +2193,18 @@ static void handle_replace_frame(switch_media_bug_t *bug, struct eavesdrop_pvt *
 		if (ep->reverse_resampler && bytes > 0) {
 			int16_t *original_data = (int16_t *)data_buffer;
 			int original_samples = bytes / 2 / ep->read_impl.number_of_channels;
+			uint8_t *reverse_resample_buffer = is_read ? ep->r_reverse_resample_data : ep->w_reverse_resample_data;
 
 			switch_mutex_lock(ep->reverse_resample_mutex);
 			switch_resample_process(ep->reverse_resampler, original_data, original_samples);
 
-			/* Copy resampled data to reverse resample buffer */
+			/* Copy resampled data to thread-specific reverse resample buffer */
 			{
 				uint32_t out_bytes = ep->reverse_resampler->to_len * 2 * ep->read_impl.number_of_channels;
 				if (out_bytes > SWITCH_MAX_L16) out_bytes = SWITCH_MAX_L16;
-				memcpy(ep->reverse_resample_data, ep->reverse_resampler->to, out_bytes);
+				memcpy(reverse_resample_buffer, ep->reverse_resampler->to, out_bytes);
 			}
-			data_to_merge = ep->reverse_resample_data;
+			data_to_merge = reverse_resample_buffer;
 			merge_samples = ep->reverse_resampler->to_len;
 
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG10,
@@ -2649,7 +2651,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 		switch_zmalloc(ep->r_data, SWITCH_MAX_L16);
 		switch_zmalloc(ep->w_data, SWITCH_MAX_L16);
 		switch_zmalloc(ep->resample_data, SWITCH_MAX_L16);
-		switch_zmalloc(ep->reverse_resample_data, SWITCH_MAX_L16);
+		switch_zmalloc(ep->r_reverse_resample_data, SWITCH_MAX_L16);
+		switch_zmalloc(ep->w_reverse_resample_data, SWITCH_MAX_L16);
 		switch_zmalloc(ep->frame_data, SWITCH_MAX_L16);
 
 		if (switch_channel_pre_answer(channel) != SWITCH_STATUS_SUCCESS) {
@@ -3180,7 +3183,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 			switch_safe_free(ep->r_data);
 			switch_safe_free(ep->w_data);
 			switch_safe_free(ep->resample_data);
-			switch_safe_free(ep->reverse_resample_data);
+			switch_safe_free(ep->r_reverse_resample_data);
+			switch_safe_free(ep->w_reverse_resample_data);
 			switch_safe_free(ep->frame_data);
 
 			if (ep->reverse_resampler) {
