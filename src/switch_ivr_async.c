@@ -2138,7 +2138,8 @@ struct eavesdrop_pvt {
 	switch_mutex_t *resample_mutex;
 	switch_audio_resampler_t *reverse_resampler;
 	switch_mutex_t *reverse_resample_mutex;
-	uint8_t *data;
+	uint8_t *r_data;
+	uint8_t *w_data;
 	uint8_t *resample_data;
 	uint8_t *reverse_resample_data;
 	uint8_t *frame_data;
@@ -2152,7 +2153,8 @@ static void handle_replace_frame(switch_media_bug_t *bug, struct eavesdrop_pvt *
 	const char *log_skip_prefix = is_read ? "READ_REPLACE" : "WRITE_REPLACE";
 	switch_frame_t *rframe;
 	uint32_t required_bytes;
-	void *data_to_merge = ep->data;
+	uint8_t *data_buffer = is_read ? ep->r_data : ep->w_data;
+	void *data_to_merge = data_buffer;
 	uint32_t merge_samples = 0;
 	uint32_t buffer_inuse;
 	uint32_t input_samples;
@@ -2184,11 +2186,11 @@ static void handle_replace_frame(switch_media_bug_t *bug, struct eavesdrop_pvt *
 		uint32_t bytes;
 
 		switch_buffer_lock(buffer);
-		bytes = (uint32_t) switch_buffer_read(buffer, ep->data, required_bytes);
+		bytes = (uint32_t) switch_buffer_read(buffer, data_buffer, required_bytes);
 
 		/* Apply reverse resampling if needed */
 		if (ep->reverse_resampler && bytes > 0) {
-			int16_t *original_data = (int16_t *)ep->data;
+			int16_t *original_data = (int16_t *)data_buffer;
 			int original_samples = bytes / 2 / ep->read_impl.number_of_channels;
 
 			switch_mutex_lock(ep->reverse_resample_mutex);
@@ -2218,7 +2220,7 @@ static void handle_replace_frame(switch_media_bug_t *bug, struct eavesdrop_pvt *
 		rframe->samples = rframe->datalen / 2;
 
 		if (is_read && switch_test_flag(ep, ED_DEMUX_READ)) {
-			ep->demux_frame.data = ep->data;
+			ep->demux_frame.data = data_buffer;
 			ep->demux_frame.datalen = bytes;
 			ep->demux_frame.samples = bytes / 2 / channels;
 			ep->demux_frame.channels = rframe->channels;
@@ -2644,7 +2646,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 
 		ep = switch_core_session_alloc(session, sizeof(*ep));
 
-		switch_zmalloc(ep->data, SWITCH_MAX_L16);
+		switch_zmalloc(ep->r_data, SWITCH_MAX_L16);
+		switch_zmalloc(ep->w_data, SWITCH_MAX_L16);
 		switch_zmalloc(ep->resample_data, SWITCH_MAX_L16);
 		switch_zmalloc(ep->reverse_resample_data, SWITCH_MAX_L16);
 		switch_zmalloc(ep->frame_data, SWITCH_MAX_L16);
@@ -3174,7 +3177,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Eavesdrop: Destroyed resampler\n");
 			}
 
-			switch_safe_free(ep->data);
+			switch_safe_free(ep->r_data);
+			switch_safe_free(ep->w_data);
 			switch_safe_free(ep->resample_data);
 			switch_safe_free(ep->reverse_resample_data);
 			switch_safe_free(ep->frame_data);
