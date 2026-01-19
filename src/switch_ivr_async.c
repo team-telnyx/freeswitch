@@ -2234,6 +2234,8 @@ static void handle_replace_frame(switch_media_bug_t *bug, struct eavesdrop_pvt *
 			switch_core_media_bug_set_read_replace_frame(bug, rframe);
 			if (switch_test_flag(ep, ED_DEMUX_READ)) {
 				switch_core_media_bug_set_read_demux_frame(bug, &ep->demux_frame);
+			} else {
+				switch_core_media_bug_set_read_demux_frame(bug, NULL);
 			}
 		} else {
 			switch_core_media_bug_set_write_replace_frame(bug, rframe);
