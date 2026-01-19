@@ -2162,6 +2162,9 @@ static void handle_replace_frame(switch_media_bug_t *bug, struct eavesdrop_pvt *
 	int channels;
 
 	if (!switch_test_flag(ep, flag)) {
+		if (flag == ED_MUX_READ) {
+			switch_core_media_bug_set_read_demux_frame(bug, NULL);
+		}
 		return;
 	}
 
