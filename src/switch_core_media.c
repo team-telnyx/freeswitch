@@ -4643,8 +4643,16 @@ static void clear_ice(switch_core_session_t *session, switch_media_type_t type)
 //?
 SWITCH_DECLARE(void) switch_core_media_clear_ice(switch_core_session_t *session)
 {
+	switch_channel_t *channel;
+
 	clear_ice(session, SWITCH_MEDIA_TYPE_AUDIO);
 	clear_ice(session, SWITCH_MEDIA_TYPE_VIDEO);
+
+	/* Clear trickle ICE accept variable to ensure fresh state on reconnection */
+	channel = switch_core_session_get_channel(session);
+	if (channel) {
+		switch_channel_set_variable(channel, "sip_trickle_accept", NULL);
+	}
 
 }
 
@@ -10723,7 +10731,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Audio params are unchanged for %s.\n",
 							  switch_channel_get_name(session->channel));
 			a_engine->cur_payload_map->negotiated = 1;
-			//XX
+			
+			if (session && a_engine) {
+				check_dtls_reinvite(session, a_engine);
+			}
+
 			goto video;
 		} else {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Audio params changed for %s from %s:%d to %s:%d\n",
