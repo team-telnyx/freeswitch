@@ -5347,6 +5347,12 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						} else {
 							sofia_clear_pflag(profile, PFLAG_RTP_NOTIMER_DURING_BRIDGE);
 						}
+					} else if (!strcasecmp(var, "ignore-rtp-during-dtmf")) {
+						if (switch_true(val)) {
+							sofia_set_pflag(profile, PFLAG_IGNORE_RTP_DURING_DTMF);
+						} else {
+							sofia_clear_pflag(profile, PFLAG_IGNORE_RTP_DURING_DTMF);
+						}
 					} else if (!strcasecmp(var, "manual-redirect")) {
 						if (switch_true(val)) {
 							sofia_set_pflag(profile, PFLAG_MANUAL_REDIRECT);

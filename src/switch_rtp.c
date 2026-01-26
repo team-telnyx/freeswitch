@@ -6816,6 +6816,27 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 				}
 			}
 
+			/* Drop audio packets during active DTMF events to prevent corruption (MS Teams RFC2833 workaround) */
+			if (accept_packet &&
+				rtp_session->flags[SWITCH_RTP_FLAG_IGNORE_RTP_DURING_DTMF] &&
+				rtp_session->dtmf_data.in_digit_ts != 0 &&
+				rtp_session->last_rtp_hdr.pt != rtp_session->recv_te &&
+				rtp_session->last_rtp_hdr.pt != rtp_session->cng_pt) {
+
+				if (rtp_session->flags[SWITCH_RTP_FLAG_DEBUG_RTP_READ]) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session),
+									  SWITCH_LOG_WARNING,
+									  "Dropping audio packet (pt=%d seq=%d ts=%u) during active DTMF event (dtmf_ts=%u) - RFC2833 workaround\n",
+									  rtp_session->last_rtp_hdr.pt,
+									  ntohs(rtp_session->recv_msg.header.seq),
+									  ntohl(rtp_session->last_rtp_hdr.ts),
+									  rtp_session->dtmf_data.in_digit_ts);
+				}
+
+				*bytes = 0;
+				goto more;
+			}
+
 			if (accept_packet && rtp_session->flags[SWITCH_RTP_FLAG_DETECT_SSRC]) {
 				//if (rtp_session->remote_ssrc != rtp_session->stats.rtcp.peer_ssrc && rtp_session->stats.rtcp.peer_ssrc) {
 				//	rtp_session->remote_ssrc = rtp_session->stats.rtcp.peer_ssrc;
