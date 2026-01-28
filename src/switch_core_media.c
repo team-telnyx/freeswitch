@@ -5349,9 +5349,6 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 				} else if (engine->ice_in.ufrag && !strcmp(engine->ice_in.ufrag, attr->a_value)) {
 					engine->new_ice = 0;
 				} else {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
-						"ice-ufrag: updating from %s to %s\n",
-						engine->ice_in.ufrag ? engine->ice_in.ufrag : "null", attr->a_value);
 					engine->ice_in.ufrag = switch_core_session_strdup(smh->session, attr->a_value);
 					engine->new_ice = 1;
 				}
