@@ -2366,8 +2366,6 @@ static switch_bool_t eavesdrop_callback(switch_media_bug_t *bug, void *user_data
 	case SWITCH_ABC_TYPE_WRITE:
 		break;
 	case SWITCH_ABC_TYPE_READ_PING:
-		/* READ_PING reads target audio and resamples it to coach rate for sending to coach */
-		/* This is separate from the buffers used for merging coach audio into target frames */
 		if (ep->buffer) {
 			if (switch_core_media_bug_read(bug, &frame, SWITCH_FALSE) != SWITCH_STATUS_FALSE) {
 				void *data_to_write = frame.data;
