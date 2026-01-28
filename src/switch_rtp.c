@@ -4557,6 +4557,9 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_add_dtls(switch_rtp_t *rtp_session, d
 
 	switch_rtp_del_dtls(rtp_session, type);
 
+	/* Reset dtls_handshake flag when starting new DTLS handshake to allow ICE auto-adjust */
+	rtp_session->ice.dtls_handshake = 0;
+
 	if ((type & DTLS_TYPE_RTP) && (type & DTLS_TYPE_RTCP)) {
 		kind = "RTP/RTCP";
 	} else if ((type & DTLS_TYPE_RTP)) {

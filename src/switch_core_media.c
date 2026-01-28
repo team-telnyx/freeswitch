@@ -4814,9 +4814,16 @@ static void clear_ice(switch_core_session_t *session, switch_media_type_t type)
 //?
 SWITCH_DECLARE(void) switch_core_media_clear_ice(switch_core_session_t *session)
 {
+	switch_channel_t *channel;
+
 	clear_ice(session, SWITCH_MEDIA_TYPE_AUDIO);
 	clear_ice(session, SWITCH_MEDIA_TYPE_VIDEO);
 
+	/* Clear trickle ICE accept variable to ensure fresh state on reconnection */
+	channel = switch_core_session_get_channel(session);
+	if (channel) {
+		switch_channel_set_variable(channel, "sip_trickle_accept", NULL);
+	}
 }
 
 SWITCH_DECLARE(void) switch_core_media_pause(switch_core_session_t *session)
@@ -5263,6 +5270,9 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 	char con_addr[256];
 	int ice_resolve = 0;
 	int trickle_on = trickle_accept_enabled(smh->session);
+	dtls_state_t check_ice_dtls_state = engine->rtp_session ? switch_rtp_dtls_state(engine->rtp_session, DTLS_TYPE_RTP) : DS_OFF;
+	int check_ice_is_reinvite = switch_channel_test_flag(smh->session->channel, CF_REINVITE) ? 1 : 0;
+	int is_trickle_recheck = (check_ice_dtls_state != DS_OFF) && !check_ice_is_reinvite;
 
 	if (switch_true(switch_channel_get_variable_dup(smh->session->channel, "ignore_sdp_ice", SWITCH_FALSE, -1))) {
 		return SWITCH_STATUS_BREAK;
@@ -5332,7 +5342,11 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 			if (!strcasecmp(attr->a_name, "group") && attr->a_value && !strncasecmp(attr->a_value, "BUNDLE", 6)) {
 				switch_channel_set_variable(smh->session->channel, "rtp_group_bundle", attr->a_value + 6);
 			} else if (!strcasecmp(attr->a_name, "ice-ufrag")) {
-				if (engine->ice_in.ufrag && !strcmp(engine->ice_in.ufrag, attr->a_value)) {
+				if (is_trickle_recheck) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
+						"ice-ufrag: skipping update during trickle recheck (current=%s, sdp=%s)\n",
+						engine->ice_in.ufrag ? engine->ice_in.ufrag : "null", attr->a_value);
+				} else if (engine->ice_in.ufrag && !strcmp(engine->ice_in.ufrag, attr->a_value)) {
 					engine->new_ice = 0;
 				} else {
 					engine->ice_in.ufrag = switch_core_session_strdup(smh->session, attr->a_value);
@@ -5340,7 +5354,10 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 				}
 				ice_seen++;
 			} else if (!strcasecmp(attr->a_name, "ice-pwd")) {
-				if (!engine->ice_in.pwd || strcmp(engine->ice_in.pwd, attr->a_value)) {
+				if (is_trickle_recheck) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
+						"ice-pwd: skipping update during trickle recheck\n");
+				} else if (!engine->ice_in.pwd || strcmp(engine->ice_in.pwd, attr->a_value)) {
 					engine->ice_in.pwd = switch_core_session_strdup(smh->session, attr->a_value);
 				}
 			} else if (!strcasecmp(attr->a_name, "ice-options")) {
@@ -5371,8 +5388,11 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 
 					continue;
 			} else if (!strcasecmp(attr->a_name, "setup")) {
-				if (!strcasecmp(attr->a_value, "passive") ||
-					(!strcasecmp(attr->a_value, "actpass") && !switch_channel_test_flag(smh->session->channel, CF_REINVITE))) {
+				if (is_trickle_recheck) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_INFO,
+						"a=setup: skipping dtls_controller update during trickle recheck (DTLS state=%d)\n", check_ice_dtls_state);
+				} else if (!strcasecmp(attr->a_value, "passive") ||
+					(!strcasecmp(attr->a_value, "actpass") && !check_ice_is_reinvite)) {
 					if (!engine->dtls_controller) {
 						engine->new_dtls = 1;
 						engine->new_ice = 1;
@@ -11409,7 +11429,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Audio params are unchanged for %s.\n",
 							  switch_channel_get_name(session->channel));
 			a_engine->cur_payload_map->negotiated = 1;
-			//XX
+
+			if (session && a_engine) {
+				check_dtls_reinvite(session, a_engine);
+			}
+
 			goto video;
 		} else {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Audio params changed for %s from %s:%d to %s:%d\n",
