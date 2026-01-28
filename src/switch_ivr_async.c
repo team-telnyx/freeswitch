@@ -2749,10 +2749,10 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 							  read_impl.actual_samples_per_second, tread_impl.actual_samples_per_second,
 							  read_impl.decoded_bytes_per_packet, read_impl.number_of_channels);
 
-		/* Create separate resamplers for read and write to avoid state corruption */
-		/* Resamplers are stateful, so sharing one between read/write causes broken audio */
-		switch_mutex_init(&ep->r_reverse_resample_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(tsession));
-		if (switch_resample_create(&ep->r_reverse_resampler,
+			/* Create separate resamplers for read and write to avoid state corruption */
+			/* Resamplers are stateful, so sharing one between read/write causes broken audio */
+			switch_mutex_init(&ep->r_reverse_resample_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(tsession));
+			if (switch_resample_create(&ep->r_reverse_resampler,
 								   read_impl.actual_samples_per_second,
 								   tread_impl.actual_samples_per_second,
 								   tread_impl.decoded_bytes_per_packet,
@@ -2763,8 +2763,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 				goto end;
 			}
 
-		switch_mutex_init(&ep->w_reverse_resample_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(tsession));
-		if (switch_resample_create(&ep->w_reverse_resampler,
+			switch_mutex_init(&ep->w_reverse_resample_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(tsession));
+			if (switch_resample_create(&ep->w_reverse_resampler,
 								   read_impl.actual_samples_per_second,
 								   tread_impl.actual_samples_per_second,
 								   tread_impl.decoded_bytes_per_packet,
@@ -2775,9 +2775,9 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 				goto end;
 			}
 
-		/* Keep old resampler for backward compatibility, but use separate ones for read/write */
-		ep->reverse_resampler = ep->r_reverse_resampler;  /* Default to read resampler */
-		ep->reverse_resample_mutex = ep->r_reverse_resample_mutex;
+			/* Keep old resampler for backward compatibility, but use separate ones for read/write */
+			ep->reverse_resampler = ep->r_reverse_resampler;  /* Default to read resampler */
+			ep->reverse_resample_mutex = ep->r_reverse_resample_mutex;
 		}
 
 		codec_initialized = 1;
