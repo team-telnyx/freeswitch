@@ -2148,6 +2148,7 @@ struct eavesdrop_pvt {
 	uint8_t *r_reverse_resample_data;
 	uint8_t *w_reverse_resample_data;
 	uint8_t *frame_data;
+	uint8_t *demux_data;
 };
 
 static void handle_replace_frame(switch_media_bug_t *bug, struct eavesdrop_pvt *ep, switch_core_session_t *session, switch_bool_t is_read)
@@ -2257,13 +2258,24 @@ static void handle_replace_frame(switch_media_bug_t *bug, struct eavesdrop_pvt *
 			/* switch_merge_sln will merge min(rframe->samples, merge_samples) samples */
 			rframe->samples = switch_merge_sln(rframe->data, rframe->samples, (int16_t *) data_to_merge, merge_samples, channels);
 			rframe->datalen = rframe->samples * 2 * channels;
-		}
 
-		if (is_read && switch_test_flag(ep, ED_DEMUX_READ)) {
-			ep->demux_frame.data = data_buffer;
-			ep->demux_frame.datalen = bytes;
-			ep->demux_frame.samples = bytes / 2 / channels;
-			ep->demux_frame.channels = rframe->channels;
+			/* Save READ audio stream for unmerge */
+			if (is_read && switch_test_flag(ep, ED_MUX_READ)) {
+				uint32_t demux_bytes = merge_samples * 2 * channels;
+				if (demux_bytes <= SWITCH_MAX_L16) {
+					memcpy(ep->demux_data, data_to_merge, demux_bytes);
+					ep->demux_frame.data = ep->demux_data;
+					ep->demux_frame.datalen = demux_bytes;
+					ep->demux_frame.samples = merge_samples;
+					ep->demux_frame.channels = channels;
+				}
+			}
+		} else {
+			if (is_read) {
+				ep->demux_frame.data = NULL;
+				ep->demux_frame.datalen = 0;
+				ep->demux_frame.samples = 0;
+			}
 		}
 
 		switch_buffer_unlock(buffer);
@@ -2372,6 +2384,38 @@ static switch_bool_t eavesdrop_callback(switch_media_bug_t *bug, void *user_data
 			if (switch_core_media_bug_read(bug, &frame, SWITCH_FALSE) != SWITCH_STATUS_FALSE) {
 				void *data_to_write = frame.data;
 				uint32_t datalen_to_write = frame.datalen;
+
+				/* Unmerge eavesdrop READ audio to prevent echo */
+				if (switch_test_flag(ep, ED_MUX_READ) && ep->demux_frame.data && ep->demux_frame.datalen > 0 && frame.datalen > 0) {
+					uint32_t frame_samples = frame.datalen / 2 / frame.channels;
+					uint32_t demux_samples = ep->demux_frame.datalen / 2 / ep->demux_frame.channels;
+					
+
+					if (frame_samples == demux_samples && frame.channels == ep->demux_frame.channels) {
+						uint8_t unmerged_data[SWITCH_MAX_L16];
+						uint32_t unmerged_samples;
+						
+						memcpy(unmerged_data, frame.data, frame.datalen);
+						
+						unmerged_samples = switch_unmerge_sln((int16_t *)unmerged_data, frame_samples,
+						                                       (int16_t *)ep->demux_frame.data, demux_samples,
+						                                       frame.channels);
+						
+						frame.data = unmerged_data;
+						frame.datalen = unmerged_samples * 2 * frame.channels;
+						frame.samples = unmerged_samples;
+						data_to_write = unmerged_data;
+						datalen_to_write = frame.datalen;
+						
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG10,
+						                  "Eavesdrop READ_PING: Unmerged eavesdrop READ audio (%u samples, %u bytes)\n",
+						                  unmerged_samples, frame.datalen);
+
+						ep->demux_frame.data = NULL;
+						ep->demux_frame.datalen = 0;
+						ep->demux_frame.samples = 0;
+					}
+				}
 
 				/* Apply resampling if needed */
 				if (ep->tread_impl.actual_samples_per_second != ep->read_impl.actual_samples_per_second &&
@@ -2700,6 +2744,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 		switch_zmalloc(ep->r_reverse_resample_data, SWITCH_MAX_L16);
 		switch_zmalloc(ep->w_reverse_resample_data, SWITCH_MAX_L16);
 		switch_zmalloc(ep->frame_data, SWITCH_MAX_L16);
+		switch_zmalloc(ep->demux_data, SWITCH_MAX_L16);
 
 		if (switch_channel_pre_answer(channel) != SWITCH_STATUS_SUCCESS) {
 			goto end;
@@ -3251,6 +3296,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 			switch_safe_free(ep->r_reverse_resample_data);
 			switch_safe_free(ep->w_reverse_resample_data);
 			switch_safe_free(ep->frame_data);
+			switch_safe_free(ep->demux_data);
 
 			if (ep->r_reverse_resampler) {
 				switch_resample_destroy(&ep->r_reverse_resampler);
