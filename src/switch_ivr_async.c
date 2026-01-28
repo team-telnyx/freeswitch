@@ -2387,7 +2387,6 @@ static switch_bool_t eavesdrop_callback(switch_media_bug_t *bug, void *user_data
 				if (switch_test_flag(ep, ED_MUX_READ) && ep->demux_frame.data && ep->demux_frame.datalen > 0 && frame.datalen > 0) {
 					uint32_t frame_samples = frame.datalen / 2 / frame.channels;
 					uint32_t demux_samples = ep->demux_frame.datalen / 2 / ep->demux_frame.channels;
-					
 
 					if (frame_samples == demux_samples && frame.channels == ep->demux_frame.channels) {
 						uint8_t unmerged_data[SWITCH_MAX_L16];
