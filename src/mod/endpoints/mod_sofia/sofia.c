@@ -4929,6 +4929,7 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 					switch_mutex_init(&profile->flag_mutex, SWITCH_MUTEX_NESTED, profile->pool);
 					profile->dtmf_duration = 100;
 					profile->rtp_digit_delay = 40;
+					profile->ignore_rtp_during_dtmf_timeout = 2000;
 					profile->sip_force_expires = 0;
 					profile->sip_force_expires_min = 0;
 					profile->sip_force_expires_max = 0;
@@ -5347,12 +5348,20 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						} else {
 							sofia_clear_pflag(profile, PFLAG_RTP_NOTIMER_DURING_BRIDGE);
 						}
-					} else if (!strcasecmp(var, "ignore-rtp-during-dtmf")) {
-						if (switch_true(val)) {
-							sofia_set_pflag(profile, PFLAG_IGNORE_RTP_DURING_DTMF);
-						} else {
-							sofia_clear_pflag(profile, PFLAG_IGNORE_RTP_DURING_DTMF);
-						}
+				} else if (!strcasecmp(var, "ignore-rtp-during-dtmf")) {
+					if (switch_true(val)) {
+						sofia_set_pflag(profile, PFLAG_IGNORE_RTP_DURING_DTMF);
+					} else {
+						sofia_clear_pflag(profile, PFLAG_IGNORE_RTP_DURING_DTMF);
+					}
+				} else if (!strcasecmp(var, "ignore-rtp-during-dtmf-timeout") && !zstr(val)) {
+					int timeout = atoi(val);
+					if (timeout < 1 || timeout > 10000) {
+						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+										  "Invalid ignore-rtp-during-dtmf-timeout value: %d (must be 1-10000ms), using default 2000ms\n", timeout);
+						timeout = 2000;
+					}
+					profile->ignore_rtp_during_dtmf_timeout = (uint32_t) timeout;
 					} else if (!strcasecmp(var, "manual-redirect")) {
 						if (switch_true(val)) {
 							sofia_set_pflag(profile, PFLAG_MANUAL_REDIRECT);

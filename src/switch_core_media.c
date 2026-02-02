@@ -10846,6 +10846,30 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 			}
 		}
 
+		/* Enable ignore-rtp-during-dtmf if channel variable or sofia profile sets it */
+		{
+			const char *val = NULL;
+		uint32_t timeout_ms;
+			if ((val = switch_channel_get_variable(session->channel, "ignore_rtp_during_dtmf")) && switch_true(val)) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+								  "Enabling SWITCH_RTP_FLAG_IGNORE_RTP_DURING_DTMF (RFC2833 workaround)\n");
+				switch_rtp_set_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_IGNORE_RTP_DURING_DTMF);
+			}
+
+		/* Set custom timeout for ignore-rtp-during-dtmf if configured */
+		if ((val = switch_channel_get_variable(session->channel, "ignore_rtp_during_dtmf_timeout")) && !zstr(val)) {
+			timeout_ms = atoi(val);
+			if (timeout_ms > 0 && timeout_ms <= 10000) {
+				switch_rtp_set_ignore_rtp_during_dtmf_timeout(a_engine->rtp_session, timeout_ms);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+								  "Set DTMF audio drop timeout to %ums\n", timeout_ms);
+			} else {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+								  "Invalid ignore_rtp_during_dtmf_timeout value: %s (must be 1-10000ms), using default\n", val);
+			}
+		}
+		}
+
 		if (switch_rtp_ready(a_engine->rtp_session)) {
 			switch_rtp_set_payload_map(a_engine->rtp_session, &a_engine->payload_map);
 		}
