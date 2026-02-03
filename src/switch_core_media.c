@@ -10849,7 +10849,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 		/* Enable ignore-rtp-during-dtmf if channel variable or sofia profile sets it */
 		{
 			const char *val = NULL;
-		uint32_t timeout_ms;
+			uint32_t timeout_ms = 0;
 			if ((val = switch_channel_get_variable(session->channel, "ignore_rtp_during_dtmf")) && switch_true(val)) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 								  "Enabling SWITCH_RTP_FLAG_IGNORE_RTP_DURING_DTMF (RFC2833 workaround)\n");
