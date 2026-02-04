@@ -6835,8 +6835,20 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 				uint32_t elapsed_ms;
 
 				current_ts = ntohl(rtp_session->last_rtp_hdr.ts);
-				elapsed_samples = current_ts - rtp_session->dtmf_data.in_digit_ts;
-				elapsed_ms = (elapsed_samples * 1000) / rtp_session->samples_per_second;
+
+				/* Check for timestamp progression to avoid wraparound issues */
+				if (current_ts >= rtp_session->dtmf_data.in_digit_ts) {
+					elapsed_samples = current_ts - rtp_session->dtmf_data.in_digit_ts;
+					elapsed_ms = (elapsed_samples * 1000) / rtp_session->samples_per_second;
+				} else {
+					/* Timestamp wrapped around or went backwards - treat as timeout to be safe */
+					elapsed_ms = rtp_session->ignore_rtp_during_dtmf_timeout + 1;
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session),
+									  SWITCH_LOG_WARNING,
+									  "DTMF timestamp anomaly: current_ts=%u < dtmf_ts=%u, forcing timeout\n",
+									  current_ts,
+									  rtp_session->dtmf_data.in_digit_ts);
+				}
 
 				/* Timeout to handle lost DTMF END packets (configurable via ignore_rtp_during_dtmf_timeout) */
 				if (elapsed_ms > rtp_session->ignore_rtp_during_dtmf_timeout) {
@@ -6856,7 +6868,7 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 					/* Drop audio packet during active DTMF */
 					if (rtp_session->flags[SWITCH_RTP_FLAG_DEBUG_RTP_READ]) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session),
-										  SWITCH_LOG_WARNING,
+										  SWITCH_LOG_DEBUG,
 										  "Dropping audio packet (pt=%d seq=%d ts=%u elapsed=%ums) during active DTMF event (dtmf_ts=%u) - RFC2833 workaround\n",
 										  rtp_session->last_rtp_hdr.pt,
 										  ntohs(rtp_session->recv_msg.header.seq),
