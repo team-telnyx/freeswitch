@@ -6866,16 +6866,14 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 					/* Do not drop this packet, let it process normally */
 				} else {
 					/* Drop audio packet during active DTMF */
-					if (rtp_session->flags[SWITCH_RTP_FLAG_DEBUG_RTP_READ]) {
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session),
-										  SWITCH_LOG_DEBUG,
-										  "Dropping audio packet (pt=%d seq=%d ts=%u elapsed=%ums) during active DTMF event (dtmf_ts=%u) - RFC2833 workaround\n",
-										  rtp_session->last_rtp_hdr.pt,
-										  ntohs(rtp_session->recv_msg.header.seq),
-										  current_ts,
-										  elapsed_ms,
-										  rtp_session->dtmf_data.in_digit_ts);
-					}
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session),
+									  SWITCH_LOG_DEBUG,
+									  "Dropping audio packet (pt=%d seq=%d ts=%u elapsed=%ums) during active DTMF event (dtmf_ts=%u) - RFC2833 workaround\n",
+									  rtp_session->last_rtp_hdr.pt,
+									  ntohs(rtp_session->recv_msg.header.seq),
+									  current_ts,
+									  elapsed_ms,
+									  rtp_session->dtmf_data.in_digit_ts);
 
 					*bytes = 0;
 					goto more;
