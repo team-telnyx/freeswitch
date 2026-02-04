@@ -5101,7 +5101,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_create(switch_rtp_t **new_rtp_session
 	rtp_session->cng_pt = INVALID_PT;
 	rtp_session->session = session;
 	rtp_session->rtcp_probe = 0;
-	rtp_session->ignore_rtp_during_dtmf_timeout = 2000;
+	rtp_session->ignore_rtp_during_dtmf_timeout = SWITCH_RTP_DEFAULT_IGNORE_DTMF_TIMEOUT_MS;
 
 	switch_mutex_init(&rtp_session->flag_mutex, SWITCH_MUTEX_NESTED, pool);
 	switch_mutex_init(&rtp_session->read_mutex, SWITCH_MUTEX_NESTED, pool);
@@ -6881,7 +6881,6 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 					goto more;
 				}
 			}
-
 
 			if (accept_packet && rtp_session->flags[SWITCH_RTP_FLAG_DETECT_SSRC]) {
 				//if (rtp_session->remote_ssrc != rtp_session->stats.rtcp.peer_ssrc && rtp_session->stats.rtcp.peer_ssrc) {
