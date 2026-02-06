@@ -2066,6 +2066,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_multi_threaded_bridge(switch_core_ses
 
 		switch_channel_set_bridge_time(caller_channel);
 		switch_channel_set_bridge_time(peer_channel);
+		set_bridge_codec_vars(caller_channel, peer_channel);
 
 		if (switch_event_create(&event, SWITCH_EVENT_CHANNEL_BRIDGE) == SWITCH_STATUS_SUCCESS) {
 			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Bridge-A-Unique-ID", switch_core_session_get_uuid(session));
