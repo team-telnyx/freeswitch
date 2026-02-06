@@ -1921,6 +1921,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_signal_bridge(switch_core_session_t *
 	}
 
 	check_bridge_export(caller_channel, peer_channel);
+	set_bridge_codec_vars(caller_channel, peer_channel);
 
 	switch_channel_set_flag_recursive(caller_channel, CF_SIGNAL_BRIDGE_TTL);
 	switch_channel_set_flag_recursive(peer_channel, CF_SIGNAL_BRIDGE_TTL);
