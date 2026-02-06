@@ -1875,6 +1875,35 @@ static void check_bridge_export(switch_channel_t *channel, switch_channel_t *pee
 	switch_channel_process_export(channel, peer_channel, NULL, SWITCH_BRIDGE_EXPORT_VARS_VARIABLE);
 }
 
+/**
+ * Copy codec names from each channel to the peer channel with "bridge_" prefix
+ * This allows detection of transcoding by comparing codec variables in a single CDR
+ */
+static void set_bridge_codec_vars(switch_channel_t *channel_a, switch_channel_t *channel_b)
+{
+	const char *codec_var;
+
+	/* Copy audio codec name from channel_a to channel_b */
+	if ((codec_var = switch_channel_get_variable(channel_a, "rtp_use_codec_name"))) {
+		switch_channel_set_variable(channel_b, "bridge_rtp_use_codec_name", codec_var);
+	}
+
+	/* Copy audio codec name from channel_b to channel_a */
+	if ((codec_var = switch_channel_get_variable(channel_b, "rtp_use_codec_name"))) {
+		switch_channel_set_variable(channel_a, "bridge_rtp_use_codec_name", codec_var);
+	}
+
+	/* Copy video codec name from channel_a to channel_b (if present) */
+	if ((codec_var = switch_channel_get_variable(channel_a, "rtp_use_video_codec_name"))) {
+		switch_channel_set_variable(channel_b, "bridge_rtp_use_video_codec_name", codec_var);
+	}
+
+	/* Copy video codec name from channel_b to channel_a (if present) */
+	if ((codec_var = switch_channel_get_variable(channel_b, "rtp_use_video_codec_name"))) {
+		switch_channel_set_variable(channel_a, "bridge_rtp_use_video_codec_name", codec_var);
+	}
+}
+
 SWITCH_DECLARE(switch_status_t) switch_ivr_signal_bridge(switch_core_session_t *session, switch_core_session_t *peer_session)
 {
 	switch_channel_t *caller_channel = switch_core_session_get_channel(session);
