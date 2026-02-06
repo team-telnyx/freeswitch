@@ -31,6 +31,7 @@
 
 #include <switch.h>
 #include "mod_sofia.h"
+#include "prometheus_metrics.h"
 
 #define kLOCALADDR "local_addr"
 #define kLOCALPORT "local_port"
@@ -403,9 +404,15 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 
     switch_channel_mark_answered(channel);
 
+    // Track successful RTP endpoint origination
+    prometheus_increment_rtp_outgoing_calls();
+
     return SWITCH_CAUSE_SUCCESS;
 
 fail:
+     // Track failed RTP endpoint origination
+     prometheus_increment_rtp_outgoing_failed_calls();
+
      if (tech_pvt) {
         if (tech_pvt->read_codec.implementation) {
 			switch_core_codec_destroy(&tech_pvt->read_codec);
