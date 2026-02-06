@@ -287,6 +287,9 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
         rate = !zstr(szrate) ? atoi(szrate) : 8000,
         pt = !zstr(szpt) ? atoi(szpt) : 0;
 
+    // Track total RTP endpoint origination attempts
+    prometheus_increment_rtp_outgoing_calls();
+
     if (zstr(local_addr)) {
         local_addr = crtp.default_local_ip;
     }
@@ -403,9 +406,6 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
     }
 
     switch_channel_mark_answered(channel);
-
-    // Track successful RTP endpoint origination
-    prometheus_increment_rtp_outgoing_calls();
 
     return SWITCH_CAUSE_SUCCESS;
 
