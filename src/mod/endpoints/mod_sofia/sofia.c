@@ -5358,6 +5358,9 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						int timeout = atoi(val);
 						if (timeout > 0 && timeout <= 10000) {
 							profile->ignore_rtp_during_dtmf_timeout = timeout;
+						} else {
+							switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+								"ignore-rtp-during-dtmf-timeout value '%s' out of range (1-10000ms), using default\n", val);
 						}
 					} else if (!strcasecmp(var, "manual-redirect")) {
 						if (switch_true(val)) {

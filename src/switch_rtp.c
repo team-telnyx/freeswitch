@@ -6839,7 +6839,12 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 				/* Check for timestamp progression to avoid wraparound issues */
 				if (current_ts >= rtp_session->dtmf_data.in_digit_ts) {
 					elapsed_samples = current_ts - rtp_session->dtmf_data.in_digit_ts;
-					elapsed_ms = (elapsed_samples * 1000) / rtp_session->samples_per_second;
+					if (rtp_session->samples_per_second > 0) {
+						elapsed_ms = (elapsed_samples * 1000) / rtp_session->samples_per_second;
+					} else {
+						/* Guard against division by zero - force timeout */
+						elapsed_ms = rtp_session->ignore_rtp_during_dtmf_timeout + 1;
+					}
 				} else {
 					/* Timestamp wrapped around or went backwards - treat as timeout to be safe */
 					elapsed_ms = rtp_session->ignore_rtp_during_dtmf_timeout + 1;
