@@ -6829,7 +6829,6 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 				rtp_session->dtmf_data.in_digit_ts != 0 &&
 				rtp_session->last_rtp_hdr.pt != rtp_session->recv_te &&
 				rtp_session->last_rtp_hdr.pt != rtp_session->cng_pt) {
-
 				uint32_t current_ts;
 				uint32_t elapsed_samples;
 				uint32_t elapsed_ms;

@@ -10860,13 +10860,13 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 			/* Set custom timeout for ignore-rtp-during-dtmf if configured */
 			if ((val = switch_channel_get_variable(session->channel, "ignore_rtp_during_dtmf_timeout")) && !zstr(val)) {
 				timeout = atoi(val);
-				if (timeout > 0 && timeout <= 10000) {
+				if (timeout > 0 && timeout <= SWITCH_IGNORE_RTP_DURING_DTMF_MAX_TIMEOUT_MS) {
 					switch_rtp_set_ignore_rtp_during_dtmf_timeout(a_engine->rtp_session, (uint32_t)timeout);
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 									  "Set DTMF audio drop timeout to %dms\n", timeout);
 				} else {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-									  "Invalid ignore_rtp_during_dtmf_timeout value: %d (must be 1-10000ms), using default\n", timeout);
+									  "Invalid ignore_rtp_during_dtmf_timeout value: %d (must be 1-%dms), using default\n", timeout, SWITCH_IGNORE_RTP_DURING_DTMF_MAX_TIMEOUT_MS);
 				}
 			}
 		}
