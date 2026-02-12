@@ -104,21 +104,24 @@ public:
     class iterator
     {
     public:
-        iterator() : index_(0) {}
+        // Default constructor creates an "end" iterator
+        iterator() : endpoints_(), index_(0) {}
 
+        // Construct from vector - shares ownership via shared_ptr
         iterator(const std::vector<endpoint_type>& endpoints, size_t index = 0)
-            : endpoints_(endpoints), index_(index)
+            : endpoints_(std::make_shared<std::vector<endpoint_type>>(endpoints)), index_(index)
         {
         }
 
         const endpoint_type& operator*() const
         {
-            return endpoints_[index_];
+            // Safe dereference - caller must ensure not at end
+            return (*endpoints_)[index_];
         }
 
         const endpoint_type* operator->() const
         {
-            return &endpoints_[index_];
+            return &(*endpoints_)[index_];
         }
 
         iterator& operator++()
@@ -136,11 +139,11 @@ public:
 
         bool operator==(const iterator& other) const
         {
-            // Check if either iterator is at end
-            bool this_at_end = endpoints_.empty() || index_ >= endpoints_.size();
-            bool other_at_end = other.endpoints_.empty() || other.index_ >= other.endpoints_.size();
+            // Check if both are end iterators
+            bool this_at_end = !endpoints_ || index_ >= endpoints_->size();
+            bool other_at_end = !other.endpoints_ || other.index_ >= other.endpoints_->size();
 
-            // If both at end, they're equal
+            // If both at end, they're equal (regardless of which vector)
             if (this_at_end && other_at_end) {
                 return true;
             }
@@ -150,8 +153,8 @@ public:
                 return false;
             }
 
-            // Both have data - compare if same container and same position
-            return index_ == other.index_ && &endpoints_[0] == &other.endpoints_[0];
+            // Both valid - must point to same vector and same index
+            return endpoints_.get() == other.endpoints_.get() && index_ == other.index_;
         }
 
         bool operator!=(const iterator& other) const
@@ -160,7 +163,7 @@ public:
         }
 
     private:
-        std::vector<endpoint_type> endpoints_;
+        std::shared_ptr<std::vector<endpoint_type>> endpoints_;
         size_t index_;
     };
 
