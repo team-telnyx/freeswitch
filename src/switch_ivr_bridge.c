@@ -174,8 +174,8 @@ cleanup:
 static void video_bridge_thread(switch_core_session_t *session, void *obj)
 {
 	struct vid_helper *vh = obj;
-	switch_channel_t *channel = NULL; 
-	switch_channel_t *b_channel = NULL; 
+	switch_channel_t *channel = NULL;
+	switch_channel_t *b_channel = NULL;
 	switch_status_t status;
 	switch_frame_t *read_frame = 0;
 	int set_decoded_read = 0, refresh_timer = 0;
@@ -265,7 +265,12 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 
 			status = switch_core_session_read_video_frame(vh->session_a, &read_frame, SWITCH_IO_FLAG_NONE, 0);
 
-			if (!SWITCH_READ_ACCEPTABLE(status)) {
+			if (status != SWITCH_STATUS_SUCCESS) {
+				switch_cond_next();
+				continue;
+			}
+
+			if (!read_frame || read_frame->datalen == 0 || !read_frame->packet) {
 				switch_cond_next();
 				continue;
 			}
@@ -278,7 +283,8 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 		}
 
 		if (read_frame && switch_channel_media_up(b_channel)) {
-			if (switch_core_session_write_video_frame(vh->session_b, read_frame, SWITCH_IO_FLAG_NONE, 0) != SWITCH_STATUS_SUCCESS) {
+			status = switch_core_session_write_video_frame(vh->session_b, read_frame, SWITCH_IO_FLAG_NONE, 0);
+			if (status != SWITCH_STATUS_SUCCESS) {
 				switch_cond_next();
 				continue;
 			}
@@ -453,7 +459,8 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 	int pass_val = 0, last_pass_val = 0;
 
 #ifdef SWITCH_VIDEO_IN_THREADS
-	struct vid_helper vh = { 0 };
+	struct vid_helper vh_a = { 0 };
+	struct vid_helper vh_b = { 0 };
 	uint32_t vid_launch = 0;
 #endif
 	data->clean_exit = 0;
@@ -825,13 +832,19 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 #ifdef SWITCH_VIDEO_IN_THREADS
 		if (switch_channel_test_flag(chan_a, CF_VIDEO) && switch_channel_test_flag(chan_b, CF_VIDEO) && !vid_launch) {
 			vid_launch++;
-			vh.session_a = session_a;
-			vh.session_b = session_b;
-			strcpy(vh.session_a_uuid, switch_core_session_get_uuid(session_a));
-			strcpy(vh.session_b_uuid, switch_core_session_get_uuid(session_b));
+			vh_a.session_a = session_a;
+			vh_a.session_b = session_b;
+			strcpy(vh_a.session_a_uuid, switch_core_session_get_uuid(session_a));
+			strcpy(vh_a.session_b_uuid, switch_core_session_get_uuid(session_b));
+
+			vh_b.session_a = session_b;
+			vh_b.session_b = session_a;
+			strcpy(vh_b.session_a_uuid, switch_core_session_get_uuid(session_b));
+			strcpy(vh_b.session_b_uuid, switch_core_session_get_uuid(session_a));
 			switch_channel_clear_flag(chan_a, CF_VIDEO_BLANK);
 			switch_channel_clear_flag(chan_b, CF_VIDEO_BLANK);
-			launch_video(&vh);
+			launch_video(&vh_a);
+			launch_video(&vh_b);
 		} else {
 			if (switch_channel_test_flag(chan_a, CF_VIDEO)) {
 				switch_channel_set_flag(chan_a, CF_VIDEO_BLANK);
@@ -1073,7 +1086,13 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 				goto end_of_bridge_loop;
 			}
 
-			switch_core_session_write_video_frame(session_b, read_frame, SWITCH_IO_FLAG_NONE, 0);
+			if (read_frame && switch_test_flag(read_frame, SFF_CNG)) {
+				/* absorb */
+			}
+
+			status = switch_core_session_write_video_frame(session_b, read_frame, SWITCH_IO_FLAG_NONE, 0);
+			if (status != SWITCH_STATUS_SUCCESS) {
+			}
 		}
 #endif
 #if DEBUG_RTP
@@ -1138,11 +1157,19 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 
 			if (status != SWITCH_STATUS_BREAK && !switch_channel_test_flag(chan_a, CF_HOLD) && !switch_channel_test_flag(chan_b, CF_LEG_HOLDING)) {
 #if DEBUG_RTP
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_NOTICE, "Audio bridge thread: write frame %p -> %p\n", (void*)session_a, (void*)session_b);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_NOTICE, "Audio bridge thread: write frame %p -> %p\n", (void*)session_a, (void*)session_b);
 #endif
+				{
+					static int audio_bridge_write_count = 0;
+					if (++audio_bridge_write_count % 200 == 1) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_b), SWITCH_LOG_WARNING,
+									  "AUDIO BRIDGE: write frame session_b=%s\n",
+									  switch_channel_get_name(chan_b));
+					}
+				}
 				if (switch_core_session_write_frame(session_b, read_frame, SWITCH_IO_FLAG_NONE, stream_id) != SWITCH_STATUS_SUCCESS) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_DEBUG,
-									  "%s ending bridge by request from write function\n", switch_channel_get_name(chan_b));
+								  "%s ending bridge by request from write function\n", switch_channel_get_name(chan_b));
 					goto end_of_bridge_loop;
 				}
 			}
@@ -1164,8 +1191,13 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 
 
 #ifdef SWITCH_VIDEO_IN_THREADS
-	if (vh.up > 0) {
-		vh.up = -1;
+	if (vh_a.up > 0 || vh_b.up > 0) {
+		if (vh_a.up > 0) {
+			vh_a.up = -1;
+		}
+		if (vh_b.up > 0) {
+			vh_b.up = -1;
+		}
 		switch_channel_set_flag(chan_a, CF_NOT_READY);
 		//switch_channel_set_flag(chan_b, CF_NOT_READY);
 		switch_core_session_kill_channel(session_a, SWITCH_SIG_BREAK);
@@ -1218,9 +1250,13 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 	}
 
 #ifdef SWITCH_VIDEO_IN_THREADS
-	if (switch_core_media_check_engine_function(session_a, SWITCH_MEDIA_TYPE_VIDEO)) {
-		if (vh.up == 1) {
-			vh.up = -1;
+	if (switch_core_media_check_engine_function(session_a, SWITCH_MEDIA_TYPE_VIDEO) ||
+		switch_core_media_check_engine_function(session_b, SWITCH_MEDIA_TYPE_VIDEO)) {
+		if (vh_a.up == 1) {
+			vh_a.up = -1;
+		}
+		if (vh_b.up == 1) {
+			vh_b.up = -1;
 		}
 
 		switch_channel_set_flag(chan_a, CF_VIDEO_BREAK);
@@ -1229,7 +1265,12 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 		switch_core_session_kill_channel(session_b, SWITCH_SIG_BREAK);
 
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_DEBUG, "Ending video thread.\n");
-		switch_core_media_end_engine_function(session_a, SWITCH_MEDIA_TYPE_VIDEO);
+		if (switch_core_media_check_engine_function(session_a, SWITCH_MEDIA_TYPE_VIDEO)) {
+			switch_core_media_end_engine_function(session_a, SWITCH_MEDIA_TYPE_VIDEO);
+		}
+		if (switch_core_media_check_engine_function(session_b, SWITCH_MEDIA_TYPE_VIDEO)) {
+			switch_core_media_end_engine_function(session_b, SWITCH_MEDIA_TYPE_VIDEO);
+		}
 		switch_channel_clear_flag(chan_a, CF_NOT_READY);
 		switch_channel_clear_flag(chan_b, CF_NOT_READY);
 	}
