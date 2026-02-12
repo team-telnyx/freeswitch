@@ -27,6 +27,44 @@ namespace Telnyx {
 namespace Net {
 
 /**
+ * Global c-ares library initialization.
+ * Ensures ares_library_init() is called exactly once per process.
+ */
+class ares_library_initializer
+{
+public:
+    static ares_library_initializer& instance()
+    {
+        static ares_library_initializer init;
+        return init;
+    }
+
+    bool is_initialized() const { return initialized_; }
+
+private:
+    ares_library_initializer()
+    {
+        int status = ares_library_init(ARES_LIB_INIT_ALL);
+        initialized_ = (status == ARES_SUCCESS);
+    }
+
+    ~ares_library_initializer()
+    {
+        // Cleanup is optional - the OS will clean up on process exit
+        // Only call if we successfully initialized
+        if (initialized_) {
+            ares_library_cleanup();
+        }
+    }
+
+    // Prevent copying
+    ares_library_initializer(const ares_library_initializer&) = delete;
+    ares_library_initializer& operator=(const ares_library_initializer&) = delete;
+
+    bool initialized_;
+};
+
+/**
  * Generic c-ares based resolver that mimics boost::asio resolver interface.
  * Template parameter InternetProtocol should be one of:
  *   - boost::asio::ip::tcp
@@ -484,8 +522,8 @@ private:
 
     void init()
     {
-        int status = ares_library_init(ARES_LIB_INIT_ALL);
-        if (status != ARES_SUCCESS) {
+        // Ensure global c-ares library is initialized (once per process)
+        if (!ares_library_initializer::instance().is_initialized()) {
             initialized_ = false;
             return;
         }
@@ -495,9 +533,8 @@ private:
         options.timeout = 5000;  // 5 second timeout
         options.tries = 3;       // 3 retries
 
-        status = ares_init_options(&channel_, &options, ARES_OPT_TIMEOUT | ARES_OPT_TRIES);
+        int status = ares_init_options(&channel_, &options, ARES_OPT_TIMEOUT | ARES_OPT_TRIES);
         if (status != ARES_SUCCESS) {
-            ares_library_cleanup();
             initialized_ = false;
             return;
         }
@@ -511,10 +548,7 @@ private:
             ares_destroy(channel_);
             channel_ = nullptr;
         }
-        if (initialized_) {
-            ares_library_cleanup();
-            initialized_ = false;
-        }
+        initialized_ = false;
     }
 
     ares_channel channel_;
