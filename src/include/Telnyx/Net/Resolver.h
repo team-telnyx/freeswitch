@@ -6,22 +6,22 @@
 
 // c-ares available - use async DNS resolution
 #include <ares.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
 #include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 
 #include <boost/asio/deadline_timer.hpp>
 #include <boost/asio/posix/stream_descriptor.hpp>
+#include <boost/bind/bind.hpp>
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/system/error_code.hpp>
-#include <boost/bind/bind.hpp>
 
 #include <cstring>
-#include <vector>
-#include <string>
 #include <map>
 #include <memory>
 #include <set>
+#include <string>
+#include <vector>
 
 namespace Telnyx {
 namespace Net {
