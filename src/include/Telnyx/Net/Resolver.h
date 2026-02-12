@@ -80,8 +80,8 @@ template <typename InternetProtocol>
 class resolver
 {
 public:
-    typedef InternetProtocol protocol_type;
-    typedef typename InternetProtocol::endpoint endpoint_type;
+    using protocol_type = InternetProtocol;
+    using endpoint_type = typename InternetProtocol::endpoint;
 
     class query
     {
