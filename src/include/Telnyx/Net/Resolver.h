@@ -48,14 +48,7 @@ private:
         initialized_ = (status == ARES_SUCCESS);
     }
 
-    ~ares_library_initializer()
-    {
-        // Cleanup is optional - the OS will clean up on process exit
-        // Only call if we successfully initialized
-        if (initialized_) {
-            ares_library_cleanup();
-        }
-    }
+    ~ares_library_initializer() = default;
 
     // Prevent copying
     ares_library_initializer(const ares_library_initializer&) = delete;
