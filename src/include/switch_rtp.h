@@ -872,6 +872,9 @@ SWITCH_DECLARE(void) switch_rtp_session_set_bundle(switch_rtp_t *rtp_session, sw
 SWITCH_DECLARE(switch_bool_t) switch_rtp_session_get_bundle(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(void) switch_rtp_session_set_bundle_master(switch_rtp_t *rtp_session, switch_bool_t is_bundle_master);
 SWITCH_DECLARE(switch_bool_t) switch_rtp_session_get_bundle_master(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(void) switch_rtp_session_link_bundle_master(switch_rtp_t *slave, switch_rtp_t *master);
+SWITCH_DECLARE(switch_bool_t) switch_rtp_bundle_ready(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(switch_bool_t) switch_rtp_bundle_mid_configured(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(void) switch_rtp_session_set_bundle_ssrc(switch_rtp_t *rtp_session, uint32_t ssrc);
 SWITCH_DECLARE(uint32_t) switch_rtp_session_get_bundle_ssrc(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(void) switch_rtp_session_set_bundle_group_id(switch_rtp_t *rtp_session, const char * group_id);

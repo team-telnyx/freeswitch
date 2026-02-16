@@ -533,6 +533,15 @@ struct switch_rtp {
 	switch_bool_t is_bundle;          /* this RTP session participates in BUNDLE */
 	switch_bool_t is_bundle_master;   /* this RTP session is the master 5-tuple for the group */
 	uint32_t bundle_ssrc;             /* SSRC used to demux this media when bundled */
+	switch_thread_cond_t *bundle_cond;   /* condition variable for bundle packet arrival */
+	switch_mutex_t *bundle_cond_mutex;   /* mutex protecting bundle_cond */
+	volatile uint32_t bundle_packet_ready; /* flag indicating packet available in JB */
+	switch_rtp_t *bundle_master_ref;      /* reference to audio (bundle master) session for SRTP */
+	switch_bool_t use_bundle_master_srtp; /* flag to use master's SRTP context for send */
+	switch_mutex_t *bundle_srtp_mutex;    /* mutex for SRTP context access */
+	switch_queue_t *bundle_early_queue;   /* queue of early packets pending MID config */
+	uint32_t bundle_early_queue_count;    /* count of queued packets */
+	switch_time_t bundle_mid_configured_at; /* timestamp when MID was configured */
 	char *bundle_group_id;            /* optional group identifier */
 	uint8_t send_rtp_exts_size;
 	uint8_t send_rtp_exts_written;
@@ -5452,6 +5461,16 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_create(switch_rtp_t **new_rtp_session
 	rtp_session->is_bundle        = SWITCH_FALSE;
 	rtp_session->is_bundle_master = SWITCH_FALSE;
 	rtp_session->bundle_ssrc      = 0;
+	/* Initialize bundle synchronization primitives */
+	rtp_session->bundle_packet_ready = 0;
+	switch_mutex_init(&rtp_session->bundle_cond_mutex, SWITCH_MUTEX_NESTED, rtp_session->pool);
+	switch_thread_cond_create(&rtp_session->bundle_cond, rtp_session->pool);
+	rtp_session->bundle_master_ref = NULL;
+	rtp_session->use_bundle_master_srtp = SWITCH_FALSE;
+	switch_mutex_init(&rtp_session->bundle_srtp_mutex, SWITCH_MUTEX_NESTED, rtp_session->pool);
+	switch_queue_create(&rtp_session->bundle_early_queue, 50, rtp_session->pool);
+	rtp_session->bundle_early_queue_count = 0;
+	rtp_session->bundle_mid_configured_at = 0;
 	rtp_session->bundle_group_id  = NULL;
 
 	rtp_session->last_poll_status = SWITCH_STATUS_FALSE;
@@ -7657,6 +7676,13 @@ fork_end:
 				if (*bytes > 0 && *bytes <= SWITCH_RTP_MAX_BUF_LEN) {
 					if (target->vb && !target->pause_jb && jb_valid(target)) {
 						switch_jb_put_packet(target->vb, (switch_rtp_packet_t *) &rtp_session->recv_msg, *bytes);
+						/* Signal the video read thread that a packet is available */
+						if (target->bundle_cond && target->bundle_cond_mutex) {
+							switch_mutex_lock(target->bundle_cond_mutex);
+							target->bundle_packet_ready++;
+							switch_thread_cond_signal(target->bundle_cond);
+							switch_mutex_unlock(target->bundle_cond_mutex);
+						}
 					} else if (target->jb && !target->pause_jb && jb_valid(target)) {
 						switch_jb_put_packet(target->jb, (switch_rtp_packet_t *) &rtp_session->recv_msg, *bytes);
 					}
@@ -8786,8 +8812,32 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 	if (rtp_session->is_bundle && rtp_session->vb && !switch_rtp_ready(rtp_session)) {
 		switch_status_t jb_status;
 
-		/* Yield to prevent busy-spinning - bundled video has no timer */
-		switch_cond_next();
+	/* Event-driven wait for packet arrival instead of busy-spinning */
+	{
+		int wait_attempts = 0;
+		const int max_wait_attempts = 3;
+		const switch_interval_time_t wait_timeout_us = 10000; /* 10ms timeout */
+
+		while (wait_attempts < max_wait_attempts) {
+			/* Check if packet is already available (avoid unnecessary wait) */
+			jb_status = switch_jb_peek_packet(rtp_session->vb);
+			if (jb_status == SWITCH_STATUS_SUCCESS) {
+				break;
+			}
+
+			/* Wait for signal from audio thread with timeout */
+			if (rtp_session->bundle_cond && rtp_session->bundle_cond_mutex) {
+				switch_mutex_lock(rtp_session->bundle_cond_mutex);
+				if (rtp_session->bundle_packet_ready == 0) {
+					switch_thread_cond_timedwait(rtp_session->bundle_cond,
+						rtp_session->bundle_cond_mutex, wait_timeout_us);
+				}
+				rtp_session->bundle_packet_ready = 0;
+				switch_mutex_unlock(rtp_session->bundle_cond_mutex);
+			}
+			wait_attempts++;
+		}
+	}
 
 		/* Read from video jitterbuffer */
 		jb_status = switch_jb_get_packet(rtp_session->vb, (switch_rtp_packet_t *) &rtp_session->recv_msg, &bytes);
@@ -9993,7 +10043,8 @@ static int rtp_bundle_write(switch_rtp_t *video_session, switch_rtp_t *audio_mas
 	int ret;
 	uint32_t this_ts = 0;
 	int external = (flags && *flags & SFF_EXTERNAL);
-	switch_rtp_t *srtp_session = video_session;
+	/* Use audio master's SRTP context for encryption - video goes through audio's socket */
+	switch_rtp_t *srtp_session = audio_master;
 
 	/* Check audio master is ready for write */
 	if (!switch_rtp_ready(audio_master)) {
@@ -10085,9 +10136,38 @@ static int rtp_bundle_write(switch_rtp_t *video_session, switch_rtp_t *audio_mas
 	}
 
 #if HAVE_MID_EXT
-	/* Add MID extension for demux at remote end */
-	if (video_session->ext_mid.enabled && video_session->ext_mid.ext_id > 0) {
-		rtp_add_mid_extension(video_session, send_msg, &bytes, rtp_header_len + (send_msg->header.cc * 4));
+	/* BUNDLE: Always add MID extension for video going through audio socket.
+	 * This is required for remote peer to demux video from audio. */
+	{
+		switch_bool_t mid_added = SWITCH_FALSE;
+
+		/* Try configured MID extension first */
+		if (video_session->ext_mid.enabled && video_session->ext_mid.ext_id > 0 &&
+		    video_session->ext_mid.mid[0] != '\0') {
+			rtp_add_mid_extension(video_session, send_msg, &bytes, rtp_header_len + (send_msg->header.cc * 4));
+			mid_added = SWITCH_TRUE;
+		}
+
+		/* Fallback: If MID not configured but we're bundled, try to get from channel */
+		if (!mid_added && video_session->session) {
+			switch_channel_t *channel = switch_core_session_get_channel(video_session->session);
+			const char *video_mid = switch_channel_get_variable(channel, "rtp_video_mid");
+			const char *mid_ext_id_str = switch_channel_get_variable(channel, "rtp_mid_ext_id");
+			
+			if (video_mid && video_mid[0]) {
+				int mid_ext_id = mid_ext_id_str ? atoi(mid_ext_id_str) : 1;
+				if (mid_ext_id < 1) mid_ext_id = 1;
+				
+				/* Temporarily configure and add extension */
+				switch_rtp_enable_mid(video_session, (uint8_t)mid_ext_id, video_mid);
+				rtp_add_mid_extension(video_session, send_msg, &bytes, rtp_header_len + (send_msg->header.cc * 4));
+				mid_added = SWITCH_TRUE;
+				
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(video_session->session), SWITCH_LOG_DEBUG,
+					"BUNDLE WRITE: Added MID extension from channel var (mid=%s, ext_id=%d)\n",
+					video_mid, mid_ext_id);
+			}
+		}
 	}
 #endif
 
@@ -11744,6 +11824,24 @@ SWITCH_DECLARE(switch_time_t) switch_rtp_session_set_dtls_checks_started(switch_
 SWITCH_DECLARE(void) switch_rtp_session_set_bundle(switch_rtp_t *rtp_session, switch_bool_t is_bundle)
 {
 	rtp_session->is_bundle = is_bundle;
+
+	/* Proactively create video jitterbuffer for bundled video sessions.
+	 * This ensures the JB exists before any demuxed packets arrive,
+	 * regardless of when set_video_buffer_size() is called. */
+	if (is_bundle && rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] && !rtp_session->vb) {
+		uint32_t default_frames = 1;
+
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+			"BUNDLE: Proactively creating video jitterbuffer (is_bundle=true, vb was NULL)\n");
+
+		/* Create minimal JB - will be resized by set_video_buffer_size if needed */
+		switch_jb_create(&rtp_session->vb, SJB_VIDEO, default_frames, 2048, rtp_session->pool);
+		if (rtp_session->vb) {
+			switch_jb_set_session(rtp_session->vb, rtp_session->session);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_INFO,
+				"BUNDLE: Created video jitterbuffer proactively (frames=%u, max=2048)\n", default_frames);
+		}
+	}
 }
 
 SWITCH_DECLARE(switch_bool_t) switch_rtp_session_get_bundle(switch_rtp_t *rtp_session)
@@ -11759,6 +11857,86 @@ SWITCH_DECLARE(void) switch_rtp_session_set_bundle_master(switch_rtp_t *rtp_sess
 SWITCH_DECLARE(switch_bool_t) switch_rtp_session_get_bundle_master(switch_rtp_t *rtp_session)
 {
 	return rtp_session->is_bundle_master;
+}
+
+/* Link bundled session to its master for SRTP context sharing.
+ * The video (slave) session will use the audio (master) session's SRTP context
+ * for encrypting outbound packets since video goes through audio's socket. */
+SWITCH_DECLARE(void) switch_rtp_session_link_bundle_master(switch_rtp_t *slave, switch_rtp_t *master)
+{
+	if (!slave || !master) return;
+	
+	switch_mutex_lock(slave->bundle_srtp_mutex);
+	slave->bundle_master_ref = master;
+	slave->use_bundle_master_srtp = SWITCH_TRUE;
+	switch_mutex_unlock(slave->bundle_srtp_mutex);
+	
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(slave->session), SWITCH_LOG_DEBUG,
+		"BUNDLE: Linked video SRTP to audio master (slave=%p, master=%p)\n",
+		(void*)slave, (void*)master);
+}
+
+/* Diagnostic: Check if bundled video session is ready to receive demuxed packets */
+SWITCH_DECLARE(switch_bool_t) switch_rtp_bundle_ready(switch_rtp_t *rtp_session)
+{
+	if (!rtp_session->is_bundle) {
+		return SWITCH_TRUE; /* Non-bundled sessions are always "ready" */
+	}
+
+	if (!rtp_session->vb) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
+			"BUNDLE: Video session not ready - no jitterbuffer!\n");
+		return SWITCH_FALSE;
+	}
+
+	return SWITCH_TRUE;
+}
+
+/* Check if MID extension is properly configured for outbound bundled video */
+SWITCH_DECLARE(switch_bool_t) switch_rtp_bundle_mid_configured(switch_rtp_t *rtp_session)
+{
+	if (!rtp_session) return SWITCH_FALSE;
+	
+	if (!rtp_session->is_bundle) {
+		return SWITCH_TRUE; /* Non-bundled doesn't need MID */
+	}
+	
+	if (rtp_session->ext_mid.enabled && 
+	    rtp_session->ext_mid.ext_id > 0 && 
+	    rtp_session->ext_mid.mid[0] != '\0') {
+		return SWITCH_TRUE;
+	}
+	
+	return SWITCH_FALSE;
+}
+
+/* Replay early packets that were queued before MID was configured */
+static void rtp_bundle_replay_early_packets(switch_rtp_t *rtp_session)
+{
+	void *pop = NULL;
+	uint32_t replayed = 0;
+	
+	if (!rtp_session->bundle_early_queue) return;
+	if (!rtp_session->vb) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
+			"BUNDLE: Cannot replay early packets - no jitterbuffer\n");
+		return;
+	}
+	
+	while (switch_queue_trypop(rtp_session->bundle_early_queue, &pop) == SWITCH_STATUS_SUCCESS) {
+		switch_rtp_packet_t *pkt = (switch_rtp_packet_t *)pop;
+		
+		/* Put into jitterbuffer with a reasonable size estimate */
+		switch_jb_put_packet(rtp_session->vb, pkt, sizeof(switch_rtp_packet_t));
+		replayed++;
+	}
+	
+	rtp_session->bundle_early_queue_count = 0;
+	
+	if (replayed > 0) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_INFO,
+			"BUNDLE: Replayed %u early packets into jitterbuffer\n", replayed);
+	}
 }
 
 SWITCH_DECLARE(void) switch_rtp_session_set_bundle_ssrc(switch_rtp_t *rtp_session, uint32_t ssrc)
@@ -11922,6 +12100,10 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_enable_mid(switch_rtp_t *rtp_session,
 
 	if (rtp_session->ext_mid.enabled && rtp_session->is_bundle) {
 		if (rtp_session->ext_mid.ext_id == ext_id && !strcmp(rtp_session->ext_mid.mid, mid)) {
+			/* Already configured with same values, but still replay any early packets */
+			if (rtp_session->bundle_early_queue_count > 0) {
+				rtp_bundle_replay_early_packets(rtp_session);
+			}
 			return SWITCH_STATUS_SUCCESS;
 		}
 	}
@@ -11930,6 +12112,16 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_enable_mid(switch_rtp_t *rtp_session,
     memcpy(rtp_session->ext_mid.mid, mid, L);
     rtp_session->ext_mid.ext_id  = ext_id;
     rtp_session->ext_mid.enabled = 1;
+
+	/* Mark configuration time and replay any early packets */
+	rtp_session->bundle_mid_configured_at = switch_time_now();
+	
+	if (rtp_session->bundle_early_queue_count > 0) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_INFO,
+			"BUNDLE: MID configured (mid=%s), replaying %u early packets\n",
+			mid, rtp_session->bundle_early_queue_count);
+		rtp_bundle_replay_early_packets(rtp_session);
+	}
 
     return SWITCH_STATUS_SUCCESS;
 }

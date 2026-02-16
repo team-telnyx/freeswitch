@@ -1773,6 +1773,27 @@ SWITCH_DECLARE(switch_status_t) switch_jb_get_packet(switch_jb_t *jb, switch_rtp
 	return status;
 }
 
+
+
+/* Peek at jitterbuffer without removing packet - for efficient wait logic */
+SWITCH_DECLARE(switch_status_t) switch_jb_peek_packet(switch_jb_t *jb)
+{
+	switch_status_t status = SWITCH_STATUS_NOTFOUND;
+
+	if (!jb) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	switch_mutex_lock(jb->mutex);
+
+	if (jb->complete_frames > 0 || jb->visible_nodes > 0) {
+		status = SWITCH_STATUS_SUCCESS;
+	}
+
+	switch_mutex_unlock(jb->mutex);
+	return status;
+}
+
 /* For Emacs:
  * Local Variables:
  * mode:c

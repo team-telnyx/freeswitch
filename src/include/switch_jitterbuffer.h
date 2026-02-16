@@ -58,6 +58,7 @@ SWITCH_DECLARE(int) switch_jb_poll(switch_jb_t *jb);
 SWITCH_DECLARE(switch_status_t) switch_jb_put_packet(switch_jb_t *jb, switch_rtp_packet_t *packet, switch_size_t len);
 SWITCH_DECLARE(switch_size_t) switch_jb_get_last_read_len(switch_jb_t *jb);
 SWITCH_DECLARE(switch_status_t) switch_jb_get_packet(switch_jb_t *jb, switch_rtp_packet_t *packet, switch_size_t *len);
+SWITCH_DECLARE(switch_status_t) switch_jb_peek_packet(switch_jb_t *jb);
 SWITCH_DECLARE(uint32_t) switch_jb_pop_nack(switch_jb_t *jb);
 SWITCH_DECLARE(switch_status_t) switch_jb_get_packet_by_seq(switch_jb_t *jb, uint16_t seq, switch_rtp_packet_t *packet, switch_size_t *len);
 SWITCH_DECLARE(void) switch_jb_set_session(switch_jb_t *jb, switch_core_session_t *session);
