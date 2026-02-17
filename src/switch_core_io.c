@@ -36,6 +36,8 @@
 #include <switch.h>
 #include "private/switch_core_pvt.h"
 
+#define MAX_READ_DEMUX 8
+
 SWITCH_DECLARE(void) switch_core_gen_encoded_silence(unsigned char *data, const switch_codec_implementation_t *read_impl, switch_size_t len)
 {
 	unsigned char g729_filler[] = {
@@ -764,7 +766,20 @@ cnt_with_cng:
 			switch_media_bug_t *bp;
 			switch_bool_t ok = SWITCH_TRUE;
 			int prune = 0;
+			switch_frame_t *read_demux_frames[MAX_READ_DEMUX];
+			int read_demux_count = 0;
+
 			switch_thread_rwlock_rdlock(session->bug_rwlock);
+
+			/* Collect all read_demux_frames inside rdlock (eavesdrop bugs NULL theirs after use) */
+			{
+				switch_media_bug_t *dbp;
+				for (dbp = session->bugs; dbp; dbp = dbp->next) {
+					if (dbp->read_demux_frame && read_demux_count < MAX_READ_DEMUX) {
+						read_demux_frames[read_demux_count++] = dbp->read_demux_frame;
+					}
+				}
+			}
 
 			for (bp = session->bugs; bp; bp = bp->next) {
 				ok = SWITCH_TRUE;
@@ -793,6 +808,7 @@ cnt_with_cng:
 				if (bp->ready && switch_test_flag(bp, SMBF_READ_STREAM)) {
 					switch_mutex_lock(bp->read_mutex);
 					if (bp->read_demux_frame) {
+						/* Bug has its own demux (e.g. eavesdrop bug itself) */
 						uint8_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
 						int bytes = read_frame->datalen;
 						uint32_t datalen = 0;
@@ -805,6 +821,19 @@ cnt_with_cng:
 
 						switch_buffer_write(bp->raw_read_buffer, data, datalen);
 						bp->read_demux_frame = NULL;
+					} else if (read_demux_count > 0) {
+						/* Bug without its own demux (e.g. recording) — unmerge ALL collected demux frames */
+						uint8_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
+						int i;
+
+						memcpy(data, read_frame->data, read_frame->datalen);
+						for (i = 0; i < read_demux_count; i++) {
+							uint32_t samples = read_frame->datalen / 2 / read_demux_frames[i]->channels;
+							switch_unmerge_sln((int16_t *)data, samples,
+												read_demux_frames[i]->data, samples,
+												read_demux_frames[i]->channels);
+						}
+						switch_buffer_write(bp->raw_read_buffer, data, read_frame->datalen);
 					} else {
 						switch_buffer_write(bp->raw_read_buffer, read_frame->data, read_frame->datalen);
 					}
