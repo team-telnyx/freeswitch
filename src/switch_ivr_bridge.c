@@ -804,6 +804,18 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_NOTICE, "Audio bridge thread: #21 %p -> %p\n", (void*)session_a, (void*)session_b);
 #endif
 			status = switch_core_session_read_frame(session_a, &read_frame, SWITCH_IO_FLAG_NONE, stream_id);
+
+		/* DEBUG: Detailed bridge frame read logging */
+		{
+			static int bridge_detail_count = 0;
+			if (++bridge_detail_count % 500 == 1) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_WARNING,
+					"BRIDGE READ: status=%d datalen=%u cng=%d count=%d from=%s\n",
+					status, read_frame ? read_frame->datalen : 0,
+					read_frame ? switch_test_flag(read_frame, SFF_CNG) : -1,
+					bridge_detail_count, switch_channel_get_name(chan_a));
+			}
+		}
 #if DEBUG_RTP
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_NOTICE, "Audio bridge thread: #22 %p -> %p\n", (void*)session_a, (void*)session_b);
 #endif
@@ -1116,6 +1128,18 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 
 		/* read audio from 1 channel and write it to the other */
 		status = switch_core_session_read_frame(session_a, &read_frame, SWITCH_IO_FLAG_NONE, stream_id);
+
+		/* DEBUG: Detailed bridge frame read logging */
+		{
+			static int bridge_detail_count = 0;
+			if (++bridge_detail_count % 500 == 1) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_WARNING,
+					"BRIDGE READ: status=%d datalen=%u cng=%d count=%d from=%s\n",
+					status, read_frame ? read_frame->datalen : 0,
+					read_frame ? switch_test_flag(read_frame, SFF_CNG) : -1,
+					bridge_detail_count, switch_channel_get_name(chan_a));
+			}
+		}
 
 		if (SWITCH_READ_ACCEPTABLE(status)) {
 			read_frame_count++;

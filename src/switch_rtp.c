@@ -7088,6 +7088,16 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 		}
 	}
 
+	/* Debug logging for AUDIO packet reception */
+	if (!rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
+		static int audio_poll_count = 0;
+		if (++audio_poll_count % 2000 == 1) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
+							  "AUDIO RTP POLL: poll_status=%d bytes=%ld ready=%d count=%d\n",
+							  poll_status, (long)*bytes, switch_rtp_ready(rtp_session), audio_poll_count);
+		}
+	}
+
 	if (*bytes) {
 		b = (unsigned char *) &rtp_session->recv_msg;
 
@@ -7099,6 +7109,18 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 							  (long)*bytes, ntohl(rtp_session->recv_msg.header.ssrc),
 							  rtp_session->recv_mid, switch_rtp_ready(rtp_session),
 							  rtp_session->is_bundle, rtp_session->is_bundle_master);
+			}
+		}
+
+		/* Debug logging for AUDIO packets received */
+		if (!rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
+			static int audio_recv_count = 0;
+			if (++audio_recv_count % 500 == 1) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
+							  "AUDIO RX TRACE: bytes=%ld ssrc=%u pt=%d seq=%d version=%d count=%d\n",
+							  (long)*bytes, ntohl(rtp_session->recv_msg.header.ssrc),
+							  rtp_session->recv_msg.header.pt, ntohs(rtp_session->recv_msg.header.seq),
+							  rtp_session->recv_msg.header.version, audio_recv_count);
 			}
 		}
 

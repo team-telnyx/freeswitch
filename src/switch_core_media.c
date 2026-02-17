@@ -11816,7 +11816,12 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 			const char *eid = switch_channel_get_variable(session->channel, "rtp_mid_ext_id");
 			uint8_t mid_ext_id = 0;
 
-		
+			/* DEBUG: Log MID variables */
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+				"AUDIO MID SETUP: mid='%s' ext_id='%s' for %s\n",
+				mid ? mid : "(null)", eid ? eid : "(null)",
+				switch_channel_get_name(switch_core_session_get_channel(session)));
+
 			if (eid && switch_is_number(eid)) {
 				unsigned int tmp = switch_atoui(eid);
 				if (tmp) {
