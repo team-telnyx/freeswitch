@@ -9930,6 +9930,7 @@ static void *SWITCH_THREAD_FUNC video_helper_thread(switch_thread_t *thread, voi
 	switch_image_t *blank_img = NULL;
 	switch_frame_t fr = { 0 };
 	unsigned char *buf = NULL;
+	switch_time_t video_start_time = 0;
 	switch_rgb_color_t bgcolor;
 	switch_rtp_engine_t *v_engine = NULL;
 	const char *var;
@@ -9987,6 +9988,9 @@ static void *SWITCH_THREAD_FUNC video_helper_thread(switch_thread_t *thread, voi
 	fr.packetlen = buflen;
 	fr.data = buf + 12;
 	fr.buflen = buflen - 12;
+
+	/* Initialize video start time for RTP timestamp calculation */
+	video_start_time = switch_micro_time_now();
 
 	switch_core_media_gen_key_frame(session);
 
@@ -10056,6 +10060,9 @@ static void *SWITCH_THREAD_FUNC video_helper_thread(switch_thread_t *thread, voi
 
 			if (send_blank && blank_img) {
 				fr.img = blank_img;
+				/* Calculate proper RTP timestamp (90kHz clock) to ensure
+				 * downstream jitterbuffer can detect frame boundaries */
+				fr.timestamp = (uint32_t)((switch_micro_time_now() - video_start_time) / 1000 * 90);
 				switch_yield(10000);
 				switch_core_session_write_video_frame(session, &fr, SWITCH_IO_FLAG_FORCE, 0);
 			} else {
@@ -10091,6 +10098,9 @@ static void *SWITCH_THREAD_FUNC video_helper_thread(switch_thread_t *thread, voi
 				switch_core_session_write_video_frame(session, read_frame, SWITCH_IO_FLAG_NONE, 0);
 			} else if (blank_img) {
 				fr.img = blank_img;
+				/* Calculate proper RTP timestamp (90kHz clock) to ensure
+				 * downstream jitterbuffer can detect frame boundaries */
+				fr.timestamp = (uint32_t)((switch_micro_time_now() - video_start_time) / 1000 * 90);
 				switch_yield(10000);
 				switch_core_session_write_video_frame(session, &fr, SWITCH_IO_FLAG_FORCE, 0);
 			}
