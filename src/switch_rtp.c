@@ -7848,14 +7848,24 @@ fork_end:
 				*bytes = 0;
 				return SWITCH_STATUS_FALSE;
 			}
-			/* Debug: Log successful jitterbuffer put */
+			/* Debug: Log successful jitterbuffer put with source tracking */
 			{
 				static int video_jb_put_count = 0;
-				if (++video_jb_put_count % 100 == 1) {
+				uint32_t pkt_ts = ntohl(rtp_session->recv_msg.header.ts);
+				/* Log every 100th packet, or if timestamp looks suspicious (< 1 million) */
+				if (++video_jb_put_count % 100 == 1 || pkt_ts < 1000000) {
+					char remote_buf[80] = "unknown";
+					if (rtp_session->remote_addr) {
+						switch_get_addr(remote_buf, sizeof(remote_buf), rtp_session->remote_addr);
+					}
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
-									  "VIDEO JB PUT: bytes=%ld seq=%u pt=%d count=%d\n",
-									  (long)*bytes, ntohs(rtp_session->last_rtp_hdr.seq),
-									  rtp_session->last_rtp_hdr.pt, video_jb_put_count);
+									  "VIDEO JB PUT: from=%s ssrc=%u seq=%u ts=%u bytes=%ld pt=%d bundle=%d count=%d\n",
+									  remote_buf,
+									  ntohl(rtp_session->recv_msg.header.ssrc),
+									  ntohs(rtp_session->last_rtp_hdr.seq),
+									  pkt_ts,
+									  (long)*bytes, rtp_session->last_rtp_hdr.pt,
+									  rtp_session->is_bundle, video_jb_put_count);
 				}
 			}
 			status = switch_jb_put_packet(rtp_session->vb, (switch_rtp_packet_t *) &rtp_session->recv_msg, *bytes);
