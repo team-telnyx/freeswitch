@@ -9163,6 +9163,7 @@ SWITCH_DECLARE(void) switch_core_session_write_blank_video(switch_core_session_t
 {
 	switch_frame_t fr = { 0 };
 	int i = 0;
+	switch_time_t start_time = 0;
 	switch_rgb_color_t bgcolor = { 0 };
 	int buflen = SWITCH_RTP_MAX_BUF_LEN;
 	unsigned char buf[SWITCH_RTP_MAX_BUF_LEN];
@@ -9198,10 +9199,13 @@ SWITCH_DECLARE(void) switch_core_session_write_blank_video(switch_core_session_t
 	frame_ms = (uint32_t) 1000 / fps;
 	if (frame_ms <= 0) frame_ms = 66;
 	frames = (uint32_t) ms / frame_ms;
+	start_time = switch_micro_time_now();
 
 	switch_core_media_gen_key_frame(session);
 	for (i = 0; i < frames; i++) {
 		fr.img = blank_img;
+		/* Calculate proper RTP timestamp (90kHz clock) */
+		fr.timestamp = (uint32_t)((switch_micro_time_now() - start_time) / 1000 * 90);
 		switch_core_session_write_video_frame(session, &fr, SWITCH_IO_FLAG_NONE, 0);
 		switch_yield(frame_ms * 1000);
 	}
