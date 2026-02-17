@@ -740,6 +740,20 @@ static inline void add_node(switch_jb_t *jb, switch_rtp_packet_t *packet, switch
 
 	if (jb->type == SJB_VIDEO) {
 		jb->packet_count++;
+		/* Debug: Log timestamp comparison for video JB */
+		{
+			static int video_ts_check_count = 0;
+			if (++video_ts_check_count % 100 == 1) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(jb->session), SWITCH_LOG_WARNING,
+					"VIDEO JB TS CHECK: write_init=%d pkt_ts=%u highest_ts=%u check_seq=%d check_ts=%d complete=%d/%d count=%d\n",
+					jb->write_init,
+					ntohl(node->packet.header.ts),
+					ntohl(jb->highest_wrote_ts),
+					jb->write_init ? check_seq(packet->header.seq, jb->highest_wrote_seq) : -1,
+					jb->write_init ? check_ts(node->packet.header.ts, jb->highest_wrote_ts) : -1,
+					jb->complete_frames, jb->frame_len, video_ts_check_count);
+			}
+		}
 		
 		if (jb->write_init && check_seq(packet->header.seq, jb->highest_wrote_seq) && check_ts(node->packet.header.ts, jb->highest_wrote_ts)) {
 			jb_debug(jb, 2, "WRITE frame ts: %u complete=%u/%u n:%u\n", ntohl(node->packet.header.ts), jb->complete_frames , jb->frame_len, jb->visible_nodes);

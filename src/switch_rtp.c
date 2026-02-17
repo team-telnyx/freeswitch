@@ -9088,9 +9088,9 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 				static int video_jb_poll_count = 0;
 				if (++video_jb_poll_count % 500 == 1) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
-									  "VIDEO JB POLL: vb=%p pause_jb=%d jb_poll=%d got_jb=%d count=%d\n",
+									  "VIDEO JB POLL: vb=%p pause_jb=%d jb_poll=%d got_jb=%d complete=%d count=%d\n",
 									  (void*)rtp_session->vb, rtp_session->pause_jb, jb_poll_result,
-									  got_jb, video_jb_poll_count);
+									  got_jb, rtp_session->vb ? switch_jb_frame_count(rtp_session->vb) : -1, video_jb_poll_count);
 				}
 			}
 		} else {
