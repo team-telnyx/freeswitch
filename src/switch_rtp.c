@@ -10133,10 +10133,28 @@ static int rtp_bundle_write(switch_rtp_t *video_session, switch_rtp_t *audio_mas
 			int32_t delta = timestamp - video_session->ts_norm.last_frame;
 			if (delta > 0 && delta <= 90000) {
 				video_session->ts_norm.delta = delta;
+			} else if (video_session->ts_norm.delta == 0) {
+				/* Negative or huge delta with uninitialized norm.delta */
+				/* Initialize to default 30fps (90000/30 = 3000 samples/frame) */
+				video_session->ts_norm.delta = 3000;
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(video_session->session), SWITCH_LOG_DEBUG,
+					"VIDEO TS NORM FIX: Bad delta=%d, initialized norm_delta to %u\n",
+					delta, video_session->ts_norm.delta);
 			}
 			video_session->ts_norm.ts += video_session->ts_norm.delta;
 		}
 		video_session->ts_norm.last_frame = timestamp;
+
+		/* Debug: Log timestamp normalization periodically */
+		{
+			static int ts_norm_log_count = 0;
+			if (++ts_norm_log_count % 200 == 1) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(video_session->session), SWITCH_LOG_WARNING,
+					"VIDEO TS NORM: in_ts=%u norm_delta=%u out_ts=%u count=%d\n",
+					timestamp, video_session->ts_norm.delta,
+					video_session->ts_norm.ts, ts_norm_log_count);
+			}
+		}
 
 		send_msg->header.ts = htonl(video_session->ts_norm.ts);
 		this_ts = video_session->ts_norm.ts;
