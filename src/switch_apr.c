@@ -987,7 +987,7 @@ static switch_status_t resolve_hostname_cares(fspr_sockaddr_t **sa, const char *
 	/* Configure c-ares to use internal event thread for async processing */
 	ares_optmask |= ARES_OPT_EVENT_THREAD | ARES_OPT_TIMEOUT | ARES_OPT_TRIES;
 	ares_opts.evsys = ARES_EVSYS_DEFAULT;
-	ares_opts.timeout = 1000;
+	ares_opts.timeout = runtime.ares_dns_timeout;
 	ares_opts.tries = 2;
 
 	/* Initialize c-ares channel */
