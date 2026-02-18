@@ -9205,6 +9205,7 @@ SWITCH_DECLARE(void) switch_core_session_write_blank_video(switch_core_session_t
 	for (i = 0; i < frames; i++) {
 		fr.img = blank_img;
 		/* Calculate proper RTP timestamp (90kHz clock) */
+		switch_set_flag(&fr, SFF_USE_VIDEO_TIMESTAMP);
 		fr.timestamp = (uint32_t)((switch_micro_time_now() - start_time) / 1000 * 90);
 		switch_core_session_write_video_frame(session, &fr, SWITCH_IO_FLAG_NONE, 0);
 		switch_yield(frame_ms * 1000);
@@ -10066,6 +10067,7 @@ static void *SWITCH_THREAD_FUNC video_helper_thread(switch_thread_t *thread, voi
 				fr.img = blank_img;
 				/* Calculate proper RTP timestamp (90kHz clock) to ensure
 				 * downstream jitterbuffer can detect frame boundaries */
+				switch_set_flag(&fr, SFF_USE_VIDEO_TIMESTAMP);
 				fr.timestamp = (uint32_t)((switch_micro_time_now() - video_start_time) / 1000 * 90);
 				switch_yield(10000);
 				switch_core_session_write_video_frame(session, &fr, SWITCH_IO_FLAG_FORCE, 0);
@@ -10104,6 +10106,7 @@ static void *SWITCH_THREAD_FUNC video_helper_thread(switch_thread_t *thread, voi
 				fr.img = blank_img;
 				/* Calculate proper RTP timestamp (90kHz clock) to ensure
 				 * downstream jitterbuffer can detect frame boundaries */
+				switch_set_flag(&fr, SFF_USE_VIDEO_TIMESTAMP);
 				fr.timestamp = (uint32_t)((switch_micro_time_now() - video_start_time) / 1000 * 90);
 				switch_yield(10000);
 				switch_core_session_write_video_frame(session, &fr, SWITCH_IO_FLAG_FORCE, 0);
