@@ -1448,7 +1448,7 @@ AC_ARG_WITH(cares,
   [with_cares="$withval"],
   [with_cares="no"])
 if test "$with_cares" = "yes"; then
-  PKG_CHECK_MODULES([CARES], [libcares >= 1.7.0],[
+  PKG_CHECK_MODULES([CARES], [libcares >= 1.27.0],[
     AM_CONDITIONAL([HAVE_CARES],[true])],[
     AC_MSG_RESULT([no]); AM_CONDITIONAL([HAVE_CARES],[false])])
 else
