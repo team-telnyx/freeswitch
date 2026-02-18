@@ -978,8 +978,6 @@ static switch_status_t resolve_hostname_cares(fspr_sockaddr_t **sa, const char *
 	int init_status;
 	switch_status_t result_status;
 
-	(void)flags; /* Unused currently */
-
 	memset(&resolve_state, 0, sizeof(resolve_state));
 	memset(&ares_opts, 0, sizeof(ares_opts));
 	memset(&hints, 0, sizeof(hints));
@@ -1000,8 +998,14 @@ static switch_status_t resolve_hostname_cares(fspr_sockaddr_t **sa, const char *
 		return SWITCH_STATUS_GENERR;
 	}
 
-	/* Set resolution hints based on requested address family */
-	hints.ai_family = family;
+	/* Set ai_family based on flags, falling back to family parameter */
+	if ((flags & APR_IPV4_ADDR_OK) && !(flags & APR_IPV6_ADDR_OK)) {
+		hints.ai_family = AF_INET;
+	} else if ((flags & APR_IPV6_ADDR_OK) && !(flags & APR_IPV4_ADDR_OK)) {
+		hints.ai_family = AF_INET6;
+	} else {
+		hints.ai_family = family;
+	}
 	hints.ai_socktype = SOCK_DGRAM;  /* VoIP typically uses UDP */
 	hints.ai_protocol = IPPROTO_UDP;
 
