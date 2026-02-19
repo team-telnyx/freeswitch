@@ -10119,10 +10119,14 @@ static int rtp_bundle_write(switch_rtp_t *video_session, switch_rtp_t *audio_mas
 			}
 			if (this_ts != video_session->ts_norm.last_frame) {
 				int32_t delta = this_ts - video_session->ts_norm.last_frame;
-				if (delta > 0 && delta <= 90000) {
+				/* Accept delta only if reasonable: 750-30000 samples (3fps to 120fps at 90kHz) */
+				if (delta >= 750 && delta <= 30000) {
 					video_session->ts_norm.delta = delta;
-				} else if (video_session->ts_norm.delta == 0) {
-					video_session->ts_norm.delta = 3000;
+				} else {
+					/* Unreasonable delta - use default 30fps */
+					if (video_session->ts_norm.delta == 0 || video_session->ts_norm.delta > 30000) {
+						video_session->ts_norm.delta = 3000;
+					}
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(video_session->session), SWITCH_LOG_WARNING,
 						"VIDEO TS NORM FIX (send_msg): Bad delta=%d, init norm_delta=%u\n", delta, video_session->ts_norm.delta);
 				}
@@ -10162,12 +10166,14 @@ static int rtp_bundle_write(switch_rtp_t *video_session, switch_rtp_t *audio_mas
 
 		if (timestamp != video_session->ts_norm.last_frame) {
 			int32_t delta = timestamp - video_session->ts_norm.last_frame;
-			if (delta > 0 && delta <= 90000) {
+			/* Accept delta only if reasonable: 750-30000 samples (3fps to 120fps at 90kHz) */
+			if (delta >= 750 && delta <= 30000) {
 				video_session->ts_norm.delta = delta;
-			} else if (video_session->ts_norm.delta == 0) {
-				/* Negative or huge delta with uninitialized norm.delta */
-				/* Initialize to default 30fps (90000/30 = 3000 samples/frame) */
-				video_session->ts_norm.delta = 3000;
+			} else {
+				/* Unreasonable delta - use default 30fps */
+				if (video_session->ts_norm.delta == 0 || video_session->ts_norm.delta > 30000) {
+					video_session->ts_norm.delta = 3000;
+				}
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(video_session->session), SWITCH_LOG_DEBUG,
 					"VIDEO TS NORM FIX: Bad delta=%d, initialized norm_delta to %u\n",
 					delta, video_session->ts_norm.delta);
