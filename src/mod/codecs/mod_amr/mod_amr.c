@@ -130,6 +130,7 @@ struct amr_context {
 	int dtx_mode;
 	int max_red;
 	int debug;
+	switch_mutex_t *mutex;
 };
 
 #define SWITCH_AMR_DEFAULT_BITRATE AMR_BITRATE_1220
@@ -440,6 +441,8 @@ static switch_status_t switch_amr_init(switch_codec_t *codec, switch_codec_flag_
 
 		context->codec_settings = amr_codec_settings;
 
+		switch_mutex_init(&context->mutex, SWITCH_MUTEX_NESTED, codec->memory_pool);
+
 		codec->private_info = context;
 
 		return SWITCH_STATUS_SUCCESS;
@@ -477,12 +480,17 @@ static switch_status_t switch_amr_encode(switch_codec_t *codec,
 	struct amr_context *context = codec->private_info;
 	int n;
 	unsigned char *shift_buf = encoded_data;
+	switch_byte_t current_mode;
 
 	if (!context || !context->encoder_state || !decoded_data || !encoded_data) {
 		return SWITCH_STATUS_FALSE;
 	}
 
-	n = Encoder_Interface_Encode(context->encoder_state, context->enc_mode, (int16_t *) decoded_data, (switch_byte_t *) encoded_data + 1, 0);
+	switch_mutex_lock(context->mutex);
+	current_mode = context->enc_mode;
+	switch_mutex_unlock(context->mutex);
+
+	n = Encoder_Interface_Encode(context->encoder_state, current_mode, (int16_t *) decoded_data, (switch_byte_t *) encoded_data + 1, 0);
 	if (n < 0) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMR encoder: Encoder_Interface_Encode() ERROR!\n");
 		return SWITCH_STATUS_FALSE;
@@ -502,7 +510,7 @@ static switch_status_t switch_amr_encode(switch_codec_t *codec,
 		/* mode 0 = 95 speech bits -> 96 bytes - 1 padding bit */
 		/* mode 1 = 103 speech bits -> 104 bytes - 1 padding bit */
 		/* mode 5 = 159 speech bits -> 160 bytes - 1 padding bit */
-		if ((context->enc_mode == 5 ) || (context->enc_mode == 1) || (context->enc_mode == 0)) {
+		if ((current_mode == 5 ) || (current_mode == 1) || (current_mode == 0)) {
 			/* modes 0,1 and 5 have only 1 padding bit and due to shifting
 			 * we may have an extra 0 byte at the end of the voice payload (bit stuffing) */
 			if (shift_buf[n-1] != 0x0) {
@@ -595,20 +603,26 @@ static switch_status_t switch_amr_control(switch_codec_t *codec,
 	case SCC_AUDIO_ADJUST_BITRATE:
 		{
 			const char *cmd = (const char *)cmd_data;
+			/* AMR-NB valid modes are 0-7 (mode 8 is SID, not for regular encoding) */
+			const int max_mode = 7;
+			const int mode_step = 2;
+			int new_mode;
+
+			switch_mutex_lock(context->mutex);
 
 			if (!strcasecmp(cmd, "increase")) {
-				if (context->enc_mode < SWITCH_AMR_MODES - 1) {
-					int mode_step = 2; /*this is the mode, not the actual bitrate*/
-					context->enc_mode = context->enc_mode + mode_step;
+				new_mode = context->enc_mode + mode_step;
+				if (new_mode <= max_mode) {
+					context->enc_mode = (switch_byte_t) new_mode;
 					if (globals.debug || context->debug) {
 						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
 								"AMR encoder: Adjusting mode to %d (increase)\n", context->enc_mode);
 					}
 				}
 			} else if (!strcasecmp(cmd, "decrease")) {
-				if (context->enc_mode > 0) {
-					int mode_step = 2; /*this is the mode, not the actual bitrate*/
-					context->enc_mode = context->enc_mode - mode_step;
+				new_mode = context->enc_mode - mode_step;
+				if (new_mode >= 0) {
+					context->enc_mode = (switch_byte_t) new_mode;
 					if (globals.debug || context->debug) {
 						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
 								"AMR encoder: Adjusting mode to %d (decrease)\n", context->enc_mode);
@@ -628,6 +642,8 @@ static switch_status_t switch_amr_control(switch_codec_t *codec,
 							"AMR encoder: Adjusting mode to %d (minimum)\n", context->enc_mode);
 				}
 			}
+
+			switch_mutex_unlock(context->mutex);
 		}
 		break;
 	default:
