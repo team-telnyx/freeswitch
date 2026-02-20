@@ -1013,8 +1013,8 @@ static switch_status_t resolve_hostname_cares(fspr_sockaddr_t **sa, const char *
 	ares_getaddrinfo(resolve_state.dns_channel, hostname, NULL, &hints,
 					dns_completion_callback, &resolve_state);
 
-	/* Block until resolution completes (c-ares handles this internally with event thread) */
-	ares_queue_wait_empty(resolve_state.dns_channel, -1);
+	/* Block until the async DNS resolution completes or ares_dns_timeout expires (c-ares processes it internally) */
+	ares_queue_wait_empty(resolve_state.dns_channel, runtime.ares_dns_timeout);
 
 	/* Map c-ares status to FreeSWITCH status codes */
 	switch (resolve_state.resolution_status) {
