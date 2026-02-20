@@ -983,6 +983,7 @@ static switch_status_t resolve_hostname_cares(fspr_sockaddr_t **sa, const char *
 	memset(&hints, 0, sizeof(hints));
 
 	resolve_state.mem_pool = pool;
+	resolve_state.resolution_status = ARES_ETIMEOUT;
 
 	/* Configure c-ares to use internal event thread for async processing */
 	ares_optmask |= ARES_OPT_EVENT_THREAD | ARES_OPT_TIMEOUT | ARES_OPT_TRIES;
