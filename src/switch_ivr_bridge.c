@@ -265,6 +265,25 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 
 			status = switch_core_session_read_video_frame(vh->session_a, &read_frame, SWITCH_IO_FLAG_NONE, 0);
 
+			/* DEBUG: Track video read outcomes */
+			{
+				static int vh_read_count = 0, vh_read_fail = 0, vh_read_empty = 0, vh_read_ok = 0;
+				vh_read_count++;
+				if (status != SWITCH_STATUS_SUCCESS) {
+					vh_read_fail++;
+				} else if (!read_frame || read_frame->datalen == 0 || !read_frame->packet) {
+					vh_read_empty++;
+				} else {
+					vh_read_ok++;
+				}
+				if (vh_read_count % 200 == 1) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_WARNING,
+						"VIDEO HELPER READ: count=%d ok=%d fail=%d empty=%d status=%d datalen=%u\n",
+						vh_read_count, vh_read_ok, vh_read_fail, vh_read_empty, status,
+						read_frame ? read_frame->datalen : 0);
+				}
+			}
+
 			if (status != SWITCH_STATUS_SUCCESS) {
 				switch_cond_next();
 				continue;
@@ -283,7 +302,22 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 		}
 
 		if (read_frame && switch_channel_media_up(b_channel)) {
-			status = switch_core_session_write_video_frame(vh->session_b, read_frame, SWITCH_IO_FLAG_NONE, 0);
+			/* DEBUG: Track video write outcomes */
+			{
+				static int vh_write_count = 0, vh_write_fail = 0, vh_write_ok = 0;
+				vh_write_count++;
+				status = switch_core_session_write_video_frame(vh->session_b, read_frame, SWITCH_IO_FLAG_NONE, 0);
+				if (status == SWITCH_STATUS_SUCCESS) {
+					vh_write_ok++;
+				} else {
+					vh_write_fail++;
+				}
+				if (vh_write_count % 200 == 1) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_b), SWITCH_LOG_WARNING,
+						"VIDEO HELPER WRITE: count=%d ok=%d fail=%d status=%d datalen=%u\n",
+						vh_write_count, vh_write_ok, vh_write_fail, status, read_frame->datalen);
+				}
+			}
 			if (status != SWITCH_STATUS_SUCCESS) {
 				switch_cond_next();
 				continue;
