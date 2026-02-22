@@ -46,6 +46,10 @@ struct vid_helper {
 	char session_a_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1];
 	char session_b_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1];
 	int up;
+	/* Per-instance debug counters */
+	int dbg_loop;
+	int dbg_read_ok;
+	int dbg_write_ok;
 };
 
 
@@ -208,12 +212,29 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 	}
 	b_channel = switch_core_session_get_channel(vh->session_b);
 
+	/* DEBUG: Log thread start with direction */
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_WARNING,
+		"VH_START: dir=%s->%s media_up_a=%d media_up_b=%d CF_ANS_a=%d CF_ANS_b=%d\n",
+		vh->session_a_uuid, vh->session_b_uuid,
+		switch_channel_media_up(channel), switch_channel_media_up(b_channel),
+		switch_channel_test_flag(channel, CF_ANSWERED),
+		switch_channel_test_flag(b_channel, CF_ANSWERED));
+
 	switch_core_session_request_video_refresh(vh->session_a);
 	switch_core_session_request_video_refresh(vh->session_b);
 
 	refresh_timer = refresh_cnt;
 
 	while (switch_channel_up_nosig(channel) && switch_channel_up_nosig(b_channel) && vh->up == 1) {
+		/* DEBUG: Log loop OUTSIDE media_up check */
+		vh->dbg_loop++;
+		if (vh->dbg_loop % 2000 == 1) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_WARNING,
+				"VH_LOOP: dir=%s->%s loop=%d my_media_up=%d read_ok=%d write_ok=%d\n",
+				vh->session_a_uuid, vh->session_b_uuid, vh->dbg_loop,
+				switch_channel_media_up(channel), vh->dbg_read_ok, vh->dbg_write_ok);
+		}
+
 		if (switch_channel_media_up(channel)) {
 			if (switch_core_session_transcoding(vh->session_a, vh->session_b, SWITCH_MEDIA_TYPE_VIDEO)) {
 				pass_val = 1;
@@ -265,22 +286,14 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 
 			status = switch_core_session_read_video_frame(vh->session_a, &read_frame, SWITCH_IO_FLAG_NONE, 0);
 
-			/* DEBUG: Track video read outcomes */
-			{
-				static int vh_read_count = 0, vh_read_fail = 0, vh_read_empty = 0, vh_read_ok = 0;
-				vh_read_count++;
-				if (status != SWITCH_STATUS_SUCCESS) {
-					vh_read_fail++;
-				} else if (!read_frame || read_frame->datalen == 0 || !read_frame->packet) {
-					vh_read_empty++;
-				} else {
-					vh_read_ok++;
-				}
-				if (vh_read_count % 200 == 1) {
+			/* DEBUG: Track video read outcomes (per-instance) */
+			if (status == SWITCH_STATUS_SUCCESS && read_frame && read_frame->datalen > 0) {
+				vh->dbg_read_ok++;
+				if (vh->dbg_read_ok % 200 == 1) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_WARNING,
-						"VIDEO HELPER READ: count=%d ok=%d fail=%d empty=%d status=%d datalen=%u\n",
-						vh_read_count, vh_read_ok, vh_read_fail, vh_read_empty, status,
-						read_frame ? read_frame->datalen : 0);
+						"VH_READ: dir=%s->%s ok=%d datalen=%u\n",
+						vh->session_a_uuid, vh->session_b_uuid,
+						vh->dbg_read_ok, read_frame->datalen);
 				}
 			}
 
@@ -317,20 +330,15 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 		}
 
 		if (read_frame && switch_channel_media_up(b_channel)) {
-			/* DEBUG: Track video write outcomes */
-			{
-				static int vh_write_count = 0, vh_write_fail = 0, vh_write_ok = 0;
-				vh_write_count++;
-				status = switch_core_session_write_video_frame(vh->session_b, read_frame, SWITCH_IO_FLAG_NONE, 0);
-				if (status == SWITCH_STATUS_SUCCESS) {
-					vh_write_ok++;
-				} else {
-					vh_write_fail++;
-				}
-				if (vh_write_count % 200 == 1) {
+			/* DEBUG: Track video write outcomes (per-instance) */
+			status = switch_core_session_write_video_frame(vh->session_b, read_frame, SWITCH_IO_FLAG_NONE, 0);
+			if (status == SWITCH_STATUS_SUCCESS) {
+				vh->dbg_write_ok++;
+				if (vh->dbg_write_ok % 200 == 1) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_b), SWITCH_LOG_WARNING,
-						"VIDEO HELPER WRITE: count=%d ok=%d fail=%d status=%d datalen=%u\n",
-						vh_write_count, vh_write_ok, vh_write_fail, status, read_frame->datalen);
+						"VH_WRITE: dir=%s->%s ok=%d datalen=%u\n",
+						vh->session_a_uuid, vh->session_b_uuid,
+						vh->dbg_write_ok, read_frame->datalen);
 				}
 			}
 			if (status != SWITCH_STATUS_SUCCESS) {
@@ -355,12 +363,20 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 	switch_core_session_rwunlock(vh->session_a);
 	switch_core_session_rwunlock(vh->session_b);
 
+	/* DEBUG: Log thread end with final stats */
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+		"VH_END: dir=%s->%s loops=%d reads_ok=%d writes_ok=%d\n",
+		vh->session_a_uuid, vh->session_b_uuid,
+		vh->dbg_loop, vh->dbg_read_ok, vh->dbg_write_ok);
+
 	vh->up = 0;
 	return;
 }
 
 static void launch_video(struct vid_helper *vh)
 {
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_WARNING,
+		"LAUNCH_VIDEO: dir=%s->%s\n", vh->session_a_uuid, vh->session_b_uuid);
 	switch_core_media_start_engine_function(vh->session_a, SWITCH_MEDIA_TYPE_VIDEO, video_bridge_thread, vh);
 }
 #endif
