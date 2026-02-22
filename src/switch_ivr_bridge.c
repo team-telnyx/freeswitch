@@ -301,6 +301,21 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 			continue;
 		}
 
+		/* DEBUG: Trace media_up check for BUNDLE video debugging */
+		{
+			static int vh_media_check_count = 0;
+			int media_up = switch_channel_media_up(b_channel);
+			int cf_answered = switch_channel_test_flag(b_channel, CF_ANSWERED);
+			int cf_early = switch_channel_test_flag(b_channel, CF_EARLY_MEDIA);
+			vh_media_check_count++;
+			if (vh_media_check_count % 500 == 1 || !media_up) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_b), SWITCH_LOG_WARNING,
+					"VIDEO HELPER MEDIA CHECK: read_frame=%p datalen=%u media_up=%d CF_ANSWERED=%d CF_EARLY=%d b_chan=%s count=%d\n",
+					(void*)read_frame, read_frame ? read_frame->datalen : 0,
+					media_up, cf_answered, cf_early, switch_channel_get_name(b_channel), vh_media_check_count);
+			}
+		}
+
 		if (read_frame && switch_channel_media_up(b_channel)) {
 			/* DEBUG: Track video write outcomes */
 			{
