@@ -212,13 +212,12 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 	}
 	b_channel = switch_core_session_get_channel(vh->session_b);
 
-	/* DEBUG: Log thread start with direction */
+	/* DEBUG: Log thread start with direction and pointers */
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_WARNING,
-		"VH_START: dir=%s->%s media_up_a=%d media_up_b=%d CF_ANS_a=%d CF_ANS_b=%d\n",
+		"VH_START: dir=%s->%s session_a=%p session_b=%p channel=%p b_channel=%p media_up_a=%d media_up_b=%d\n",
 		vh->session_a_uuid, vh->session_b_uuid,
-		switch_channel_media_up(channel), switch_channel_media_up(b_channel),
-		switch_channel_test_flag(channel, CF_ANSWERED),
-		switch_channel_test_flag(b_channel, CF_ANSWERED));
+		(void*)vh->session_a, (void*)vh->session_b, (void*)channel, (void*)b_channel,
+		switch_channel_media_up(channel), switch_channel_media_up(b_channel));
 
 	switch_core_session_request_video_refresh(vh->session_a);
 	switch_core_session_request_video_refresh(vh->session_b);
