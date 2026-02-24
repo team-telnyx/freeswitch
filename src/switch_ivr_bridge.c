@@ -219,6 +219,47 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 		(void*)vh->session_a, (void*)vh->session_b, (void*)channel, (void*)b_channel,
 		switch_channel_media_up(channel), switch_channel_media_up(b_channel));
 
+	/* TEL-6738: Wait for DTLS to be ready on both legs before proceeding.
+	 * On outbound sofia legs, DTLS handshake happens after the video helper
+	 * thread starts. If we try to read video frames before DTLS is ready,
+	 * packets get dropped by jb_valid() and we block indefinitely. */
+	{
+		switch_rtp_t *rtp_a = switch_core_media_get_rtp_session(vh->session_a, SWITCH_MEDIA_TYPE_VIDEO);
+		switch_rtp_t *rtp_b = switch_core_media_get_rtp_session(vh->session_b, SWITCH_MEDIA_TYPE_VIDEO);
+		int wait_count = 0;
+		const int max_wait_ms = 5000;  /* 5 second timeout */
+		const int sleep_ms = 20;
+
+		while (switch_channel_up_nosig(channel) && switch_channel_up_nosig(b_channel) && vh->up == 1) {
+			dtls_state_t state_a = rtp_a ? switch_rtp_dtls_state(rtp_a, DTLS_TYPE_RTP) : DS_OFF;
+			dtls_state_t state_b = rtp_b ? switch_rtp_dtls_state(rtp_b, DTLS_TYPE_RTP) : DS_OFF;
+
+			/* DS_OFF means DTLS not in use (SDES/non-SRTP), DS_READY means handshake complete */
+			if ((state_a == DS_OFF || state_a == DS_READY) &&
+				(state_b == DS_OFF || state_b == DS_READY)) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_INFO,
+					"VH_DTLS_READY: dir=%s->%s state_a=%d state_b=%d wait_ms=%d\n",
+					vh->session_a_uuid, vh->session_b_uuid, state_a, state_b, wait_count * sleep_ms);
+				break;
+			}
+
+			if (wait_count * sleep_ms >= max_wait_ms) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_WARNING,
+					"VH_DTLS_TIMEOUT: dir=%s->%s state_a=%d state_b=%d - proceeding anyway\n",
+					vh->session_a_uuid, vh->session_b_uuid, state_a, state_b);
+				break;
+			}
+
+			wait_count++;
+			if (wait_count % 50 == 1) {  /* Log every 1 second */
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
+					"VH_DTLS_WAIT: dir=%s->%s state_a=%d state_b=%d wait_ms=%d\n",
+					vh->session_a_uuid, vh->session_b_uuid, state_a, state_b, wait_count * sleep_ms);
+			}
+			switch_yield(sleep_ms * 1000);  /* sleep_ms in microseconds */
+		}
+	}
+
 	switch_core_session_request_video_refresh(vh->session_a);
 	switch_core_session_request_video_refresh(vh->session_b);
 
