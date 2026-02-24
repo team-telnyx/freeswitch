@@ -232,8 +232,9 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 		
 		if (!(ch_up && bch_up && vh_up == 1)) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_WARNING,
-				"VH_EXIT: dir=%s->%s ch_up=%d bch_up=%d vh_up=%d loops=%d\n",
-				vh->session_a_uuid, vh->session_b_uuid, ch_up, bch_up, vh_up, vh->dbg_loop);
+				"VH_EXIT: dir=%s->%s ch_up=%d bch_up=%d vh_up=%d loops=%d ch_state=%d bch_state=%d\n",
+				vh->session_a_uuid, vh->session_b_uuid, ch_up, bch_up, vh_up, vh->dbg_loop,
+				switch_channel_get_state(channel), switch_channel_get_state(b_channel));
 			break;
 		}
 		
@@ -241,9 +242,10 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 		vh->dbg_loop++;
 		if (vh->dbg_loop % 2000 == 1) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_WARNING,
-				"VH_LOOP: dir=%s->%s loop=%d my_media_up=%d read_ok=%d write_ok=%d ch_up=%d bch_up=%d\n",
+				"VH_LOOP: dir=%s->%s loop=%d my_media_up=%d read_ok=%d write_ok=%d ch_state=%d bch_state=%d\n",
 				vh->session_a_uuid, vh->session_b_uuid, vh->dbg_loop,
-				switch_channel_media_up(channel), vh->dbg_read_ok, vh->dbg_write_ok, ch_up, bch_up);
+				switch_channel_media_up(channel), vh->dbg_read_ok, vh->dbg_write_ok,
+				switch_channel_get_state(channel), switch_channel_get_state(b_channel));
 		}
 
 		if (switch_channel_media_up(channel)) {
