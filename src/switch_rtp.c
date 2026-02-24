@@ -9057,7 +9057,7 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 			}
 
 			if (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] && !rtp_session->flags[SWITCH_RTP_FLAG_PROXY_MEDIA]) {
-				pt = 100000;
+				pt = 20000;  /* TEL-6738: Reduced from 100ms to 20ms to catch JB frames faster */
 			}
 
 			if (rtp_session->vb && !rtp_session->pause_jb) {
