@@ -337,17 +337,25 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 				refresh_timer--;
 			}
 
-			status = switch_core_session_read_video_frame(vh->session_a, &read_frame, SWITCH_IO_FLAG_NONE, 0);
+			/* TEL-6738: Use SWITCH_IO_FLAG_SINGLE_READ to prevent blocking indefinitely
+			 * when no video RTP has arrived yet. Without this flag, the DATAWAIT flag
+			 * causes rtp_common_read() to loop forever waiting for video packets.
+			 * This is especially problematic in bridging scenarios where both sides
+			 * may be waiting for the other to send video first. */
+			status = switch_core_session_read_video_frame(vh->session_a, &read_frame, SWITCH_IO_FLAG_SINGLE_READ, 0);
 
 			/* DEBUG: Track video read outcomes (per-instance) */
 			if (status == SWITCH_STATUS_SUCCESS && read_frame && read_frame->datalen > 0) {
 				vh->dbg_read_ok++;
-				if (vh->dbg_read_ok % 200 == 1) {
+				if (vh->dbg_read_ok % 500 == 1) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_WARNING,
 						"VH_READ: dir=%s->%s ok=%d datalen=%u\n",
 						vh->session_a_uuid, vh->session_b_uuid,
 						vh->dbg_read_ok, read_frame->datalen);
 				}
+			} else {
+				/* TEL-6738: No video data available - yield briefly to avoid busy-spinning */
+				switch_yield(10000);  /* 10ms */
 			}
 
 			if (status != SWITCH_STATUS_SUCCESS) {
