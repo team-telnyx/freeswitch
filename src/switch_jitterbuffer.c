@@ -32,6 +32,9 @@
 #include <switch.h>
 #include <switch_jitterbuffer.h>
 #include "private/switch_hashtable_private.h"
+#ifdef __linux__
+#include <execinfo.h>
+#endif
 
 #define NACK_TIME 80000
 #define RENACK_TIME 100000
@@ -1381,6 +1384,27 @@ SWITCH_DECLARE(switch_status_t) switch_jb_create(switch_jb_t **jbp, switch_jb_ty
 		"JB CREATED: jb=%p type=%s min=%u max=%u frame_len=%u\n",
 		(void*)jb, (type == SJB_VIDEO ? "VIDEO" : (type == SJB_AUDIO ? "AUDIO" : "TEXT")),
 		min_frame_len, max_frame_len, jb->frame_len);
+
+	/* TEL-6738: Print stack trace for mystery 100/100 JB */
+#ifdef __linux__
+	if (type == SJB_VIDEO && min_frame_len == 100 && max_frame_len == 100) {
+		void *bt_buffer[30];
+		int bt_size, i;
+		char **bt_strings;
+
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT,
+			"JB 100/100 MYSTERY: Stack trace for jb=%p:\n", (void*)jb);
+
+		bt_size = backtrace(bt_buffer, 30);
+		bt_strings = backtrace_symbols(bt_buffer, bt_size);
+		if (bt_strings) {
+			for (i = 0; i < bt_size; i++) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "  [%d] %s\n", i, bt_strings[i]);
+			}
+			free(bt_strings);
+		}
+	}
+#endif
 
 	return SWITCH_STATUS_SUCCESS;
 }
