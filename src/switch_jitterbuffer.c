@@ -745,13 +745,12 @@ static inline void add_node(switch_jb_t *jb, switch_rtp_packet_t *packet, switch
 			static int video_ts_check_count = 0;
 			if (++video_ts_check_count % 100 == 1) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(jb->session), SWITCH_LOG_WARNING,
-					"VIDEO JB TS CHECK: write_init=%d pkt_ts=%u highest_ts=%u check_seq=%d check_ts=%d complete=%d/%d count=%d\n",
+					"VIDEO JB TS CHECK: jb=%p write_init=%d pkt_ts=%u complete=%d/%d max=%u count=%d\n",
+					(void*)jb,
 					jb->write_init,
 					ntohl(node->packet.header.ts),
-					ntohl(jb->highest_wrote_ts),
-					jb->write_init ? check_seq(packet->header.seq, jb->highest_wrote_seq) : -1,
-					jb->write_init ? check_ts(node->packet.header.ts, jb->highest_wrote_ts) : -1,
-					jb->complete_frames, jb->frame_len, video_ts_check_count);
+					jb->complete_frames, jb->frame_len,
+					jb->max_frame_len, video_ts_check_count);
 			}
 		}
 		
@@ -1376,6 +1375,12 @@ SWITCH_DECLARE(switch_status_t) switch_jb_create(switch_jb_t **jbp, switch_jb_ty
 	switch_mutex_init(&jb->list_mutex, SWITCH_MUTEX_NESTED, pool);
 
 	*jbp = jb;
+
+	/* TEL-6738: Log JB pointer after creation */
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+		"JB CREATED: jb=%p type=%s min=%u max=%u frame_len=%u\n",
+		(void*)jb, (type == SJB_VIDEO ? "VIDEO" : (type == SJB_AUDIO ? "AUDIO" : "TEXT")),
+		min_frame_len, max_frame_len, jb->frame_len);
 
 	return SWITCH_STATUS_SUCCESS;
 }

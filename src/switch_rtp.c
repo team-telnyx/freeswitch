@@ -7859,7 +7859,8 @@ fork_end:
 						switch_get_addr(remote_buf, sizeof(remote_buf), rtp_session->remote_addr);
 					}
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
-									  "VIDEO JB PUT: from=%s ssrc=%u seq=%u ts=%u bytes=%ld pt=%d bundle=%d count=%d\n",
+									  "VIDEO JB PUT: vb=%p from=%s ssrc=%u seq=%u ts=%u bytes=%ld pt=%d bundle=%d count=%d\n",
+									  (void*)rtp_session->vb,
 									  remote_buf,
 									  ntohl(rtp_session->recv_msg.header.ssrc),
 									  ntohs(rtp_session->last_rtp_hdr.seq),
