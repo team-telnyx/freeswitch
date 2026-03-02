@@ -7175,6 +7175,7 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 
 			if (!zstr(reason_header)) {
 				switch_channel_set_variable(channel, "sip_reason", reason_header);
+				switch_channel_set_variable_partner(channel, "sip_reason", reason_header);
 				su_free(nua_handle_get_home(nh), reason_header);
 			}
 			if (sip->sip_reason->re_protocol && (!strcasecmp(sip->sip_reason->re_protocol, "Q.850")
