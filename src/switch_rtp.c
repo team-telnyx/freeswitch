@@ -2963,6 +2963,7 @@ static switch_status_t enable_remote_rtcp_socket(switch_rtp_t *rtp_session, cons
 
 			if (rtp_session->rtcp_sock_output && rtp_session->rtcp_sock_output != rtp_session->rtcp_sock_input) {
 				switch_socket_close(rtp_session->rtcp_sock_output);
+				rtp_session->rtcp_sock_output = NULL;
 			}
 
 			if ((status = switch_socket_create(&rtp_session->rtcp_sock_output,
@@ -6708,6 +6709,11 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 			rtp_session->last_recv_msg = rtp_session->recv_msg;
 			if (switch_core_session_get_fork_read_frame_data(rtp_session->session, (void*) &rtp_session->last_recv_msg.body
 				, (sizeof(rtp_session->last_recv_msg.body) / sizeof(rtp_session->last_recv_msg.body[0])), &last_datalen) == SWITCH_STATUS_SUCCESS) {
+				switch_frame_t *saved_frame = NULL;
+				if (switch_core_session_get_fork_read_frame(rtp_session->session, &saved_frame) == SWITCH_STATUS_SUCCESS && saved_frame) {
+					rtp_session->last_recv_msg.header.pt = saved_frame->payload;
+					switch_frame_free(&saved_frame);
+				}
 				// The last frame size should have a minimum header length
 				if (rtp_session->last_recv_bytes >= rtp_header_len) {
 					rtp_session->last_recv_bytes = rtp_header_len + last_datalen;
@@ -6829,7 +6835,6 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 				rtp_session->dtmf_data.in_digit_ts != 0 &&
 				rtp_session->last_rtp_hdr.pt != rtp_session->recv_te &&
 				rtp_session->last_rtp_hdr.pt != rtp_session->cng_pt) {
-
 				uint32_t current_ts;
 				uint32_t elapsed_samples;
 				uint32_t elapsed_ms;

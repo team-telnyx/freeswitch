@@ -2427,13 +2427,17 @@ SWITCH_DECLARE(void) switch_media_handle_destroy(switch_core_session_t *session)
 		switch_core_timer_destroy(&smh->video_timer);
 	}
 
+	switch_mutex_lock(session->codec_read_mutex);
 	if (switch_core_codec_ready(&a_engine->read_codec)) {
 		switch_core_codec_destroy(&a_engine->read_codec);
 	}
+	switch_mutex_unlock(session->codec_read_mutex);
 
+	switch_mutex_lock(session->codec_write_mutex);
 	if (switch_core_codec_ready(&a_engine->write_codec)) {
 		switch_core_codec_destroy(&a_engine->write_codec);
 	}
+	switch_mutex_unlock(session->codec_write_mutex);
 
 	if (switch_core_codec_ready(&v_engine->read_codec)) {
 		switch_core_codec_destroy(&v_engine->read_codec);
@@ -10860,13 +10864,13 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 			/* Set custom timeout for ignore-rtp-during-dtmf if configured */
 			if ((val = switch_channel_get_variable(session->channel, "ignore_rtp_during_dtmf_timeout")) && !zstr(val)) {
 				timeout = atoi(val);
-				if (timeout > 0 && timeout <= 10000) {
+				if (timeout > 0 && timeout <= SWITCH_IGNORE_RTP_DURING_DTMF_MAX_TIMEOUT_MS) {
 					switch_rtp_set_ignore_rtp_during_dtmf_timeout(a_engine->rtp_session, (uint32_t)timeout);
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 									  "Set DTMF audio drop timeout to %dms\n", timeout);
 				} else {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-									  "Invalid ignore_rtp_during_dtmf_timeout value: %d (must be 1-10000ms), using default\n", timeout);
+									  "Invalid ignore_rtp_during_dtmf_timeout value: %d (must be 1-%dms), using default\n", timeout, SWITCH_IGNORE_RTP_DURING_DTMF_MAX_TIMEOUT_MS);
 				}
 			}
 		}
