@@ -785,7 +785,8 @@ cnt_with_cng:
 			/* Pre-compute unmerged read frame once for all READ_STREAM bugs without their own demux */
 			if (read_demux_count > 0) {
 				read_demux_data = malloc(read_frame->datalen);
-				if (read_demux_data) {
+				switch_assert(read_demux_data);
+				{
 					int i;
 					memcpy(read_demux_data, read_frame->data, read_frame->datalen);
 					for (i = 0; i < read_demux_count; i++) {
@@ -856,9 +857,7 @@ cnt_with_cng:
 				}
 			}
 			switch_thread_rwlock_unlock(session->bug_rwlock);
-			if (read_demux_data) {
-				free(read_demux_data);
-			}
+			switch_safe_free(read_demux_data);
 			if (prune) {
 				switch_core_media_bug_prune(session);
 			}
