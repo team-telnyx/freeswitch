@@ -7111,7 +7111,7 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 		}
 
 		if (status > 180 && to_handle_update) {
-			nua_set_params(nua, NUTAG_APPL_METHOD("UPDATE"), TAG_END());
+			nua_set_hparams(nh, NUTAG_APPL_METHOD("UPDATE"), TAG_END());
 		}
 
 		if (status == 100 && !sofia_test_flag(tech_pvt, TFLAG_100_UEPOCH_SET)) {
@@ -11636,7 +11636,7 @@ void sofia_handle_sip_i_invite(switch_core_session_t *session, nua_t *nua, sofia
 		to_handle_update = sofia_test_pflag(profile, PFLAG_HANDLE_UPDATE);
 	}
 	if (to_handle_update) {
-		nua_set_params(nua, NUTAG_APPL_METHOD("UPDATE"), TAG_END());
+		nua_set_hparams(nh, NUTAG_APPL_METHOD("UPDATE"), TAG_END());
 	}
 
 	switch_channel_set_variable_printf(channel, "sip_local_network_addr", "%s", profile->extsipip ? profile->extsipip : profile->sipip);
