@@ -544,12 +544,40 @@ switch_status_t sofia_on_hangup(switch_core_session_t *session)
 	sofia_gateway_t *gateway_ptr = NULL;
 
 	switch_telnyx_sofia_on_hangup(session);
-	sip_cause = switch_telnyx_hangup_cause_to_sip(session, cause);
-	if (sip_cause <= 0) {
-		sip_cause = hangup_cause_to_sip(cause);
-	} else {
-		cause = switch_telnyx_recompute_cause_code(channel, sip_cause, cause);
-		(*switch_channel_get_cause_ptr(channel)) = cause;
+
+	/* TEL-6811: pass through ONLY 603 "Network Blocked" with SIP-protocol Reason header.
+	 * Three conditions must ALL be true; any mismatch falls through to normal Q2S flow.
+	 *   1. sip_invite_failure_status == "603"
+	 *   2. sip_invite_failure_phrase == "Network Blocked" (case-insensitive)
+	 *   3. sip_reason starts with "SIP;" (SIP-protocol Reason, not Q.850)
+	 * sip_cause is initialised to -1 (above); used as sentinel to skip Q2S when set here. */
+	{
+		const char *fail_status  = switch_channel_get_variable(channel, "sip_invite_failure_status");
+		const char *fail_phrase  = switch_channel_get_variable(channel, "sip_invite_failure_phrase");
+		const char *sip_rsn      = switch_channel_get_variable(channel, "sip_reason");
+
+		int is_603              = !zstr(fail_status) && !strcmp(fail_status, "603");
+		int is_network_blocked  = !zstr(fail_phrase) && !strcasecmp(fail_phrase, "Network Blocked");
+		int has_sip_reason      = !zstr(sip_rsn)     && !strncasecmp(sip_rsn, "SIP;", 4);
+
+		if (is_603 && is_network_blocked && has_sip_reason) {
+			/* Bypass Q2S: use carrier's SIP cause directly, preserve phrase for Status-Line */
+			sip_cause = 603;
+			switch_channel_set_variable(channel, "override_sip_reason_phrase", fail_phrase);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+				"TEL-6811: 603 Network Blocked passthrough — skipping Q2S mapping\n");
+		}
+	}
+
+	if (sip_cause < 0) {
+		/* Normal Q2S path — completely unchanged */
+		sip_cause = switch_telnyx_hangup_cause_to_sip(session, cause);
+		if (sip_cause <= 0) {
+			sip_cause = hangup_cause_to_sip(cause);
+		} else {
+			cause = switch_telnyx_recompute_cause_code(channel, sip_cause, cause);
+			(*switch_channel_get_cause_ptr(channel)) = cause;
+		}
 	}
 
 	if ((gateway_name = switch_channel_get_variable(channel, "sip_gateway_name"))) {

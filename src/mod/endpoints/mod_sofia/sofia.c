@@ -7170,12 +7170,27 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 			switch_channel_set_variable_partner(channel, "sip_invite_failure_phrase", NULL);
 		}
 
+		/* TEL-6811: copy sip_reason to A-leg ONLY for 603 "Network Blocked" with a
+		 * SIP-protocol Reason header.  Condition is intentionally narrow — zero blast
+		 * radius on anything that is not exactly that response. */
+		if (status == 603 && !zstr(phrase) && !strcasecmp(phrase, "Network Blocked")
+				&& sip->sip_reason
+				&& !zstr(sip->sip_reason->re_protocol)
+				&& !strcasecmp(sip->sip_reason->re_protocol, "SIP")) {
+			char *reason_header = sip_header_as_string(nua_handle_get_home(nh), (void *) sip->sip_reason);
+			if (!zstr(reason_header)) {
+				switch_channel_set_variable(channel, "sip_reason", reason_header);
+				switch_channel_set_variable_partner(channel, "sip_reason", reason_header);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+					"TEL-6811: sip_reason copied to A-leg partner: %s\n", reason_header);
+				su_free(nua_handle_get_home(nh), reason_header);
+			}
+		}
+
 		if (status >= 400 && sip->sip_reason) {
 			char *reason_header = sip_header_as_string(nua_handle_get_home(nh), (void *) sip->sip_reason);
 
 			if (!zstr(reason_header)) {
-				switch_channel_set_variable(channel, "sip_reason", reason_header);
-				switch_channel_set_variable_partner(channel, "sip_reason", reason_header);
 				su_free(nua_handle_get_home(nh), reason_header);
 			}
 			if (sip->sip_reason->re_protocol && (!strcasecmp(sip->sip_reason->re_protocol, "Q.850")
