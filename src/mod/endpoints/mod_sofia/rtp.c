@@ -413,18 +413,12 @@ fail:
      // Track failed RTP endpoint origination
      prometheus_increment_rtp_outgoing_failed_calls();
 
-     if (tech_pvt) {
-        if (tech_pvt->read_codec.implementation) {
-			switch_core_codec_destroy(&tech_pvt->read_codec);
-		}
-
-		if (tech_pvt->write_codec.implementation) {
-			switch_core_codec_destroy(&tech_pvt->write_codec);
-		}
-    }
-
     if (*new_session) {
+        // Session was created, channel_on_destroy handles all cleanup
         switch_core_session_destroy(new_session);
+    } else if (local_port != 0) {
+        // Session creation failed but port was already allocated
+        switch_rtp_release_port(local_addr, local_port);
     }
     return SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER;
 }
@@ -452,11 +446,16 @@ static switch_status_t channel_on_destroy(switch_core_session_t *session)
 		if (tech_pvt->write_codec.implementation) {
 			switch_core_codec_destroy(&tech_pvt->write_codec);
 		}
-	}
 
-    if (tech_pvt->local_port != 0) {
-        switch_rtp_release_port(tech_pvt->local_address, tech_pvt->local_port);
-    }
+		// Clean up RTP session or release port
+		if (tech_pvt->rtp_session) {
+			// Destroy RTP session (releases port internally)
+			switch_rtp_destroy(&tech_pvt->rtp_session);
+		} else if (tech_pvt->local_port != 0) {
+			// Port was allocated but RTP session was never created
+			switch_rtp_release_port(tech_pvt->local_address, tech_pvt->local_port);
+		}
+	}
 
     return SWITCH_STATUS_SUCCESS;
 }
