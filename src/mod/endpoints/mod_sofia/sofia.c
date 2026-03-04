@@ -9773,6 +9773,8 @@ void sofia_handle_sip_i_update(nua_t *nua, sofia_profile_t *profile, nua_handle_
 					return;
 				}
 			}
+		} else {
+			has_valid_sdp = SWITCH_FALSE;
 		}
 	}
 
