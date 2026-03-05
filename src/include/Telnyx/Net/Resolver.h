@@ -280,58 +280,51 @@ public:
             return;
         }
 
-        // Use ares_fds to get current socket state
-        // Note: We use fd_set here just as a data structure to track which sockets
-        // are ready - we don't use select() on it, we use boost::asio async operations instead
-        fd_set read_fds, write_fds;
-        FD_ZERO(&read_fds);
-        FD_ZERO(&write_fds);
-
+        ares_socket_t sockets[ARES_GETSOCK_MAXNUM];
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-        int nfds = ares_fds(ctx->channel, &read_fds, &write_fds);
+        int bitmask = ares_getsock(ctx->channel, sockets, ARES_GETSOCK_MAXNUM);
 #pragma GCC diagnostic pop
 
-        // Track which sockets we've seen
         std::set<ares_socket_t> active_sockets;
 
-        // Iterate through possible file descriptors (up to nfds)
-        // Note: nfds is the highest fd + 1, so we check all fds up to that
-        for (int fd = 0; fd < nfds; fd++) {
-            ares_socket_t socket_fd = static_cast<ares_socket_t>(fd);
-            bool readable = FD_ISSET(socket_fd, &read_fds) != 0;
-            bool writable = FD_ISSET(socket_fd, &write_fds) != 0;
+        for (int i = 0; i < ARES_GETSOCK_MAXNUM; i++) {
+            bool readable = ARES_GETSOCK_READABLE(bitmask, i);
+            bool writable = ARES_GETSOCK_WRITABLE(bitmask, i);
 
-            if (readable || writable) {
-                active_sockets.insert(socket_fd);
+            if (!readable && !writable) {
+                continue;
+            }
 
-                // Get or create socket wrapper
-                std::shared_ptr<socket_wrapper> wrapper;
-                auto it = ctx->sockets.find(socket_fd);
-                if (it == ctx->sockets.end()) {
-                    wrapper = std::make_shared<socket_wrapper>(ctx->io_service, socket_fd);
-                    ctx->sockets[socket_fd] = wrapper;
-                } else {
-                    wrapper = it->second;
-                }
+            ares_socket_t socket_fd = sockets[i];
+            active_sockets.insert(socket_fd);
 
-                // Setup async wait for read
-                if (readable && !wrapper->read_pending) {
-                    wrapper->read_pending = true;
-                    wrapper->descriptor->async_read_some(
-                        boost::asio::null_buffers(),
-                        boost::bind(&resolver::handle_socket_read, ctx, socket_fd, boost::asio::placeholders::error)
-                    );
-                }
+            // Get or create socket wrapper
+            std::shared_ptr<socket_wrapper> wrapper;
+            auto it = ctx->sockets.find(socket_fd);
+            if (it == ctx->sockets.end()) {
+                wrapper = std::make_shared<socket_wrapper>(ctx->io_service, socket_fd);
+                ctx->sockets[socket_fd] = wrapper;
+            } else {
+                wrapper = it->second;
+            }
 
-                // Setup async wait for write
-                if (writable && !wrapper->write_pending) {
-                    wrapper->write_pending = true;
-                    wrapper->descriptor->async_write_some(
-                        boost::asio::null_buffers(),
-                        boost::bind(&resolver::handle_socket_write, ctx, socket_fd, boost::asio::placeholders::error)
-                    );
-                }
+            // Setup async wait for read
+            if (readable && !wrapper->read_pending) {
+                wrapper->read_pending = true;
+                wrapper->descriptor->async_read_some(
+                    boost::asio::null_buffers(),
+                    boost::bind(&resolver::handle_socket_read, ctx, socket_fd, boost::asio::placeholders::error)
+                );
+            }
+
+            // Setup async wait for write
+            if (writable && !wrapper->write_pending) {
+                wrapper->write_pending = true;
+                wrapper->descriptor->async_write_some(
+                    boost::asio::null_buffers(),
+                    boost::bind(&resolver::handle_socket_write, ctx, socket_fd, boost::asio::placeholders::error)
+                );
             }
         }
 
