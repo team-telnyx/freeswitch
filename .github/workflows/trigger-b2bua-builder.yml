@@ -6,12 +6,16 @@ on:
       - main
       - deploy-*
       - release-*
+      - telnyx/telephony/deploy-*
+      - telnyx/telephony/release-*
   pull_request:
     branches:
       - master
       - main
       - deploy-*
       - release-*
+      - telnyx/telephony/deploy-*
+      - telnyx/telephony/release-*
 
 jobs:
   trigger:
