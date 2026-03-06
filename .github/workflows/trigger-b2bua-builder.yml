@@ -19,7 +19,7 @@ on:
 
 jobs:
   trigger:
-    runs-on: telnyx-small
+    runs-on: ubuntu-latest
     steps:
       - name: Trigger upstream build
         uses: actions/github-script@v6
