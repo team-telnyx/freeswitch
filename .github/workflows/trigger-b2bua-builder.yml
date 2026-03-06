@@ -26,34 +26,19 @@ jobs:
         with:
           github-token: ${{ secrets.GIT_TOKEN }}
           script: |
-            const branchName = context.eventName === 'pull_request' 
-              ? context.payload.pull_request.head.ref 
+            const rawBranch = context.eventName === 'pull_request'
+              ? context.payload.pull_request.head.ref
               : context.ref.replace('refs/heads/', '');
-            console.log(`Triggering telnyx_b2bua_builder workflow for branch: ${branchName}`);
-            
-            try {
-              // Option 1: Try to trigger workflow on the exact same branch name
-              await github.rest.actions.createWorkflowDispatch({
-                owner: 'team-telnyx',
-                repo: 'telnyx_b2bua_builder',
-                workflow_id: 'build-test-publish.yml',
-                ref: branchName
-              });
-              console.log('Successfully triggered workflow_dispatch on branch: ' + branchName);
-            } catch (error) {
-              console.log(`workflow_dispatch failed: ${error.message}`);
-              console.log(`The target repo might not have the branch ${branchName}.`);
-              
-              // Option 2: Fallback to repository_dispatch on default branch
-              // This relies on the target workflow accepting repository_dispatch events
-              console.log(`Falling back to repository_dispatch (upstream-build)`);
-              await github.rest.repos.createDispatchEvent({
-                owner: 'team-telnyx',
-                repo: 'telnyx_b2bua_builder',
-                event_type: 'upstream-build',
-                client_payload: {
-                  branch: branchName
-                }
-              });
-              console.log('Successfully triggered repository_dispatch');
-            }
+            // Strip telnyx/telephony/ prefix — builder branches use the short form (e.g. deploy-tel-1234)
+            const branchName = rawBranch.replace('telnyx/telephony/', '');
+            console.log(`Triggering telnyx_b2bua_builder workflow for branch: ${branchName} (from ${rawBranch})`);
+
+            await github.rest.repos.createDispatchEvent({
+              owner: 'team-telnyx',
+              repo: 'telnyx_b2bua_builder',
+              event_type: 'upstream-build',
+              client_payload: {
+                branch: branchName
+              }
+            });
+            console.log('Successfully triggered repository_dispatch');
