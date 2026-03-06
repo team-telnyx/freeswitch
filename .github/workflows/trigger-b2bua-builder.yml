@@ -1,0 +1,44 @@
+name: Trigger telnyx_b2bua_builder
+on:
+  push:
+    branches:
+      - master
+      - main
+      - deploy-*
+      - release-*
+      - telnyx/telephony/deploy-*
+      - telnyx/telephony/release-*
+  pull_request:
+    branches:
+      - telnyx/telephony/master
+      - telnyx/telephony/main
+      - telnyx/telephony/deploy-*
+      - telnyx/telephony/release-*
+      - deploy-*
+      - release-*
+
+jobs:
+  trigger:
+    runs-on: telnyx-small
+    steps:
+      - name: Trigger upstream build
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GIT_TOKEN }}
+          script: |
+            const rawBranch = context.eventName === 'pull_request'
+              ? context.payload.pull_request.head.ref
+              : context.ref.replace('refs/heads/', '');
+            // Strip telnyx/telephony/ prefix — builder branches use the short form (e.g. deploy-tel-1234)
+            const branchName = rawBranch.replace('telnyx/telephony/', '');
+
+            await github.rest.repos.createDispatchEvent({
+              owner: 'team-telnyx',
+              repo: 'telnyx_b2bua_builder',
+              event_type: 'upstream-build',
+              client_payload: {
+                branch: branchName,
+                source_repo: context.repo.repo,
+                run_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
+              }
+            });
