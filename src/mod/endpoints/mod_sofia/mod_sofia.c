@@ -537,17 +537,14 @@ switch_status_t sofia_on_hangup(switch_core_session_t *session)
 			if ((val = switch_channel_get_variable(tech_pvt->channel, "sip_reason"))) {
 				reason = switch_core_session_sprintf(session, "%s", val);
 			} else {
-				/* TEL-6830: Copy partner sip_reason only for Network Blocked (D52 scenario, matching TEL-6811 pattern) */
-				val = NULL;
-				{
-					const char *partner_phrase = switch_channel_get_variable_partner(channel, "sip_hangup_phrase");
-					if (!zstr(partner_phrase) && !strcasecmp(partner_phrase, "Network Blocked")) {
-						val = switch_channel_get_variable_partner(channel, "sip_reason");
-					}
+				/* TEL-6830: Check if dialplan explicitly suppressed Q.850 Reason header */
+				const char *no_q850 = switch_channel_get_variable(channel, "sip_no_q850_reason");
+				if (!switch_true(no_q850)) {
+					no_q850 = switch_channel_get_variable_partner(channel, "sip_no_q850_reason");
 				}
-				if (!zstr(val)) {
-					switch_channel_set_variable(channel, "sip_reason", val);
-					reason = switch_core_session_sprintf(session, "%s", val);
+				if (switch_true(no_q850)) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+						"TEL-6830: Q.850 Reason suppressed by sip_no_q850_reason variable\n");
 				} else if ((switch_channel_test_flag(channel, CF_INTERCEPT) || cause == SWITCH_CAUSE_PICKED_OFF || cause == SWITCH_CAUSE_LOSE_RACE)
 					&& !switch_true(switch_channel_get_variable(channel, "ignore_completed_elsewhere"))) {
 					reason = switch_core_session_sprintf(session, "SIP;cause=200;text=\"Call completed elsewhere\"");
