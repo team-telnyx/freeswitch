@@ -299,41 +299,52 @@ public:
             ares_socket_t socket_fd = sockets[i];
             active_sockets.insert(socket_fd);
 
-            // Get or create socket wrapper
-            std::shared_ptr<socket_wrapper> wrapper;
-            auto it = ctx->sockets.find(socket_fd);
-            if (it == ctx->sockets.end()) {
-                wrapper = std::make_shared<socket_wrapper>(ctx->io_service, socket_fd);
-                ctx->sockets[socket_fd] = wrapper;
-            } else {
-                wrapper = it->second;
-            }
+            // Get or create socket wrapper. The stream_descriptor constructor
+            // or async operations can throw if the fd is invalid or in a bad
+            // state (e.g. c-ares closed it between ares_getsock and here).
+            try {
+                std::shared_ptr<socket_wrapper> wrapper;
+                auto it = ctx->sockets.find(socket_fd);
+                if (it == ctx->sockets.end()) {
+                    wrapper = std::make_shared<socket_wrapper>(ctx->io_service, socket_fd);
+                    ctx->sockets[socket_fd] = wrapper;
+                } else {
+                    wrapper = it->second;
+                }
 
-            // Setup async wait for read
-            if (readable && !wrapper->read_pending) {
-                wrapper->read_pending = true;
-                wrapper->descriptor->async_read_some(
-                    boost::asio::null_buffers(),
-                    boost::bind(&resolver::handle_socket_read, ctx, socket_fd, boost::asio::placeholders::error)
-                );
-            }
+                // Setup async wait for read
+                if (readable && !wrapper->read_pending) {
+                    wrapper->read_pending = true;
+                    wrapper->descriptor->async_read_some(
+                        boost::asio::null_buffers(),
+                        boost::bind(&resolver::handle_socket_read, ctx, socket_fd, boost::asio::placeholders::error)
+                    );
+                }
 
-            // Setup async wait for write
-            if (writable && !wrapper->write_pending) {
-                wrapper->write_pending = true;
-                wrapper->descriptor->async_write_some(
-                    boost::asio::null_buffers(),
-                    boost::bind(&resolver::handle_socket_write, ctx, socket_fd, boost::asio::placeholders::error)
-                );
+                // Setup async wait for write
+                if (writable && !wrapper->write_pending) {
+                    wrapper->write_pending = true;
+                    wrapper->descriptor->async_write_some(
+                        boost::asio::null_buffers(),
+                        boost::bind(&resolver::handle_socket_write, ctx, socket_fd, boost::asio::placeholders::error)
+                    );
+                }
+            } catch (const boost::system::system_error&) {
+                ctx->sockets.erase(socket_fd);
+                active_sockets.erase(socket_fd);
             }
         }
 
         // Remove sockets that are no longer active
         for (auto it = ctx->sockets.begin(); it != ctx->sockets.end();) {
             if (active_sockets.find(it->first) == active_sockets.end()) {
-                // Cancel any pending operations
-                if (it->second->read_pending || it->second->write_pending) {
-                    it->second->descriptor->cancel();
+                // Cancel any pending operations — cancel itself may throw
+                // if the descriptor is already in a bad state
+                try {
+                    if (it->second->read_pending || it->second->write_pending) {
+                        it->second->descriptor->cancel();
+                    }
+                } catch (const boost::system::system_error&) {
                 }
                 it = ctx->sockets.erase(it);
             } else {
