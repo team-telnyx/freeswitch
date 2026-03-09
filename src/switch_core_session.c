@@ -1755,12 +1755,17 @@ SWITCH_DECLARE(void) switch_core_session_perform_destroy(switch_core_session_t *
 		(*session)->plc = NULL;
 	}
 
+	/* Run destroy state handlers BEFORE building the CHANNEL_DESTROY event.
+	 * Handlers may modify channel variables; running them first ensures
+	 * the event captures the final, stable state of all variables and
+	 * prevents a use-after-free race where a handler frees variable memory
+	 * that the event construction is still reading. (issue #2981) */
+	switch_core_session_destroy_state(*session);
+
 	if (switch_event_create(&event, SWITCH_EVENT_CHANNEL_DESTROY) == SWITCH_STATUS_SUCCESS) {
 		switch_channel_event_set_data((*session)->channel, event);
 		switch_event_fire(&event);
 	}
-
-	switch_core_session_destroy_state(*session);
 
 	switch_buffer_destroy(&(*session)->raw_read_buffer);
 	switch_buffer_destroy(&(*session)->raw_write_buffer);
