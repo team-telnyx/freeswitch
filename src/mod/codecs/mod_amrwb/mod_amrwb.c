@@ -418,6 +418,17 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 
 				fmtptmp_pos = switch_snprintf(fmtptmp, sizeof(fmtptmp), "mode-set=%s", modes);
 			}
+
+			/* When carrier omits mode-set, sync enc_mode with configured mode-set
+			 * so the encoder does not exceed the modes advertised in our answer SDP. */
+			if (globals.context.enc_modes) {
+				for (i = SWITCH_AMRWB_MODES-2; i > -1; i--) {
+					if (globals.context.enc_modes & (1 << i)) {
+						context->enc_mode = (switch_byte_t) i;
+						break;
+					}
+				}
+			}
 		}
 
 		if (globals.adjust_bitrate) {
