@@ -246,10 +246,16 @@ public:
             addrinfo_callback, &result_ctx);
 
         // Block until done (c-ares processes internally via event thread)
-        ares_queue_wait_empty(channel, DNS_TIMEOUT_MS);
+        ares_status_t wait_status = ares_queue_wait_empty(channel, DNS_TIMEOUT_MS);
 
         // Cleanup channel (closes all c-ares sockets)
         ares_destroy(channel);
+
+        // If wait timed out, the callback may never have fired
+        if (wait_status == ARES_ETIMEOUT) {
+            ec = boost::asio::error::timed_out;
+            return iterator();
+        }
 
         // Map result status
         if (result_ctx.status != ARES_SUCCESS) {
