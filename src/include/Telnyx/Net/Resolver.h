@@ -231,7 +231,6 @@ public:
         resolve_result result_ctx;
         result_ctx.endpoints = &endpoints;
         result_ctx.port = port;
-        result_ctx.done = false;
         result_ctx.status = ARES_SUCCESS;
 
         // Setup hints
@@ -245,8 +244,11 @@ public:
         ares_getaddrinfo(channel, q.host_name().c_str(), nullptr, &hints,
             addrinfo_callback, &result_ctx);
 
-        // Block until done (c-ares processes internally via event thread)
-        ares_status_t wait_status = ares_queue_wait_empty(channel, DNS_TIMEOUT_MS);
+        // Block until done. The wait timeout is a safety backstop, not the
+        // primary timeout — c-ares enforces timeout × tries internally.
+        // Worst case: DNS_TIMEOUT_MS * DNS_TRIES + margin for processing.
+        static const int DNS_WAIT_MS = DNS_TIMEOUT_MS * DNS_TRIES + 500;
+        ares_status_t wait_status = ares_queue_wait_empty(channel, DNS_WAIT_MS);
 
         // Cleanup channel (closes all c-ares sockets)
         ares_destroy(channel);
@@ -265,6 +267,7 @@ public:
                     ec = boost::asio::error::host_not_found;
                     break;
                 case ARES_ETIMEOUT:
+                case ARES_EDESTRUCTION:
                     ec = boost::asio::error::timed_out;
                     break;
                 default:
@@ -293,7 +296,6 @@ private:
     struct resolve_result {
         std::vector<endpoint_type>* endpoints;
         unsigned short port;
-        bool done;
         int status;
     };
 
@@ -318,7 +320,7 @@ private:
                     sockaddr_in* addr_in = reinterpret_cast<sockaddr_in*>(node->ai_addr);
 
                     boost::asio::ip::address_v4::bytes_type bytes;
-                    memcpy(bytes.data(), &addr_in->sin_addr, sizeof(struct in_addr));
+                    memcpy(bytes.data(), &addr_in->sin_addr, sizeof(in_addr));
 
                     ctx->endpoints->push_back(
                         endpoint_type(boost::asio::ip::address_v4(bytes), ctx->port)
@@ -328,7 +330,7 @@ private:
                     sockaddr_in6* addr_in6 = reinterpret_cast<sockaddr_in6*>(node->ai_addr);
 
                     boost::asio::ip::address_v6::bytes_type bytes;
-                    memcpy(bytes.data(), &addr_in6->sin6_addr, sizeof(struct in6_addr));
+                    memcpy(bytes.data(), &addr_in6->sin6_addr, sizeof(in6_addr));
 
                     ctx->endpoints->push_back(
                         endpoint_type(boost::asio::ip::address_v6(bytes), ctx->port)
@@ -338,7 +340,6 @@ private:
             ares_freeaddrinfo(result);
         }
 
-        ctx->done = true;
     }
 
 };
