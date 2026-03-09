@@ -22,15 +22,15 @@ jobs:
     runs-on: telnyx-small
     steps:
       - name: Create branch in downstream repos
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ secrets.GIT_TOKEN }}
+          RAW_BRANCH: ${{ github.ref_name }}
+          SOURCE: ${{ github.event.repository.name }}
         run: |
           set -euo pipefail
-          BRANCH="${{ github.ref_name }}"
-          # Strip telnyx/telephony/ prefix — downstream branches use the short form
-          BRANCH="${BRANCH#telnyx/telephony/}"
+          BRANCH="${RAW_BRANCH#telnyx/telephony/}"
           ORG="team-telnyx"
-          SOURCE="${{ github.event.repository.name }}"
 
           # Determine targets
           TARGETS=("telnyx_b2bua_builder")
@@ -45,13 +45,18 @@ jobs:
             DEFAULT=$(gh api "repos/$ORG/$target" --jq '.default_branch')
             SHA=$(gh api "repos/$ORG/$target/git/ref/heads/$DEFAULT" --jq '.object.sha')
 
-            # Create branch (ignore error if already exists)
-            if gh api "repos/$ORG/$target/git/refs" \
+            # Create branch — log result either way
+            HTTP_CODE=$(gh api "repos/$ORG/$target/git/refs" \
                  -f "ref=refs/heads/$BRANCH" \
-                 -f "sha=$SHA" 2>/dev/null; then
-              echo "✅ Created $BRANCH in $target"
+                 -f "sha=$SHA" \
+                 --silent -i 2>&1 | head -1 | awk '{print $2}') || true
+
+            if [ "$HTTP_CODE" = "201" ]; then
+              echo "✅ [$SOURCE] Created $BRANCH in $target"
+            elif [ "$HTTP_CODE" = "422" ]; then
+              echo "ℹ️ [$SOURCE] Branch $BRANCH already exists in $target (skipped)"
             else
-              echo "ℹ️ Branch $BRANCH may already exist in $target (skipped)"
+              echo "⚠️ [$SOURCE] Failed to create $BRANCH in $target (HTTP $HTTP_CODE)"
             fi
           done
       - name: Trigger upstream build
