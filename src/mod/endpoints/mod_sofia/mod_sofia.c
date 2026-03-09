@@ -546,7 +546,7 @@ switch_status_t sofia_on_hangup(switch_core_session_t *session)
 
 	switch_telnyx_sofia_on_hangup(session);
 
-	/* TEL-6811: pass through ONLY 603 "Network Blocked" with SIP-protocol Reason header.
+	/* Pass through ONLY 603 "Network Blocked" with SIP-protocol Reason header.
 	 * Three conditions must ALL be true; any mismatch falls through to normal Q2S flow.
 	 *   1. sip_invite_failure_status == "603"
 	 *   2. sip_invite_failure_phrase == "Network Blocked" (case-insensitive)
@@ -567,7 +567,7 @@ switch_status_t sofia_on_hangup(switch_core_session_t *session)
 			skip_ps_cause_override = 1;
 			switch_channel_set_variable(channel, "override_sip_reason_phrase", fail_phrase);
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-				"TEL-6811: 603 Network Blocked passthrough - skipping Q2S mapping\n");
+				"603 Network Blocked passthrough - skipping Q2S mapping\n");
 		}
 	}
 

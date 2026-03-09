@@ -7176,14 +7176,14 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 			if (!zstr(reason_header)) {
 				switch_channel_set_variable(channel, "sip_reason", reason_header);
 
-				/* TEL-6811: For 603 "Network Blocked" with SIP-protocol Reason,
+				/* For 603 "Network Blocked" with SIP-protocol Reason,
 				 * also copy to A-leg partner for passthrough */
 				if (status == 603 && !zstr(phrase) && !strcasecmp(phrase, "Network Blocked")
 						&& !zstr(sip->sip_reason->re_protocol)
 						&& !strcasecmp(sip->sip_reason->re_protocol, "SIP")) {
 					switch_channel_set_variable_partner(channel, "sip_reason", reason_header);
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-						"TEL-6811: sip_reason copied to A-leg partner: %s\n", reason_header);
+						"sip_reason copied to A-leg partner: %s\n", reason_header);
 				}
 
 				su_free(nua_handle_get_home(nh), reason_header);
@@ -9479,7 +9479,7 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 			if (tech_pvt->q850_cause && !switch_channel_var_true(channel, "ignore_q850_reason")) {
 				cause = tech_pvt->q850_cause;
 			} else {
-				// ENGDESK-27289: this modifies 408 hangup cause caused by sip transaction timeouts
+				// This modifies 408 hangup cause caused by sip transaction timeouts
 				if (status == 408 && zstr(switch_channel_get_variable(channel, "sip_reply_host")) && profile->telnyx_sip_proxy_timeout_hangup_cause) {
 					cause = profile->telnyx_sip_proxy_timeout_hangup_cause;
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "SIP transaction timer expired. Mapping 408 to %s\n",
