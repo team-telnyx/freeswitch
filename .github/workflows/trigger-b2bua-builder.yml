@@ -21,6 +21,39 @@ jobs:
   trigger:
     runs-on: telnyx-small
     steps:
+      - name: Create branch in downstream repos
+        env:
+          GH_TOKEN: ${{ secrets.GIT_TOKEN }}
+        run: |
+          set -euo pipefail
+          BRANCH="${{ github.ref_name }}"
+          # Strip telnyx/telephony/ prefix — downstream branches use the short form
+          BRANCH="${BRANCH#telnyx/telephony/}"
+          ORG="team-telnyx"
+          SOURCE="${{ github.event.repository.name }}"
+
+          # Determine targets
+          TARGETS=("telnyx_b2bua_builder")
+          if [ "$SOURCE" = "mod_telnyx_rtc" ]; then
+            TARGETS+=("b2bua-rtc")
+          else
+            TARGETS+=("b2bua")
+          fi
+
+          for target in "${TARGETS[@]}"; do
+            # Get default branch SHA
+            DEFAULT=$(gh api "repos/$ORG/$target" --jq '.default_branch')
+            SHA=$(gh api "repos/$ORG/$target/git/ref/heads/$DEFAULT" --jq '.object.sha')
+
+            # Create branch (ignore error if already exists)
+            if gh api "repos/$ORG/$target/git/refs" \
+                 -f "ref=refs/heads/$BRANCH" \
+                 -f "sha=$SHA" 2>/dev/null; then
+              echo "✅ Created $BRANCH in $target"
+            else
+              echo "ℹ️ Branch $BRANCH may already exist in $target (skipped)"
+            fi
+          done
       - name: Trigger upstream build
         uses: actions/github-script@v6
         with:
