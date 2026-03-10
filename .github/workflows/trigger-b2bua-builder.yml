@@ -61,7 +61,7 @@ jobs:
             exit 1
           fi
       - name: Delete branch in downstream repos
-        if: github.event_name == 'delete' && github.event.ref_type == 'branch' && (startsWith(github.event.ref, 'deploy-') || startsWith(github.event.ref, 'release-') || startsWith(github.event.ref, 'telnyx/telephony/deploy-') || startsWith(github.event.ref, 'telnyx/telephony/release-'))
+        if: github.event_name == 'delete' && github.event.ref_type == 'branch' && (startsWith(github.event.ref, 'deploy-') || startsWith(github.event.ref, 'release-') || startsWith(github.event.ref, 'telnyx/telephony/deploy-') || startsWith(github.event.ref, 'telnyx/telephony/release-')) && github.event.ref != 'deploy-development'
         env:
           GH_TOKEN: ${{ secrets.GIT_TOKEN }}
           RAW_BRANCH: ${{ github.event.ref }}
