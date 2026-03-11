@@ -532,6 +532,13 @@ switch_status_t sofia_on_destroy(switch_core_session_t *session)
 
 }
 
+static int sofia_is_passthrough_cause(int status) {
+	switch (status) {
+	case 603: return 1;
+	default:  return 0;
+	}
+}
+
 switch_status_t sofia_on_hangup(switch_core_session_t *session)
 {
 	switch_core_session_t *a_session;
@@ -539,32 +546,28 @@ switch_status_t sofia_on_hangup(switch_core_session_t *session)
 	switch_channel_t *channel = switch_core_session_get_channel(session);
 	switch_call_cause_t cause = switch_channel_get_cause(channel);
 	int sip_cause = -1;
-	int skip_ps_cause_override = 0;
 	const char *ps_cause = NULL, *use_my_cause;
 	const char *gateway_name = NULL;
 	sofia_gateway_t *gateway_ptr = NULL;
 
 	switch_telnyx_sofia_on_hangup(session);
 
-	/* Pass through ONLY 603 "Network Blocked" with SIP-protocol Reason header.
-	 * Three conditions must ALL be true; any mismatch falls through to normal Q2S flow.
-	 *   1. sip_invite_failure_status == "603"
-	 *   2. sip_invite_failure_phrase == "Network Blocked" (case-insensitive)
-	 *   3. sip_reason starts with "SIP;" (SIP-protocol Reason, not Q.850)
+	/* Pass through passthrough-cause responses with "Network Blocked" phrase.
+	 * Two conditions must ALL be true; any mismatch falls through to normal Q2S flow.
+	 *   1. sip_invite_failure_status is a passthrough cause (e.g. 603)
+	 *   2. sip_invite_failure_phrase == SOFIA_NETWORK_BLOCKED_PHRASE (case-insensitive)
 	 * sip_cause is initialised to -1 (above); used as sentinel to skip Q2S when set here. */
 	{
 		const char *fail_status = switch_channel_get_variable(channel, "sip_invite_failure_status");
 		const char *fail_phrase = switch_channel_get_variable(channel, "sip_invite_failure_phrase");
-		const char *sip_rsn = switch_channel_get_variable(channel, "sip_reason");
 
-		int is_603 = !zstr(fail_status) && !strcmp(fail_status, "603");
-		int is_network_blocked = !zstr(fail_phrase) && !strcasecmp(fail_phrase, "Network Blocked");
-		int has_sip_reason = !zstr(sip_rsn) && !strncasecmp(sip_rsn, "SIP;", 4);
+		int fail_code = !zstr(fail_status) ? atoi(fail_status) : -1;
+		int is_passthrough_cause = sofia_is_passthrough_cause(fail_code);
+		int is_network_blocked = !zstr(fail_phrase) && !strcasecmp(fail_phrase, SOFIA_NETWORK_BLOCKED_PHRASE);
 
-		if (is_603 && is_network_blocked && has_sip_reason) {
+		if (is_passthrough_cause && is_network_blocked) {
 			/* Bypass Q2S: use carrier's SIP cause directly, preserve phrase for Status-Line */
-			sip_cause = 603;
-			skip_ps_cause_override = 1;
+			sip_cause = fail_code;
 			switch_channel_set_variable(channel, "override_sip_reason_phrase", fail_phrase);
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 				"603 Network Blocked passthrough - skipping Q2S mapping\n");
@@ -632,7 +635,7 @@ switch_status_t sofia_on_hangup(switch_core_session_t *session)
 		ps_cause = switch_channel_get_variable(channel, "last_bridge_" SWITCH_PROTO_SPECIFIC_HANGUP_CAUSE_VARIABLE);
 	}
 
-	if (!skip_ps_cause_override && !zstr(ps_cause) && (!strncasecmp(ps_cause, "sip:", 4) || !strncasecmp(ps_cause, "sips:", 5))) {
+	if (!zstr(ps_cause) && (!strncasecmp(ps_cause, "sip:", 4) || !strncasecmp(ps_cause, "sips:", 5))) {
 		int new_cause = atoi(sofia_glue_strip_proto(ps_cause));
 		if (new_cause) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s Overriding SIP cause %d with %d from the other leg\n",

@@ -7178,7 +7178,7 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 
 				/* For 603 "Network Blocked" with SIP-protocol Reason,
 				 * also copy to A-leg partner for passthrough */
-				if (status == 603 && !zstr(phrase) && !strcasecmp(phrase, "Network Blocked")
+				if (status == 603 && !zstr(phrase) && !strcasecmp(phrase, SOFIA_NETWORK_BLOCKED_PHRASE)
 						&& !zstr(sip->sip_reason->re_protocol)
 						&& !strcasecmp(sip->sip_reason->re_protocol, "SIP")) {
 					switch_channel_set_variable_partner(channel, "sip_reason", reason_header);
