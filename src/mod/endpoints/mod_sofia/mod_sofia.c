@@ -545,29 +545,12 @@ switch_status_t sofia_on_hangup(switch_core_session_t *session)
 
 	switch_telnyx_sofia_on_hangup(session);
 
-	{
-		const char *fail_status = switch_channel_get_variable(channel, "sip_invite_failure_status");
-		const char *fail_phrase  = switch_channel_get_variable(channel, "sip_invite_failure_phrase");
-
-		if (!zstr(fail_status) && !strcmp(fail_status, "603") &&
-		    !zstr(fail_phrase) && !strcasecmp(fail_phrase, "Network Blocked")) {
-			sip_cause = 603;
-			switch_channel_set_variable(channel, "override_sip_reason_phrase", fail_phrase);
-			switch_channel_set_variable(channel, "sip_ignore_remote_cause", "true");
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-				"603 Network Blocked passthrough - skipping Q2S\n");
-		}
-	}
-
-	if (sip_cause < 0) {
-		/* Normal Q2S path - completely unchanged */
-		sip_cause = switch_telnyx_hangup_cause_to_sip(session, cause);
-		if (sip_cause <= 0) {
-			sip_cause = hangup_cause_to_sip(cause);
-		} else {
-			cause = switch_telnyx_recompute_cause_code(channel, sip_cause, cause);
-			(*switch_channel_get_cause_ptr(channel)) = cause;
-		}
+	sip_cause = switch_telnyx_hangup_cause_to_sip(session, cause);
+	if (sip_cause <= 0) {
+		sip_cause = hangup_cause_to_sip(cause);
+	} else {
+		cause = switch_telnyx_recompute_cause_code(channel, sip_cause, cause);
+		(*switch_channel_get_cause_ptr(channel)) = cause;
 	}
 
 	if ((gateway_name = switch_channel_get_variable(channel, "sip_gateway_name"))) {
@@ -628,6 +611,20 @@ switch_status_t sofia_on_hangup(switch_core_session_t *session)
 			sip_cause = new_cause;
 			cause = switch_telnyx_recompute_cause_code(channel, sip_cause, cause);
 			(*switch_channel_get_cause_ptr(channel)) = cause;
+		}
+	}
+
+	{
+		const char *fail_status = switch_channel_get_variable(channel, "sip_invite_failure_status");
+		const char *fail_phrase  = switch_channel_get_variable(channel, "sip_invite_failure_phrase");
+
+		if (!zstr(fail_status) && !strcmp(fail_status, "603") &&
+		    !zstr(fail_phrase) && !strcasecmp(fail_phrase, "Network Blocked")) {
+			sip_cause = 603;
+			switch_channel_set_variable(channel, "override_sip_reason_phrase", fail_phrase);
+			switch_channel_set_variable(channel, "sip_ignore_remote_cause", "true");
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+				"603 Network Blocked passthrough - overriding Q2S result\n");
 		}
 	}
 
