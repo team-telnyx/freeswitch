@@ -2672,10 +2672,11 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 		}
 
 		if (report_sent && rtp_session->rtcp_probe) {
-			switch_rtcp_report_data_t report_data;
+			switch_rtcp_report_data_t report_data = {0};
 			rtcp_pt_t type = (rtp_session->stats.rtcp.sent_pkt_count || force_send_rr) ? _RTCP_PT_RR : _RTCP_PT_SR;
 			switch_channel_t *channel = switch_core_session_get_channel(rtp_session->session);
 			report_data.rtcp_type = type;
+			report_data.ssrc = rtcp_report_block ? rtcp_report_block->ssrc : 0;
 			report_data.rtcp_data.report_block = rtcp_report_block;
 			if (channel && switch_channel_test_flag(channel, CF_ENABLE_RTCP_PROBE)) {
 #ifdef DEBUG_HOMER
@@ -8034,9 +8035,16 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 				rtp_session->rtcp_frame.packet_count =  ntohl(sr->sender_info.pc);
 				rtp_session->rtcp_frame.octect_count = ntohl(sr->sender_info.oc);
 
-				report = &sr->report_block;
-				report_data.ssrc = report->ssrc;
-				report_data.rtcp_data.report_block = report;
+				if (msg->header.count > 0) {
+					report = &sr->report_block;
+					report_data.ssrc = report->ssrc;
+					report_data.rtcp_data.report_block = report;
+				} else {
+					/* SR with no report blocks (e.g. WebRTC compound RTCP: SR+SDES).
+					 * Use the packet SSRC so the probe can still deliver sender_info to Homer. */
+					report_data.ssrc = sr->ssrc;
+					report_data.rtcp_data.report_block = NULL;
+				}
 			} else { /* Receiver report */
 				struct switch_rtcp_receiver_report* rr = (struct switch_rtcp_receiver_report*)msg->body;
 				packet_ssrc = rr->ssrc;
@@ -8058,27 +8066,38 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 				switch_channel_t *channel = switch_core_session_get_channel(rtp_session->session);
 				report_data.rtcp_type = msg->header.type;
 				if (channel && switch_channel_test_flag(channel, CF_ENABLE_RTCP_PROBE)) {
+					if (report) {
+						/* We have a report block -- validate SSRC before forwarding */
 #ifdef DEBUG_HOMER
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "[not ours] RTCP probe report block (pt=%u, ssrc=%u, ia_jitter=%u) [type=%s remote_ssrc=%u peer_ssrc=%u local ssrc=%u]\n",
-						msg->header.type, ntohl(report->ssrc), ntohl(report->jitter), rtp_type(rtp_session), rtp_session->remote_ssrc, rtp_session->stats.rtcp.peer_ssrc, rtp_session->ssrc);
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "[not ours] RTCP probe report block (pt=%u, ssrc=%u, ia_jitter=%u) [type=%s remote_ssrc=%u peer_ssrc=%u local ssrc=%u]\n",
+							msg->header.type, ntohl(report->ssrc), ntohl(report->jitter), rtp_type(rtp_session), rtp_session->remote_ssrc, rtp_session->stats.rtcp.peer_ssrc, rtp_session->ssrc);
 #endif
-					if (ntohl(report_data.ssrc) != rtp_session->ssrc && report_data.rtcp_type != _RTCP_PT_XR) {
+						if (ntohl(report_data.ssrc) != rtp_session->ssrc && report_data.rtcp_type != _RTCP_PT_XR) {
 #ifdef DEBUG_HOMER
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "Skip RTCP probe report for %s with pt=%u and probably sloppy jitter of %u, as ssrc=%u does not match local ssrc=%u\n",
-							rtp_type(rtp_session), msg->header.type, ntohl(report->jitter), ntohl(report_data.ssrc), rtp_session->ssrc);
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "Skip RTCP probe report for %s with pt=%u and probably sloppy jitter of %u, as ssrc=%u does not match local ssrc=%u\n",
+								rtp_type(rtp_session), msg->header.type, ntohl(report->jitter), ntohl(report_data.ssrc), rtp_session->ssrc);
 #endif
-					} else if (RTCP_BUG_SSRC == ntohl(report_data.ssrc)) {
+						} else if (RTCP_BUG_SSRC == ntohl(report_data.ssrc)) {
 #ifdef DEBUG_HOMER
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "Skip RTCP probe report for %s with pt=%u and probably sloppy jitter of %u, as ssrc=%u matches RTCP bug ssrc=%u\n",
-							rtp_type(rtp_session), msg->header.type, ntohl(report->jitter), ntohl(report_data.ssrc), RTCP_BUG_SSRC);
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "Skip RTCP probe report for %s with pt=%u and probably sloppy jitter of %u, as ssrc=%u matches RTCP bug ssrc=%u\n",
+								rtp_type(rtp_session), msg->header.type, ntohl(report->jitter), ntohl(report_data.ssrc), RTCP_BUG_SSRC);
 #endif
-					} else {
-						if (report && ntohl(report->jitter) > HIGH_JITTER_LOG_THRESHOLD) {
+						} else {
+							if (ntohl(report->jitter) > HIGH_JITTER_LOG_THRESHOLD) {
 #ifdef DEBUG_HOMER
-							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "(huge jitter) [not ours] RTCP probe report block (pt=%u, ssrc=%u, ia_jitter=%u) [type=%s remote_ssrc=%u peer_ssrc=%u local ssrc=%u]\n",
-								msg->header.type, ntohl(report_data.ssrc), ntohl(report->jitter), rtp_type(rtp_session), rtp_session->remote_ssrc, rtp_session->stats.rtcp.peer_ssrc, rtp_session->ssrc);
+								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "(huge jitter) [not ours] RTCP probe report block (pt=%u, ssrc=%u, ia_jitter=%u) [type=%s remote_ssrc=%u peer_ssrc=%u local ssrc=%u]\n",
+									msg->header.type, ntohl(report_data.ssrc), ntohl(report->jitter), rtp_type(rtp_session), rtp_session->remote_ssrc, rtp_session->stats.rtcp.peer_ssrc, rtp_session->ssrc);
 #endif
+							}
+							rtp_session->rtcp_probe(channel, rtp_session, FALSE, &report_data, rtcp_sender_info);
 						}
+					} else if (report_data.rtcp_type == _RTCP_PT_SR && rtcp_sender_info) {
+						/* SR with no report blocks (RC=0) -- still forward sender_info to the probe.
+						 * This happens with WebRTC compound RTCP (SR+SDES) where the SR has RC=0. */
+#ifdef DEBUG_HOMER
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "[not ours] RTCP probe SR sender-only (pt=%u, packet_ssrc=0x%X) [type=%s]\n",
+							msg->header.type, ntohl(report_data.ssrc), rtp_type(rtp_session));
+#endif
 						rtp_session->rtcp_probe(channel, rtp_session, FALSE, &report_data, rtcp_sender_info);
 					}
 				}
@@ -10755,6 +10774,11 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_write_raw(switch_rtp_t *rtp_session, 
 SWITCH_DECLARE(uint32_t) switch_rtp_get_ssrc(switch_rtp_t *rtp_session)
 {
 	return rtp_session->ssrc;
+}
+
+SWITCH_DECLARE(uint32_t) switch_rtp_get_remote_ssrc(switch_rtp_t *rtp_session)
+{
+	return rtp_session->remote_ssrc;
 }
 
 SWITCH_DECLARE(uint32_t) switch_rtp_get_new_ssrc(switch_rtp_t *rtp_session)
