@@ -7076,6 +7076,9 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 		if (m->m_proto == sdp_proto_extended_srtp || m->m_proto == sdp_proto_extended_rtp) {
 			got_webrtc++;
 			switch_core_session_set_ice(session);
+			/* Set CF_AVPF early for SAVPF/AVPF offers.
+			 * set_ice() may not set it if DTLS is not yet parsed. */
+			switch_channel_set_flag(session->channel, CF_AVPF);
 		}
 
 		if (m->m_proto == sdp_proto_srtp || m->m_proto == sdp_proto_extended_srtp) {
