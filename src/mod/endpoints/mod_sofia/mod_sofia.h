@@ -327,6 +327,7 @@ typedef enum {
 	PFLAG_ENABLE_100REL_SYNC,
 	PFLAG_DISABLE_AUTH_CHALLENGE_RESPONSE,
 	PFLAG_HANDLE_UPDATE,
+	PFLAG_IGNORE_RTP_DURING_DTMF,
 	/* No new flags below this line */
 	PFLAG_MAX
 } PFLAGS;
@@ -830,6 +831,7 @@ struct sofia_profile {
 	int iping_freq;
 	sofia_paid_type_t paid_type;
 	uint32_t rtp_digit_delay;
+	uint32_t ignore_rtp_during_dtmf_timeout;
 	switch_queue_t *event_queue;
 	switch_thread_t *thread;
 	switch_core_media_vflag_t vflags;
