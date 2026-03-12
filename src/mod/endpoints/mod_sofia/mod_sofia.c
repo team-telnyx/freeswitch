@@ -539,7 +539,6 @@ switch_status_t sofia_on_hangup(switch_core_session_t *session)
 	switch_channel_t *channel = switch_core_session_get_channel(session);
 	switch_call_cause_t cause = switch_channel_get_cause(channel);
 	int sip_cause = -1;
-	int skip_ps_cause_override = 0;
 	const char *ps_cause = NULL, *use_my_cause;
 	const char *gateway_name = NULL;
 	sofia_gateway_t *gateway_ptr = NULL;
@@ -553,8 +552,8 @@ switch_status_t sofia_on_hangup(switch_core_session_t *session)
 		if (!zstr(fail_status) && !strcmp(fail_status, "603") &&
 		    !zstr(fail_phrase) && !strcasecmp(fail_phrase, "Network Blocked")) {
 			sip_cause = 603;
-			skip_ps_cause_override = 1;
 			switch_channel_set_variable(channel, "override_sip_reason_phrase", fail_phrase);
+			switch_channel_set_variable(channel, "sip_ignore_remote_cause", "true");
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 				"603 Network Blocked passthrough - skipping Q2S\n");
 		}
@@ -621,7 +620,7 @@ switch_status_t sofia_on_hangup(switch_core_session_t *session)
 		ps_cause = switch_channel_get_variable(channel, "last_bridge_" SWITCH_PROTO_SPECIFIC_HANGUP_CAUSE_VARIABLE);
 	}
 
-	if (!skip_ps_cause_override && !zstr(ps_cause) && (!strncasecmp(ps_cause, "sip:", 4) || !strncasecmp(ps_cause, "sips:", 5))) {
+	if (!zstr(ps_cause) && (!strncasecmp(ps_cause, "sip:", 4) || !strncasecmp(ps_cause, "sips:", 5))) {
 		int new_cause = atoi(sofia_glue_strip_proto(ps_cause));
 		if (new_cause) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s Overriding SIP cause %d with %d from the other leg\n",

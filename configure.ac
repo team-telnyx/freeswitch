@@ -2237,7 +2237,6 @@ AC_CONFIG_FILES([Makefile
 		src/mod/event_handlers/mod_rayo/Makefile
 		src/mod/event_handlers/mod_smpp/Makefile
 		src/mod/event_handlers/mod_snmp/Makefile
-		src/mod/event_handlers/mod_event_zmq/Makefile
 		src/mod/formats/mod_imagick/Makefile
 		src/mod/formats/mod_local_stream/Makefile
 		src/mod/formats/mod_native_file/Makefile
@@ -2307,6 +2306,48 @@ AC_CONFIG_FILES([Makefile
 		libs/xmlrpc-c/config.mk
 		libs/xmlrpc-c/srcdir.mk
 		libs/xmlrpc-c/stamp-h
+launcher/Makefile
+
+src/mod/applications/mod_telnyx/Makefile
+
+src/mod/applications/mod_denoiser/Makefile
+
+src/mod/asr_tts/mod_polly/Makefile
+
+src/mod/asr_tts/mod_gstt/Makefile
+
+src/mod/applications/mod_homer_rtcp/Makefile
+
+src/mod/xml_int/mod_xml_http/Makefile
+
+src/mod/applications/mod_call_recovery/Makefile
+
+src/mod/applications/mod_call_control/Makefile
+
+src/mod/applications/mod_backtrace/Makefile
+
+src/mod/applications/mod_q2s_mapping/Makefile
+
+src/mod/endpoints/mod_telnyx_rtc/Makefile
+
+src/mod/applications/mod_happy_voicemail/Makefile
+
+src/mod/codecs/mod_bcg729/Makefile
+
+src/mod/applications/mod_siprec_src/Makefile
+
+src/mod/asr_tts/mod_unimrcp/Makefile
+
+src/mod/applications/mod_deep_filter_net/Makefile
+
+src/mod/applications/mod_krisp_nc/Makefile
+
+src/mod/applications/mod_ai_coustics/Makefile
+
+src/mod/codecs/mod_evs/Makefile
+
+src/mod/applications/mod_audio_stream/Makefile
+
 		scripts/gentls_cert])
 
 AM_CONDITIONAL(ISLINUX, [test `uname -s` = Linux])
