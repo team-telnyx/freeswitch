@@ -544,7 +544,6 @@ switch_status_t sofia_on_hangup(switch_core_session_t *session)
 	sofia_gateway_t *gateway_ptr = NULL;
 
 	switch_telnyx_sofia_on_hangup(session);
-
 	sip_cause = switch_telnyx_hangup_cause_to_sip(session, cause);
 	if (sip_cause <= 0) {
 		sip_cause = hangup_cause_to_sip(cause);
