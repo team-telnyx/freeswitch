@@ -37,6 +37,8 @@
 #define RENACK_TIME 100000
 #define MAX_FRAME_PADDING 2
 #define MAX_MISSING_SEQ 20
+#define MAX_DROPOUT 3000
+#define MAX_CONSECUTIVE_MISS 100
 #define jb_debug(_jb, _level, _format, ...) if (_jb->debug_level >= _level) switch_log_printf(SWITCH_CHANNEL_SESSION_LOG_CLEAN(_jb->session), SWITCH_LOG_ALERT, "JB:%p:%s:%d/%d lv:%d ln:%.4d sz:%.3u/%.3u/%.3u/%.3u c:%.3u %.3u/%.3u/%.3u/%.3u %.2f%% ->" _format, (void *) _jb, (jb->type == SJB_TEXT ? "txt" : (jb->type == SJB_AUDIO ? "aud" : "vid")), _jb->allocated_nodes, _jb->visible_nodes, _level, __LINE__,  _jb->min_frame_len, _jb->max_frame_len, _jb->frame_len, _jb->complete_frames, _jb->period_count, _jb->consec_good_count, _jb->period_good_count, _jb->consec_miss_count, _jb->period_miss_count, _jb->period_miss_pct, __VA_ARGS__)
 
 //const char *TOKEN_1 = "ONE";
@@ -68,7 +70,9 @@ typedef struct switch_jb_stats_s {
 	uint32_t size_est;
 	uint32_t acceleration;
 	uint32_t expand;
+	uint32_t consecutive_miss;
 	uint32_t jitter_max_ms;
+	uint32_t buffering_skip;
 	int estimate_ms;
 	int buffer_size_ms;
 } switch_jb_stats_t;
@@ -796,8 +800,8 @@ static inline void increment_seq(switch_jb_t *jb)
 
 static inline void decrement_seq(switch_jb_t *jb)
 {
-	jb->last_target_seq = jb->target_seq;
 	jb->target_seq = htons((ntohs(jb->target_seq) - 1));
+	jb->last_target_seq = htons((ntohs(jb->target_seq) - 1));
 }
 
 static inline void set_read_seq(switch_jb_t *jb, uint16_t seq)
@@ -942,9 +946,12 @@ static inline int check_jb_size(switch_jb_t *jb)
 
 		seq_hs = ntohs(np->packet.header.seq);
 		if (target_seq_hs > seq_hs) {
-			hide_node(np, SWITCH_FALSE);
-			old++;
-			continue;
+			uint16_t udelta = target_seq_hs - seq_hs;
+			if (udelta > 1 && udelta < MAX_DROPOUT) {
+				hide_node(np, SWITCH_FALSE);
+				old++;
+				continue;
+			}
 		}
 
 		if (count == 0) {
@@ -1594,12 +1601,13 @@ SWITCH_DECLARE(switch_status_t) switch_jb_get_packet(switch_jb_t *jb, switch_rtp
 		switch_goto_status(SWITCH_STATUS_BREAK, end);
 	}
 
-	if (jb->complete_frames < jb->frame_len) {
+	if (!jb->elastic && (jb->complete_frames < jb->frame_len)) {
 
 		switch_jb_poll(jb);
 
 		if (!jb->flush) {
 			jb_debug(jb, 2, "BUFFERING %u/%u\n", jb->complete_frames , jb->frame_len);
+			jb->jitter.stats.buffering_skip++;
 			switch_goto_status(SWITCH_STATUS_MORE_DATA, end);
 		}
 	}
@@ -1724,6 +1732,16 @@ SWITCH_DECLARE(switch_status_t) switch_jb_get_packet(switch_jb_t *jb, switch_rtp
 						jb_debug(jb, 2, "%s", "Frame not found suggest PLC\n");
 					}
 
+					if (jb->elastic) {
+						jb->jitter.stats.consecutive_miss++;
+						if (jb->jitter.stats.consecutive_miss > MAX_CONSECUTIVE_MISS) {
+							jb->jitter.stats.reset_missing_frames++;
+							jb->jitter.stats.consecutive_miss = 0;
+							jb->elastic = SWITCH_FALSE;
+							switch_jb_reset(jb);
+							switch_goto_status(SWITCH_STATUS_RESTART, end);
+						}
+					}
 					plc = 1;
 					switch_goto_status(SWITCH_STATUS_NOTFOUND, end);
 				}
@@ -1754,6 +1772,8 @@ SWITCH_DECLARE(switch_status_t) switch_jb_get_packet(switch_jb_t *jb, switch_rtp
 
 		packet->header.seq = seq;
 		packet->header.ts = ts;
+	} else {
+		jb->jitter.stats.consecutive_miss = 0;
 	}
 
 	switch_mutex_unlock(jb->mutex);
