@@ -615,7 +615,7 @@ switch_status_t sofia_on_hangup(switch_core_session_t *session)
 
 	{
 		const char *fail_status = switch_channel_get_variable(channel, "sip_invite_failure_status");
-		const char *fail_phrase  = switch_channel_get_variable(channel, "sip_invite_failure_phrase");
+		const char *fail_phrase = switch_channel_get_variable(channel, "sip_invite_failure_phrase");
 
 		if (!zstr(fail_status) && !strcmp(fail_status, "603") &&
 		    !zstr(fail_phrase) && !strcasecmp(fail_phrase, "Network Blocked")) {
