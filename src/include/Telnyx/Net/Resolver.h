@@ -250,10 +250,17 @@ public:
         static const int DNS_WAIT_MS = DNS_TIMEOUT_MS * DNS_TRIES + 500;
         ares_status_t wait_status = ares_queue_wait_empty(channel, DNS_WAIT_MS);
 
+        // If wait timed out, queries are still in-flight in the event thread.
+        // Cancel them and wait for the cancellation callbacks to fire before
+        // destroying — ares_destroy with in-flight queries can crash (SIGBUS).
+        if (wait_status == ARES_ETIMEOUT) {
+            ares_cancel(channel);
+            ares_queue_wait_empty(channel, -1);
+        }
+
         // Cleanup channel (closes all c-ares sockets)
         ares_destroy(channel);
 
-        // If wait timed out, the callback may never have fired
         if (wait_status == ARES_ETIMEOUT) {
             ec = boost::asio::error::timed_out;
             return iterator();

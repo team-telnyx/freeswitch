@@ -1031,6 +1031,10 @@ static switch_status_t resolve_hostname_cares(fspr_sockaddr_t **sa, const char *
 		if (wait_status == ARES_ETIMEOUT) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
 							 "DNS resolution failed for %s: wait timeout\n", hostname);
+			/* Cancel in-flight queries and wait for callbacks to fire before
+			 * destroying — ares_destroy with in-flight queries can crash. */
+			ares_cancel(resolve_state.dns_channel);
+			ares_queue_wait_empty(resolve_state.dns_channel, -1);
 			ares_destroy(resolve_state.dns_channel);
 			return SWITCH_STATUS_TIMEOUT;
 		}
