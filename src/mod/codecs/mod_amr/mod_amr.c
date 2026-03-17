@@ -441,7 +441,7 @@ static switch_status_t switch_amr_init(switch_codec_t *codec, switch_codec_flag_
 
 		context->codec_settings = amr_codec_settings;
 
-		switch_mutex_init(&context->mutex, SWITCH_MUTEX_NESTED, codec->memory_pool);
+		switch_mutex_init(&context->mutex, SWITCH_MUTEX_UNNESTED, codec->memory_pool);
 
 		codec->private_info = context;
 
@@ -606,44 +606,52 @@ static switch_status_t switch_amr_control(switch_codec_t *codec,
 			/* AMR-NB valid modes are 0-7 (mode 8 is SID, not for regular encoding) */
 			const int max_mode = 7;
 			const int mode_step = 2;
-			int new_mode;
+			int cur_mode, new_mode;
 
 			switch_mutex_lock(context->mutex);
+			cur_mode = context->enc_mode;
+			switch_mutex_unlock(context->mutex);
 
 			if (!strcasecmp(cmd, "increase")) {
-				new_mode = context->enc_mode + mode_step;
+				new_mode = cur_mode + mode_step;
 				if (new_mode <= max_mode) {
+					switch_mutex_lock(context->mutex);
 					context->enc_mode = (switch_byte_t) new_mode;
+					switch_mutex_unlock(context->mutex);
 					if (globals.debug || context->debug) {
 						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
-								"AMR encoder: Adjusting mode to %d (increase)\n", context->enc_mode);
+								"AMR encoder: Adjusting mode to %d (increase)\n", new_mode);
 					}
 				}
 			} else if (!strcasecmp(cmd, "decrease")) {
-				new_mode = context->enc_mode - mode_step;
+				new_mode = cur_mode - mode_step;
 				if (new_mode >= 0) {
+					switch_mutex_lock(context->mutex);
 					context->enc_mode = (switch_byte_t) new_mode;
+					switch_mutex_unlock(context->mutex);
 					if (globals.debug || context->debug) {
 						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
-								"AMR encoder: Adjusting mode to %d (decrease)\n", context->enc_mode);
+								"AMR encoder: Adjusting mode to %d (decrease)\n", new_mode);
 					}
 				}
 			} else if (!strcasecmp(cmd, "default")) {
+					switch_mutex_lock(context->mutex);
 					context->enc_mode = globals.default_bitrate;
+					switch_mutex_unlock(context->mutex);
 					if (globals.debug || context->debug) {
 						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
-								"AMR encoder: Adjusting mode to %d (default)\n", context->enc_mode);
+								"AMR encoder: Adjusting mode to %d (default)\n", globals.default_bitrate);
 					}
 			} else {
 				/*minimum bitrate (AMR mode)*/
+				switch_mutex_lock(context->mutex);
 				context->enc_mode = 0;
+				switch_mutex_unlock(context->mutex);
 				if (globals.debug || context->debug) {
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
-							"AMR encoder: Adjusting mode to %d (minimum)\n", context->enc_mode);
+							"AMR encoder: Adjusting mode to %d (minimum)\n", 0);
 				}
 			}
-
-			switch_mutex_unlock(context->mutex);
 		}
 		break;
 	default:
