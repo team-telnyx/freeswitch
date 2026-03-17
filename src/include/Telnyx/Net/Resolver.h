@@ -255,7 +255,10 @@ public:
         // destroying — ares_destroy with in-flight queries can crash (SIGBUS).
         if (wait_status == ARES_ETIMEOUT) {
             ares_cancel(channel);
-            ares_queue_wait_empty(channel, -1);
+            while (ares_queue_wait_empty(channel, 10000) != ARES_SUCCESS) {
+                fprintf(stderr, "c-ares channel %p takes time to cancel\n",
+                        static_cast<void*>(channel));
+            }
         }
 
         // Cleanup channel (closes all c-ares sockets)
