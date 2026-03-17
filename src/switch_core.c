@@ -2527,7 +2527,25 @@ SWITCH_DECLARE(switch_status_t) switch_core_init_and_modload(switch_core_flag_t 
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CONSOLE, "Bringing up environment.\n");
 #ifdef HAVE_CARES
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CONSOLE, "DNS resolution using c-ares (async)\n");
+	{
+		struct ares_options ares_opts;
+		int ares_optmask = ARES_OPT_EVENT_THREAD | ARES_OPT_TIMEOUT | ARES_OPT_TRIES;
+		int ares_init_status;
+
+		memset(&ares_opts, 0, sizeof(ares_opts));
+		ares_opts.evsys = ARES_EVSYS_DEFAULT;
+		ares_opts.timeout = runtime.ares_dns_timeout;
+		ares_opts.tries = 2;
+
+		ares_init_status = ares_init_options(&runtime.ares_dns_channel, &ares_opts, ares_optmask);
+		if (ares_init_status == ARES_SUCCESS) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CONSOLE, "DNS resolution using c-ares (async)\n");
+		} else {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+							 "c-ares channel initialization failed: %s\n", ares_strerror(ares_init_status));
+			runtime.ares_dns_channel = NULL;
+		}
+	}
 #endif
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CONSOLE, "Loading Modules.\n");
 	if (switch_loadable_module_init(SWITCH_TRUE) != SWITCH_STATUS_SUCCESS) {
@@ -3137,6 +3155,18 @@ SWITCH_DECLARE(switch_status_t) switch_core_destroy(void)
 
 	switch_scheduler_task_thread_stop();
 
+#ifdef HAVE_CARES
+	if (runtime.ares_dns_channel) {
+		ares_cancel(runtime.ares_dns_channel);
+		while (ares_queue_wait_empty(runtime.ares_dns_channel, 10000) != ARES_SUCCESS) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+							 "c-ares channel %p takes time to cancel\n",
+							 (void *)runtime.ares_dns_channel);
+		}
+		ares_destroy(runtime.ares_dns_channel);
+		runtime.ares_dns_channel = NULL;
+	}
+#endif
 	switch_rtp_shutdown();
 	switch_msrp_destroy();
 
