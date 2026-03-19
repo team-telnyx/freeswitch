@@ -1830,6 +1830,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_init(switch_core_flag_t flags, switc
 	runtime.db_handle_timeout = 5000000;
 	runtime.event_heartbeat_interval = 20;
 	runtime.ares_dns_timeout = 1000;
+#ifdef HAVE_CARES
+	runtime.ares_shared_channel = SWITCH_TRUE;
+#endif
 
 	runtime.runlevel++;
 	runtime.dummy_cng_frame.data = runtime.dummy_data;
@@ -2180,6 +2183,10 @@ static void switch_load_core_config(const char *file)
 						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "ares-dns-timeout must be between 100 and 3000 ms\n");
 					}
 
+				} else if (!strcasecmp(var, "ares-shared-channel")) {
+#ifdef HAVE_CARES
+					runtime.ares_shared_channel = switch_true(val);
+#endif
 				} else if (!strcasecmp(var, "multiple-registrations")) {
 					runtime.multiple_registrations = switch_true(val);
 				} else if (!strcasecmp(var, "auto-create-schemas")) {
@@ -2527,7 +2534,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_init_and_modload(switch_core_flag_t 
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CONSOLE, "Bringing up environment.\n");
 #ifdef HAVE_CARES
-	{
+	if (runtime.ares_shared_channel) {
 		struct ares_options ares_opts;
 		int ares_optmask = ARES_OPT_EVENT_THREAD | ARES_OPT_TIMEOUT | ARES_OPT_TRIES;
 		int ares_init_status;
@@ -2539,12 +2546,16 @@ SWITCH_DECLARE(switch_status_t) switch_core_init_and_modload(switch_core_flag_t 
 
 		ares_init_status = ares_init_options(&runtime.ares_dns_channel, &ares_opts, ares_optmask);
 		if (ares_init_status == ARES_SUCCESS) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CONSOLE, "DNS resolution using c-ares (async)\n");
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CONSOLE,
+							 "DNS resolution using c-ares (async, shared channel)\n");
 		} else {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
 							 "c-ares channel initialization failed: %s\n", ares_strerror(ares_init_status));
 			runtime.ares_dns_channel = NULL;
 		}
+	} else {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CONSOLE,
+						 "DNS resolution using c-ares (async, per-query channel)\n");
 	}
 #endif
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CONSOLE, "Loading Modules.\n");
@@ -3101,6 +3112,15 @@ SWITCH_DECLARE(int32_t) switch_core_session_ctl(switch_session_ctl_t cmd, void *
 SWITCH_DECLARE(switch_core_flag_t) switch_core_flags(void)
 {
 	return runtime.flags;
+}
+
+SWITCH_DECLARE(switch_bool_t) switch_core_ares_shared_channel_enabled(void)
+{
+#ifdef HAVE_CARES
+	return runtime.ares_shared_channel;
+#else
+	return SWITCH_FALSE;
+#endif
 }
 
 SWITCH_DECLARE(switch_bool_t) switch_core_running(void)

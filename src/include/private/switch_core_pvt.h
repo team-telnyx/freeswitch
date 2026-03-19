@@ -290,6 +290,7 @@ struct switch_runtime {
 	uint32_t ares_dns_timeout;
 #ifdef HAVE_CARES
 	ares_channel ares_dns_channel;
+	switch_bool_t ares_shared_channel;
 #endif
 	int cpu_count;
 	uint32_t time_sync;

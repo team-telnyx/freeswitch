@@ -2435,6 +2435,12 @@ SWITCH_DECLARE(switch_bool_t) switch_core_ready_outbound(void);
 SWITCH_DECLARE(switch_core_flag_t) switch_core_flags(void);
 
 /*!
+  \brief Check if the shared c-ares DNS channel is enabled
+  \return SWITCH_TRUE if shared channel mode is active
+*/
+SWITCH_DECLARE(switch_bool_t) switch_core_ares_shared_channel_enabled(void);
+
+/*!
   \brief Execute a management operation.
   \param relative_oid the relative oid of the operation.
   \param action the action to perform.

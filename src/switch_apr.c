@@ -858,7 +858,7 @@ struct dns_resolve_state {
 
 /**
  * Callback invoked by c-ares when DNS resolution completes
- * Stores the result and status, then signals the waiting caller
+ * Stores the result and status, then signals the waiting caller if using shared channel
  */
 static void dns_completion_callback(void *user_data, int status, int timeouts, struct ares_addrinfo *result)
 {
@@ -866,14 +866,23 @@ static void dns_completion_callback(void *user_data, int status, int timeouts, s
 
 	(void)timeouts; /* Unused parameter */
 
-	switch_mutex_lock(resolve_state->mutex);
-	if (status == ARES_SUCCESS && result != NULL) {
-		resolve_state->resolved_info = result;
+	if (resolve_state->mutex) {
+		/* Shared channel mode: signal condvar */
+		switch_mutex_lock(resolve_state->mutex);
+		if (status == ARES_SUCCESS && result != NULL) {
+			resolve_state->resolved_info = result;
+		}
+		resolve_state->resolution_status = status;
+		resolve_state->done = SWITCH_TRUE;
+		switch_thread_cond_signal(resolve_state->cond);
+		switch_mutex_unlock(resolve_state->mutex);
+	} else {
+		/* Per-query channel mode: just store results */
+		if (status == ARES_SUCCESS && result != NULL) {
+			resolve_state->resolved_info = result;
+		}
+		resolve_state->resolution_status = status;
 	}
-	resolve_state->resolution_status = status;
-	resolve_state->done = SWITCH_TRUE;
-	switch_thread_cond_signal(resolve_state->cond);
-	switch_mutex_unlock(resolve_state->mutex);
 }
 
 /**
@@ -972,46 +981,147 @@ static switch_status_t convert_cares_to_sockaddr(const struct ares_addrinfo *ai_
 }
 
 /**
+ * Map c-ares status to FreeSWITCH status codes and log failures
+ */
+static switch_status_t map_cares_status(int ares_status, const char *hostname,
+										struct ares_addrinfo *resolved_info,
+										fspr_sockaddr_t **sa, fspr_port_t port,
+										switch_memory_pool_t *pool)
+{
+	switch (ares_status) {
+		case ARES_SUCCESS:
+			return convert_cares_to_sockaddr(resolved_info, sa, port, pool);
+
+		case ARES_ENOTFOUND:
+		case ARES_ENODATA:
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+							 "DNS resolution failed for %s: not found\n", hostname);
+			return SWITCH_STATUS_NOTFOUND;
+
+		case ARES_ENOMEM:
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+							 "DNS resolution failed for %s: out of memory\n", hostname);
+			return SWITCH_STATUS_MEMERR;
+
+		case ARES_ETIMEOUT:
+		case ARES_ECANCELLED:
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+							 "DNS resolution failed for %s: timeout\n", hostname);
+			return SWITCH_STATUS_TIMEOUT;
+
+		default:
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+							 "DNS resolution failed for %s: %s\n", hostname,
+							 ares_strerror(ares_status));
+			return SWITCH_STATUS_GENERR;
+	}
+}
+
+/**
+ * Prepare common resolve state: hints, hostname normalization
+ */
+static void prepare_resolve_hints(struct ares_addrinfo_hints *hints, const char **hostname,
+								  fspr_int32_t family, fspr_int32_t flags)
+{
+	memset(hints, 0, sizeof(*hints));
+
+	if ((flags & APR_IPV4_ADDR_OK) && !(flags & APR_IPV6_ADDR_OK)) {
+		hints->ai_family = AF_INET;
+	} else if ((flags & APR_IPV6_ADDR_OK) && !(flags & APR_IPV4_ADDR_OK)) {
+		hints->ai_family = AF_INET6;
+	} else {
+		hints->ai_family = family;
+	}
+	hints->ai_socktype = SOCK_DGRAM;  /* VoIP typically uses UDP */
+	hints->ai_protocol = IPPROTO_UDP;
+
+	if (*hostname == NULL) {
+		*hostname = (hints->ai_family == AF_INET6) ? "::" : "0.0.0.0";
+	}
+}
+
+/**
+ * Resolve hostname using a per-query c-ares channel (legacy mode)
+ */
+static switch_status_t resolve_hostname_cares_perquery(fspr_sockaddr_t **sa, const char *hostname, fspr_int32_t family,
+													   fspr_port_t port, fspr_int32_t flags, switch_memory_pool_t *pool)
+{
+	struct dns_resolve_state resolve_state;
+	struct ares_addrinfo_hints hints;
+	struct ares_options ares_opts;
+	ares_channel channel;
+	int init_status;
+	switch_status_t result_status;
+
+	memset(&resolve_state, 0, sizeof(resolve_state));
+	resolve_state.resolution_status = ARES_ETIMEOUT;
+
+	memset(&ares_opts, 0, sizeof(ares_opts));
+	ares_opts.evsys = ARES_EVSYS_DEFAULT;
+	ares_opts.timeout = runtime.ares_dns_timeout;
+	ares_opts.tries = 2;
+
+	init_status = ares_init_options(&channel, &ares_opts,
+									ARES_OPT_EVENT_THREAD | ARES_OPT_TIMEOUT | ARES_OPT_TRIES);
+	if (init_status != ARES_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+						 "c-ares initialization failed: %s\n", ares_strerror(init_status));
+		return SWITCH_STATUS_GENERR;
+	}
+
+	prepare_resolve_hints(&hints, &hostname, family, flags);
+
+	ares_getaddrinfo(channel, hostname, NULL, &hints,
+					dns_completion_callback, &resolve_state);
+
+	{
+		ares_status_t wait_status = ares_queue_wait_empty(channel,
+			runtime.ares_dns_timeout * 2 + 500);
+
+		if (wait_status == ARES_ETIMEOUT) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+							 "DNS resolution failed for %s: wait timeout\n", hostname);
+			ares_cancel(channel);
+			while (ares_queue_wait_empty(channel, 10000) != ARES_SUCCESS) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+								 "c-ares channel %p takes time to cancel\n",
+								 (void *)channel);
+			}
+			ares_destroy(channel);
+			return SWITCH_STATUS_TIMEOUT;
+		}
+	}
+
+	result_status = map_cares_status(resolve_state.resolution_status, hostname,
+									resolve_state.resolved_info, sa, port, pool);
+
+	if (resolve_state.resolved_info) {
+		ares_freeaddrinfo(resolve_state.resolved_info);
+	}
+
+	ares_destroy(channel);
+	return result_status;
+}
+
+/**
  * Resolve hostname using the shared c-ares channel
  * Blocks until resolution completes, then converts results to FreeSWITCH format
  */
-static switch_status_t resolve_hostname_cares(fspr_sockaddr_t **sa, const char *hostname, fspr_int32_t family,
-											   fspr_port_t port, fspr_int32_t flags, switch_memory_pool_t *pool)
+static switch_status_t resolve_hostname_cares_shared(fspr_sockaddr_t **sa, const char *hostname, fspr_int32_t family,
+													 fspr_port_t port, fspr_int32_t flags, switch_memory_pool_t *pool)
 {
 	struct dns_resolve_state resolve_state;
 	struct ares_addrinfo_hints hints;
 	switch_status_t result_status;
 
-	if (!runtime.ares_dns_channel) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
-						 "c-ares channel not initialized, falling back to APR\n");
-		return fspr_sockaddr_info_get(sa, hostname, family, port, flags, pool);
-	}
-
 	memset(&resolve_state, 0, sizeof(resolve_state));
-	memset(&hints, 0, sizeof(hints));
-
 	resolve_state.resolution_status = ARES_ETIMEOUT;
 
 	/* Create per-query synchronization primitives */
 	switch_mutex_init(&resolve_state.mutex, SWITCH_MUTEX_NESTED, pool);
 	switch_thread_cond_create(&resolve_state.cond, pool);
 
-	/* Set ai_family based on flags, falling back to family parameter */
-	if ((flags & APR_IPV4_ADDR_OK) && !(flags & APR_IPV6_ADDR_OK)) {
-		hints.ai_family = AF_INET;
-	} else if ((flags & APR_IPV6_ADDR_OK) && !(flags & APR_IPV4_ADDR_OK)) {
-		hints.ai_family = AF_INET6;
-	} else {
-		hints.ai_family = family;
-	}
-	hints.ai_socktype = SOCK_DGRAM;  /* VoIP typically uses UDP */
-	hints.ai_protocol = IPPROTO_UDP;
-
-	/* NULL hostname means wildcard bind address */
-	if (hostname == NULL) {
-		hostname = (hints.ai_family == AF_INET6) ? "::" : "0.0.0.0";
-	}
+	prepare_resolve_hints(&hints, &hostname, family, flags);
 
 	/* Start asynchronous DNS query on the shared channel */
 	ares_getaddrinfo(runtime.ares_dns_channel, hostname, NULL, &hints,
@@ -1027,47 +1137,28 @@ static switch_status_t resolve_hostname_cares(fspr_sockaddr_t **sa, const char *
 	}
 	switch_mutex_unlock(resolve_state.mutex);
 
-	/* Map c-ares status to FreeSWITCH status codes */
-	switch (resolve_state.resolution_status) {
-		case ARES_SUCCESS:
-			/* Convert results to FreeSWITCH sockaddr format */
-			result_status = convert_cares_to_sockaddr(resolve_state.resolved_info, sa, port, pool);
+	result_status = map_cares_status(resolve_state.resolution_status, hostname,
+									resolve_state.resolved_info, sa, port, pool);
 
-			/* Free c-ares allocated result */
-			if (resolve_state.resolved_info) {
-				ares_freeaddrinfo(resolve_state.resolved_info);
-			}
-			break;
-
-		case ARES_ENOTFOUND:
-		case ARES_ENODATA:
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-							 "DNS resolution failed for %s: not found\n", hostname);
-			result_status = SWITCH_STATUS_NOTFOUND;
-			break;
-
-		case ARES_ENOMEM:
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
-							 "DNS resolution failed for %s: out of memory\n", hostname);
-			result_status = SWITCH_STATUS_MEMERR;
-			break;
-
-		case ARES_ETIMEOUT:
-		case ARES_ECANCELLED:
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-							 "DNS resolution failed for %s: timeout\n", hostname);
-			result_status = SWITCH_STATUS_TIMEOUT;
-			break;
-
-		default:
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
-							 "DNS resolution failed for %s: %s\n", hostname,
-							 ares_strerror(resolve_state.resolution_status));
-			result_status = SWITCH_STATUS_GENERR;
-			break;
+	if (resolve_state.resolved_info) {
+		ares_freeaddrinfo(resolve_state.resolved_info);
 	}
 
 	return result_status;
+}
+
+/**
+ * Resolve hostname using c-ares.
+ * Uses shared channel if configured (ares-shared-channel=true, the default),
+ * otherwise falls back to per-query channel.
+ */
+static switch_status_t resolve_hostname_cares(fspr_sockaddr_t **sa, const char *hostname, fspr_int32_t family,
+											   fspr_port_t port, fspr_int32_t flags, switch_memory_pool_t *pool)
+{
+	if (runtime.ares_dns_channel) {
+		return resolve_hostname_cares_shared(sa, hostname, family, port, flags, pool);
+	}
+	return resolve_hostname_cares_perquery(sa, hostname, family, port, flags, pool);
 }
 
 #endif /* HAVE_CARES */
