@@ -5298,17 +5298,17 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 		//return SWITCH_STATUS_SUCCESS;
 	//}
 
-	if (trickle_on) {
-		if (engine->ice_in.is_chosen[0] && engine->ice_in.is_chosen[1]) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG, "check_ice(): Trickle ICE candidates already chosen, skip ICE processing\n");
-			return SWITCH_STATUS_SUCCESS;
-		}
-	} 
-
-	engine->ice_in.chosen[0] = 0;
-	engine->ice_in.chosen[1] = 0;
-	engine->ice_in.is_chosen[0] = 0;
-	engine->ice_in.is_chosen[1] = 0;
+	if (trickle_on && engine->ice_in.is_chosen[0] && engine->ice_in.is_chosen[1] &&
+		!switch_channel_test_flag(smh->session->channel, CF_REINVITE)) {
+		/* Accumulate candidates; skip shortcut on reinvite (stale chosen pair). */
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
+			"check_ice(): Trickle ICE candidates already chosen, accumulating new candidates\n");
+	} else {
+		engine->ice_in.chosen[0] = 0;
+		engine->ice_in.chosen[1] = 0;
+		engine->ice_in.is_chosen[0] = 0;
+		engine->ice_in.is_chosen[1] = 0;
+	}
 	if (!trickle_on) {
 		engine->ice_in.cand_idx[0] = 0;
 		engine->ice_in.cand_idx[1] = 0;
@@ -5578,6 +5578,11 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 	}
 
 	if (!ice_seen && !cand_seen) {
+		return SWITCH_STATUS_SUCCESS;
+	}
+
+	/* Candidates already chosen; skip re-selection. USE-CANDIDATE handles switching. */
+	if (trickle_on && engine->ice_in.is_chosen[0] && engine->ice_in.is_chosen[1]) {
 		return SWITCH_STATUS_SUCCESS;
 	}
 

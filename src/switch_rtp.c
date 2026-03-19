@@ -1259,6 +1259,32 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG6, "Got USE-CANDIDATE on %s cand %s:%d\n", rtp_type(rtp_session), ice->ice_params->cands[i][ice->proto].con_addr, ice->ice_params->cands[i][ice->proto].con_port);
 					}
 				}
+
+				/* RFC 8445: controlled agent must accept the nominated pair. */
+				if (ice->addr && !switch_cmp_addr(from_addr, ice->addr, SWITCH_TRUE)) {
+					/* Once DTLS is established, don't switch addresses from competing nominations. */
+					if (rtp_session->dtls && rtp_session->dtls->state >= DS_READY && rtp_session->ice.ready) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
+							"USE-CANDIDATE: DTLS already READY, ignoring %s nomination from %s:%d\n",
+							rtp_type(rtp_session), from_host, from_port);
+					} else {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+							"USE-CANDIDATE: switching %s ice dest from current to nominated %s:%d\n",
+							rtp_type(rtp_session), from_host, from_port);
+						switch_rtp_change_ice_dest(rtp_session, ice, from_host, from_port);
+
+						/* Update DTLS remote addr so Client Hello goes to the right place. */
+						if (rtp_session->dtls && rtp_session->dtls->remote_addr) {
+							if (switch_sockaddr_info_get(&rtp_session->dtls->remote_addr, from_host, SWITCH_UNSPEC, from_port, 0, rtp_session->pool) == SWITCH_STATUS_SUCCESS) {
+								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+									"USE-CANDIDATE: updated DTLS remote addr to %s:%d\n", from_host, from_port);
+							} else {
+								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
+									"USE-CANDIDATE: failed to resolve DTLS remote addr %s:%d\n", from_host, from_port);
+							}
+						}
+					}
+				}
 			}
 			break;
 		case SWITCH_STUN_ATTR_ERROR_CODE:
@@ -4102,10 +4128,60 @@ static int do_dtls(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 		char tmp_buf2[80] = "";
 		const char *host_from = switch_get_addr(tmp_buf1, sizeof(tmp_buf1), rtp_session->from_addr);
 		const char *host_ice_cur_addr = switch_get_addr(tmp_buf2, sizeof(tmp_buf2), rtp_session->ice.addr);
+		switch_port_t from_port = switch_sockaddr_get_port(rtp_session->from_addr);
+		int nominated = 0;
 
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "Got DTLS packet from [%s] whilst current ICE negotiated address is [%s]. Ignored.\n", host_from, host_ice_cur_addr);
+		/* Accept DTLS from a USE-CANDIDATE nominated address (e.g. relay). */
+		if (zstr(host_from)) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+				"Got DTLS packet from unresolvable address. Ignored.\n");
+			return 0;
+		}
 
-		return 0;
+		if (rtp_session->ice.ice_params) {
+			int ci;
+			for (ci = 0; ci < rtp_session->ice.ice_params->cand_idx[rtp_session->ice.proto]; ci++) {
+				icand_t *c = &rtp_session->ice.ice_params->cands[ci][rtp_session->ice.proto];
+				if (c->use_candidate && c->con_addr &&
+				    !strcmp(c->con_addr, host_from) &&
+				    c->con_port == from_port) {
+					nominated = 1;
+					break;
+				}
+			}
+		}
+
+		if (!nominated) {
+			if (dtls->state < DS_READY) {
+				/* Pre-READY: accept DTLS from any source (fingerprint auth suffices). */
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
+					"DTLS HANDSHAKE: accepting packet from [%s] (ICE negotiated [%s], DTLS state=%d)\n",
+					host_from, host_ice_cur_addr, dtls->state);
+			} else {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
+					"Got DTLS packet from [%s] whilst current ICE negotiated address is [%s]. Ignored.\n",
+					host_from, host_ice_cur_addr);
+				return 0;
+			}
+		}
+
+		/* Once DTLS is established, don't flip-flop the address from competing nominations. */
+		if (dtls->state >= DS_READY && rtp_session->ice.ready) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
+				"DTLS already READY, ignoring late nomination from [%s:%d] (current [%s]).\n",
+				host_from, from_port, host_ice_cur_addr);
+		} else {
+			/* Nominated addr - accept and update ice dest (pre-READY only). */
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
+				"DTLS from nominated USE-CANDIDATE addr [%s:%d], switching from [%s]. Accepted.\n",
+				host_from, from_port, host_ice_cur_addr);
+			switch_rtp_change_ice_dest(rtp_session, &rtp_session->ice, host_from, from_port);
+			if (dtls->remote_addr) {
+				if (switch_sockaddr_info_get(&dtls->remote_addr, host_from, SWITCH_UNSPEC, from_port, 0, rtp_session->pool) != SWITCH_STATUS_SUCCESS) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "DTLS: failed to resolve nominated addr %s:%d\n", host_from, from_port);
+				}
+			}
+		}
 	}
 
 	if (dtls->bytes > 0 && dtls->data) {
