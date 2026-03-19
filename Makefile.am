@@ -1,5 +1,5 @@
 EXTRA_DIST =
-SUBDIRS = . src build tests/unit
+SUBDIRS = . src build tests/unit tests/unit_cpp
 AUTOMAKE_OPTIONS = foreign subdir-objects
 NAME = freeswitch
 
@@ -837,6 +837,7 @@ modwipe:
 
 print_tests: libfreeswitch.la $(switch_builddir)/modules.conf src/mod/modules.inc
 	@cd tests/unit && $(MAKE) $(AM_MAKEFLAGS) print_tests
+	@cd tests/unit_cpp && $(MAKE) $(AM_MAKEFLAGS) print_tests
 	@cd src/mod && $(MAKE) $(AM_MAKEFLAGS) print_tests
 
 dox:
