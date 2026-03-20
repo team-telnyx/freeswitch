@@ -2879,10 +2879,11 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_eavesdrop_session(switch_core_session
 		}
 
 
-		if (switch_core_media_bug_add(tsession, "eavesdrop", uuid,
-									  eavesdrop_callback, ep, 0,
-									  read_flags | write_flags | SMBF_READ_PING | SMBF_THREAD_LOCK | SMBF_NO_PAUSE | stereo_flag | pos_flag,
-									  &bug) != SWITCH_STATUS_SUCCESS) {
+		if (switch_core_media_bug_add_ex(tsession, "eavesdrop", uuid,
+										 eavesdrop_callback, ep, 0,
+										 read_flags | write_flags | SMBF_READ_PING | SMBF_THREAD_LOCK | SMBF_NO_PAUSE | stereo_flag | pos_flag,
+										 SMBF_EXT_NO_READ_DEMUX,
+										 &bug) != SWITCH_STATUS_SUCCESS) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Cannot attach bug\n");
 			goto end;
 		}
