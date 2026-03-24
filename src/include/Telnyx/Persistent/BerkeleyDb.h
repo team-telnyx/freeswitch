@@ -8,6 +8,8 @@
 
 #include <db_cxx.h>
 #include <cstdio>
+#include <sys/stat.h>
+#include <cerrno>
 #include <string>
 #include <sstream>
 
@@ -211,6 +213,51 @@ void clear()
 
   for (std::vector<std::string>::const_iterator iter = keys.begin(); iter != keys.end(); iter++)
     erase(*iter);
+}
+
+bool compact(int fillPercent = 80, int maxPages = 0)
+{
+  if (!_pDb)
+    return false;
+
+  DB_COMPACT cmpt;
+  memset(&cmpt, 0, sizeof(cmpt));
+  cmpt.compact_fillpercent = fillPercent;
+  cmpt.compact_pages = maxPages;
+
+  int ret = _pDb->compact(0, 0, 0, &cmpt, DB_FREE_SPACE, 0);
+  if (ret != 0)
+    return false;
+
+  _pDb->sync(0);
+  return true;
+}
+
+std::size_t recordCount() const
+{
+  if (!_pDb || !_pCursor)
+    return 0;
+
+  std::size_t count = 0;
+  Dbt key, data;
+  int ret = _pCursor->get(&key, &data, DB_FIRST);
+  while (ret == 0) {
+    ++count;
+    ret = _pCursor->get(&key, &data, DB_NEXT);
+  }
+  return count;
+}
+
+std::size_t getFileSize() const
+{
+  if (_path.empty())
+    return 0;
+
+  struct stat st;
+  if (stat(_path.c_str(), &st) != 0)
+    return 0;
+
+  return static_cast<std::size_t>(st.st_size);
 }
 
 protected:
