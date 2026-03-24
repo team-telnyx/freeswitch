@@ -1996,6 +1996,12 @@ typedef enum {
 } switch_media_bug_flag_enum_t;
 typedef uint32_t switch_media_bug_flag_t;
 
+typedef enum {
+	SMBF_EXT_NONE = 0,
+	SMBF_EXT_NO_READ_DEMUX = (1 << 0)
+} switch_media_bug_ext_flag_enum_t;
+typedef uint32_t switch_media_bug_ext_flag_t;
+
 /*!
   \enum switch_file_flag_t
   \brief File flags

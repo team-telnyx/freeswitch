@@ -294,6 +294,17 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_add(_In_ switch_core_sessi
 														  _In_opt_ void *user_data,
 														  _In_ time_t stop_time, _In_ switch_media_bug_flag_t flags, _Out_ switch_media_bug_t **new_bug);
 
+SWITCH_DECLARE(switch_status_t) switch_core_media_bug_add_ex(_In_ switch_core_session_t *session,
+															 _In_ const char *function,
+															 _In_ const char *target,
+															 _In_ switch_media_bug_callback_t callback,
+															 _In_opt_ void *user_data,
+															 _In_ time_t stop_time, _In_ switch_media_bug_flag_t flags,
+															 _In_ switch_media_bug_ext_flag_t ext_flags,
+															 _Out_ switch_media_bug_t **new_bug);
+
+SWITCH_DECLARE(switch_bool_t) switch_core_media_bug_test_ext_flag(switch_media_bug_t *bug, uint32_t ext_flag);
+
 /*!
  * \brief Get the weight of a media bug
  * \param bug The media bug to get the weight from

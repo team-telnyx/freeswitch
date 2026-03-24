@@ -833,6 +833,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_push_spy_frame(switch_medi
 }
 
 #define MAX_BUG_BUFFER 1024 * 512
+
 SWITCH_DECLARE(switch_status_t) switch_core_media_bug_add(switch_core_session_t *session,
 														  const char *function,
 														  const char *target,
@@ -840,6 +841,24 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_add(switch_core_session_t 
 														  void *user_data, time_t stop_time,
 														  switch_media_bug_flag_t flags,
 														  switch_media_bug_t **new_bug)
+{
+	return switch_core_media_bug_add_ex(session, function, target, callback,
+										user_data, stop_time, flags, SMBF_EXT_NONE, new_bug);
+}
+
+SWITCH_DECLARE(switch_bool_t) switch_core_media_bug_test_ext_flag(switch_media_bug_t *bug, uint32_t ext_flag)
+{
+	return (bug->ext_flags & ext_flag) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_media_bug_add_ex(switch_core_session_t *session,
+															 const char *function,
+															 const char *target,
+															 switch_media_bug_callback_t callback,
+															 void *user_data, time_t stop_time,
+															 switch_media_bug_flag_t flags,
+															 switch_media_bug_ext_flag_t ext_flags,
+															 switch_media_bug_t **new_bug)
 {
 	switch_media_bug_t *bug, *bp;
 	switch_size_t bytes;
@@ -916,6 +935,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_add(switch_core_session_t 
 	bug->user_data = user_data;
 	bug->session = session;
 	bug->flags = flags;
+	bug->ext_flags = ext_flags;
 	bug->weight = 0;
 	bug->function = "N/A";
 	bug->target = "N/A";

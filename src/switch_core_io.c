@@ -838,8 +838,8 @@ cnt_with_cng:
 
 						switch_buffer_write(bp->raw_read_buffer, data, datalen);
 						bp->read_demux_frame = NULL;
-					} else if (read_demux_data) {
-						/* Pre-computed unmerged frame — all demux audio removed */
+					} else if (read_demux_data && !switch_core_media_bug_test_ext_flag(bp, SMBF_EXT_NO_READ_DEMUX)) {
+						/* Pre-computed unmerged frame for bugs without SMBF_EXT_NO_READ_DEMUX */
 						switch_buffer_write(bp->raw_read_buffer, read_demux_data, read_frame->datalen);
 					} else {
 						switch_buffer_write(bp->raw_read_buffer, read_frame->data, read_frame->datalen);
