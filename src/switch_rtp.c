@@ -763,7 +763,7 @@ static void switch_rtp_change_ice_dest(switch_rtp_t *rtp_session, switch_rtp_ice
 	int i;
 	uint8_t ice_cand_found_idx = 0;
 
-	for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; i++) {
+	for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; ++i) {
 		if (!strcmp(host, ice->ice_params->cands[i][ice->proto].con_addr) && port == ice->ice_params->cands[i][ice->proto].con_port) {
 			ice_cand_found_idx = i;
 		}
@@ -1253,7 +1253,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 		case SWITCH_STUN_ATTR_USE_CAND:
 			{
 				ice->rready = 1;
-				for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; i++) {
+				for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; ++i) {
 					if (!strcmp(ice->ice_params->cands[i][ice->proto].con_addr, from_host) && ice->ice_params->cands[i][ice->proto].con_port == from_port) {
 						ice->ice_params->cands[i][ice->proto].use_candidate = 1;
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG6, "Got USE-CANDIDATE on %s cand %s:%d\n", rtp_type(rtp_session), ice->ice_params->cands[i][ice->proto].con_addr, ice->ice_params->cands[i][ice->proto].con_port);
@@ -4140,7 +4140,7 @@ static int do_dtls(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 
 		if (rtp_session->ice.ice_params) {
 			int ci;
-			for (ci = 0; ci < rtp_session->ice.ice_params->cand_idx[rtp_session->ice.proto]; ci++) {
+			for (ci = 0; ci < rtp_session->ice.ice_params->cand_idx[rtp_session->ice.proto]; ++ci) {
 				icand_t *c = &rtp_session->ice.ice_params->cands[ci][rtp_session->ice.proto];
 				if (c->use_candidate && c->con_addr &&
 				    !strcmp(c->con_addr, host_from) &&
@@ -4151,29 +4151,25 @@ static int do_dtls(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 			}
 		}
 
-		if (!nominated) {
-			if (dtls->state < DS_READY) {
-				/* Pre-READY: accept DTLS from any source (fingerprint auth suffices). */
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
-					"DTLS HANDSHAKE: accepting packet from [%s] (ICE negotiated [%s], DTLS state=%d)\n",
-					host_from, host_ice_cur_addr, dtls->state);
-			} else {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
-					"Got DTLS packet from [%s] whilst current ICE negotiated address is [%s]. Ignored.\n",
-					host_from, host_ice_cur_addr);
-				return 0;
-			}
-		}
-
-		/* Once DTLS is established, don't flip-flop the address from competing nominations. */
-		if (dtls->state >= DS_READY && rtp_session->ice.ready) {
+		if (!nominated && dtls->state < DS_READY) {
+			/* Pre-READY: accept non-nominated DTLS for handshake (fingerprint auth) but don't switch dest. */
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
-				"DTLS already READY, ignoring late nomination from [%s:%d] (current [%s]).\n",
+				"DTLS packet from [%s] (not nominated), processing for handshake (current ICE [%s]).\n",
+				host_from, host_ice_cur_addr);
+		} else if (!nominated) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
+				"Got DTLS packet from [%s] whilst current ICE negotiated address is [%s]. Ignored.\n",
+				host_from, host_ice_cur_addr);
+			return 0;
+		} else if (dtls->state >= DS_READY && rtp_session->ice.ready) {
+			/* DTLS established + ICE settled: don't flip-flop from competing nominations. */
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
+				"DTLS READY + ICE settled, ignoring nomination from [%s:%d] (current [%s]).\n",
 				host_from, from_port, host_ice_cur_addr);
 		} else {
-			/* Nominated addr - accept and update ice dest (pre-READY only). */
+			/* Nominated addr - accept and update ice dest (pre-READY or ICE restarting). */
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
-				"DTLS from nominated USE-CANDIDATE addr [%s:%d], switching from [%s]. Accepted.\n",
+				"DTLS from nominated addr [%s:%d], switching from [%s]. Accepted.\n",
 				host_from, from_port, host_ice_cur_addr);
 			switch_rtp_change_ice_dest(rtp_session, &rtp_session->ice, host_from, from_port);
 			if (dtls->remote_addr) {
