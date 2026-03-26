@@ -613,7 +613,7 @@ switch_status_t sofia_on_hangup(switch_core_session_t *session)
 		}
 	}
 
-	{
+	if (sofia_test_pflag(tech_pvt->profile, PFLAG_PASS_603_NETWORK_BLOCKED)) {
 		const char *fail_status = switch_channel_get_variable(channel, "sip_invite_failure_status");
 		const char *fail_phrase = switch_channel_get_variable(channel, "sip_invite_failure_phrase");
 
