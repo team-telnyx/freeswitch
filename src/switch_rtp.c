@@ -11337,6 +11337,17 @@ static switch_status_t switch_rtp_internal_add_remote_candidate(switch_rtp_t *rt
 	}
 
 	
+	/* Bail if the session is being torn down — pool and ice_params may be freed imminently */
+	if (rtp_session->session) {
+		switch_channel_t *channel = switch_core_session_get_channel(rtp_session->session);
+		if (channel && (switch_channel_down_nosig(channel) || switch_channel_get_state(channel) >= CS_HANGUP)) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+					"Trickle ICE: session hanging up, dropping candidate (mid=%s idx=%d comp=%d)\n",
+					mid ? mid : "(null)", mline_index, cand->component_id);
+			return SWITCH_STATUS_FALSE;
+		}
+	}
+
 	/* RFC 8838: ignore late trickled candidates after end-of-candidates */
 	if ((ice == &rtp_session->ice && rtp_session->ice.rready) ||
 	    (ice == &rtp_session->rtcp_ice && rtp_session->rtcp_ice.rready)) {
@@ -11346,7 +11357,18 @@ static switch_status_t switch_rtp_internal_add_remote_candidate(switch_rtp_t *rt
 		return SWITCH_STATUS_SUCCESS;
 	}
 	
-	if (ice->ice_params) {
+	switch_mutex_lock(rtp_session->ice_mutex);
+
+	/* Re-check ice_params under lock — may have been freed during teardown */
+	if (!ice->ice_params) {
+		switch_mutex_unlock(rtp_session->ice_mutex);
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+					"Trickle ICE: ice_params gone after lock (mid=%s idx=%d comp=%d)\n",
+					mid ? mid : "(null)", mline_index, cand->component_id);
+		return SWITCH_STATUS_FALSE;
+	}
+
+	{
 		uint32_t existing = ice->ice_params->cand_idx[ice->proto];
 		for (uint32_t i = 0; i < existing; i++) {
 			const char *e_addr = ice->ice_params->cands[i][ice->proto].con_addr;
@@ -11359,6 +11381,7 @@ static switch_status_t switch_rtp_internal_add_remote_candidate(switch_rtp_t *rt
 					!strcasecmp(e_type, cand->cand_type) &&
 					!strcasecmp(e_addr, cand->ip) &&
 					e_port == (switch_port_t)cand->port) {
+					switch_mutex_unlock(rtp_session->ice_mutex);
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
 						"Trickle ICE: dropping duplicate (foundation=%s type=%s %s:%d) mid=%s comp=%d\n",
 						cand->foundation, cand->cand_type, cand->ip, cand->port, mid ? mid : "(null)", cand->component_id);
@@ -11367,6 +11390,7 @@ static switch_status_t switch_rtp_internal_add_remote_candidate(switch_rtp_t *rt
 			}
 
 			if (e_addr && !strcasecmp(e_addr, cand->ip) && e_port == (switch_port_t)cand->port) {
+				switch_mutex_unlock(rtp_session->ice_mutex);
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
 							"Trickle ICE: dropping duplicate remote candidate %s:%d (mid=%s idx=%d comp=%d)",
 							cand->ip, cand->port, mid ? mid : "(null)", mline_index, cand->component_id);
@@ -11415,6 +11439,8 @@ static switch_status_t switch_rtp_internal_add_remote_candidate(switch_rtp_t *rt
 	if (cand->rel_port) {
 		ice->ice_params->cands[idx][ice->proto].rport = (switch_port_t)cand->rel_port;
 	}
+
+	switch_mutex_unlock(rtp_session->ice_mutex);
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_INFO,
 					"Trickle ICE: appended remote candidate (mid=%s idx=%d) %s %s:%d prio %lu (component %d)\n",
