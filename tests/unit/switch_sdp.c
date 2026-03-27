@@ -552,7 +552,7 @@ FST_CORE_BEGIN("./conf_sdp")
         memset(&info, 0, sizeof(info));
 		match = switch_core_media_negotiate_sdp(fst_session, sdp2, &p, SDP_OFFER);
 		switch_assert(match != 1);
-		switch_channel_set_variable(switch_core_session_get_channel(fst_session), "sip_remote_sdp_str", sdp1);
+		switch_channel_set_variable(switch_core_session_get_channel(fst_session), "sip_remote_sdp_str", sdp2);
 		st = collect_remote_sdp_info_from_session(fst_session, &info);
 		switch_assert(st == SWITCH_STATUS_SUCCESS);
  
@@ -597,7 +597,7 @@ FST_CORE_BEGIN("./conf_sdp")
         memset(&info, 0, sizeof(info));
   		match = switch_core_media_negotiate_sdp(fst_session, sdp3, &p, SDP_OFFER);
 		switch_assert(match != 1);
-		switch_channel_set_variable(switch_core_session_get_channel(fst_session), "sip_remote_sdp_str", sdp1);
+		switch_channel_set_variable(switch_core_session_get_channel(fst_session), "sip_remote_sdp_str", sdp3);
 		st = collect_remote_sdp_info_from_session(fst_session, &info);
 		switch_assert(st == SWITCH_STATUS_SUCCESS);
  
@@ -622,6 +622,7 @@ FST_CORE_BEGIN("./conf_sdp")
             "o=- 1 1 IN IP4 203.0.113.1\r\n"
             "s=-\r\n"
             "t=0 0\r\n"
+            "c=IN IP4 203.0.113.1\r\n"
             "m=audio 49170 RTP/SAVPF 0\r\n"
             "a=ice-ufrag:x\r\n"
             "a=ice-pwd:y\r\n"
@@ -631,7 +632,7 @@ FST_CORE_BEGIN("./conf_sdp")
         memset(&info, 0, sizeof(info));
   		match = switch_core_media_negotiate_sdp(fst_session, sdp4, &p, SDP_OFFER);
 		switch_assert(match != 1);
-		switch_channel_set_variable(switch_core_session_get_channel(fst_session), "sip_remote_sdp_str", sdp1);
+		switch_channel_set_variable(switch_core_session_get_channel(fst_session), "sip_remote_sdp_str", sdp4);
 		st = collect_remote_sdp_info_from_session(fst_session, &info);
 		switch_assert(st == SWITCH_STATUS_SUCCESS);
  
@@ -651,6 +652,7 @@ FST_CORE_BEGIN("./conf_sdp")
             "o=- 1 1 IN IP4 198.51.100.1\r\n"
             "s=-\r\n"
             "t=0 0\r\n"
+            "c=IN IP4 198.51.100.1\r\n"
             "m=audio 9 RTP/SAVPF 111\r\n"
             "a=ice-ufrag:turnu\r\n"
             "a=ice-pwd:turnp\r\n"
@@ -661,7 +663,7 @@ FST_CORE_BEGIN("./conf_sdp")
   		match = switch_core_media_negotiate_sdp(fst_session, sdp5, &p, SDP_OFFER);
 		switch_assert(match != 1);
 
-		switch_channel_set_variable(switch_core_session_get_channel(fst_session), "sip_remote_sdp_str", sdp1);
+		switch_channel_set_variable(switch_core_session_get_channel(fst_session), "sip_remote_sdp_str", sdp5);
 		st = collect_remote_sdp_info_from_session(fst_session, &info);
 		switch_assert(st == SWITCH_STATUS_SUCCESS);
 			{
