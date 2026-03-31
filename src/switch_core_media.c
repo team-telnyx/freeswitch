@@ -5345,7 +5345,7 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 			/* RFC 5888 / RFC 8843: capture BUNDLE mids at session level */
 			if (!strcasecmp(attr->a_name, "group") && attr->a_value && !strncasecmp(attr->a_value, "BUNDLE", 6)) {
 				switch_channel_set_variable(smh->session->channel, "rtp_group_bundle", attr->a_value + 6);
-			} else if (!strcasecmp(attr->a_name, "ice-ufrag")) {
+			} else if (!strcasecmp(attr->a_name, "ice-ufrag") && !zstr(attr->a_value)) {
 				if (is_trickle_recheck) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
 						"ice-ufrag: skipping update during trickle recheck (current=%s, sdp=%s)\n",
@@ -5357,14 +5357,14 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 					engine->new_ice = 1;
 				}
 				ice_seen++;
-			} else if (!strcasecmp(attr->a_name, "ice-pwd")) {
+			} else if (!strcasecmp(attr->a_name, "ice-pwd") && !zstr(attr->a_value)) {
 				if (is_trickle_recheck) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
 						"ice-pwd: skipping update during trickle recheck\n");
 				} else if (!engine->ice_in.pwd || strcmp(engine->ice_in.pwd, attr->a_value)) {
 					engine->ice_in.pwd = switch_core_session_strdup(smh->session, attr->a_value);
 				}
-			} else if (!strcasecmp(attr->a_name, "ice-options")) {
+			} else if (!strcasecmp(attr->a_name, "ice-options") && !zstr(attr->a_value)) {
 				engine->ice_in.options = switch_core_session_strdup(smh->session, attr->a_value);
 				if (attr->a_value && switch_stristr("trickle", attr->a_value)) {
 					switch_channel_set_variable(smh->session->channel, "sip_trickle_accept", "true");
@@ -5391,7 +5391,7 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 					}
 
 					continue;
-			} else if (!strcasecmp(attr->a_name, "setup")) {
+			} else if (!strcasecmp(attr->a_name, "setup") && !zstr(attr->a_value)) {
 				if (is_trickle_recheck) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_INFO,
 						"a=setup: skipping dtls_controller update during trickle recheck (DTLS state=%d)\n", check_ice_dtls_state);
