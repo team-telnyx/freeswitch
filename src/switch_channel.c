@@ -1074,20 +1074,38 @@ SWITCH_DECLARE(const char *) switch_channel_get_variable_dup(switch_channel_t *c
 
 SWITCH_DECLARE(const char *) switch_channel_get_variable_strdup(switch_channel_t *channel, const char *varname)
 {
-	const char *value = switch_channel_get_variable_dup(channel, varname, SWITCH_FALSE, -1);
+	const char *r = NULL;
 
-	return value ? (const char *)strdup(value) : NULL;
+	switch_assert(channel != NULL);
+
+	switch_mutex_lock(channel->profile_mutex);
+	{
+		const char *value = switch_channel_get_variable_dup(channel, varname, SWITCH_FALSE, -1);
+		if (value) {
+			r = (const char *)strdup(value);
+		}
+	}
+	switch_mutex_unlock(channel->profile_mutex);
+
+	return r;
 }
 
 SWITCH_DECLARE(switch_status_t) switch_channel_get_variable_buf(switch_channel_t *channel, const char *varname, char *buf, switch_size_t buflen)
 {
-	const char *value = switch_channel_get_variable_dup(channel, varname, SWITCH_FALSE, -1);
+	switch_status_t status = SWITCH_STATUS_FALSE;
 
-	if (value && buf && buflen && switch_copy_string(buf, value, buflen)) {
-		return SWITCH_STATUS_SUCCESS;
+	switch_assert(channel != NULL);
+
+	switch_mutex_lock(channel->profile_mutex);
+	{
+		const char *value = switch_channel_get_variable_dup(channel, varname, SWITCH_FALSE, -1);
+		if (value && buf && buflen && switch_copy_string(buf, value, buflen)) {
+			status = SWITCH_STATUS_SUCCESS;
+		}
 	}
+	switch_mutex_unlock(channel->profile_mutex);
 
-	return SWITCH_STATUS_FALSE;
+	return status;
 }
 
 SWITCH_DECLARE(const char *) switch_channel_get_variable_partner(switch_channel_t *channel, const char *varname)
@@ -2915,7 +2933,7 @@ SWITCH_DECLARE(void) switch_channel_event_set_extended_data(switch_channel_t *ch
 					vvar = (char *) hi->name;
 					vval = (char *) hi->value;
 
-					switch_assert(vvar && vval);
+					if (zstr(vvar) || !vval) continue;
 					switch_snprintf(buf, sizeof(buf), "scope_variable_%s", vvar);
 
 					if (!switch_event_get_header(event, buf)) {
@@ -2926,16 +2944,32 @@ SWITCH_DECLARE(void) switch_channel_event_set_extended_data(switch_channel_t *ch
 		}
 
 		if (channel->variables) {
-			for (hi = channel->variables->headers; hi; hi = hi->next) {
+			switch_event_t *vars_snap = NULL;
+
+			if (event->event_id == SWITCH_EVENT_CHANNEL_DESTROY) {
+				/* Snapshot the variables under lock to avoid use-after-free if
+				   another thread modifies channel->variables concurrently.
+				   The snapshot is fully independent, so we can safely iterate
+				   it without holding the lock. (issue #2981) */
+				if (switch_event_dup(&vars_snap, channel->variables) != SWITCH_STATUS_SUCCESS) {
+					vars_snap = NULL;
+				}
+			}
+
+			for (hi = (vars_snap ? vars_snap->headers : channel->variables->headers); hi; hi = hi->next) {
 				char buf[1024];
 				char *vvar = NULL, *vval = NULL;
 
 				vvar = (char *) hi->name;
 				vval = (char *) hi->value;
 
-				switch_assert(vvar && vval);
+				if (zstr(vvar) || !vval) continue;
 				switch_snprintf(buf, sizeof(buf), "variable_%s", vvar);
 				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, buf, vval);
+			}
+
+			if (vars_snap) {
+				switch_event_destroy(&vars_snap);
 			}
 		}
 	}
