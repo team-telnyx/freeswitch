@@ -613,6 +613,22 @@ switch_status_t sofia_on_hangup(switch_core_session_t *session)
 		}
 	}
 
+	if (sofia_test_pflag(tech_pvt->profile, PFLAG_PASS_603_NETWORK_BLOCKED)) {
+		const char *fail_status = switch_channel_get_variable(channel, "sip_invite_failure_status");
+		const char *fail_phrase = switch_channel_get_variable(channel, "sip_invite_failure_phrase");
+
+		if (!zstr(fail_status) && !strcmp(fail_status, "603") &&
+		    !zstr(fail_phrase) && !strcasecmp(fail_phrase, "Network Blocked")) {
+			sip_cause = 603;
+			cause = SWITCH_CAUSE_DECLINE;
+			(*switch_channel_get_cause_ptr(channel)) = cause;
+			switch_channel_set_variable(channel, "override_sip_reason_phrase", fail_phrase);
+			switch_channel_set_variable(channel, "sip_ignore_remote_cause", "true");
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+				"603 Network Blocked passthrough - overriding Q2S result and forcing SIP/Q.850 cause\n");
+		}
+	}
+
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Channel %s hanging up, cause: %s\n",
 					  switch_channel_get_name(channel), switch_channel_cause2str(cause));
 
