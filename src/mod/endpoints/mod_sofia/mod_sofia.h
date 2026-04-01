@@ -1030,6 +1030,7 @@ switch_mutex_unlock(obj->flag_mutex);
 void sofia_glue_global_standby(switch_bool_t on);
 
 switch_status_t sofia_media_activate_rtp(private_object_t *tech_pvt);
+switch_status_t sofia_media_activate_rtp_unlocked(private_object_t *tech_pvt);
 
 const char *sofia_media_get_codec_string(private_object_t *tech_pvt);
 
