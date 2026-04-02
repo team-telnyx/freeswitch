@@ -215,10 +215,10 @@ void clear()
     erase(*iter);
 }
 
-bool compact(int fillPercent = 80, int maxPages = 0)
+int compact(int fillPercent = 80, int maxPages = 0)
 {
   if (!_pDb)
-    return false;
+    return -1;
 
   DB_COMPACT cmpt;
   memset(&cmpt, 0, sizeof(cmpt));
@@ -227,10 +227,10 @@ bool compact(int fillPercent = 80, int maxPages = 0)
 
   int ret = _pDb->compact(0, 0, 0, &cmpt, DB_FREE_SPACE, 0);
   if (ret != 0)
-    return false;
+    return ret;
 
   _pDb->sync(0);
-  return true;
+  return 0;
 }
 
 std::size_t recordCount() const
