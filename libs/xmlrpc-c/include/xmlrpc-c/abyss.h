@@ -585,8 +585,8 @@ MIMETypeGuessFromFile(const char * const filename);
 ** Maximum number of simultaneous connections
 *********************************************************************/
 
-// 128 + 64 Max connections
-#define MAX_CONN    192
+// TEL-6923: Increase max connections to 512
+#define MAX_CONN    512
 
 /*********************************************************************
 ** General purpose definitions
