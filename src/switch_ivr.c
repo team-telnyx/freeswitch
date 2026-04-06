@@ -2365,11 +2365,11 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_session_transfer(switch_core_session_
 		 * Use SWITCH_FALSE for var_check since these values are stored as-is for
 		 * transfer event tracking. The extension may legitimately contain unexpanded
 		 * variable references (e.g. from ESL uuid_transfer commands) which would
-		 * otherwise trigger CRIT logs at switch_channel.c:1580 (TEL-6718). */
+		 * otherwise trigger CRIT logs at switch_channel.c:1580 . */
 		switch_channel_set_variable(channel, "transfer_in_progress", "true");
 		switch_channel_set_variable_var_check(channel, "transfer_extension", extension, SWITCH_FALSE);
-		switch_channel_set_variable_var_check(channel, "transfer_dialplan", use_dialplan, SWITCH_FALSE);
-		switch_channel_set_variable_var_check(channel, "transfer_context", use_context, SWITCH_FALSE);
+		switch_channel_set_variable(channel, "transfer_dialplan", use_dialplan);
+		switch_channel_set_variable(channel, "transfer_context", use_context);
 		
 		/* Also set global variables that will be inherited by originated channels */
 		switch_core_set_variable("transfer_originating_uuid", switch_core_session_get_uuid(session));
