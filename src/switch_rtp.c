@@ -11402,6 +11402,15 @@ static switch_status_t switch_rtp_internal_add_remote_candidate(switch_rtp_t *rt
 			}
 		}
 
+		/* Bounds check before shift — prevent writing past cands[MAX_CAND-1] */
+		if (existing >= MAX_CAND) {
+			switch_mutex_unlock(rtp_session->ice_mutex);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
+				"Trickle ICE: dropping candidate capacity full (%d/%d) (mid=%s comp=%d)\n",
+				existing, MAX_CAND, mid ? mid : "(null)", cand->component_id);
+			return SWITCH_STATUS_SUCCESS;
+		}
+
 		if (existing > insert_at) {
 			for (uint32_t j = existing; j > insert_at; j--) {
 				ice->ice_params->cands[j][ice->proto] = ice->ice_params->cands[j-1][ice->proto];
@@ -11414,7 +11423,7 @@ static switch_status_t switch_rtp_internal_add_remote_candidate(switch_rtp_t *rt
 	}
 
 	idx = insert_at;
-	
+
 	ice->ice_params->cand_idx[ice->proto]++;
 	ice->ice_params->cands[idx][ice->proto].con_addr = switch_core_strdup(rtp_session->pool, cand->ip);
 	ice->ice_params->cands[idx][ice->proto].con_port = (switch_port_t)cand->port;
@@ -11770,7 +11779,6 @@ SWITCH_DECLARE(uint32_t) switch_rtp_get_remote_ice_candidates(const switch_rtp_t
 {
 	const switch_rtp_ice_t *ices[2] = { NULL, NULL };
 	const int comp_id_for_ice[2] = { 1, 2 };
-	switch_rtp_t *rtp_nc;
 	switch_rtp_ice_cand_t *vec = NULL;
 	uint32_t total = 0;
 	int i, cid;
@@ -11805,8 +11813,11 @@ SWITCH_DECLARE(uint32_t) switch_rtp_get_remote_ice_candidates(const switch_rtp_t
 		return 0;
 	}
 
-	rtp_nc = (switch_rtp_t *)rtp;
-	vec = (switch_rtp_ice_cand_t *)switch_core_alloc(rtp_nc->pool, total * sizeof(*vec));
+	/* Use malloc: vector is short-lived within caller scope. Pool alloc
+ 	 * isn’t freed and seems to corrupt the pool on repeated trickle rechecks. */
+	vec = (switch_rtp_ice_cand_t *)malloc(total * sizeof(*vec));
+	switch_assert(vec);
+	memset(vec, 0, total * sizeof(*vec));
 
 	{
 		uint32_t k = 0;

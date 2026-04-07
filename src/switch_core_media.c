@@ -5232,6 +5232,12 @@ static int trickle_merge_rtp_remote_into_engine(switch_media_handle_t *smh, swit
 		                  type == SWITCH_MEDIA_TYPE_AUDIO ? "audio" :
 		                  type == SWITCH_MEDIA_TYPE_VIDEO ? "video" : "text");
 	}
+
+	/* Free the malloc'd candidate vec from switch_rtp_get_remote_ice_candidates */
+	if (srcv) {
+		free((void *)srcv);
+	}
+
 	return added;
 }
 
@@ -5339,6 +5345,11 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 			int argc = 0, j = 0;
 
 			if (zstr(attr->a_name)) {
+				continue;
+			}
+			/* During trickle recheck, process only candidate/end-of-candidates. Reprocessing SDP
+ 			 * attrs (ICE/DTLS/etc.) on cached parser can corrupt heap over iterations. */
+			if (is_trickle_recheck && strcasecmp(attr->a_name, "candidate") && strcasecmp(attr->a_name, "end-of-candidates")) {
 				continue;
 			}
 
