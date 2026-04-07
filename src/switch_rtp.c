@@ -11814,12 +11814,9 @@ SWITCH_DECLARE(uint32_t) switch_rtp_get_remote_ice_candidates(const switch_rtp_t
 	}
 
 	/* Use malloc: vector is short-lived within caller scope. Pool alloc
- 	 *  isn’t freed and seems to corrupt the pool on repeated trickle rechecks. */
+ 	 * isn’t freed and seems to corrupt the pool on repeated trickle rechecks. */
 	vec = (switch_rtp_ice_cand_t *)malloc(total * sizeof(*vec));
-	if (!vec) {
-		*out_vec = NULL;
-		return 0;
-	}
+	switch_assert(vec);
 	memset(vec, 0, total * sizeof(*vec));
 
 	{
