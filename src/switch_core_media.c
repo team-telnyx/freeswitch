@@ -5642,7 +5642,7 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 						engine->ice_in.cands[i][cid].ready++;
 						ip_choose_family(smh, check_addr);
 
-						if (cid == 0 && got_rtcp_mux && engine->ice_in.cand_idx[1] < MAX_CAND) {
+						if (cid == 0 && engine->rtcp_mux > 0 && engine->ice_in.cand_idx[1] < MAX_CAND) {
 
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
 											"Choose same candidate, index %d, for rtcp based on rtcp-mux attribute %s:%d\n",
@@ -5829,7 +5829,7 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 	}
 
 
-	if (m && !got_rtcp_mux) {
+	if (m && !got_rtcp_mux && !is_trickle_recheck) {
 		engine->rtcp_mux = -1;
 	}
 
