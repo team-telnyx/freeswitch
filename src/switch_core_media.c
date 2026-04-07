@@ -5232,6 +5232,12 @@ static int trickle_merge_rtp_remote_into_engine(switch_media_handle_t *smh, swit
 		                  type == SWITCH_MEDIA_TYPE_AUDIO ? "audio" :
 		                  type == SWITCH_MEDIA_TYPE_VIDEO ? "video" : "text");
 	}
+
+	/* Free the malloc'd candidate vec from switch_rtp_get_remote_ice_candidates */
+	if (srcv) {
+		free((void *)srcv);
+	}
+
 	return added;
 }
 
@@ -5339,6 +5345,14 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 			int argc = 0, j = 0;
 
 			if (zstr(attr->a_name)) {
+				continue;
+			}
+			/* TEL-6919: During trickle recheck, only process candidate and end-of-candidates attributes.
+			 * ICE credentials (ufrag/pwd), DTLS (setup/fingerprint), and other session-level attributes
+			 * were already processed during initial SDP negotiation. Re-iterating them on the cached
+			 * sdp_parser during repeated check_ice() calls causes heap corruption because the parser's
+			 * internal string pointers can become invalid after N iterations. */
+			if (is_trickle_recheck && strcasecmp(attr->a_name, "candidate") && strcasecmp(attr->a_name, "end-of-candidates")) {
 				continue;
 			}
 
