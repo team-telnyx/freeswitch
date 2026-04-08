@@ -68,6 +68,7 @@ typedef struct switch_thread_data_s {
 	void *obj;
 	int alloc;
 	int running;
+	char name[16];
 	switch_memory_pool_t *pool;
 } switch_thread_data_t;
 

@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+
+<!--
+  UAC scenario: establish a call, then send a Trickle ICE candidate via INFO
+  Content-Type: application/trickle-ice-sdpfrag
+-->
+
+<scenario name="UAC Trickle ICE via INFO">
+
+  <!-- Initial INVITE with ICE support advertised -->
+  <send retrans="500">
+    <![CDATA[
+      INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+      From: "uac" <sip:uac@[local_ip]:[local_port]>;tag=[call_number]
+      To: <sip:[service]@[remote_ip]:[remote_port]>
+      Call-ID: [call_id]
+      CSeq: 1 INVITE
+      Contact: <sip:uac@[local_ip]:[local_port];transport=[transport]>
+      Max-Forwards: 70
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=- 0 0 IN IP4 [local_ip]
+      s=-
+      c=IN IP4 [local_ip]
+      t=0 0
+      m=audio 6000 RTP/AVP 0 101
+      a=rtpmap:0 PCMU/8000
+      a=rtpmap:101 telephone-event/8000
+      a=fmtp:101 0-16
+      a=ice-ufrag:Ufrag1
+      a=ice-pwd:Password1Password1Password1
+      a=ice-options:trickle
+      a=setup:actpass
+      a=fingerprint:SHA-256 00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF
+    ]]>
+  </send>
+
+  <!-- Expect provisional/ok and then ACK -->
+  <recv response="100" optional="true" />
+  <recv response="18[03]" optional="true" />
+  <recv response="200" rtd="true">
+    <action>
+      <ereg regexp=".*" search_in="body" check_it="true" assign_to="sdp_ok"/>
+    </action>
+  </recv>
+
+  <send>
+    <![CDATA[
+      ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+      From: "uac" <sip:uac@[local_ip]:[local_port]>;tag=[call_number]
+      To: <sip:[service]@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 1 ACK
+      Contact: <sip:uac@[local_ip]:[local_port];transport=[transport]>
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+
+  <!-- Send Trickle ICE info with a candidate -->
+  <pause milliseconds="500" />
+
+  <send retrans="500">
+    <![CDATA[
+      INFO sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+      From: "uac" <sip:uac@[local_ip]:[local_port]>;tag=[call_number]
+      To: <sip:[service]@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 2 INFO
+      Contact: <sip:uac@[local_ip]:[local_port];transport=[transport]>
+      Max-Forwards: 70
+      Content-Type: application/trickle-ice-sdpfrag
+      Content-Length: [len]
+
+      m=audio 9 RTP/AVP 0 101
+      a=mid:0
+      a=candidate:1 1 UDP 2122260223 192.0.2.1 54545 typ host
+      a=end-of-candidates
+    ]]>
+  </send>
+
+  <recv response="200" />
+
+  <!-- Hang up -->
+  <pause milliseconds="500" />
+
+  <send>
+    <![CDATA[
+      BYE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+      From: "uac" <sip:uac@[local_ip]:[local_port]>;tag=[call_number]
+      To: <sip:[service]@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 3 BYE
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+
+  <recv response="200" />
+
+</scenario>

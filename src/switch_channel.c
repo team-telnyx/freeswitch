@@ -3795,8 +3795,6 @@ SWITCH_DECLARE(switch_status_t) switch_channel_perform_mark_pre_answered(switch_
 		const char *uuid;
 		switch_core_session_t *other_session;
 
-		switch_core_media_check_dtls(channel->session, SWITCH_MEDIA_TYPE_AUDIO);
-
 		switch_log_printf(SWITCH_CHANNEL_ID_LOG, file, func, line, switch_channel_get_uuid(channel), SWITCH_LOG_NOTICE, "Pre-Answer %s!\n", channel->name);
 		switch_channel_set_flag(channel, CF_EARLY_MEDIA);
 
@@ -3892,6 +3890,14 @@ SWITCH_DECLARE(switch_status_t) switch_channel_perform_pre_answer(switch_channel
 	} else {
 		switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
 	}
+
+	if (switch_channel_direction(channel) == SWITCH_CALL_DIRECTION_INBOUND &&
+				!switch_channel_test_flag(channel, CF_ORIGINATOR) && !switch_channel_test_flag(channel, CF_BRIDGE_ORIGINATOR) &&
+				!switch_channel_test_flag(channel, CF_UUID_BRIDGE_ORIGINATOR)) {
+			switch_core_media_dtls_init_check_lock(channel->session, SWITCH_MEDIA_TYPE_AUDIO);
+			switch_core_media_dtls_init_check_lock(channel->session, SWITCH_MEDIA_TYPE_VIDEO);
+			switch_core_media_dtls_init_check_lock(channel->session, SWITCH_MEDIA_TYPE_TEXT);
+		}
 
 	return status;
 }
@@ -4094,8 +4100,6 @@ SWITCH_DECLARE(switch_status_t) switch_channel_perform_mark_answered(switch_chan
 		return SWITCH_STATUS_SUCCESS;
 	}
 
-	switch_core_media_check_dtls(channel->session, SWITCH_MEDIA_TYPE_AUDIO);
-
 	if (channel->caller_profile && channel->caller_profile->times) {
 		switch_mutex_lock(channel->profile_mutex);
 		channel->caller_profile->times->answered = switch_micro_time_now();
@@ -4259,6 +4263,16 @@ SWITCH_DECLARE(switch_status_t) switch_channel_perform_answer(switch_channel_t *
 				switch_ivr_sleep(channel->session, msec, SWITCH_TRUE, NULL);
 			}
 		}
+	}
+
+
+	if (switch_channel_direction(channel) == SWITCH_CALL_DIRECTION_INBOUND &&
+						!switch_channel_test_flag(channel, CF_ORIGINATOR) && !switch_channel_test_flag(channel, CF_BRIDGE_ORIGINATOR) &&
+						!switch_channel_test_flag(channel, CF_UUID_BRIDGE_ORIGINATOR)) {
+
+				switch_core_media_dtls_init_check_lock(channel->session, SWITCH_MEDIA_TYPE_AUDIO);
+				switch_core_media_dtls_init_check_lock(channel->session, SWITCH_MEDIA_TYPE_VIDEO);
+				switch_core_media_dtls_init_check_lock(channel->session, SWITCH_MEDIA_TYPE_TEXT);
 	}
 
 	return status;

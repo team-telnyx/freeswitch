@@ -274,6 +274,67 @@ FST_TEST_BEGIN(sofia_auth_identity_test_attest_a_date)
 	}
 }
 FST_TEST_END()
+
+FST_TEST_BEGIN(sofia_trickle_supported_and_accept_headers)
+{
+	const char *profile;
+	char *cmd_args;
+	switch_stream_handle_t stream = { 0 };
+	char *out;
+
+	profile = switch_core_get_variable("sofia_profile");
+	if (zstr(profile)) {
+		profile = "internal";
+	}
+
+	cmd_args = switch_core_sprintf(fst_pool, "status profile %s", profile);
+	SWITCH_STANDARD_STREAM(stream);
+	switch_api_execute("sofia", cmd_args, NULL, &stream);
+	out = (char *)stream.data;
+
+	fst_check_string_not_empty(out);
+
+	fst_check(out && strstr(out, "Supported:"));
+	fst_check(out && switch_stristr(out, "trickle-ice"));
+
+	if (out && switch_stristr(out, "trickle-ice")) {
+		fst_check(strstr(out, "Accept:") != NULL);
+		fst_check(switch_stristr(out, "application/trickle-ice-sdpfrag") != NULL);
+	}
+
+	switch_safe_free(stream.data);
+}
+FST_TEST_END()
+
+FST_TEST_BEGIN(sofia_trickle_recv_info_advertised_if_enabled)
+{
+	const char *profile;
+	char *cmd_args;
+	switch_stream_handle_t stream = { 0 };
+	char *out;
+	const char *recv_info_pos;
+
+	profile = switch_core_get_variable("sofia_profile");
+	if (zstr(profile)) {
+		profile = "internal";
+	}
+
+	cmd_args = switch_core_sprintf(fst_pool, "status profile %s", profile);
+	SWITCH_STANDARD_STREAM(stream);
+	switch_api_execute("sofia", cmd_args, NULL, &stream);
+	out = (char *)stream.data;
+
+	fst_check_string_not_empty(out);
+
+	if (out && switch_stristr(out, "trickle-ice")) {
+		recv_info_pos = switch_stristr(out, "Recv-Info:");
+		fst_check((recv_info_pos == NULL) || (switch_stristr(recv_info_pos, "trickle-ice") != NULL));
+	}
+
+	switch_safe_free(stream.data);
+}
+FST_TEST_END()
+
 #endif 
 
 FST_MODULE_END()

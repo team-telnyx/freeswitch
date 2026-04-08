@@ -92,7 +92,11 @@ typedef enum {
 	IPR_RTCP
 } ice_proto_t;
 
-
+typedef struct ext_mid_s {
+	uint8_t ext_id;   /* negotiated extmap ID for MID (1-14 for 1-byte header) */
+	char mid[17];     /* MID string (max 16 bytes for 1-byte hdr format) */
+	uint8_t enabled;
+} ext_mid_t;
 
 typedef struct icand_s {
 	char *foundation;
@@ -121,7 +125,8 @@ typedef struct ice_s {
 	char *ufrag;
 	char *pwd;
 	char *options;
-
+	switch_bool_t controlling;
+	switch_bool_t end_of_candidates;
 } ice_t;
 
 struct switch_rtcp_report_block {
@@ -289,6 +294,20 @@ typedef struct switch_rtcp_report_data {
 		switch_rtcp_xr_report *xr_blocks;
 	} rtcp_data;
 } switch_rtcp_report_data_t;
+
+typedef enum {
+	RTP_EXT_TYPE_NONE,
+	RTP_EXT_TYPE_RTP_STREAM_ID,   /* RID */
+	RTP_EXT_TYPE_REPAIRED_RTP_STREAM_ID,
+	RTP_EXT_TYPE_MID, /*MID*/
+	RTP_EXT_TYPE_ABS_SEND_TIME,
+} rtp_extension_type_t;
+
+typedef struct rtp_extension_s {
+	uint8_t id;                      /* 4-bit identifier from RTP header extension */
+	rtp_extension_type_t type;      /* Internal enum type for known extensions */
+	char name[64];                  /* URI-style name from SDP */
+} rtp_extension_t;
 
 SWITCH_DECLARE(switch_status_t) switch_rtp_add_crypto_key(switch_rtp_t *rtp_session, switch_rtp_crypto_direction_t direction, uint32_t index, switch_secure_settings_t *ssec);
 typedef void (*rtcp_probe_func)(switch_channel_t*, switch_rtp_t *, switch_bool_t, switch_rtcp_report_data_t *, struct switch_rtcp_sender_info *);
@@ -802,6 +821,56 @@ SWITCH_DECLARE(void) switch_rtp_video_loss(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(switch_core_session_t*) switch_rtp_get_core_session(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(switch_status_t) switch_rtp_transcode(switch_codec_t *codec_in, switch_codec_t *codec_out, char *payload_in, uint32_t len_in, char *payload_out, uint32_t *len_out, uint32_t rate_in, uint32_t rate_out);
+SWITCH_DECLARE(switch_time_t) switch_rtp_session_get_dtls_checks_started(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(switch_time_t) switch_rtp_session_set_dtls_checks_started(switch_rtp_t *rtp_session, switch_time_t dtls_checks_started);
+SWITCH_DECLARE(switch_sockaddr_t*) switch_rtp_session_get_remote_addr(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(switch_sockaddr_t*) switch_rtp_session_get_rtcp_remote_addr(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(char *) switch_rtp_session_get_type(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(switch_status_t) switch_rtp_enable_mid(switch_rtp_t *rtp_session, uint8_t ext_id, const char *mid);
+
+
+/* Trickle ICE extensions */
+typedef struct switch_rtp_ice_cand_s {
+	char foundation[32];
+	int component_id;
+	char transport[8];
+	unsigned long priority;
+	char ip[64];
+	int port;
+	char cand_type[16]; /* host|srflx|prflx|relay */
+	char rel_addr[64];
+	int rel_port;
+} switch_rtp_ice_cand_t;
+
+typedef void (*switch_ice_candidate_cb_t)(
+	void *user_data,
+	const char *mid,
+	int mline_index,
+	const switch_rtp_ice_cand_t *cand,
+	int end_of_candidates /* boolean */
+);
+
+typedef struct switch_rtp_ext_info_s {
+	switch_bool_t has_ext;   /* header.x */
+	uint16_t profile;        /* ext->profile (host order) */
+	uint16_t length_words;   /* ext->length (host order, 32-bit words) */
+} switch_rtp_ext_info_t;
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_get_extension_info(
+	switch_rtp_t *rtp_session,
+	switch_rtp_ext_info_t *info
+);
+
+SWITCH_DECLARE(void) switch_rtp_set_ice_candidate_cb(switch_rtp_t *rtp_session, switch_ice_candidate_cb_t cb, void *user_data);
+SWITCH_DECLARE(switch_status_t) switch_rtp_add_trickle_remote_candidate(switch_rtp_t *rtp_session, int mline_index, const char *mid, const char *cand_line);
+SWITCH_DECLARE(switch_status_t) switch_rtp_trickle_end_of_candidates(switch_rtp_t *rtp_session, int mline_index, const char *mid);
+SWITCH_DECLARE(uint32_t) switch_rtp_get_poll_timeout_ms(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(uint32_t) switch_rtp_get_ms_per_packet(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(uint32_t) switch_rtp_get_us_per_packet(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(switch_bool_t) switch_rtp_using_timer(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(void) switch_rtp_prepare_trickle_ice(switch_rtp_t *rtp_session, ice_proto_t proto, ice_t *ice_params);
+SWITCH_DECLARE(uint32_t) switch_rtp_get_remote_ice_candidates(const switch_rtp_t *rtp, const switch_rtp_ice_cand_t **out_vec);
+SWITCH_DECLARE(uint32_t) switch_rtp_get_new_ssrc(switch_rtp_t *rtp_session);
 /*!
   \}
 */
