@@ -585,8 +585,7 @@ MIMETypeGuessFromFile(const char * const filename);
 ** Maximum number of simultaneous connections
 *********************************************************************/
 
-// 128 + 64 Max connections
-#define MAX_CONN    192
+#define MAX_CONN    512
 
 /*********************************************************************
 ** General purpose definitions
