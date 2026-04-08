@@ -9787,11 +9787,13 @@ void sofia_handle_sip_i_update(nua_t *nua, sofia_profile_t *profile, nua_handle_
         if (!strcasecmp(sip->sip_content_type->c_type, "application") &&
             !strcasecmp(sip->sip_content_type->c_subtype, "trickle-ice-sdpfrag")) {
             if (session) {
-                tech_pvt = switch_core_session_get_private(session);
                 trickle_frag_t frag = {{0}};
                 const char *body = (const char *)sip->sip_payload->pl_data;
+                tech_pvt = switch_core_session_get_private(session);
+
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
                                   "%s Received SIP UPDATE (trickle-ice-sdpfrag)\n", switch_channel_get_name(switch_core_session_get_channel(session)));
+								  
                 if (!zstr(body) && parse_trickle_sdpfrag(body, &frag) == SWITCH_STATUS_SUCCESS) {
                     sofia_trickle_apply(tech_pvt, session, &frag);
                 }
