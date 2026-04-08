@@ -71,6 +71,26 @@ switch_status_t sofia_media_activate_rtp(private_object_t *tech_pvt)
 
 
 
+/* Lock-free variant of sofia_media_activate_rtp for callers that manage
+ * sofia_mutex externally.  Used by sofia_answer_channel to avoid holding
+ * sofia_mutex across switch_core_media_activate_rtp, which acquires
+ * codec_read_mutex — preventing ABBA deadlock with the SIGNAL_DATA
+ * dispatch path (codec_read_mutex -> sofia_mutex). */
+switch_status_t sofia_media_activate_rtp_unlocked(private_object_t *tech_pvt)
+{
+	switch_status_t status;
+
+	status = switch_core_media_activate_rtp(tech_pvt->session);
+
+	if (status == SWITCH_STATUS_SUCCESS) {
+		sofia_set_flag(tech_pvt, TFLAG_RTP);
+		sofia_set_flag(tech_pvt, TFLAG_IO);
+	}
+
+	return status;
+}
+
+
 switch_status_t sofia_media_tech_media(private_object_t *tech_pvt, const char *r_sdp, switch_sdp_type_t type)
 {
 	switch_assert(tech_pvt != NULL);

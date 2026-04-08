@@ -5398,6 +5398,12 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 							switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
 								"ignore-rtp-during-dtmf-timeout value '%s' out of range (1-%dms), using default\n", val, SWITCH_IGNORE_RTP_DURING_DTMF_MAX_TIMEOUT_MS);
 						}
+					} else if (!strcasecmp(var, "pass-603-network-blocked")) {
+						if (switch_true(val)) {
+							sofia_set_pflag(profile, PFLAG_PASS_603_NETWORK_BLOCKED);
+						} else {
+							sofia_clear_pflag(profile, PFLAG_PASS_603_NETWORK_BLOCKED);
+						}
 					} else if (!strcasecmp(var, "manual-redirect")) {
 						if (switch_true(val)) {
 							sofia_set_pflag(profile, PFLAG_MANUAL_REDIRECT);
@@ -7211,6 +7217,13 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 
 			if (!zstr(reason_header)) {
 				switch_channel_set_variable(channel, "sip_reason", reason_header);
+
+				/* Target specifically 603 Network Blocked for passthrough to A-leg */
+				if (sofia_test_pflag(profile, PFLAG_PASS_603_NETWORK_BLOCKED) &&
+						status == 603 && !zstr(phrase) && !strcasecmp(phrase, "Network Blocked")) {
+					switch_channel_set_variable_partner(channel, "sip_reason", reason_header);
+				}
+
 				su_free(nua_handle_get_home(nh), reason_header);
 			}
 			if (sip->sip_reason->re_protocol && (!strcasecmp(sip->sip_reason->re_protocol, "Q.850")

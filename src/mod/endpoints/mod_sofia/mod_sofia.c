@@ -613,6 +613,22 @@ switch_status_t sofia_on_hangup(switch_core_session_t *session)
 		}
 	}
 
+	if (sofia_test_pflag(tech_pvt->profile, PFLAG_PASS_603_NETWORK_BLOCKED)) {
+		const char *fail_status = switch_channel_get_variable(channel, "sip_invite_failure_status");
+		const char *fail_phrase = switch_channel_get_variable(channel, "sip_invite_failure_phrase");
+
+		if (!zstr(fail_status) && !strcmp(fail_status, "603") &&
+		    !zstr(fail_phrase) && !strcasecmp(fail_phrase, "Network Blocked")) {
+			sip_cause = 603;
+			cause = SWITCH_CAUSE_DECLINE;
+			(*switch_channel_get_cause_ptr(channel)) = cause;
+			switch_channel_set_variable(channel, "override_sip_reason_phrase", fail_phrase);
+			switch_channel_set_variable(channel, "sip_ignore_remote_cause", "true");
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+				"603 Network Blocked passthrough - overriding Q2S result and forcing SIP/Q.850 cause\n");
+		}
+	}
+
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Channel %s hanging up, cause: %s\n",
 					  switch_channel_get_name(channel), switch_channel_cause2str(cause));
 
@@ -895,6 +911,8 @@ static switch_status_t sofia_answer_channel(switch_core_session_t *session)
 	const char *call_info = switch_channel_get_variable(channel, "presence_call_info_full");
 	const char *session_id_header = sofia_glue_session_id_header(session, tech_pvt->profile);
 
+	switch_mutex_lock(tech_pvt->sofia_mutex);
+
 	if(sofia_acknowledge_call(session) == SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Dialplan did not acknowledge_call; sent 100 Trying");
 	}
@@ -912,7 +930,9 @@ static switch_status_t sofia_answer_channel(switch_core_session_t *session)
 		switch_core_media_set_local_sdp(session, b_sdp, SWITCH_TRUE);
 
 		if (switch_channel_test_flag(tech_pvt->channel, CF_PROXY_MEDIA)) {
-			sofia_media_activate_rtp(tech_pvt);
+			switch_mutex_unlock(tech_pvt->sofia_mutex);
+			sofia_media_activate_rtp_unlocked(tech_pvt);
+			switch_mutex_lock(tech_pvt->sofia_mutex);
 			switch_core_media_patch_sdp(tech_pvt->session);			
 			switch_core_media_proxy_remote_addr(tech_pvt->session, NULL);
 		}
@@ -951,11 +971,13 @@ static switch_status_t sofia_answer_channel(switch_core_session_t *session)
 		sofia_set_flag_locked(tech_pvt, TFLAG_ANS);
 		sofia_set_flag_locked(tech_pvt, TFLAG_SDP);
 		switch_channel_mark_answered(channel);     // ... and remember to actually answer the call!
-		return SWITCH_STATUS_SUCCESS;
+		status = SWITCH_STATUS_SUCCESS;
+		goto done;
 	}
 
 	if (sofia_test_flag(tech_pvt, TFLAG_ANS) || switch_channel_direction(channel) == SWITCH_CALL_DIRECTION_OUTBOUND) {
-		return SWITCH_STATUS_SUCCESS;
+		status = SWITCH_STATUS_SUCCESS;
+		goto done;
 	}
 
 	b_sdp = switch_channel_get_variable(channel, SWITCH_B_SDP_VARIABLE);
@@ -968,8 +990,11 @@ static switch_status_t sofia_answer_channel(switch_core_session_t *session)
 
 		if (switch_channel_test_flag(channel, CF_PROXY_MEDIA)) {
 			switch_core_media_patch_sdp(tech_pvt->session);
-			if (sofia_media_activate_rtp(tech_pvt) != SWITCH_STATUS_SUCCESS) {
-				return SWITCH_STATUS_FALSE;
+			switch_mutex_unlock(tech_pvt->sofia_mutex);
+			status = sofia_media_activate_rtp_unlocked(tech_pvt);
+			switch_mutex_lock(tech_pvt->sofia_mutex);
+			if (status != SWITCH_STATUS_SUCCESS) {
+				goto done;
 			}
 		}
 	} else {
@@ -993,8 +1018,11 @@ static switch_status_t sofia_answer_channel(switch_core_session_t *session)
 
 			if (switch_channel_test_flag(channel, CF_PROXY_MEDIA)) {
 				switch_core_media_patch_sdp(tech_pvt->session);
-				if (sofia_media_activate_rtp(tech_pvt) != SWITCH_STATUS_SUCCESS) {
-					return SWITCH_STATUS_FALSE;
+				switch_mutex_unlock(tech_pvt->sofia_mutex);
+				status = sofia_media_activate_rtp_unlocked(tech_pvt);
+				switch_mutex_lock(tech_pvt->sofia_mutex);
+				if (status != SWITCH_STATUS_SUCCESS) {
+					goto done;
 				}
 			}
 		}
@@ -1057,7 +1085,8 @@ static switch_status_t sofia_answer_channel(switch_core_session_t *session)
 				}
 
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC-PROXY, Done waiting for ACK\n");
-				return SWITCH_STATUS_SUCCESS;
+				status = SWITCH_STATUS_SUCCESS;
+				goto done;
 			}
 		}
 
@@ -1078,21 +1107,22 @@ static switch_status_t sofia_answer_channel(switch_core_session_t *session)
 
 				if (zstr(r_sdp) || sofia_media_tech_media(tech_pvt, r_sdp, SDP_OFFER) != SWITCH_STATUS_SUCCESS) {
 					switch_channel_set_variable(channel, SWITCH_ENDPOINT_DISPOSITION_VARIABLE, "CODEC NEGOTIATION ERROR");
-					//switch_mutex_lock(tech_pvt->sofia_mutex);
-					//nua_respond(tech_pvt->nh, SIP_488_NOT_ACCEPTABLE, TAG_END());
-					//switch_mutex_unlock(tech_pvt->sofia_mutex);
-					return SWITCH_STATUS_FALSE;
+					status = SWITCH_STATUS_FALSE;
+					goto done;
 				}
 			}
 		}
 
 		if ((status = switch_core_media_choose_port(tech_pvt->session, SWITCH_MEDIA_TYPE_AUDIO, 0)) != SWITCH_STATUS_SUCCESS) {
 			switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
-			return status;
+			goto done;
 		}
 
 		switch_core_media_gen_local_sdp(session, SDP_ANSWER, NULL, 0, NULL, 0);
-		if (sofia_media_activate_rtp(tech_pvt) != SWITCH_STATUS_SUCCESS) {
+		switch_mutex_unlock(tech_pvt->sofia_mutex);
+		status = sofia_media_activate_rtp_unlocked(tech_pvt);
+		switch_mutex_lock(tech_pvt->sofia_mutex);
+		if (status != SWITCH_STATUS_SUCCESS) {
 			switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
 		}
 
@@ -1203,7 +1233,11 @@ static switch_status_t sofia_answer_channel(switch_core_session_t *session)
 		sofia_set_flag_locked(tech_pvt, TFLAG_ANS);
 	}
 
-	return SWITCH_STATUS_SUCCESS;
+	status = SWITCH_STATUS_SUCCESS;
+
+done:
+	switch_mutex_unlock(tech_pvt->sofia_mutex);
+	return status;
 }
 
 static switch_status_t sofia_read_text_frame(switch_core_session_t *session, switch_frame_t **frame, switch_io_flag_t flags, int stream_id)
@@ -2882,7 +2916,14 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 		}
 		break;
 	case SWITCH_MESSAGE_INDICATE_ANSWER:
+		/* Unlock sofia_mutex before sofia_answer_channel to prevent deadlock.
+		 * sofia_answer_channel -> switch_core_media_activate_rtp -> set_codec
+		 * locks codec_read_mutex. The read_frame path holds codec_read_mutex then
+		 * dispatches SIGNAL_DATA which locks sofia_mutex — ABBA deadlock.
+		 * sofia_answer_channel manages its own sofia_mutex locking internally. */
+		switch_mutex_unlock(tech_pvt->sofia_mutex);
 		status = sofia_answer_channel(session);
+		switch_mutex_lock(tech_pvt->sofia_mutex);
 		break;
 	case SWITCH_MESSAGE_INDICATE_PROGRESS:
 		{
