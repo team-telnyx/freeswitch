@@ -1703,29 +1703,36 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 					channel = switch_core_session_get_channel(rtp_session->session);
 				}
 
-				ice->missed_count = 0;
-				ice->rready = 1;
-
-				if (cur_idx > -1) {
+				/* ENGDESK-49495: Only allow auto-change if source IP matches a known ICE candidate.
+				 * This prevents DTLS path mismatch when STUN arrives from an IP not in the negotiated SDP.
+				 * The STUN response is still sent (required by ICE), but we don't change the RTP/DTLS destination. */
+				if (cur_idx < 0) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
+							"Skipping auto-change for %s stun/%s/dtls - source %s:%u is not a negotiated ICE candidate (current: %s:%u)\n",
+							rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp",
+							from_host, from_port, host2, port2);
+				} else {
+					ice->missed_count = 0;
+					ice->rready = 1;
 					ice->ice_params->chosen[ice->proto] = cur_idx;
+
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE,
+							"Auto Changing %s stun/%s/dtls port from %s:%u to %s:%u idx:%d\n", rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp",
+							host2, port2,
+							from_host, from_port, cur_idx);
+
+					switch_channel_set_flag(channel, CF_VIDEO_REFRESH_REQ);
+					switch_core_media_gen_key_frame(rtp_session->session);
+
+					switch_rtp_change_ice_dest(rtp_session, ice, from_host, from_port);
+
+					ice->cand_responsive = is_responsive;
+					if (ice->cand_responsive) {
+						ice->initializing = 0;
+					}
+
+					ice->last_ok = now;
 				}
-
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE,
-						"Auto Changing %s stun/%s/dtls port from %s:%u to %s:%u idx:%d\n", rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp",
-						host2, port2,
-						from_host, from_port, cur_idx);
-
-				switch_channel_set_flag(channel, CF_VIDEO_REFRESH_REQ);
-				switch_core_media_gen_key_frame(rtp_session->session);
-
-				switch_rtp_change_ice_dest(rtp_session, ice, from_host, from_port);
-
-				ice->cand_responsive = is_responsive;
-				if (ice->cand_responsive) {
-					ice->initializing = 0;
-				}
-
-				ice->last_ok = now;
 			}
 
 			if (!switch_rtp_test_flag(rtp_session, SWITCH_RTP_FLAG_ICE_NO_RESPONSE_IGNORED) || cmp || do_adj) {
