@@ -102,7 +102,6 @@ static const switch_payload_t INVALID_PT = 255;
 								 * characters when sending, but an implementation MUST accept up to 256
 								 * characters when receiving." */
 
-#define MAX_RTP_EXTENSIONS 10
 #define SWITCH_HAVE_ICE 1 
 #define HAVE_MID_EXT 0
 
@@ -679,10 +678,6 @@ static void trickle_eoc_seal(switch_rtp_t *rtp_session, const char *mid, int mli
 	}
 
 	switch_zmalloc(n, sizeof(*n));
-	if (!n) {
-		return;
-	}
-
 	n->rtp = (const void *)rtp_session;
 	n->mline_index = mline_index;
 
@@ -5346,14 +5341,6 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_set_remote_ssrc(switch_rtp_t *rtp_ses
 	return SWITCH_STATUS_SUCCESS;
 }
 
-static inline switch_channel_t *rtp_owner_channel(const switch_rtp_t *rtp_session)
-{
-	if (rtp_session && rtp_session->session) {
-		return switch_core_session_get_channel(rtp_session->session);
-	}
-	return NULL;
-}
-
 static inline const char *rtp_channel_var_dup(switch_channel_t *ch, const char *name)
 {
 	return ch ? switch_channel_get_variable_dup(ch, name, SWITCH_TRUE, -1) : NULL;
@@ -5369,8 +5356,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_create(switch_rtp_t **new_rtp_session
 	switch_core_session_t *session = switch_core_memory_pool_get_data(pool, "__session");
 	uint32_t ms_per_packet = ms_per_pkt;
 	uint32_t us_per_packet = 1000 * ms_per_packet;
-
-	switch_channel_t *channel = rtp_owner_channel(rtp_session);
+	switch_channel_t *channel = session ? switch_core_session_get_channel(session) : NULL;
 
 	*new_rtp_session = NULL;
 
@@ -10856,7 +10842,7 @@ SWITCH_DECLARE(uint32_t) switch_rtp_get_remote_ssrc(switch_rtp_t *rtp_session)
 SWITCH_DECLARE(uint32_t) switch_rtp_get_new_ssrc(switch_rtp_t *rtp_session)
 {
 	if (!rtp_session) return 0;
-	rtp_session->ssrc = (uint32_t) ((intptr_t) &rtp_session * (switch_time_t)switch_epoch_time_now(NULL));
+	rtp_session->ssrc = (uint32_t) ((intptr_t) rtp_session + (switch_time_t)switch_epoch_time_now(NULL));
 	return rtp_session->ssrc;
 }
 
@@ -11216,9 +11202,9 @@ static void rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_t *send_msg
 
     if (!rtp_session->ext_mid.enabled) return;
 
-    payload_len = strlen(rtp_session->ext_mid.mid);
-    if (!payload_len) return;
-    if (payload_len > 16) payload_len = 16;
+	payload_len = strlen(rtp_session->ext_mid.mid);
+	if (!payload_len) return;
+	if (payload_len > 16) payload_len = 16;
 
 	{
 		uint16_t words_now = 0;

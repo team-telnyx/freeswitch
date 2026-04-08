@@ -74,8 +74,8 @@ static switch_status_t parse_trickle_sdpfrag(const char *body, trickle_frag_t *o
 static void sofia_trickle_apply(private_object_t *tech_pvt, switch_core_session_t *session, const trickle_frag_t *frag);
 
 #if defined(HAVE_SWITCH_CORE_MEDIA_ADD_TRICKLE)
-extern void switch_core_media_add_trickle_candidate(switch_core_session_t *session, int mline_index, const char *mid, const char *raw_candidates);
-extern void switch_core_media_trickle_end_of_candidates(switch_core_session_t *session, int mline_index, const char *mid);
+extern switch_status_t switch_core_media_add_trickle_candidate(switch_core_session_t *session, int mline_index, const char *mid, const char *raw_candidates);
+extern switch_status_t switch_core_media_trickle_end_of_candidates(switch_core_session_t *session, int mline_index, const char *mid);
 #elif defined(HAVE_SWITCH_CORE_MEDIA_TRICKLE_ACCEPT)
 extern void switch_core_media_trickle_accept(switch_core_session_t *session, int mline_index, const char *mid, const char *raw_candidates, switch_bool_t end_of_candidates);
 #endif
@@ -9787,7 +9787,7 @@ void sofia_handle_sip_i_update(nua_t *nua, sofia_profile_t *profile, nua_handle_
         if (!strcasecmp(sip->sip_content_type->c_type, "application") &&
             !strcasecmp(sip->sip_content_type->c_subtype, "trickle-ice-sdpfrag")) {
             if (session) {
-                private_object_t *tech_pvt = switch_core_session_get_private(session);
+                tech_pvt = switch_core_session_get_private(session);
                 trickle_frag_t frag = {{0}};
                 const char *body = (const char *)sip->sip_payload->pl_data;
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
@@ -10899,31 +10899,31 @@ void sofia_handle_sip_i_info(nua_t *nua, sofia_profile_t *profile, nua_handle_t 
 
 	if (session) {
 		tech_pvt = (private_object_t *) switch_core_session_get_private(session);
-
-    /* Trickle ICE over SIP INFO */
-    if (sip && sip->sip_payload && sip->sip_content_type &&
-        sip->sip_content_type->c_type && sip->sip_content_type->c_subtype &&
-        sofia_test_pflag(profile, PFLAG_ENABLE_TRICKLE_ICE)) {
-
-        if (!strcasecmp(sip->sip_content_type->c_type, "application") &&
-            !strcasecmp(sip->sip_content_type->c_subtype, "trickle-ice-sdpfrag")) {
-
-            trickle_frag_t frag = {{0}};
-            const char *body = (const char *)sip->sip_payload->pl_data;
-
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                              "%s Received SIP INFO (trickle-ice-sdpfrag)\n", switch_channel_get_name(channel));
-
-            if (!zstr(body) && parse_trickle_sdpfrag(body, &frag) == SWITCH_STATUS_SUCCESS) {
-                sofia_trickle_apply(tech_pvt, session, &frag);
-            }
-            trickle_frag_free(&frag);
-
-            nua_respond(nh, SIP_200_OK, TAG_END());
-            return;
-        }
-    }
 		channel = switch_core_session_get_channel(session);
+
+		/* Trickle ICE over SIP INFO */
+		if (sip && sip->sip_payload && sip->sip_content_type &&
+			sip->sip_content_type->c_type && sip->sip_content_type->c_subtype &&
+			sofia_test_pflag(profile, PFLAG_ENABLE_TRICKLE_ICE)) {
+
+			if (!strcasecmp(sip->sip_content_type->c_type, "application") &&
+				!strcasecmp(sip->sip_content_type->c_subtype, "trickle-ice-sdpfrag")) {
+
+				trickle_frag_t frag = {{0}};
+				const char *body = (const char *)sip->sip_payload->pl_data;
+
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+								"%s Received SIP INFO (trickle-ice-sdpfrag)\n", switch_channel_get_name(channel));
+
+				if (!zstr(body) && parse_trickle_sdpfrag(body, &frag) == SWITCH_STATUS_SUCCESS) {
+					sofia_trickle_apply(tech_pvt, session, &frag);
+				}
+				trickle_frag_free(&frag);
+
+				nua_respond(nh, SIP_200_OK, TAG_END());
+				return;
+			}
+		}
 	}
 
 	if (sofia_test_pflag(profile, PFLAG_EXTENDED_INFO_PARSING)) {

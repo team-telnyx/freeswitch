@@ -61,7 +61,6 @@ static switch_bool_t scm_should_use_m_port(switch_core_session_t *session, switc
 #define TEXT_PERIOD_TIMEOUT 3000
 #define MAX_RED_FRAMES 25
 #define RED_PACKET_SIZE 100
-#define MAX_RTP_EXTENSIONS 10
 
 #ifndef TRICKLE_RECHECK_DEBOUNCE_US
 #define TRICKLE_RECHECK_DEBOUNCE_US 100000  /* 100 ms */
@@ -395,18 +394,18 @@ static int get_channels(const char *name, int dft)
 
 static int trickle_is_enabled(switch_core_session_t *session)
 {
-    switch_channel_t *channel;
-    const char *v;
-    int enabled;
-    channel = switch_core_session_get_channel(session);
-    v = switch_channel_get_variable(channel, "rtp_trickle_ice");
-    enabled = (v && (switch_true(v)));
-    return enabled;
+	switch_channel_t *channel;
+	const char *v;
+	int enabled;
+	channel = switch_core_session_get_channel(session);
+	v = switch_channel_get_variable(channel, "rtp_trickle_ice");
+	enabled = (v && (switch_true(v)));
+	return enabled;
 }
 
 static int trickle_accept_enabled(switch_core_session_t *session)
 {
-    return trickle_is_enabled(session) || switch_true(switch_channel_get_variable(switch_core_session_get_channel(session), "sip_trickle_accept"));
+	return trickle_is_enabled(session) || switch_true(switch_channel_get_variable(switch_core_session_get_channel(session), "sip_trickle_accept"));
 }
 
 static switch_bool_t scm_should_use_m_port(switch_core_session_t *session, switch_rtp_engine_t *engine)
@@ -5529,7 +5528,7 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_WARNING, "Drop %s Candidate cid: %d addr: %s:%s (failed ACL)\n",
 							type == SWITCH_MEDIA_TYPE_VIDEO ? "video" : "audio", cid + 1, con_addr, fields[5]);
 							continue; /* skip this candidate */
-					}	
+					}
 				}
 
 
@@ -5765,9 +5764,9 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 			if (C->foundation && *C->foundation) {
 				switch_channel_set_variable_printf(smh->session->channel, "%sfoundation", pfx, "%s", C->foundation);
 			}
-			switch_channel_set_variable_printf(smh->session->channel, "%spriority",  pfx, "%u", (unsigned)C->priority);
+			switch_channel_set_variable_printf(smh->session->channel, "%spriority", pfx, "%u", (unsigned)C->priority);
 			if (C->cand_type && *C->cand_type) {
-				switch_channel_set_variable_printf(smh->session->channel, "%stype",      pfx, "%s", C->cand_type);
+				switch_channel_set_variable_printf(smh->session->channel, "%stype", pfx, "%s", C->cand_type);
 			}
 			if (C->transport && *C->transport) {
 				switch_channel_set_variable_printf(smh->session->channel, "%stransport", pfx, "%s", C->transport);
@@ -5814,9 +5813,9 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 			if (C->foundation && *C->foundation) {
 				switch_channel_set_variable_printf(smh->session->channel, "%sfoundation", pfx, "%s", C->foundation);
 			}
-			switch_channel_set_variable_printf(smh->session->channel, "%spriority",  pfx, "%u", (unsigned)C->priority);
+			switch_channel_set_variable_printf(smh->session->channel, "%spriority", pfx, "%u", (unsigned)C->priority);
 			if (C->cand_type && *C->cand_type) {
-				switch_channel_set_variable_printf(smh->session->channel, "%stype",      pfx, "%s", C->cand_type);
+				switch_channel_set_variable_printf(smh->session->channel, "%stype", pfx, "%s", C->cand_type);
 			}
 			if (C->transport && *C->transport) {
 				switch_channel_set_variable_printf(smh->session->channel, "%stransport", pfx, "%s", C->transport);
@@ -5875,7 +5874,7 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 			if (trickle_on && !engine->dtls_controller) {
 				dtls_state_t dtls_state = switch_rtp_dtls_state(engine->rtp_session, DTLS_TYPE_RTP);
 				if (dtls_state == DS_HANDSHAKE) {
-					dtls_type_t dtype = engine->dtls_controller ? DTLS_TYPE_CLIENT : DTLS_TYPE_SERVER;
+					dtls_type_t dtype = DTLS_TYPE_SERVER; /* dtls_controller is false here */
 					dtls_type_t xtype = DTLS_TYPE_RTP;
 #ifdef HAVE_OPENSSL_DTLSv1_2_method
 					uint8_t want_DTLSv1_2 = 1;
@@ -14422,7 +14421,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 					v_engine->ice_out.ufrag = a_engine->ice_out.ufrag;
 					v_engine->ice_out.pwd = a_engine->ice_out.pwd;
 				}
-ice_out = &v_engine->ice_out;
+				ice_out = &v_engine->ice_out;
 
 
 					switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=ssrc:%u cname:%s\r\n", v_engine->ssrc, smh->cname);
@@ -20024,7 +20023,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_start_dtls_init_job(switch_c
 	td = switch_core_alloc(pool, sizeof(*td));
 	td->func = dtls_init_job;
 	td->obj = &smh->dtls_init_helper;
-	sprintf(td->name, "core/dtls/%"SWITCH_SIZE_T_FMT, switch_core_session_get_id(session));
+	snprintf(td->name, sizeof(td->name), "core/dtls/%"SWITCH_SIZE_T_FMT, switch_core_session_get_id(session));
 
 	smh->dtls_init_job = 1;
 
