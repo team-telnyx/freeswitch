@@ -1976,6 +1976,7 @@ static void *SWITCH_THREAD_FUNC early_thread_run(switch_thread_t *thread, void *
 												"Changing sampling rate from %uHz to %uHz\n", write_impl.actual_samples_per_second, peer_read_impl.actual_samples_per_second);
 							
 							switch_mutex_lock(state->mutex);
+							switch_core_session_lock_codec_read(state->oglobals->session);
 							if (switch_core_codec_ready(state->write_codec)) {
 								switch_core_codec_destroy(state->write_codec);
 							}
@@ -1998,6 +1999,7 @@ static void *SWITCH_THREAD_FUNC early_thread_run(switch_thread_t *thread, void *
 								memset(state->write_frame->data, 255, state->write_frame->datalen);
 								switch_core_session_set_read_codec(state->oglobals->session, state->write_codec);
 							}
+							switch_core_session_unlock_codec_read(state->oglobals->session);
 							switch_mutex_unlock(state->mutex);
 						}
 					}
