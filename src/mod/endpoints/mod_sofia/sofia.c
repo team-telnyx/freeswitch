@@ -42,6 +42,7 @@
 #include "mod_sofia.h"
 #include <switch_ssl.h>
 #include "prometheus_metrics.h"
+#include "switch_telnyx.h"
 
 
 extern su_log_t tport_log[];
@@ -2525,6 +2526,18 @@ void sofia_event_callback(nua_event_t event,
 	uint32_t sess_count = switch_core_session_count();
 	uint32_t sess_max = switch_core_session_limit(0);
 	
+	/* External handle dispatch: if an external module (e.g. mod_dynamic_gateway)
+	 * owns this handle, dispatch ALL events to it — not just register/unregister.
+	 * The handler identifies its own handles via a magic sentinel and returns
+	 * SWITCH_TRUE to consume the event, preventing mod_sofia from misinterpreting
+	 * the handle's magic pointer as a sofia_private_t. */
+	if (switch_telnyx_sofia_register_handler(
+			(int)event, status, phrase,
+			(void *)nua, (void *)nh, (void *)sofia_private,
+			(const void *)sip, (void *)tags) == SWITCH_TRUE) {
+		return;
+	}
+
 	switch(event) {
 	case nua_i_active:
 		{
