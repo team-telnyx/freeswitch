@@ -256,6 +256,7 @@ struct switch_rtp_rfc2833_data {
 	unsigned int out_digit_sofar;
 	unsigned int out_digit_sub_sofar;
 	unsigned int out_digit_dur;
+	switch_time_t out_digit_last_progress_us; /* gate against sub-ptime do_2833() wakeups; see ENGDESK-48201 */
 	uint16_t in_digit_seq;
 	uint32_t in_digit_ts;
 	uint32_t last_in_digit_ts;
@@ -6198,6 +6199,22 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 
 	if (rtp_session->dtmf_data.out_digit_dur > 0) {
 		int x, loops = 1;
+		switch_time_t now_us = switch_micro_time_now();
+
+		/* ENGDESK-48201: drop calls less than half a ptime since the last in-flight progress
+		   so a tight-looping read path (e.g. silent peer + SIG_BREAK) can't collapse the digit. */
+		if (rtp_session->dtmf_data.out_digit_last_progress_us &&
+			rtp_session->samples_per_second &&
+			rtp_session->samples_per_interval) {
+			switch_time_t min_us =
+				((switch_time_t) rtp_session->samples_per_interval * 1000000)
+				/ rtp_session->samples_per_second / 2;
+
+			if ((now_us - rtp_session->dtmf_data.out_digit_last_progress_us) < min_us) {
+				return;
+			}
+		}
+		rtp_session->dtmf_data.out_digit_last_progress_us = now_us;
 
 		if (!rtp_session->last_write_ts) {
 			if (rtp_session->timer.timer_interface) {
@@ -6344,6 +6361,7 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 			rtp_session->dtmf_data.out_digit_sub_sofar = samples;
 			rtp_session->dtmf_data.out_digit_dur = rdigit->duration;
 			rtp_session->dtmf_data.out_digit = rdigit->digit;
+			rtp_session->dtmf_data.out_digit_last_progress_us = switch_micro_time_now(); /* seed gate */
 			rtp_session->dtmf_data.out_digit_packet[0] = (unsigned char) switch_char_to_rfc2833(rdigit->digit);
 			rtp_session->dtmf_data.out_digit_packet[1] = 13;
 			rtp_session->dtmf_data.out_digit_packet[2] = (unsigned char) (rtp_session->dtmf_data.out_digit_sub_sofar >> 8);
