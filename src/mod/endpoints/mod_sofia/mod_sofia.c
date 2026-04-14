@@ -7046,18 +7046,33 @@ char *sofia_stir_shaken_as_create_identity_header(switch_core_session_t *session
 }
 
 
-/* Return the NUA handle for a named sofia profile */
-static void *sofia_find_nua_by_profile(const char *profile_name)
+/* Acquire a ref-counted NUA handle for a named sofia profile.
+ * The profile read-lock is held until sofia_release_profile_handle() is called.
+ * This prevents the profile (and its NUA) from being destroyed while in use. */
+static void *sofia_find_nua_by_profile(const char *profile_name, void **profile_handle)
 {
 	sofia_profile_t *profile = sofia_glue_find_profile(profile_name);
-	void *nua;
 
+	if (profile_handle) *profile_handle = NULL;
 	if (!profile) return NULL;
 
-	nua = (void *)profile->nua;
-	sofia_glue_release_profile(profile);
+	/* Return the profile as an opaque handle — caller must release it */
+	if (profile_handle) {
+		*profile_handle = (void *)profile;
+	} else {
+		/* No handle output — caller can't release, so release now (legacy) */
+		sofia_glue_release_profile(profile);
+	}
 
-	return nua;
+	return (void *)profile->nua;
+}
+
+/* Release the profile read-lock acquired by sofia_find_nua_by_profile() */
+static void sofia_release_profile_handle(void *profile_handle)
+{
+	if (profile_handle) {
+		sofia_glue_release_profile((sofia_profile_t *)profile_handle);
+	}
 }
 
 /* Return the SIP URL (sip:mod_sofia@IP:PORT) for a named sofia profile */
@@ -7333,6 +7348,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_sofia_load)
 	//sofia_endpoint_interface->recover_callback = sofia_recover_callback;
 	switch_telnyx_event_dispatch()->switch_telnyx_call_recover = sofia_recover_callback;
 	switch_telnyx_event_dispatch()->switch_telnyx_sofia_find_nua = sofia_find_nua_by_profile;
+	switch_telnyx_event_dispatch()->switch_telnyx_sofia_release_profile = sofia_release_profile_handle;
 	switch_telnyx_event_dispatch()->switch_telnyx_sofia_find_profile_url = sofia_find_profile_url;
 
 	management_interface = switch_loadable_module_create_interface(*module_interface, SWITCH_MANAGEMENT_INTERFACE);
