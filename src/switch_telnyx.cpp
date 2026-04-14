@@ -265,3 +265,11 @@ void * switch_telnyx_sofia_find_nua(const char *profile_name)
 	}
 	return NULL;
 }
+
+switch_status_t switch_telnyx_sofia_find_profile_url(const char *profile_name, char *buf, switch_size_t buflen)
+{
+	if (_event_dispatch.switch_telnyx_sofia_find_profile_url) {
+		return _event_dispatch.switch_telnyx_sofia_find_profile_url(profile_name, buf, buflen);
+	}
+	return SWITCH_STATUS_FALSE;
+}
