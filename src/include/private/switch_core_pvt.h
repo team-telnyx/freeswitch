@@ -38,6 +38,10 @@
 #include <switch_private.h>
 #endif
 
+#ifdef HAVE_CARES
+#include <ares.h>
+#endif
+
 #ifdef HAVE_MLOCKALL
 #include <sys/mman.h>
 #endif
@@ -285,6 +289,10 @@ struct switch_runtime {
 	uint32_t db_handle_timeout;
 	uint32_t event_heartbeat_interval;
 	uint32_t ares_dns_timeout;
+#ifdef HAVE_CARES
+	ares_channel ares_dns_channel;
+	switch_bool_t ares_shared_channel;
+#endif
 	int cpu_count;
 	uint32_t time_sync;
 	char *core_db_pre_trans_execute;

@@ -12,17 +12,35 @@
 
 #include <boost/system/error_code.hpp>
 
+#include <condition_variable>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
+
+// Defined in switch_core.c — returns whether shared c-ares channel mode is enabled.
+// When linked against libfreeswitch (and switch_core.h is included), the declaration
+// comes from switch_core.h. For standalone use without FS headers, provide a weak
+// default that enables shared channel mode.
+#ifndef SWITCH_CORE_H
+extern "C" __attribute__((weak)) int switch_core_ares_shared_channel_enabled(void);
+
+int __attribute__((weak)) switch_core_ares_shared_channel_enabled(void)
+{
+    return 1; // default: shared channel enabled
+}
+#endif
 
 namespace Telnyx {
 namespace Net {
 
 /**
- * Global c-ares library initialization.
+ * Global c-ares library and channel initialization.
  * Ensures ares_library_init() is called exactly once per process.
+ * When shared channel mode is enabled (ares-shared-channel=true, the default),
+ * maintains a single shared channel for all resolvers.
+ * When disabled, only initializes the library; channels are created per-query.
  */
 class ares_library_initializer
 {
@@ -34,20 +52,57 @@ public:
     }
 
     bool is_initialized() const { return initialized_; }
+    ares_channel channel() const { return channel_; }
+
+    static const int DNS_TIMEOUT_MS = 1000;
+    static const int DNS_TRIES = 2;
 
 private:
+
     ares_library_initializer()
+        : initialized_(false), channel_(nullptr)
     {
         int status = ares_library_init(ARES_LIB_INIT_ALL);
-        initialized_ = (status == ARES_SUCCESS);
+        if (status != ARES_SUCCESS) {
+            return;
+        }
+
+        if (switch_core_ares_shared_channel_enabled()) {
+            ares_options options;
+            memset(&options, 0, sizeof(options));
+            options.evsys = ARES_EVSYS_DEFAULT;
+            options.timeout = DNS_TIMEOUT_MS;
+            options.tries = DNS_TRIES;
+
+            status = ares_init_options(&channel_, &options,
+                ARES_OPT_EVENT_THREAD | ARES_OPT_TIMEOUT | ARES_OPT_TRIES);
+            if (status != ARES_SUCCESS) {
+                channel_ = nullptr;
+                // Still usable in per-query mode
+            }
+        }
+
+        initialized_ = true;
     }
 
-    ~ares_library_initializer() = default;
+    ~ares_library_initializer()
+    {
+        if (channel_) {
+            ares_cancel(channel_);
+            while (ares_queue_wait_empty(channel_, 10000) != ARES_SUCCESS) {
+                fprintf(stderr, "c-ares channel %p takes time to cancel\n",
+                        static_cast<void*>(channel_));
+            }
+            ares_destroy(channel_);
+            channel_ = nullptr;
+        }
+    }
 
     ares_library_initializer(const ares_library_initializer&) = delete;
     ares_library_initializer& operator=(const ares_library_initializer&) = delete;
 
     bool initialized_;
+    ares_channel channel_;
 };
 
 /**
@@ -191,7 +246,8 @@ public:
 
     iterator resolve(const query& q, boost::system::error_code& ec)
     {
-        if (!ares_library_initializer::instance().is_initialized()) {
+        auto& init = ares_library_initializer::instance();
+        if (!init.is_initialized()) {
             ec = boost::asio::error::not_connected;
             return iterator();
         }
@@ -209,30 +265,6 @@ public:
             return iterator(endpoints, 0);
         }
 
-        // DNS resolution via c-ares with internal event thread.
-        static const int DNS_TIMEOUT_MS = 1000;
-        static const int DNS_TRIES = 2;
-
-        ares_options options;
-        memset(&options, 0, sizeof(options));
-        options.evsys = ARES_EVSYS_DEFAULT;
-        options.timeout = DNS_TIMEOUT_MS;
-        options.tries = DNS_TRIES;
-
-        ares_channel channel = nullptr;
-        int init_status = ares_init_options(&channel, &options,
-            ARES_OPT_EVENT_THREAD | ARES_OPT_TIMEOUT | ARES_OPT_TRIES);
-
-        if (init_status != ARES_SUCCESS) {
-            ec = boost::system::error_code(init_status, boost::system::system_category());
-            return iterator();
-        }
-
-        resolve_result result_ctx;
-        result_ctx.endpoints = &endpoints;
-        result_ctx.port = port;
-        result_ctx.status = ARES_SUCCESS;
-
         // Setup hints
         ares_addrinfo_hints hints;
         memset(&hints, 0, sizeof(hints));
@@ -240,33 +272,65 @@ public:
         hints.ai_socktype = get_socktype();
         hints.ai_protocol = get_protocol();
 
-        // Start async resolution — c-ares event thread handles all I/O
-        ares_getaddrinfo(channel, q.host_name().c_str(), nullptr, &hints,
-            addrinfo_callback, &result_ctx);
+        resolve_result result_ctx;
+        result_ctx.endpoints = &endpoints;
+        result_ctx.port = port;
+        result_ctx.status = ARES_SUCCESS;
+        result_ctx.done = false;
+        result_ctx.use_condvar = false;
 
-        // Block until done. The wait timeout is a safety backstop, not the
-        // primary timeout — c-ares enforces timeout × tries internally.
-        // Worst case: DNS_TIMEOUT_MS * DNS_TRIES + margin for processing.
-        static const int DNS_WAIT_MS = DNS_TIMEOUT_MS * DNS_TRIES + 500;
-        ares_status_t wait_status = ares_queue_wait_empty(channel, DNS_WAIT_MS);
+        if (init.channel()) {
+            // Shared channel mode: use condvar for per-query synchronization
+            result_ctx.use_condvar = true;
 
-        // If wait timed out, queries are still in-flight in the event thread.
-        // Cancel them and wait for the cancellation callbacks to fire before
-        // destroying — ares_destroy with in-flight queries can crash (SIGBUS).
-        if (wait_status == ARES_ETIMEOUT) {
-            ares_cancel(channel);
-            while (ares_queue_wait_empty(channel, 10000) != ARES_SUCCESS) {
-                fprintf(stderr, "c-ares channel %p takes time to cancel\n",
-                        static_cast<void*>(channel));
+            ares_getaddrinfo(init.channel(), q.host_name().c_str(), nullptr, &hints,
+                addrinfo_callback, &result_ctx);
+
+            // Block until the callback signals completion.
+            // c-ares enforces timeout x tries internally and always fires the
+            // callback, so we can wait indefinitely - state lives on the stack.
+            {
+                std::unique_lock<std::mutex> lock(result_ctx.mtx);
+                result_ctx.cv.wait(lock, [&] { return result_ctx.done; });
             }
-        }
+        } else {
+            // Per-query channel mode (legacy)
+            ares_channel channel = nullptr;
+            ares_options options;
+            memset(&options, 0, sizeof(options));
+            options.evsys = ARES_EVSYS_DEFAULT;
+            options.timeout = ares_library_initializer::DNS_TIMEOUT_MS;
+            options.tries = ares_library_initializer::DNS_TRIES;
 
-        // Cleanup channel (closes all c-ares sockets)
-        ares_destroy(channel);
+            int init_status = ares_init_options(&channel, &options,
+                ARES_OPT_EVENT_THREAD | ARES_OPT_TIMEOUT | ARES_OPT_TRIES);
 
-        if (wait_status == ARES_ETIMEOUT) {
-            ec = boost::asio::error::timed_out;
-            return iterator();
+            if (init_status != ARES_SUCCESS) {
+                ec = boost::system::error_code(init_status, boost::system::system_category());
+                return iterator();
+            }
+
+            ares_getaddrinfo(channel, q.host_name().c_str(), nullptr, &hints,
+                addrinfo_callback, &result_ctx);
+
+            static const int DNS_WAIT_MS =
+                ares_library_initializer::DNS_TIMEOUT_MS * ares_library_initializer::DNS_TRIES + 500;
+            ares_status_t wait_status = ares_queue_wait_empty(channel, DNS_WAIT_MS);
+
+            if (wait_status == ARES_ETIMEOUT) {
+                ares_cancel(channel);
+                while (ares_queue_wait_empty(channel, 10000) != ARES_SUCCESS) {
+                    fprintf(stderr, "c-ares channel %p takes time to cancel\n",
+                            static_cast<void*>(channel));
+                }
+            }
+
+            ares_destroy(channel);
+
+            if (wait_status == ARES_ETIMEOUT) {
+                ec = boost::asio::error::timed_out;
+                return iterator();
+            }
         }
 
         // Map result status
@@ -277,7 +341,7 @@ public:
                     ec = boost::asio::error::host_not_found;
                     break;
                 case ARES_ETIMEOUT:
-                case ARES_EDESTRUCTION:
+                case ARES_ECANCELLED:
                     ec = boost::asio::error::timed_out;
                     break;
                 default:
@@ -298,8 +362,7 @@ public:
 
     void cancel()
     {
-        // No-op: each resolve() uses its own short-lived channel.
-        // Cancellation is handled by ares_destroy() when resolve() completes.
+        // No-op: channel lifecycle is managed internally.
     }
 
 private:
@@ -307,6 +370,10 @@ private:
         std::vector<endpoint_type>* endpoints;
         unsigned short port;
         int status;
+        std::mutex mtx;
+        std::condition_variable cv;
+        bool done;
+        bool use_condvar;
     };
 
     static int get_socktype()
@@ -319,9 +386,8 @@ private:
         return IPPROTO_UDP;
     }
 
-    static void addrinfo_callback(void* arg, int status, int /* timeouts */, ares_addrinfo* result)
+    static void store_results(resolve_result* ctx, int status, ares_addrinfo* result)
     {
-        resolve_result* ctx = static_cast<resolve_result*>(arg);
         ctx->status = status;
 
         if (status == ARES_SUCCESS && result) {
@@ -349,7 +415,24 @@ private:
             }
             ares_freeaddrinfo(result);
         }
+    }
 
+    static void addrinfo_callback(void* arg, int status, int /* timeouts */, ares_addrinfo* result)
+    {
+        resolve_result* ctx = static_cast<resolve_result*>(arg);
+
+        if (ctx->use_condvar) {
+            // Shared channel mode: lock, store, signal
+            {
+                std::lock_guard<std::mutex> lock(ctx->mtx);
+                store_results(ctx, status, result);
+                ctx->done = true;
+            }
+            ctx->cv.notify_one();
+        } else {
+            // Per-query channel mode: just store results
+            store_results(ctx, status, result);
+        }
     }
 
 };

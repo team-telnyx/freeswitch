@@ -1830,6 +1830,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_init(switch_core_flag_t flags, switc
 	runtime.db_handle_timeout = 5000000;
 	runtime.event_heartbeat_interval = 20;
 	runtime.ares_dns_timeout = 1000;
+#ifdef HAVE_CARES
+	runtime.ares_shared_channel = SWITCH_TRUE;
+#endif
 
 	runtime.runlevel++;
 	runtime.dummy_cng_frame.data = runtime.dummy_data;
@@ -2180,6 +2183,10 @@ static void switch_load_core_config(const char *file)
 						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "ares-dns-timeout must be between 100 and 3000 ms\n");
 					}
 
+				} else if (!strcasecmp(var, "ares-shared-channel")) {
+#ifdef HAVE_CARES
+					runtime.ares_shared_channel = switch_true(val);
+#endif
 				} else if (!strcasecmp(var, "multiple-registrations")) {
 					runtime.multiple_registrations = switch_true(val);
 				} else if (!strcasecmp(var, "auto-create-schemas")) {
@@ -2527,7 +2534,29 @@ SWITCH_DECLARE(switch_status_t) switch_core_init_and_modload(switch_core_flag_t 
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CONSOLE, "Bringing up environment.\n");
 #ifdef HAVE_CARES
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CONSOLE, "DNS resolution using c-ares (async)\n");
+	if (runtime.ares_shared_channel) {
+		struct ares_options ares_opts;
+		int ares_optmask = ARES_OPT_EVENT_THREAD | ARES_OPT_TIMEOUT | ARES_OPT_TRIES;
+		int ares_init_status;
+
+		memset(&ares_opts, 0, sizeof(ares_opts));
+		ares_opts.evsys = ARES_EVSYS_DEFAULT;
+		ares_opts.timeout = runtime.ares_dns_timeout;
+		ares_opts.tries = 2;
+
+		ares_init_status = ares_init_options(&runtime.ares_dns_channel, &ares_opts, ares_optmask);
+		if (ares_init_status == ARES_SUCCESS) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CONSOLE,
+							 "DNS resolution using c-ares (async, shared channel)\n");
+		} else {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+							 "c-ares channel initialization failed: %s\n", ares_strerror(ares_init_status));
+			runtime.ares_dns_channel = NULL;
+		}
+	} else {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CONSOLE,
+						 "DNS resolution using c-ares (async, per-query channel)\n");
+	}
 #endif
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CONSOLE, "Loading Modules.\n");
 	if (switch_loadable_module_init(SWITCH_TRUE) != SWITCH_STATUS_SUCCESS) {
@@ -3085,6 +3114,15 @@ SWITCH_DECLARE(switch_core_flag_t) switch_core_flags(void)
 	return runtime.flags;
 }
 
+SWITCH_DECLARE(switch_bool_t) switch_core_ares_shared_channel_enabled(void)
+{
+#ifdef HAVE_CARES
+	return runtime.ares_shared_channel;
+#else
+	return SWITCH_FALSE;
+#endif
+}
+
 SWITCH_DECLARE(switch_bool_t) switch_core_running(void)
 {
 	return runtime.running ? SWITCH_TRUE : SWITCH_FALSE;
@@ -3137,6 +3175,18 @@ SWITCH_DECLARE(switch_status_t) switch_core_destroy(void)
 
 	switch_scheduler_task_thread_stop();
 
+#ifdef HAVE_CARES
+	if (runtime.ares_dns_channel) {
+		ares_cancel(runtime.ares_dns_channel);
+		while (ares_queue_wait_empty(runtime.ares_dns_channel, 10000) != ARES_SUCCESS) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+							 "c-ares channel %p takes time to cancel\n",
+							 (void *)runtime.ares_dns_channel);
+		}
+		ares_destroy(runtime.ares_dns_channel);
+		runtime.ares_dns_channel = NULL;
+	}
+#endif
 	switch_rtp_shutdown();
 	switch_msrp_destroy();
 
