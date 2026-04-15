@@ -6211,6 +6211,9 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 				/ rtp_session->samples_per_second / 2;
 
 			if ((now_us - rtp_session->dtmf_data.out_digit_last_progress_us) < min_us) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+								  "Skipping do_2833 tick: %" SWITCH_TIME_T_FMT "us since last progress < %" SWITCH_TIME_T_FMT "us min\n",
+								  now_us - rtp_session->dtmf_data.out_digit_last_progress_us, min_us);
 				return;
 			}
 		}
