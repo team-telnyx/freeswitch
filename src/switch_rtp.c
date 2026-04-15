@@ -10143,13 +10143,14 @@ fork_done:
 #endif
 
 		/* Apply normalised timestamps before SRTP protection so the authentication
-		   tag covers the correct timestamp value in the RTP header */
+		   tag covers the correct timestamp value in the RTP header.
+		   Commit is deferred until after successful send to avoid advancing
+		   ts_normalised.ts on failed-send paths. */
 		if (rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS) {
 			uint32_t norm_ts = normalised_ts_get_next(rtp_session);
 			send_msg->header.ts = htonl(norm_ts);
 			rtp_session->ts = norm_ts;
 			this_ts = norm_ts;
-			normalised_ts_commit(rtp_session, norm_ts);
 		}
 
 #ifdef ENABLE_SRTP
@@ -10284,6 +10285,10 @@ fork_done:
 
 		rtp_session->last_write_ts = this_ts;
 		rtp_session->flags[SWITCH_RTP_FLAG_RESET] = 0;
+
+		if (rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS) {
+			normalised_ts_commit(rtp_session, this_ts);
+		}
 
 		if (rtp_session->queue_delay) {
 			rtp_session->delay_samples = rtp_session->queue_delay;
