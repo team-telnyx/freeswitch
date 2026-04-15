@@ -9833,7 +9833,9 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 
 		if (m) {
 			rtp_session->flags[SWITCH_RTP_FLAG_RESET] = 1;
-			rtp_session->ts = 0;
+			if (!(rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS)) {
+				rtp_session->ts = 0;
+			}
 		}
 
 		/* If the marker was set, and the timestamp seems to have started over - set a new SSRC, to indicate this is a new stream */
@@ -10161,6 +10163,17 @@ fork_done:
 		}
 #endif
 
+		/* Apply normalised timestamps before SRTP protection so the authentication
+		   tag covers the correct timestamp value in the RTP header.
+		   Commit is deferred until after successful send to avoid advancing
+		   ts_normalised.ts on failed-send paths. */
+		if (rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS) {
+			uint32_t norm_ts = normalised_ts_get_next(rtp_session);
+			send_msg->header.ts = htonl(norm_ts);
+			rtp_session->ts = norm_ts;
+			this_ts = norm_ts;
+		}
+
 #ifdef ENABLE_SRTP
 		switch_mutex_lock(rtp_session->ice_mutex);
 		if (rtp_session->flags[SWITCH_RTP_FLAG_SECURE_SEND]) {
@@ -10293,6 +10306,10 @@ fork_done:
 
 		rtp_session->last_write_ts = this_ts;
 		rtp_session->flags[SWITCH_RTP_FLAG_RESET] = 0;
+
+		if (rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS) {
+			normalised_ts_commit(rtp_session, this_ts);
+		}
 
 		if (rtp_session->queue_delay) {
 			rtp_session->delay_samples = rtp_session->queue_delay;
@@ -11036,34 +11053,11 @@ SWITCH_DECLARE(void) switch_rtp_fork_fire_stop_event(switch_rtp_t *rtp_session)
 
 static switch_status_t switch_rtp_sendto(switch_rtp_t *rtp_session, switch_socket_t *sock, switch_sockaddr_t *where, int32_t flags, rtp_msg_t *send_msg, switch_size_t *len)
 {
-	switch_status_t ret = SWITCH_STATUS_SUCCESS;
-
 	if (!rtp_session) {
 		return SWITCH_STATUS_GENERR;
 	}
 
-	if (rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS) {
-		{
-			uint32_t ts = normalised_ts_get_next(rtp_session);
-
-			if (!where || !send_msg || !len || !*len) {
-				return SWITCH_STATUS_GENERR;
-			}
-#if DEBUG_RTP
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "RTP: NORM ts: %u %s %p/%p\n", ts,
-					rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName", (void*)rtp_session->session, (void*)rtp_session);
-#endif
-			send_msg->header.ts = htonl(ts);
-			ret = switch_socket_sendto(sock, where, 0, (void *) send_msg, len);
-			if (ret != SWITCH_STATUS_SUCCESS) {
-				return ret;
-			}
-			normalised_ts_commit(rtp_session, ts);
-		}
-	} else {
-		return switch_socket_sendto(sock, where, 0, (void *) send_msg, len);
-	}
-	return SWITCH_STATUS_SUCCESS;
+	return switch_socket_sendto(sock, where, 0, (void *) send_msg, len);
 }
 
 SWITCH_DECLARE(switch_status_t) switch_rtp_transcode(switch_codec_t *codec_in, switch_codec_t *codec_out, char *payload_in, uint32_t len_in, char *payload_out, uint32_t *len_out, uint32_t rate_in, uint32_t rate_out)
