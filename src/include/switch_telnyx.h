@@ -28,6 +28,21 @@ typedef switch_bool_t (*switch_telnyx_on_media_timeout_func)(switch_channel_t*, 
 typedef void (*switch_telnyx_channel_event_set_basic_data_func)(switch_channel_t*, switch_event_t*);
 typedef switch_bool_t (*switch_telnyx_on_add_media_bug_func)(switch_media_bug_t**, switch_media_bug_t*, const char*, const char*);
 
+/* Get the NUA handle for a named mod_sofia profile. Returns nua_t* as void*.
+ * Returns NULL if the profile is not found or not running.
+ * The returned pointer is valid as long as the profile is alive. */
+typedef void * (*switch_telnyx_sofia_find_nua_func)(const char *profile_name);
+
+/* Registration handler callback for external registration engines.
+ * When set, mod_sofia dispatches nua_r_register/nua_r_unregister events to this handler
+ * before processing them internally. Sofia-SIP types are passed as void* to avoid
+ * pulling sofia-sip headers into the core.
+ * Returns SWITCH_TRUE if the event was handled, SWITCH_FALSE to fall through to mod_sofia. */
+typedef switch_bool_t (*switch_telnyx_sofia_register_handler_func)(
+	int event, int status, const char *phrase,
+	void *nua, void *nh, void *hmagic,
+	const void *sip, void *tags);
+
 typedef struct switch_telnyx_event_dispatch_s {
 	switch_telnyx_hangup_cause_to_sip_func switch_telnyx_hangup_cause_to_sip;
 	switch_telnyx_sofia_on_init_func switch_telnyx_sofia_on_init;
@@ -47,6 +62,8 @@ typedef struct switch_telnyx_event_dispatch_s {
 	switch_telnyx_on_media_timeout_func switch_telnyx_on_media_timeout;
 	switch_telnyx_channel_event_set_basic_data_func switch_telnyx_channel_event_set_basic_data;
 	switch_telnyx_on_add_media_bug_func switch_telnyx_on_add_media_bug;
+	switch_telnyx_sofia_register_handler_func switch_telnyx_sofia_register_handler;
+	switch_telnyx_sofia_find_nua_func switch_telnyx_sofia_find_nua;
 } switch_telnyx_event_dispatch_t;
 
 SWITCH_DECLARE(void) switch_telnyx_init(switch_memory_pool_t *pool);
@@ -78,6 +95,13 @@ SWITCH_DECLARE(switch_bool_t) switch_telnyx_sip_cause_to_q850(int status, switch
 SWITCH_DECLARE(switch_bool_t) switch_telnyx_sip_on_media_timeout(switch_channel_t* channel, switch_rtp_t* rtp_session);
 SWITCH_DECLARE(void) switch_telnyx_channel_event_set_basic_data(switch_channel_t *channel, switch_event_t *event);
 SWITCH_DECLARE(switch_bool_t) switch_telnyx_on_add_media_bug(switch_media_bug_t **list, switch_media_bug_t *bug, const char* function, const char* target);
+
+SWITCH_DECLARE(void *) switch_telnyx_sofia_find_nua(const char *profile_name);
+
+SWITCH_DECLARE(switch_bool_t) switch_telnyx_sofia_register_handler(
+	int event, int status, const char *phrase,
+	void *nua, void *nh, void *hmagic,
+	const void *sip, void *tags);
 
 SWITCH_END_EXTERN_C
 

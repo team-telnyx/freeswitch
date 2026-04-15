@@ -7046,6 +7046,20 @@ char *sofia_stir_shaken_as_create_identity_header(switch_core_session_t *session
 }
 
 
+/* Return the NUA handle for a named sofia profile */
+static void *sofia_find_nua_by_profile(const char *profile_name)
+{
+	sofia_profile_t *profile = sofia_glue_find_profile(profile_name);
+	void *nua;
+
+	if (!profile) return NULL;
+
+	nua = (void *)profile->nua;
+	sofia_glue_release_profile(profile);
+
+	return nua;
+}
+
 SWITCH_MODULE_LOAD_FUNCTION(mod_sofia_load)
 {
 	switch_chat_interface_t *chat_interface;
@@ -7300,6 +7314,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_sofia_load)
 	
 	//sofia_endpoint_interface->recover_callback = sofia_recover_callback;
 	switch_telnyx_event_dispatch()->switch_telnyx_call_recover = sofia_recover_callback;
+	switch_telnyx_event_dispatch()->switch_telnyx_sofia_find_nua = sofia_find_nua_by_profile;
 
 	management_interface = switch_loadable_module_create_interface(*module_interface, SWITCH_MANAGEMENT_INTERFACE);
 	management_interface->relative_oid = "1001";

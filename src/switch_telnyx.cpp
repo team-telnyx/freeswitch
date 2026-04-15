@@ -246,3 +246,22 @@ switch_bool_t switch_telnyx_on_add_media_bug(switch_media_bug_t **list, switch_m
 	}
 	return SWITCH_FALSE;
 }
+switch_bool_t switch_telnyx_sofia_register_handler(
+	int event, int status, const char *phrase,
+	void *nua, void *nh, void *hmagic,
+	const void *sip, void *tags)
+{
+	if (_event_dispatch.switch_telnyx_sofia_register_handler) {
+		return _event_dispatch.switch_telnyx_sofia_register_handler(
+			event, status, phrase, nua, nh, hmagic, sip, tags);
+	}
+	return SWITCH_FALSE;
+}
+
+void * switch_telnyx_sofia_find_nua(const char *profile_name)
+{
+	if (_event_dispatch.switch_telnyx_sofia_find_nua) {
+		return _event_dispatch.switch_telnyx_sofia_find_nua(profile_name);
+	}
+	return NULL;
+}
