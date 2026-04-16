@@ -40,8 +40,9 @@ typedef void * (*switch_telnyx_sofia_find_nua_func)(const char *profile_name, vo
 typedef void (*switch_telnyx_sofia_release_profile_func)(void *profile_handle);
 
 /* Get the SIP URL for a named mod_sofia profile (e.g. "IP:PORT").
+ * When use_tls is true, returns the TLS IP:PORT instead.
  * Writes into buf up to buflen bytes. Returns SWITCH_STATUS_SUCCESS on success. */
-typedef switch_status_t (*switch_telnyx_sofia_find_profile_url_func)(const char *profile_name, char *buf, switch_size_t buflen);
+typedef switch_status_t (*switch_telnyx_sofia_find_profile_url_func)(const char *profile_name, int use_tls, char *buf, switch_size_t buflen);
 
 /* NUA event handler callback for external modules that own NUA handles.
  *
@@ -119,7 +120,7 @@ SWITCH_DECLARE(switch_bool_t) switch_telnyx_on_add_media_bug(switch_media_bug_t 
 
 SWITCH_DECLARE(void *) switch_telnyx_sofia_find_nua(const char *profile_name, void **profile_handle);
 SWITCH_DECLARE(void) switch_telnyx_sofia_release_profile(void *profile_handle);
-SWITCH_DECLARE(switch_status_t) switch_telnyx_sofia_find_profile_url(const char *profile_name, char *buf, switch_size_t buflen);
+SWITCH_DECLARE(switch_status_t) switch_telnyx_sofia_find_profile_url(const char *profile_name, int use_tls, char *buf, switch_size_t buflen);
 
 SWITCH_DECLARE(switch_bool_t) switch_telnyx_sofia_register_handler(
 	int event, int status, const char *phrase,

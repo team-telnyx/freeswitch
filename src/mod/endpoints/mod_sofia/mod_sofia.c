@@ -7076,17 +7076,23 @@ static void sofia_release_profile_handle(void *profile_handle)
 }
 
 /* Return the SIP URL (sip:mod_sofia@IP:PORT) for a named sofia profile */
-static switch_status_t sofia_find_profile_url(const char *profile_name, char *buf, switch_size_t buflen)
+static switch_status_t sofia_find_profile_url(const char *profile_name, int use_tls, char *buf, switch_size_t buflen)
 {
 	sofia_profile_t *profile = sofia_glue_find_profile(profile_name);
+	const char *ip;
+	int port;
 
 	if (!profile) return SWITCH_STATUS_FALSE;
 
-	if (profile->extsipip) {
-		snprintf(buf, buflen, "%s:%d", profile->extsipip, profile->extsipport);
+	ip = profile->extsipip ? profile->extsipip : profile->sipip;
+
+	if (use_tls) {
+		port = profile->tls_sip_port;
 	} else {
-		snprintf(buf, buflen, "%s:%d", profile->sipip, profile->sip_port);
+		port = profile->extsipip ? profile->extsipport : profile->sip_port;
 	}
+
+	snprintf(buf, buflen, "%s:%d", ip, port);
 
 	sofia_glue_release_profile(profile);
 
