@@ -11765,6 +11765,7 @@ SWITCH_DECLARE(uint32_t) switch_rtp_get_remote_ice_candidates(const switch_rtp_t
 {
 	const switch_rtp_ice_t *ices[2] = { NULL, NULL };
 	const int comp_id_for_ice[2] = { 1, 2 };
+	switch_rtp_t *rtp_nc;   /* cast off const to allow ice_mutex lock */
 	switch_rtp_ice_cand_t *vec = NULL;
 	uint32_t total = 0;
 	int i, cid;
@@ -11779,10 +11780,19 @@ SWITCH_DECLARE(uint32_t) switch_rtp_get_remote_ice_candidates(const switch_rtp_t
 		return 0;
 	}
 
+	rtp_nc = (switch_rtp_t *)rtp;
+
+	/* Hold ice_mutex for the entire read. Otherwise a concurrent
+	 * switch_rtp_internal_add_remote_candidate() can grow cand_idx between the
+	 * size computation and the fill loop, producing a buffer overflow on vec[]
+	 * and heap corruption. */
+	switch_mutex_lock(rtp_nc->ice_mutex);
+
 	ices[0] = rtp->ice.ice_params      ? &rtp->ice      : NULL;  /* RTP  */
 	ices[1] = rtp->rtcp_ice.ice_params ? &rtp->rtcp_ice : NULL;  /* RTCP */
 
 	if (!ices[0] && !ices[1]) {
+		switch_mutex_unlock(rtp_nc->ice_mutex);
 		*out_vec = NULL;
 		return 0;
 	}
@@ -11795,6 +11805,7 @@ SWITCH_DECLARE(uint32_t) switch_rtp_get_remote_ice_candidates(const switch_rtp_t
 	}
 
 	if (!total) {
+		switch_mutex_unlock(rtp_nc->ice_mutex);
 		*out_vec = NULL;
 		return 0;
 	}
@@ -11860,6 +11871,8 @@ SWITCH_DECLARE(uint32_t) switch_rtp_get_remote_ice_candidates(const switch_rtp_t
 			}
 		}
 	}
+
+	switch_mutex_unlock(rtp_nc->ice_mutex);
 
 	*out_vec = vec;
 	return total;
