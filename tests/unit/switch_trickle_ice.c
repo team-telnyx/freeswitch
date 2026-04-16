@@ -3,8 +3,82 @@
 #include <test/switch_test.h>
 #include "switch_telnyx.h"
 #include <sofia-sip/sdp.h>
+#include <stdlib.h> /* free() for toctou stress test */
+#include <inttypes.h> /* PRIu64 for portable uint64_t format */
+
 
 #define USE_SWITCH_RTP_NEW_IPPORT 1
+
+/* ───────── TOCTOU stress test harness ───────── */
+
+#define TOCTOU_WRITERS       8
+#define TOCTOU_READERS       8
+#define TOCTOU_DURATION_MS   5000
+#define TOCTOU_PRIME_CANDS   1   /* minimum to activate ICE state */
+
+typedef struct {
+	switch_rtp_t *rtp;
+	volatile int stop;
+	volatile uint64_t ops;
+	int worker_id;
+} toctou_ctx_t;
+
+static void *SWITCH_THREAD_FUNC toctou_writer_thread(switch_thread_t *thread, void *obj)
+{
+	toctou_ctx_t *ctx = (toctou_ctx_t *)obj;
+	int i = 0;
+	(void)thread;
+
+	while (!ctx->stop) {
+		char cand[256];
+		/* Vary foundation + IP + port so each candidate is unique (dedup bypasses stale ones).
+		 * Stay in the public 50.x.x.x range so ACL accepts them. */
+		int octet3 = (i + ctx->worker_id * 37) % 250;
+		int octet4 = ((i * 7) + ctx->worker_id * 13) % 250 + 1;
+		int port   = 30000 + ((i + ctx->worker_id * 1000) % 30000);
+		uint32_t prio = 2113929471u - ((uint32_t)i & 0xFFFF);
+
+		switch_snprintf(cand, sizeof(cand),
+			"candidate:%d%d 1 udp %u 50.%d.%d.%d %d typ host",
+			ctx->worker_id, i, prio, 114 + (ctx->worker_id & 3), octet3, octet4, port);
+
+		switch_rtp_add_trickle_remote_candidate(ctx->rtp, 0, "0", cand);
+		__sync_fetch_and_add(&ctx->ops, 1);
+		i++;
+	}
+	return NULL;
+}
+
+static void *SWITCH_THREAD_FUNC toctou_reader_thread(switch_thread_t *thread, void *obj)
+{
+	toctou_ctx_t *ctx = (toctou_ctx_t *)obj;
+	(void)thread;
+
+	while (!ctx->stop) {
+		const switch_rtp_ice_cand_t *vec = NULL;
+		uint32_t n, j;
+		volatile int sink = 0;
+
+		n = switch_rtp_get_remote_ice_candidates(ctx->rtp, &vec);
+
+		/* Touch every element — forces the access that would page-fault
+		 * or corrupt on a short-buffer overflow. */
+		for (j = 0; j < n; j++) {
+			sink += vec[j].component_id + vec[j].port;
+		}
+		(void)sink;
+
+		/* This is where glibc detects heap corruption from an overrun write
+		 * during the fill loop. Without PR #559 mutex, this will abort() with
+		 * "double free or corruption" / "malloc_consolidate" under load. */
+		if (vec) {
+			free((void *)vec);
+		}
+
+		__sync_fetch_and_add(&ctx->ops, 1);
+	}
+	return NULL;
+}
 
 extern char *fst_getenv_default(const char *, char *, switch_bool_t);
 static void _silence_unused(void) { (void)fst_getenv_default; }
@@ -778,7 +852,117 @@ FCT_BGN()
 		cleanup_session_media_and_sdp(session, sdp_session, parser);
 	}
 	FCT_TEST_END();
-	
+
+	/* TOCTOU race stress test — PR #559 (TEL-6955).
+	 *
+	 * Repro for the heap corruption bug in switch_rtp_get_remote_ice_candidates():
+	 * concurrent writers grow rtp_session->ice.ice_params->cand_idx between the
+	 * size computation and the fill loop, producing a buffer overrun on the
+	 * returned vec[] and a subsequent double-free / malloc corruption abort.
+	 *
+	 * Without the ice_mutex lock: reliably aborts within seconds on a multi-core box.
+	 * With the fix:                runs for TOCTOU_DURATION_MS and exits cleanly.
+	 *
+	 * Uses a bare RTP session + hand-activated ICE so the test does not depend on
+	 * mod_loopback or a full media handle. */
+	FCT_TEST_BGN(toctou_race_stress_concurrent_trickle)
+	{
+		switch_rtp_t *rtp = NULL;
+		switch_status_t st;
+		const char *err = NULL;
+		ice_t *ice_params = NULL;
+		switch_thread_t *writers[TOCTOU_WRITERS] = {0};
+		switch_thread_t *readers[TOCTOU_READERS] = {0};
+		toctou_ctx_t wctx[TOCTOU_WRITERS];
+		toctou_ctx_t rctx[TOCTOU_READERS];
+		switch_threadattr_t *thd_attr = NULL;
+		uint64_t total_writes = 0, total_reads = 0;
+		int i;
+
+		st = make_real_rtp(pool, &rtp, &err);
+		fst_requires(st == SWITCH_STATUS_SUCCESS);
+		fst_requires(rtp != NULL);
+
+		/* Allocate a pool-owned ice_t. switch_rtp_activate_ice stores the pointer
+		 * on the rtp_session; it must outlive every thread in this test. */
+		ice_params = switch_core_alloc(pool, sizeof(ice_t));
+		fst_requires(ice_params != NULL);
+		memset(ice_params, 0, sizeof(*ice_params));
+		ice_params->ufrag = switch_core_strdup(pool, "test-local-ufrag");
+		ice_params->pwd   = switch_core_strdup(pool, "test-local-pwd-abcdefghij");
+
+		/* Pre-seed cands[0][0] so ICE_VANILLA activation finds a chosen candidate. */
+		ice_params->cands[0][0].con_addr = switch_core_strdup(pool, "50.114.144.1");
+		ice_params->cands[0][0].con_port = 30000;
+		ice_params->cands[0][0].component_id = 1;
+		ice_params->cands[0][0].priority = 2113929471u;
+		ice_params->cands[0][0].foundation = switch_core_strdup(pool, "seed");
+		ice_params->cands[0][0].transport = switch_core_strdup(pool, "udp");
+		ice_params->cands[0][0].cand_type = switch_core_strdup(pool, "host");
+		ice_params->cand_idx[0] = 1;
+		ice_params->chosen[0]   = 0;
+
+		st = switch_rtp_activate_ice(rtp,
+			(char *)"test-local-ufrag",        /* login  (our) */
+			(char *)"test-remote-ufrag",       /* rlogin (peer) */
+			"test-peer-pwd-abcdefghij",        /* password  (peer) */
+			"test-local-pwd-abcdefghij",       /* rpassword (ours) */
+			IPR_RTP,
+			ICE_VANILLA,
+			ice_params);
+		fst_requires(st == SWITCH_STATUS_SUCCESS);
+
+		/* Spawn writer threads. */
+		for (i = 0; i < TOCTOU_WRITERS; i++) {
+			wctx[i].rtp = rtp;
+			wctx[i].stop = 0;
+			wctx[i].ops = 0;
+			wctx[i].worker_id = i;
+			switch_threadattr_create(&thd_attr, pool);
+			switch_thread_create(&writers[i], thd_attr, toctou_writer_thread, &wctx[i], pool);
+		}
+
+		/* Spawn reader threads. */
+		for (i = 0; i < TOCTOU_READERS; i++) {
+			rctx[i].rtp = rtp;
+			rctx[i].stop = 0;
+			rctx[i].ops = 0;
+			rctx[i].worker_id = i;
+			switch_threadattr_create(&thd_attr, pool);
+			switch_thread_create(&readers[i], thd_attr, toctou_reader_thread, &rctx[i], pool);
+		}
+
+		/* Run under load. */
+		switch_sleep(TOCTOU_DURATION_MS * 1000);
+
+		/* Signal stop and join. */
+		for (i = 0; i < TOCTOU_WRITERS; i++) wctx[i].stop = 1;
+		for (i = 0; i < TOCTOU_READERS; i++) rctx[i].stop = 1;
+
+		for (i = 0; i < TOCTOU_WRITERS; i++) {
+			switch_status_t ts = SWITCH_STATUS_SUCCESS;
+			switch_thread_join(&ts, writers[i]);
+			total_writes += wctx[i].ops;
+		}
+		for (i = 0; i < TOCTOU_READERS; i++) {
+			switch_status_t ts = SWITCH_STATUS_SUCCESS;
+			switch_thread_join(&ts, readers[i]);
+			total_reads += rctx[i].ops;
+		}
+
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+			"TOCTOU stress: %" PRIu64 " writes, %" PRIu64 " reads over %d ms across %d writers + %d readers\n",
+			total_writes, total_reads,
+			TOCTOU_DURATION_MS, TOCTOU_WRITERS, TOCTOU_READERS);
+
+		/* Reaching this point without aborting means the heap stayed intact. */
+		fst_check(total_reads > 0);
+		fst_check(total_writes > 0);
+
+		cleanup_rtp(&rtp);
+	}
+	FCT_TEST_END();
+
 	}
 
 	FCT_FIXTURE_SUITE_END();
