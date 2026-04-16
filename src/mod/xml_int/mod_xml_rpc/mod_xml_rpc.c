@@ -1384,7 +1384,7 @@ SWITCH_MODULE_RUNTIME_FUNCTION(mod_xml_rpc_runtime)
 		globals.running = 0;
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to start HTTP Port %d\n", globals.port);
 		xmlrpc_registry_free(globals.registryP);
-		MIMETypeTerm();
+		globals.registryP = NULL;
 
 		switch_core_global_mutex_unlock();
 		return SWITCH_STATUS_TERM;
@@ -1433,16 +1433,19 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_xml_rpc_shutdown)
 	/* Cann't find a way to stop the websockets, use this for a workaround before finding the real one that works */
 	stop_all_websockets();
 
-	/* this makes the worker thread (ServerRun) stop */
-	ServerTerminate(&globals.abyssServer);
+	if (globals.registryP) {
+		/* this makes the worker thread (ServerRun) stop */
+		ServerTerminate(&globals.abyssServer);
 
-	do {
-		switch_yield(100000);
-	} while (globals.running);
+		do {
+			switch_yield(100000);
+		} while (globals.running);
 
-	ServerFree(&globals.abyssServer);
-	xmlrpc_registry_free(globals.registryP);
-	MIMETypeTerm();
+		ServerFree(&globals.abyssServer);
+		xmlrpc_registry_free(globals.registryP);
+		globals.registryP = NULL;
+		MIMETypeTerm();
+	}
 
 	switch_mutex_lock(globals.mutex);
 	
