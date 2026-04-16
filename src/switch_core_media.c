@@ -11163,10 +11163,16 @@ static void gen_ice(switch_core_session_t *session, switch_media_type_t type, co
 
 	if (!zstr(ip)) {
 		engine->ice_out.cands[0][0].con_addr = switch_core_session_strdup(session, ip);
+	} else if (!zstr(engine->local_sdp_ip) && !engine->ice_out.cands[0][0].con_addr) {
+		/* Fallback: use the engine's local SDP IP when caller passes NULL.
+		 * Prevents (null) in ICE candidate lines for inbound SIP with ICE. */
+		engine->ice_out.cands[0][0].con_addr = switch_core_session_strdup(session, engine->local_sdp_ip);
 	}
 
 	if (port) {
 		engine->ice_out.cands[0][0].con_port = port;
+	} else if (engine->local_sdp_port && !engine->ice_out.cands[0][0].con_port) {
+		engine->ice_out.cands[0][0].con_port = engine->local_sdp_port;
 	}
 
 	engine->ice_out.cands[0][0].generation = "0";
