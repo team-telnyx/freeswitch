@@ -1383,6 +1383,7 @@ SWITCH_MODULE_RUNTIME_FUNCTION(mod_xml_rpc_runtime)
 	if (ServerInit(&globals.abyssServer) != TRUE) {
 		globals.running = 0;
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to start HTTP Port %d\n", globals.port);
+		ServerFree(&globals.abyssServer);
 		xmlrpc_registry_free(globals.registryP);
 		globals.registryP = NULL;
 
@@ -1444,8 +1445,9 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_xml_rpc_shutdown)
 		ServerFree(&globals.abyssServer);
 		xmlrpc_registry_free(globals.registryP);
 		globals.registryP = NULL;
-		MIMETypeTerm();
 	}
+
+	MIMETypeTerm();
 
 	switch_mutex_lock(globals.mutex);
 	
