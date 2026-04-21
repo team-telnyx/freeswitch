@@ -1438,9 +1438,17 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_xml_rpc_shutdown)
 		/* this makes the worker thread (ServerRun) stop */
 		ServerTerminate(&globals.abyssServer);
 
-		do {
-			switch_yield(100000);
-		} while (globals.running);
+		{
+			int retries = 100; /* 100 * 100ms = 10s max */
+			while (globals.running && retries-- > 0) {
+				switch_yield(100000);
+			}
+			if (globals.running) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT,
+					"ServerRun did not exit within 10s after ServerTerminate; aborting to allow restart\n");
+				abort();
+			}
+		}
 
 		ServerFree(&globals.abyssServer);
 		xmlrpc_registry_free(globals.registryP);
