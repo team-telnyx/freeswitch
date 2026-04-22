@@ -9331,6 +9331,7 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 		if (r_sdp && sofia_test_flag(tech_pvt, TFLAG_NOSDP_REINVITE)) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Received SDP in ACK. NOSDP Re-INVITE process completion.\n");
 			sofia_clear_flag_locked(tech_pvt, TFLAG_NOSDP_REINVITE);
+			tech_pvt->mparams.hold_laps = 0;
 			if (switch_channel_test_flag(channel, CF_PROXY_MODE) || switch_channel_test_flag(channel, CF_PROXY_MEDIA)) {
 				if (switch_channel_test_flag(channel, CF_PROXY_MEDIA)) {
 					if (sofia_media_activate_rtp(tech_pvt) != SWITCH_STATUS_SUCCESS) {
