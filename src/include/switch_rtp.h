@@ -869,6 +869,7 @@ SWITCH_DECLARE(uint32_t) switch_rtp_get_ms_per_packet(switch_rtp_t *rtp_session)
 SWITCH_DECLARE(uint32_t) switch_rtp_get_us_per_packet(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(switch_bool_t) switch_rtp_using_timer(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(void) switch_rtp_prepare_trickle_ice(switch_rtp_t *rtp_session, ice_proto_t proto, ice_t *ice_params);
+SWITCH_DECLARE(uint32_t) switch_rtp_get_remote_ice_candidates(const switch_rtp_t *rtp, const switch_rtp_ice_cand_t **out_vec);
 SWITCH_DECLARE(uint32_t) switch_rtp_get_new_ssrc(switch_rtp_t *rtp_session);
 /*!
   \}
@@ -886,13 +887,3 @@ SWITCH_END_EXTERN_C
  * For VIM:
  * vim:set softtabstop=4 shiftwidth=4 tabstop=4 noet:
  */
-
-/**
- * Merge remote trickle ICE candidates from RTP ice_params into engine->ice_in under ice_mutex.
- *
- * @param rtp         The RTP session to read candidates from
- * @param session     The core session (for pool allocations via switch_core_session_strdup)
- * @param ice_in      Pointer to the engine's ice_in structure to write into
- * @return            Number of new candidates merged
- */
-SWITCH_DECLARE(int) switch_rtp_merge_remote_ice_candidates_into_engine(switch_rtp_t *rtp, switch_core_session_t *session, ice_t *ice_in);

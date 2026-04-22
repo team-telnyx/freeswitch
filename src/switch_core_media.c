@@ -5148,6 +5148,9 @@ static int trickle_merge_rtp_remote_into_engine(switch_media_handle_t *smh, swit
 	switch_rtp_engine_t *engine;
 	switch_rtp_t *rtp;
 	int added = 0;
+	const switch_rtp_ice_cand_t *srcv = NULL;
+	uint32_t rc = 0;
+
 
 	if (!smh || !session) {
 		return 0;
@@ -5163,8 +5166,63 @@ static int trickle_merge_rtp_remote_into_engine(switch_media_handle_t *smh, swit
 		return 0;
 	}
 
-	/* Merge directly under ice_mutex — no intermediate malloc/free */
-	added = switch_rtp_merge_remote_ice_candidates_into_engine(rtp, session, &engine->ice_in);
+
+	rc = switch_rtp_get_remote_ice_candidates(rtp, &srcv);
+	if (!rc || !srcv) {
+		return 0;
+	}
+
+	{
+		uint32_t i;
+		for (i = 0; i < rc; ++i) {
+			const switch_rtp_ice_cand_t *src = &srcv[i];
+			int comp = src->component_id;
+			int cid;
+			int j, idx;
+			icand_t *dst;
+			icand_t *e;
+
+			if (comp < 1 || comp > 2) {
+				continue;
+			}
+			cid = comp - 1;
+
+			for (j = 0; j < engine->ice_in.cand_idx[cid]; ++j) {
+				e = &engine->ice_in.cands[j][cid];
+				if (e->component_id == comp &&
+				    e->con_addr && !strcmp(e->con_addr, src->ip) &&
+				    e->con_port == (switch_port_t)src->port) {
+					goto next_src;
+				}
+			}
+
+			idx = engine->ice_in.cand_idx[cid];
+			if (idx >= MAX_CAND) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+				                  "Trickle ICE: drop remote cand (foundation=%s %s:%d comp=%d) — capacity full\n",
+				                  src->foundation, src->ip, src->port, comp);
+				goto next_src;
+			}
+
+			dst = &engine->ice_in.cands[idx][cid];
+			dst->foundation   = switch_core_session_strdup(session, src->foundation);
+			dst->component_id = src->component_id;
+			dst->transport    = switch_core_session_strdup(session, src->transport);
+			dst->priority     = (uint32_t)src->priority;
+			dst->con_addr     = switch_core_session_strdup(session, src->ip);
+			dst->con_port     = (switch_port_t)src->port;
+			dst->cand_type    = switch_core_session_strdup(session, src->cand_type);
+			dst->raddr        = zstr(src->rel_addr) ? NULL : switch_core_session_strdup(session, src->rel_addr);
+			dst->rport        = (switch_port_t)src->rel_port;
+			dst->ready        = 1;
+
+			engine->ice_in.cand_idx[cid] = idx + 1;
+			added++;
+
+		next_src:
+			;
+		}
+	}
 
 	if (added) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
@@ -5172,6 +5230,11 @@ static int trickle_merge_rtp_remote_into_engine(switch_media_handle_t *smh, swit
 		                  added,
 		                  type == SWITCH_MEDIA_TYPE_AUDIO ? "audio" :
 		                  type == SWITCH_MEDIA_TYPE_VIDEO ? "video" : "text");
+	}
+
+	/* Free the malloc'd candidate vec from switch_rtp_get_remote_ice_candidates */
+	if (srcv) {
+		free((void *)srcv);
 	}
 
 	return added;

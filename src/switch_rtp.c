@@ -11776,99 +11776,110 @@ SWITCH_DECLARE(void) switch_rtp_prepare_trickle_ice(switch_rtp_t *rtp_session,  
 	switch_mutex_unlock(rtp_session->ice_mutex);
 }
 
-
-SWITCH_DECLARE(int) switch_rtp_merge_remote_ice_candidates_into_engine(switch_rtp_t *rtp, switch_core_session_t *session, ice_t *ice_in)
+SWITCH_DECLARE(uint32_t) switch_rtp_get_remote_ice_candidates(const switch_rtp_t *rtp, const switch_rtp_ice_cand_t **out_vec)
 {
 	const switch_rtp_ice_t *ices[2] = { NULL, NULL };
 	const int comp_id_for_ice[2] = { 1, 2 };
-	int added = 0;
+	switch_rtp_ice_cand_t *vec = NULL;
+	uint32_t total = 0;
 	int i, cid;
 
-	if (!rtp || !session || !ice_in) {
+	if (!rtp || !out_vec) {
 		return 0;
 	}
 
 	if (!rtp->pool) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "switch_rtp_get_remote_ice_candidates(): NULL pool for RTP %p\n", (void *)rtp);
+		*out_vec = NULL;
 		return 0;
 	}
 
-	switch_mutex_lock(rtp->ice_mutex);
-
-	ices[0] = rtp->ice.ice_params      ? &rtp->ice      : NULL;
-	ices[1] = rtp->rtcp_ice.ice_params ? &rtp->rtcp_ice : NULL;
+	ices[0] = rtp->ice.ice_params      ? &rtp->ice      : NULL;  /* RTP  */
+	ices[1] = rtp->rtcp_ice.ice_params ? &rtp->rtcp_ice : NULL;  /* RTCP */
 
 	if (!ices[0] && !ices[1]) {
-		switch_mutex_unlock(rtp->ice_mutex);
+		*out_vec = NULL;
 		return 0;
 	}
 
 	for (i = 0; i < 2; ++i) {
 		const switch_rtp_ice_t *ice = ices[i];
-		int comp_id = comp_id_for_ice[i];
-		uint32_t n, ii;
-
 		if (!ice || !ice->ice_params) continue;
-
 		cid = (ice->proto >= 0 && ice->proto <= 1) ? ice->proto : 0;
-		n = (uint32_t)ice->ice_params->cand_idx[cid];
+		total += (uint32_t)ice->ice_params->cand_idx[cid];
+	}
 
-		for (ii = 0; ii < n; ++ii) {
-			const char *found = ice->ice_params->cands[ii][cid].foundation;
-			const char *addr  = ice->ice_params->cands[ii][cid].con_addr;
-			switch_port_t port = ice->ice_params->cands[ii][cid].con_port;
-			uint32_t prio      = ice->ice_params->cands[ii][cid].priority;
-			const char *ctype  = ice->ice_params->cands[ii][cid].cand_type;
-			const char *transport = ice->ice_params->cands[ii][cid].transport;
-			const char *raddr  = ice->ice_params->cands[ii][cid].raddr;
-			switch_port_t rport = ice->ice_params->cands[ii][cid].rport;
-			int engine_cid = comp_id - 1;
-			int j, idx;
-			icand_t *dst, *e;
+	if (!total) {
+		*out_vec = NULL;
+		return 0;
+	}
 
-			if (engine_cid < 0 || engine_cid > 1) continue;
+	/* Use malloc: vector is short-lived within caller scope. Pool alloc
+ 	 * isn’t freed and seems to corrupt the pool on repeated trickle rechecks. */
+	vec = (switch_rtp_ice_cand_t *)malloc(total * sizeof(*vec));
+	switch_assert(vec);
+	memset(vec, 0, total * sizeof(*vec));
 
-			/* Dedup: skip if already in engine list */
-			for (j = 0; j < ice_in->cand_idx[engine_cid]; ++j) {
-				e = &ice_in->cands[j][engine_cid];
-				if (e->component_id == comp_id &&
-				    e->con_addr && addr && !strcmp(e->con_addr, addr) &&
-				    e->con_port == port) {
-					goto next_merge_cand;
+	{
+		uint32_t k = 0;
+		for (i = 0; i < 2; ++i) {
+			const switch_rtp_ice_t *ice = ices[i];
+			int comp_id = comp_id_for_ice[i];
+			if (!ice || !ice->ice_params) continue;
+
+			cid = (ice->proto >= 0 && ice->proto <= 1) ? ice->proto : 0;
+			{
+				uint32_t n = (uint32_t)ice->ice_params->cand_idx[cid];
+				uint32_t ii;
+				for (ii = 0; ii < n; ++ii) {
+					const char *found = ice->ice_params->cands[ii][cid].foundation;
+					const char *addr  = ice->ice_params->cands[ii][cid].con_addr;
+					switch_port_t port = ice->ice_params->cands[ii][cid].con_port;
+					uint32_t prio      = ice->ice_params->cands[ii][cid].priority;
+					const char *ctype  = ice->ice_params->cands[ii][cid].cand_type;
+					const char *transport  = ice->ice_params->cands[ii][cid].transport;
+					const char *raddr  = ice->ice_params->cands[ii][cid].raddr;
+					switch_port_t rport = ice->ice_params->cands[ii][cid].rport;
+
+					memset(&vec[k], 0, sizeof(vec[k]));
+
+					vec[k].component_id = comp_id;
+
+					if (found) {
+						switch_copy_string(vec[k].foundation, found, sizeof(vec[k].foundation));
+					}
+
+					switch_copy_string(vec[k].transport, (transport && *transport) ? transport : "udp", sizeof(vec[k].transport));
+
+					vec[k].priority = (unsigned long)prio;
+
+					if (addr) {
+						switch_copy_string(vec[k].ip, addr, sizeof(vec[k].ip));
+					}
+					vec[k].port = (int)port;
+
+					if (ctype) {
+						switch_copy_string(vec[k].cand_type, ctype, sizeof(vec[k].cand_type));
+					}
+
+					if (raddr) {
+						switch_copy_string(vec[k].rel_addr, raddr, sizeof(vec[k].rel_addr));
+					} else {
+						vec[k].rel_addr[0] = '\0';
+					}
+					
+					vec[k].rel_port = (int)rport;
+
+					++k;
 				}
 			}
-
-			idx = ice_in->cand_idx[engine_cid];
-			if (idx >= MAX_CAND) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-					"Trickle ICE merge: capacity full (%d/%d), dropping %s:%d comp=%d\n",
-					idx, MAX_CAND, addr ? addr : "?", (int)port, comp_id);
-				goto next_merge_cand;
-			}
-
-			dst = &ice_in->cands[idx][engine_cid];
-			dst->foundation   = found ? switch_core_session_strdup(session, found) : NULL;
-			dst->component_id = comp_id;
-			dst->transport    = transport ? switch_core_session_strdup(session, transport) : NULL;
-			dst->priority     = prio;
-			dst->con_addr     = addr ? switch_core_session_strdup(session, addr) : NULL;
-			dst->con_port     = port;
-			dst->cand_type    = ctype ? switch_core_session_strdup(session, ctype) : NULL;
-			dst->raddr        = raddr ? switch_core_session_strdup(session, raddr) : NULL;
-			dst->rport        = rport;
-			dst->ready        = 1;
-
-			ice_in->cand_idx[engine_cid] = idx + 1;
-			added++;
-
-		next_merge_cand:
-			;
 		}
 	}
 
-	switch_mutex_unlock(rtp->ice_mutex);
-
-	return added;
+	*out_vec = vec;
+	return total;
 }
+
 static inline switch_channel_t *cand_get_channel(const switch_rtp_t *rtp_session)
 {
 	switch_channel_t *ch;
