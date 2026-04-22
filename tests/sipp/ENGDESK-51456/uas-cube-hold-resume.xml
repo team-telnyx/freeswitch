@@ -1,0 +1,288 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+
+<!-- UAS scenario simulating CUBE behavior with offerless re-INVITEs.
+     Tests ENGDESK-51456: B2BUA RTP resume after hold/resume.
+
+     Call flow:
+       1. Receive INVITE, send 200 OK (sendrecv)
+       2. Receive ACK
+       3. Send re-INVITE (CSeq 101, SDP sendrecv) → expect 200 OK + ACK
+       4. Send offerless re-INVITE (CSeq 102, no SDP body) → expect 200 OK with SDP
+       5. Send ACK with a=sendonly (CUBE holds)
+       6. Wait ~2 seconds
+       7. Send offerless re-INVITE (CSeq 103, no SDP body) → expect 200 OK with SDP
+       8. Send ACK with NO direction attribute (implicit sendrecv = resume)
+       9. Wait ~5 seconds to verify RTP flows
+      10. Send BYE
+
+     Usage:
+       sipp -sf uas-cube-hold-resume.xml -i <local_ip> -p <local_port> -recv_timeout 10000 -trace_msg
+-->
+
+<scenario name="UAS_CUBE_Hold_Resume">
+  <!-- Global variables -->
+  <Global variables>
+    <var name="remote_ip" />
+    <var name="remote_port" />
+    <var name="call_id" />
+    <var name="cseq_num" />
+  </Global>
+
+  <!-- ===== Phase 1: Receive initial INVITE ===== -->
+  <recv request="INVITE" crlf="true">
+    <action>
+      <ereg regexp=".*" search_in="hdr" header="Call-ID:" assign_to="call_id" />
+      <ereg regexp=".*" search_in="hdr" header="CSeq:" assign_to="cseq_num" />
+    </action>
+  </recv>
+
+  <!-- Send 200 OK with SDP (sendrecv — no a= direction attribute) -->
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_From:]
+      [last_To:];tag=[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port]>
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=- 1234567890 1234567890 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[local_ip_type] [local_ip]
+      t=0 0
+      m=audio [local_port] RTP/AVP 0 8 101
+      a=rtpmap:0 PCMU/8000
+      a=rtpmap:8 PCMA/8000
+      a=rtpmap:101 telephone-event/8000
+      a=sendrecv
+
+    ]]>
+  </send>
+
+  <!-- Receive ACK -->
+  <recv request="ACK" crlf="true" />
+
+  <!-- Wait a moment before sending re-INVITE -->
+  <pause milliseconds="1000" />
+
+  <!-- ===== Phase 2: Send re-INVITE with SDP (sendrecv) — normal re-INVITE ===== -->
+  <send retrans="500">
+    <![CDATA[
+      INVITE sip:[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK-cube-reinv1-[call_number]
+      From: "[local_ip]" <sip:[local_ip]:[local_port]>;tag=[call_number]
+      To: "[remote_ip]" <sip:[remote_ip]:[remote_port]>;tag=[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 101 INVITE
+      Contact: <sip:[local_ip]:[local_port]>
+      Max-Forwards: 70
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=- 1234567890 1234567891 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[local_ip_type] [local_ip]
+      t=0 0
+      m=audio [local_port] RTP/AVP 0 8 101
+      a=rtpmap:0 PCMU/8000
+      a=rtpmap:8 PCMA/8000
+      a=rtpmap:101 telephone-event/8000
+      a=sendrecv
+
+    ]]>
+  </send>
+
+  <!-- Expect 200 OK with SDP -->
+  <recv response="200" crlf="true">
+    <action>
+      <ereg regexp=".*" search_in="hdr" header="To:" assign_to="peer_tag_param" />
+    </action>
+  </recv>
+
+  <!-- Send ACK for the re-INVITE -->
+  <send>
+    <![CDATA[
+      ACK sip:[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK-cube-ack1-[call_number]
+      From: "[local_ip]" <sip:[local_ip]:[local_port]>;tag=[call_number]
+      To: "[remote_ip]" <sip:[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 101 ACK
+      Contact: <sip:[local_ip]:[local_port]>
+      Max-Forwards: 70
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <!-- Wait before offerless re-INVITE -->
+  <pause milliseconds="1000" />
+
+  <!-- ===== Phase 3: Send OFFERLESS re-INVITE (no SDP body) ===== -->
+  <send retrans="500">
+    <![CDATA[
+      INVITE sip:[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK-cube-nosdp1-[call_number]
+      From: "[local_ip]" <sip:[local_ip]:[local_port]>;tag=[call_number]
+      To: "[remote_ip]" <sip:[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 102 INVITE
+      Contact: <sip:[local_ip]:[local_port]>
+      Max-Forwards: 70
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <!-- Expect 200 OK with SDP (B2BUA provides the offer) -->
+  <recv response="200" crlf="true" />
+
+  <!-- Send ACK with a=sendonly — CUBE puts call on HOLD -->
+  <send>
+    <![CDATA[
+      ACK sip:[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK-cube-ack2-[call_number]
+      From: "[local_ip]" <sip:[local_ip]:[local_port]>;tag=[call_number]
+      To: "[remote_ip]" <sip:[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 102 ACK
+      Contact: <sip:[local_ip]:[local_port]>
+      Max-Forwards: 70
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=- 1234567890 1234567892 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[local_ip_type] [local_ip]
+      t=0 0
+      m=audio [local_port] RTP/AVP 0 8 101
+      a=rtpmap:0 PCMU/8000
+      a=rtpmap:8 PCMA/8000
+      a=rtpmap:101 telephone-event/8000
+      a=sendonly
+
+    ]]>
+  </send>
+
+  <!-- Wait ~2 seconds while call is on hold -->
+  <pause milliseconds="2000" />
+
+  <!-- ===== Phase 4: Send another OFFERLESS re-INVITE (resume) ===== -->
+  <send retrans="500">
+    <![CDATA[
+      INVITE sip:[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK-cube-nosdp2-[call_number]
+      From: "[local_ip]" <sip:[local_ip]:[local_port]>;tag=[call_number]
+      To: "[remote_ip]" <sip:[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 103 INVITE
+      Contact: <sip:[local_ip]:[local_port]>
+      Max-Forwards: 70
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <!-- Expect 200 OK with SDP (B2BUA provides the offer again) -->
+  <recv response="200" crlf="true" />
+
+  <!-- Send ACK with NO direction attribute — implicit sendrecv = RESUME -->
+  <send>
+    <![CDATA[
+      ACK sip:[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK-cube-ack3-[call_number]
+      From: "[local_ip]" <sip:[local_ip]:[local_port]>;tag=[call_number]
+      To: "[remote_ip]" <sip:[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 103 ACK
+      Contact: <sip:[local_ip]:[local_port]>
+      Max-Forwards: 70
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=- 1234567890 1234567893 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[local_ip_type] [local_ip]
+      t=0 0
+      m=audio [local_port] RTP/AVP 0 8 101
+      a=rtpmap:0 PCMU/8000
+      a=rtpmap:8 PCMA/8000
+      a=rtpmap:101 telephone-event/8000
+
+    ]]>
+  </send>
+
+  <!-- Wait ~5 seconds to verify RTP continues flowing both ways -->
+  <pause milliseconds="5000" />
+
+  <!-- ===== Phase 5: End the call ===== -->
+  <send>
+    <![CDATA[
+      BYE sip:[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK-cube-bye-[call_number]
+      From: "[local_ip]" <sip:[local_ip]:[local_port]>;tag=[call_number]
+      To: "[remote_ip]" <sip:[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 104 BYE
+      Contact: <sip:[local_ip]:[local_port]>
+      Max-Forwards: 70
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <recv response="200" crlf="true" />
+
+  <!-- Handle unexpected BYE from far end -->
+  <recv request="BYE" crlf="true" optional="true" />
+  <send optional="true">
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <!-- Keep-alive: handle re-INVITEs from B2BUA side -->
+  <recv request="INVITE" crlf="true" optional="true" />
+  <send optional="true">
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_From:]
+      [last_To:];tag=[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port]>
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=- 1234567890 1234567894 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[local_ip_type] [local_ip]
+      t=0 0
+      m=audio [local_port] RTP/AVP 0 8 101
+      a=rtpmap:0 PCMU/8000
+      a=rtpmap:8 PCMA/8000
+      a=rtpmap:101 telephone-event/8000
+      a=sendrecv
+
+    ]]>
+  </send>
+  <recv request="ACK" crlf="true" optional="true" />
+
+</scenario>

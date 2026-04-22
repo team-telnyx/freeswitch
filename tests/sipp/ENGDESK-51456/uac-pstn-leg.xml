@@ -1,0 +1,154 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+
+<!-- UAC scenario simulating the PSTN/ATT leg connecting through B2BUA.
+     Tests ENGDESK-51456: B2BUA RTP resume after hold/resume.
+
+     This is the simple leg — it sends INVITE, stays in call sending/receiving
+     RTP throughout (including during hold/resume on the CUBE side), and
+     receives BYE.
+
+     Usage:
+       sipp -sf uac-pstn-leg.xml -i <local_ip> -p <local_port> <target_ip>:<target_port> -s <dial_number> -recv_timeout 10000 -trace_msg
+-->
+
+<scenario name="UAC_PSTN_Leg">
+  <!-- ===== Phase 1: Send INVITE ===== -->
+  <send retrans="500">
+    <![CDATA[
+      INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK-pstn-[call_number]
+      From: "PSTN Leg" <sip:[local_ip]:[local_port]>;tag=[call_number]
+      To: <sip:[service]@[remote_ip]:[remote_port]>
+      Call-ID: [call_id]
+      CSeq: 1 INVITE
+      Contact: <sip:[local_ip]:[local_port]>
+      Max-Forwards: 70
+      Allow: INVITE, ACK, BYE, CANCEL, OPTIONS, INFO, UPDATE
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=- 9876543210 9876543210 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[local_ip_type] [local_ip]
+      t=0 0
+      m=audio [local_port] RTP/AVP 0 8 101
+      a=rtpmap:0 PCMU/8000
+      a=rtpmap:8 PCMA/8000
+      a=rtpmap:101 telephone-event/8000
+      a=sendrecv
+
+    ]]>
+  </send>
+
+  <!-- Expect 100 Trying (optional) -->
+  <recv response="100" optional="true" crlf="true" />
+
+  <!-- Expect 180 Ringing (optional) -->
+  <recv response="180" optional="true" crlf="true" />
+
+  <!-- Expect 200 OK with SDP -->
+  <recv response="200" crlf="true">
+    <action>
+      <ereg regexp=".*" search_in="hdr" header="To:" assign_to="peer_tag_param" />
+    </action>
+  </recv>
+
+  <!-- Send ACK -->
+  <send>
+    <![CDATA[
+      ACK sip:[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK-pstn-ack-[call_number]
+      From: "PSTN Leg" <sip:[local_ip]:[local_port]>;tag=[call_number]
+      To: <sip:[service]@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 1 ACK
+      Contact: <sip:[local_ip]:[local_port]>
+      Max-Forwards: 70
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <!-- Stay in call for 20 seconds, sending/receiving RTP.
+       This covers the entire hold/resume cycle on the CUBE side.
+       SIPp will send RTP packets during this pause. -->
+  <pause milliseconds="20000" />
+
+  <!-- Handle re-INVITE from B2BUA (B2BUA may re-INVITE during hold/resume) -->
+  <recv request="INVITE" crlf="true" optional="true" />
+  <send optional="true">
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_From:]
+      [last_To:];tag=[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port]>
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=- 9876543210 9876543211 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[local_ip_type] [local_ip]
+      t=0 0
+      m=audio [local_port] RTP/AVP 0 8 101
+      a=rtpmap:0 PCMU/8000
+      a=rtpmap:8 PCMA/8000
+      a=rtpmap:101 telephone-event/8000
+      a=sendrecv
+
+    ]]>
+  </send>
+  <recv request="ACK" crlf="true" optional="true" />
+
+  <!-- Receive BYE from B2BUA (CUBE side ended the call) -->
+  <recv request="BYE" crlf="true" />
+
+  <!-- Send 200 OK for BYE -->
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <!-- Handle unexpected re-INVITEs during call -->
+  <recv request="INVITE" crlf="true" optional="true" />
+  <send optional="true">
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_From:]
+      [last_To:];tag=[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port]>
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=- 9876543210 9876543212 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[local_ip_type] [local_ip]
+      t=0 0
+      m=audio [local_port] RTP/AVP 0 8 101
+      a=rtpmap:0 PCMU/8000
+      a=rtpmap:8 PCMA/8000
+      a=rtpmap:101 telephone-event/8000
+      a=sendrecv
+
+    ]]>
+  </send>
+  <recv request="ACK" crlf="true" optional="true" />
+
+</scenario>
