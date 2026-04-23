@@ -7480,9 +7480,10 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 					switch_core_media_set_smode(smh->session, SWITCH_MEDIA_TYPE_AUDIO, sdp_media_flow(sdp_recvonly), sdp_type);
 				} else if (recvonly) {
 					switch_core_media_set_smode(smh->session, SWITCH_MEDIA_TYPE_AUDIO, sdp_media_flow(sdp_sendonly), sdp_type);
-				} else {
+				} else if (switch_true(switch_channel_get_variable(session->channel, "media_resume_on_hold"))) {
 					/* RFC 3264 §5.1: absent a= direction = sendrecv. Reset smode so a
-					 * previous sendonly/recvonly answer doesn't latch across re-INVITEs. */
+					 * previous sendonly/recvonly answer doesn't latch across re-INVITEs.
+					 * Only when media_resume_on_hold is set on the channel. */
 					switch_core_media_set_smode(smh->session, SWITCH_MEDIA_TYPE_AUDIO, sdp_media_flow(sdp_sendrecv), sdp_type);
 				}
 			}
