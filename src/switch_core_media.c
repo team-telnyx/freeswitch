@@ -7985,6 +7985,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 					pmap->codec_ms = mimp->microseconds_per_packet / 1000;
 					pmap->bitrate = mimp->bits_per_second;
 					pmap->channels = mimp->number_of_channels;
+					pmap->always_emit_channels_in_rtpmap = mimp->always_emit_channels_in_rtpmap;
 
 					if (!strcasecmp((char *) mmap->rm_encoding, "opus")) {
 						// Set adv_channels to what remote advertised, not based on our internal channels
@@ -12773,7 +12774,7 @@ static void generate_m(switch_core_session_t *session, char *buf, size_t buflen,
 		if (smh->ianacodes[i] > 95 || switch_channel_test_flag(session->channel, CF_VERBOSE_SDP)) {
 			int channels = get_channels(imp->iananame, imp->number_of_channels);
 
-			if (channels > 1) {
+			if (channels > 1 || imp->always_emit_channels_in_rtpmap) {
 				switch_snprintf(buf + strlen(buf), buflen - strlen(buf), "a=rtpmap:%d %s/%d/%d\r\n", smh->ianacodes[i], imp->iananame, rate, channels);
 
 			} else {
@@ -13661,7 +13662,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 			a_engine->cur_payload_map->adv_channels = get_channels(a_engine->cur_payload_map->rm_encoding, 1);
 		}
 
-		if (a_engine->cur_payload_map->adv_channels > 1) {
+		if (a_engine->cur_payload_map->adv_channels > 1 || a_engine->cur_payload_map->always_emit_channels_in_rtpmap) {
 			switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=rtpmap:%d %s/%d/%d\r\n",
 							a_engine->cur_payload_map->pt, a_engine->cur_payload_map->rm_encoding, rate, a_engine->cur_payload_map->adv_channels);
 		} else {
@@ -14187,7 +14188,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 						//		red = ianacode;
 						//}
 
-						if (channels > 1) {
+						if (channels > 1 || imp->always_emit_channels_in_rtpmap) {
 							switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=rtpmap:%d %s/%d/%d\r\n", ianacode, imp->iananame,
 											imp->samples_per_second, channels);
 						} else {

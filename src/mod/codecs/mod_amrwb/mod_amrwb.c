@@ -932,6 +932,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_amrwb_load)
 										 SWITCH_CODEC_TYPE_AUDIO, 100, "AMR-WB", default_fmtp_oa,
 										 16000, 16000, 23850, 20000, 320, 640, 0, 1, 1,
 										 switch_amrwb_init, switch_amrwb_encode, switch_amrwb_decode, switch_amrwb_destroy);
+	codec_interface->implementations->always_emit_channels_in_rtpmap = SWITCH_TRUE;
 #ifndef AMRWB_PASSTHROUGH
 	codec_interface->implementations->codec_control = switch_amrwb_control;
 	codec_interface->implementations->matches_fmtp = matches_fmtp;
@@ -946,6 +947,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_amrwb_load)
 										 SWITCH_CODEC_TYPE_AUDIO, 110, "AMR-WB", default_fmtp_be,
 										 16000, 16000, 23850, 20000, 320, 640, 0, 1, 1,
 										 switch_amrwb_init, switch_amrwb_encode, switch_amrwb_decode, switch_amrwb_destroy);
+	codec_interface->implementations->always_emit_channels_in_rtpmap = SWITCH_TRUE;
 #ifndef AMRWB_PASSTHROUGH
 	codec_interface->implementations->codec_control = switch_amrwb_control;
 	codec_interface->implementations->matches_fmtp = matches_fmtp;

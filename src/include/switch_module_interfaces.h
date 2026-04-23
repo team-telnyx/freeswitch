@@ -771,6 +771,8 @@ struct switch_codec_implementation {
 	uint32_t impl_id;
 	char *modname;
 	struct switch_codec_implementation *next;
+	/*! always write /channels in rtpmap even when channels == 1 (strict IMS peers) */
+	switch_bool_t always_emit_channels_in_rtpmap;
 };
 
 /*! \brief Top level module interface to implement a series of codec implementations */

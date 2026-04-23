@@ -2820,6 +2820,8 @@ typedef struct payload_map_s {
 
 	struct payload_map_s *next;
 
+	switch_bool_t always_emit_channels_in_rtpmap;
+
 } payload_map_t;
 
 typedef enum {
