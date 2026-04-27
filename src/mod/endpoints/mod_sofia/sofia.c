@@ -2532,16 +2532,15 @@ void sofia_event_callback(nua_event_t event,
 	 * consume the event, preventing mod_sofia from misinterpreting the handle's
 	 * magic pointer as a sofia_private_t.
 	 *
-	 * Pre-filter: only dispatch events that could belong to external handles.
-	 * Register/unregister responses are the primary use case. We also dispatch
-	 * inbound events (nua_i_*) on handles with non-NULL sofia_private, as
-	 * Sofia-SIP may generate outbound-related events (e.g. nua_i_outbound).
-	 * Call-path events (INVITE, BYE, ACK) on mod_sofia's own handles bypass
-	 * this entirely for zero overhead on the hot path. */
+	 * Pre-filter: only dispatch registration-related events that external handles
+	 * receive. Call-path events (INVITE, BYE, ACK) on mod_sofia's own handles
+	 * bypass this entirely for zero overhead on the hot path.
+	 *
+	 * NOTE: external modules that bind NUA handles receiving events outside this
+	 * set must add their event types here, or risk sofia_private misinterpretation. */
 	if (sofia_private &&
 		(event == nua_r_register || event == nua_r_unregister ||
-		 event == nua_r_authenticate ||
-		 event == nua_i_outbound || event == nua_i_register)) {
+		 event == nua_r_authenticate || event == nua_i_outbound)) {
 		if (switch_telnyx_sofia_register_handler(
 				(int)event, status, phrase,
 				(void *)nua, (void *)nh, (void *)sofia_private,

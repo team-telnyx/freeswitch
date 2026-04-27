@@ -31,33 +31,42 @@ typedef switch_bool_t (*switch_telnyx_on_add_media_bug_func)(switch_media_bug_t*
 /* Acquire a ref-counted NUA handle for a named mod_sofia profile.
  * Returns nua_t* as void*. The caller MUST call switch_telnyx_sofia_release_profile()
  * when done using the NUA pointer to release the read-lock on the profile.
- * The profile_handle output parameter receives an opaque handle that must be
- * passed to the release function. Returns NULL if profile is not found/running. */
+ * The profile_handle output parameter is required and receives an opaque handle
+ * that must be passed to the release function. Returns NULL if profile is not
+ * found/running or if profile_handle is NULL.
+ *
+ * LIFETIME: hold profile_handle only for the duration of a single NUA operation.
+ * Do NOT cache the NUA pointer or profile_handle across sleeps or blocking calls
+ * -- re-acquire on each use and release before blocking. Holding the read-lock
+ * indefinitely blocks profile restarts and shutdown. */
 typedef void * (*switch_telnyx_sofia_find_nua_func)(const char *profile_name, void **profile_handle);
 
 /* Release the profile read-lock acquired by switch_telnyx_sofia_find_nua().
  * Must be called once for every successful find_nua call. */
 typedef void (*switch_telnyx_sofia_release_profile_func)(void *profile_handle);
 
-/* Get the SIP URL for a named mod_sofia profile (e.g. "IP:PORT").
- * When use_tls is true, returns the TLS IP:PORT instead.
- * Writes into buf up to buflen bytes. Returns SWITCH_STATUS_SUCCESS on success. */
+/* Get the advertised host:port for a named mod_sofia profile.
+ * Uses ext-sip-ip/ext-sip-port when configured, otherwise the bound address.
+ * When use_tls is true, returns the TLS port (requires PFLAG_TLS on the profile).
+ * IPv6 addresses are bracket-wrapped per RFC 3986.
+ * Writes into buf up to buflen bytes. Returns SWITCH_STATUS_SUCCESS on success,
+ * SWITCH_STATUS_FALSE on error (profile not found, TLS not configured, truncation). */
 typedef switch_status_t (*switch_telnyx_sofia_find_profile_url_func)(const char *profile_name, int use_tls, char *buf, switch_size_t buflen);
 
 /* NUA event handler callback for external modules that own NUA handles.
  *
- * When set, mod_sofia dispatches ALL NUA events to this handler before its own
- * processing. This is necessary because external modules bind their own structs
- * (not sofia_private_t) to NUA handles — if mod_sofia processed these events,
- * it would dereference the wrong struct type.
+ * When set, mod_sofia dispatches registration-related NUA events to this handler
+ * before its own processing. This is necessary because external modules bind their
+ * own structs (not sofia_private_t) to NUA handles -- if mod_sofia processed these
+ * events, it would dereference the wrong struct type.
  *
  * The handler identifies its own handles via a magic sentinel in hmagic and
  * returns SWITCH_TRUE to consume the event, SWITCH_FALSE to fall through.
  *
- * Performance: mod_sofia pre-filters by event type — only register/unregister
- * responses and inbound events on handles with non-NULL hmagic are dispatched.
- * Call-path events (INVITE, BYE, ACK, etc.) on mod_sofia's own handles are
- * never dispatched to this handler. */
+ * Dispatched events: nua_r_register, nua_r_unregister, nua_r_authenticate,
+ * nua_i_outbound. Call-path events (INVITE, BYE, ACK, etc.) are never dispatched.
+ * External modules that bind handles receiving events outside this set must update
+ * the pre-filter in sofia_event_callback(). */
 typedef switch_bool_t (*switch_telnyx_sofia_register_handler_func)(
 	int event, int status, const char *phrase,
 	void *nua, void *nh, void *hmagic,
@@ -130,4 +139,3 @@ SWITCH_DECLARE(switch_bool_t) switch_telnyx_sofia_register_handler(
 SWITCH_END_EXTERN_C
 
 #endif /* SWITCH_TELNYX_H */
-
