@@ -6882,6 +6882,11 @@ static switch_bool_t switch_core_media_bundle_negotiated(const switch_media_hand
 	return smh && smh->bundle.state == SWITCH_BUNDLE_STATE_ACCEPTED ? SWITCH_TRUE : SWITCH_FALSE;
 }
 
+static switch_bool_t switch_core_media_engine_owns_rtp(const switch_rtp_engine_t *engine)
+{
+	return engine && !engine->bundled_with_audio ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
 static void switch_core_media_bundle_populate_from_sdp(switch_media_handle_t *smh, sdp_session_t *sdp, switch_sdp_type_t sdp_type)
 {
 	switch_channel_t *channel;
@@ -11214,8 +11219,10 @@ SWITCH_DECLARE(void) switch_core_media_deactivate_rtp(switch_core_session_t *ses
 	}
 
 	if (v_engine->rtp_session) {
-		if (!v_engine->bundled_with_audio) {
+		if (switch_core_media_engine_owns_rtp(v_engine)) {
 			switch_rtp_destroy(&v_engine->rtp_session);
+		} else {
+			v_engine->rtp_session = NULL;
 		}
 	} else if (v_engine->local_sdp_port) {
 		switch_rtp_release_port(smh->mparams->rtpip, v_engine->local_sdp_port);
@@ -12388,7 +12395,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 
 		if (switch_channel_test_flag(session->channel, CF_VIDEO_POSSIBLE) && v_engine->cur_payload_map->rm_encoding && v_engine->cur_payload_map->remote_sdp_port) {
 			/******************************************************************************************/
-			if (v_engine->rtp_session && is_reinvite) {
+			if (v_engine->rtp_session && is_reinvite && switch_core_media_engine_owns_rtp(v_engine)) {
 				//const char *ip = switch_channel_get_variable(session->channel, SWITCH_LOCAL_MEDIA_IP_VARIABLE);
 				//const char *port = switch_channel_get_variable(session->channel, SWITCH_LOCAL_MEDIA_PORT_VARIABLE);
 				char *remote_host = switch_rtp_get_remote_host(v_engine->rtp_session);
@@ -12424,7 +12431,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 			switch_channel_set_variable(session->channel, SWITCH_LOCAL_VIDEO_PORT_VARIABLE, tmp);
 
 
-			if (v_engine->rtp_session && is_reinvite) {
+			if (v_engine->rtp_session && is_reinvite && switch_core_media_engine_owns_rtp(v_engine)) {
 				const char *rport = NULL;
 				switch_port_t remote_rtcp_port = v_engine->remote_rtcp_port;
 				//switch_channel_clear_flag(session->channel, CF_REINVITE);
@@ -12527,6 +12534,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 			if (switch_core_media_bundle_negotiated(smh) && v_engine->rtcp_mux > 0 && a_engine->rtp_session) {
 				v_engine->rtp_session = a_engine->rtp_session;
 				v_engine->bundled_with_audio = 1;
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+					"BUNDLE video is borrowing audio RTP transport; video engine will not own RTP teardown/reset\n");
 			} else {
 				v_engine->rtp_session = switch_rtp_new(a_engine->local_sdp_ip,
 														 v_engine->local_sdp_port,
@@ -17279,7 +17288,7 @@ SWITCH_DECLARE(void) switch_core_session_stop_media(switch_core_session_t *sessi
 		switch_rtp_reset(a_engine->rtp_session);
 	}
 
-	if (v_engine->rtp_session) {
+	if (v_engine->rtp_session && switch_core_media_engine_owns_rtp(v_engine)) {
 		switch_rtp_reset(v_engine->rtp_session);
 	}
 
