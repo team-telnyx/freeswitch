@@ -440,6 +440,7 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 	const char *silence_var;
 	const char *continuous_silence_var;
 	switch_bool_t bridge_generate_silence_on_hold = SWITCH_FALSE;
+	switch_bool_t bridge_generate_silence_on_hold_codec = SWITCH_FALSE;
 	int silence_val = 0, bypass_media_after_bridge = 0, max_continuous_silence_ms = 0, silence_threshold = 0;
 	const char *bridge_answer_timeout = NULL;
 	int bridge_filter_dtmf, answer_timeout, sent_update = 0;
@@ -595,13 +596,6 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 		}
 	}
 
-	bridge_generate_silence_on_hold = switch_channel_var_true(chan_a, "bridge_generate_silence_on_hold");
-
-	if (bridge_generate_silence_on_hold && !switch_channel_media_up(chan_a)) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_ERROR, "Channel has no media!\n");
-		goto end_of_bridge_loop;
-	}
-
 	if ((silence_var = switch_channel_get_variable(chan_a, "bridge_generate_comfort_noise"))) {
 #if DEBUG_RTP
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_NOTICE, "Audio bridge thread: silence_var - %s %p\n", silence_var, (void*)session_a);
@@ -619,14 +613,45 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 				silence_val = 0;
 			}
 		}
+
+		if (silence_val) {
+			if (switch_core_codec_init(&silence_codec,
+									   "L16",
+									   NULL,
+									   NULL,
+									   read_impl.actual_samples_per_second,
+									   read_impl.microseconds_per_packet / 1000,
+									   1,
+									   SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
+									   NULL, switch_core_session_get_pool(session_a)) != SWITCH_STATUS_SUCCESS) {
+
+				silence_val = 0;
+			} else {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_DEBUG, "Setup generated silence from %s to %s at %d\n", switch_channel_get_name(chan_a),
+								  switch_channel_get_name(chan_b), silence_val);
+				silence_frame.codec = &silence_codec;
+				silence_frame.data = silence_data;
+				silence_frame.buflen = sizeof(silence_data);
+				silence_frame.datalen = read_impl.decoded_bytes_per_packet;
+				silence_frame.samples = silence_frame.datalen / sizeof(int16_t);
+			}
+		}
 	} else {
 #if DEBUG_RTP
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_NOTICE, "Audio bridge thread: NO silence_var %p %p -> %p\n", (void*)session_a, (void*)session_a, (void*)session_b);
 #endif
 	}
 
-	if (silence_val || bridge_generate_silence_on_hold) {
-		if (switch_core_codec_init(&silence_codec,
+	bridge_generate_silence_on_hold = switch_channel_var_true(chan_a, "bridge_generate_silence_on_hold");
+
+	if (bridge_generate_silence_on_hold) {
+		if (!switch_channel_media_up(chan_a)) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_ERROR, "Channel has no media!\n");
+			goto end_of_bridge_loop;
+		}
+
+		if (!silence_frame.codec) {
+			if (switch_core_codec_init(&silence_codec,
 								   "L16",
 								   NULL,
 								   NULL,
@@ -636,22 +661,20 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 								   SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
 								   NULL, switch_core_session_get_pool(session_a)) != SWITCH_STATUS_SUCCESS) {
 
-			silence_val = 0;
-			bridge_generate_silence_on_hold = SWITCH_FALSE;
-		} else {
-			if (silence_val) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_DEBUG, "Setup generated silence from %s to %s at %d\n", switch_channel_get_name(chan_a),
-								  switch_channel_get_name(chan_b), silence_val);
+				bridge_generate_silence_on_hold = SWITCH_FALSE;
+			} else {
+				bridge_generate_silence_on_hold_codec = SWITCH_TRUE;
+				silence_frame.codec = &silence_codec;
+				silence_frame.data = silence_data;
+				silence_frame.buflen = sizeof(silence_data);
+				silence_frame.datalen = read_impl.decoded_bytes_per_packet;
+				silence_frame.samples = silence_frame.datalen / sizeof(int16_t);
 			}
-			if (bridge_generate_silence_on_hold) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_DEBUG, "Setup generated hold silence to %s while %s is held\n",
-								  switch_channel_get_name(chan_a), switch_channel_get_name(chan_b));
-			}
-			silence_frame.codec = &silence_codec;
-			silence_frame.data = silence_data;
-			silence_frame.buflen = sizeof(silence_data);
-			silence_frame.datalen = read_impl.decoded_bytes_per_packet;
-			silence_frame.samples = silence_frame.datalen / sizeof(int16_t);
+		}
+
+		if (bridge_generate_silence_on_hold) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_DEBUG, "Setup generated hold silence to %s while %s is held\n",
+							  switch_channel_get_name(chan_a), switch_channel_get_name(chan_b));
 		}
 	}
 
@@ -1153,27 +1176,26 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 				continue;
 			}
 
-			if (status != SWITCH_STATUS_BREAK && !switch_channel_test_flag(chan_a, CF_HOLD)) {
-				if (!switch_channel_test_flag(chan_b, CF_LEG_HOLDING)) {
+			if (status != SWITCH_STATUS_BREAK && !switch_channel_test_flag(chan_a, CF_HOLD) && !switch_channel_test_flag(chan_b, CF_LEG_HOLDING)) {
 #if DEBUG_RTP
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_NOTICE, "Audio bridge thread: write frame %p -> %p\n", (void*)session_a, (void*)session_b);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_NOTICE, "Audio bridge thread: write frame %p -> %p\n", (void*)session_a, (void*)session_b);
 #endif
-					if (switch_core_session_write_frame(session_b, read_frame, SWITCH_IO_FLAG_NONE, stream_id) != SWITCH_STATUS_SUCCESS) {
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_DEBUG,
+				if (switch_core_session_write_frame(session_b, read_frame, SWITCH_IO_FLAG_NONE, stream_id) != SWITCH_STATUS_SUCCESS) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_DEBUG,
 									  "%s ending bridge by request from write function\n", switch_channel_get_name(chan_b));
-						goto end_of_bridge_loop;
-					}
-				} else if (bridge_generate_silence_on_hold) {
+					goto end_of_bridge_loop;
+				}
+			} else if (status != SWITCH_STATUS_BREAK && !switch_channel_test_flag(chan_a, CF_HOLD) &&
+					   bridge_generate_silence_on_hold && switch_channel_test_flag(chan_b, CF_LEG_HOLDING)) {
 #if DEBUG_RTP
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_NOTICE, "Audio bridge thread: write generated hold silence %p -> %p\n", (void*)session_a, (void*)session_a);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_NOTICE, "Audio bridge thread: write generated hold silence %p -> %p\n", (void*)session_a, (void*)session_a);
 #endif
-					switch_generate_sln_silence((int16_t *) silence_frame.data, silence_frame.samples,
-									read_impl.number_of_channels, 1400);
-					if (switch_core_session_write_frame(session_a, &silence_frame, SWITCH_IO_FLAG_NONE, stream_id) != SWITCH_STATUS_SUCCESS) {
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_DEBUG,
+				switch_generate_sln_silence((int16_t *) silence_frame.data, silence_frame.samples,
+									 read_impl.number_of_channels, 1400);
+				if (switch_core_session_write_frame(session_a, &silence_frame, SWITCH_IO_FLAG_NONE, stream_id) != SWITCH_STATUS_SUCCESS) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_DEBUG,
 									  "%s ending bridge by request from hold silence write function\n", switch_channel_get_name(chan_a));
-						goto end_of_bridge_loop;
-					}
+					goto end_of_bridge_loop;
 				}
 			}
 		} else {
@@ -1205,7 +1227,9 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 #endif
 
 
-	if (silence_frame.codec) {
+	if (silence_val) {
+		switch_core_codec_destroy(&silence_codec);
+	} else if (bridge_generate_silence_on_hold_codec) {
 		switch_core_codec_destroy(&silence_codec);
 	}
 
