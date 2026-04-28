@@ -103,8 +103,6 @@ static const switch_payload_t INVALID_PT = 255;
 								 * characters when receiving." */
 
 #define SWITCH_HAVE_ICE 1 
-#define HAVE_MID_EXT 0
-
 static switch_port_t START_PORT = RTP_START_PORT;
 static switch_port_t END_PORT = RTP_END_PORT;
 static uint16_t START_SEQUENCE = RTP_START_SEQUENCE;
@@ -333,9 +331,7 @@ typedef struct ts_normalised_s {
 	uint32_t dtmf_ts;
 } ts_normalised_t;
 
-#if HAVE_MID_EXT
 static void rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_t *send_msg, switch_size_t *bytes);
-#endif
 struct trickle_cb_ctx {
 	switch_ice_candidate_cb_t cb;
 	void *user_data;
@@ -10151,17 +10147,19 @@ fork_done:
 				rtp_add_extension_header(rtp_session, send_msg, abs(score), data, &bytes);
 			}
 		}
-#if HAVE_MID_EXT
 		if (rtp_session->ext_mid.enabled && rtp_session->ext_mid.ext_id > 0) {
+			switch_size_t before_mid_ext_bytes = bytes;
+
 			rtp_add_mid_extension(rtp_session, send_msg, &bytes);
+
+			if (bytes != before_mid_ext_bytes && send_msg->header.x && send_msg->ext) {
+				uint16_t ext_words = ntohs(send_msg->ext->length);
+
+				/* 4 bytes (profile+length) + 4*words of extension data */
+				bytes = (switch_size_t)(datalen + rtp_header_len + 4 + (ext_words * 4));
+			}
 		}
 
-		if (send_msg->header.x && send_msg->ext) {
-			uint16_t ext_words = ntohs(send_msg->ext->length);
-			/* 4 bytes (profile+length) + 4*words of extension data */
-			bytes = (switch_size_t)(datalen + rtp_header_len + 4 + (ext_words * 4));
-		}
-#endif
 
 		/* Apply normalised timestamps before SRTP protection so the authentication
 		   tag covers the correct timestamp value in the RTP header.
@@ -10815,16 +10813,6 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_write_raw(switch_rtp_t *rtp_session, 
 			int sbytes = (int) *bytes;
 			srtp_err_status_t stat;
 
-#if HAVE_MID_EXT
-			if (rtp_session->write_msg.header.x && rtp_session->write_msg.ext) {
-				uint16_t ext_words = ntohs(rtp_session->write_msg.ext->length);
-				 /* 4 bytes (profile+length) + 4*words of extension data */
-				int ext_bytes = 4 + ((int)ext_words * 4);
-
-				sbytes += ext_bytes;
-				*bytes += ext_bytes;
-			}
-#endif
 
 			if (rtp_session->flags[SWITCH_RTP_FLAG_SECURE_SEND_RESET]) {
 				switch_rtp_clear_flag(rtp_session, SWITCH_RTP_FLAG_SECURE_SEND_RESET);
@@ -11207,7 +11195,6 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_enable_mid(switch_rtp_t *rtp_session,
     return SWITCH_STATUS_SUCCESS;
 }
 
-#if HAVE_MID_EXT
 static void rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_t *send_msg, switch_size_t *bytes)
 {
     uint8_t *ext_ptr;
@@ -11290,7 +11277,6 @@ static void rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_t *send_msg
     send_msg->ext->length = htons(new_words);
 	*bytes += (switch_size_t)(1 + payload_len);
 }
-#endif
 
 SWITCH_DECLARE(void) switch_rtp_set_ice_candidate_cb(switch_rtp_t *rtp_session, switch_ice_candidate_cb_t cb, void *user_data)
 {
