@@ -8863,6 +8863,20 @@ SWITCH_DECLARE(int) switch_core_media_toggle_hold(switch_core_session_t *session
 				stream = "local_stream://moh";
 			}
 
+			/* TEL-6986: When the bridged peer (A-leg) opts in via
+			 * bridge_generate_silence_on_hold=true, replace the normal hold
+			 * music with a timer-paced infinite silence stream so the held
+			 * peer (B-leg) does not pull existing MOH (e.g. noise.wav) toward
+			 * A. The broadcast still targets b_session (the partner = A-leg)
+			 * and is stopped automatically on unhold via the existing
+			 * switch_channel_stop_broadcast() path below. We never write RTP
+			 * to the held leg here. */
+			if (b_channel && switch_channel_var_true(b_channel, "bridge_generate_silence_on_hold")) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+								  "TEL-6986: bridge_generate_silence_on_hold=true on partner %s; overriding hold music with silence_stream://-1\n",
+								  switch_channel_get_name(b_channel));
+				stream = "silence_stream://-1";
+			}
 
 			if (stream && strcasecmp(stream, "silence") && (!b_channel || !switch_channel_test_flag(b_channel, CF_EVENT_LOCK_PRI))) {
 				if (!strcasecmp(stream, "indicate_hold")) {
