@@ -24,6 +24,13 @@ typedef enum {
 	SWITCH_BUNDLE_STATE_REJECTED
 } switch_bundle_state_t;
 
+typedef enum {
+	SWITCH_BUNDLE_DEMUX_NONE = 0,
+	SWITCH_BUNDLE_DEMUX_MID,
+	SWITCH_BUNDLE_DEMUX_SSRC,
+	SWITCH_BUNDLE_DEMUX_PAYLOAD_TYPE
+} switch_bundle_demux_t;
+
 typedef struct switch_bundle_mline_s {
 	int mline_index;
 	switch_media_type_t media_type;
@@ -68,7 +75,9 @@ SWITCH_DECLARE(switch_bundle_mline_t *) switch_bundle_group_find_mline_by_index(
 SWITCH_DECLARE(switch_status_t) switch_bundle_mline_set_remote_mid_ext(switch_bundle_mline_t *mline, uint8_t ext_id);
 SWITCH_DECLARE(switch_status_t) switch_bundle_mline_set_local_mid_ext(switch_bundle_mline_t *mline, uint8_t ext_id);
 SWITCH_DECLARE(switch_status_t) switch_bundle_mline_add_payload_type(switch_bundle_mline_t *mline, switch_payload_t pt);
+SWITCH_DECLARE(switch_status_t) switch_bundle_group_learn_remote_ssrc(switch_bundle_group_t *group, switch_bundle_mline_t *mline, uint32_t ssrc);
 SWITCH_DECLARE(switch_bool_t) switch_bundle_group_payload_type_unique(switch_bundle_group_t *group, switch_payload_t pt, switch_bundle_mline_t **mline_out);
+SWITCH_DECLARE(switch_bundle_mline_t *) switch_bundle_group_demux_rtp(switch_bundle_group_t *group, const char *mid, uint32_t ssrc, switch_payload_t pt, switch_bundle_demux_t *method);
 SWITCH_DECLARE(switch_status_t) switch_bundle_group_validate(switch_bundle_group_t *group);
 SWITCH_DECLARE(const char *) switch_bundle_group_reject_reason(const switch_bundle_group_t *group);
 

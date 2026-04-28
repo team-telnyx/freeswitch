@@ -172,6 +172,97 @@ SWITCH_DECLARE(switch_status_t) switch_bundle_mline_add_payload_type(switch_bund
 	return SWITCH_STATUS_SUCCESS;
 }
 
+SWITCH_DECLARE(switch_status_t) switch_bundle_group_learn_remote_ssrc(switch_bundle_group_t *group, switch_bundle_mline_t *mline, uint32_t ssrc)
+{
+	uint32_t i;
+
+	if (!group || !mline || !ssrc || !mline->in_bundle_group || mline->rejected) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	for (i = 0; i < group->mline_count; i++) {
+		switch_bundle_mline_t *other = &group->mlines[i];
+
+		if (other == mline || !other->in_bundle_group || other->rejected) {
+			continue;
+		}
+
+		if (other->remote_ssrc == ssrc) {
+			return SWITCH_STATUS_FALSE;
+		}
+	}
+
+	if (mline->remote_ssrc && mline->remote_ssrc != ssrc) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	mline->remote_ssrc = ssrc;
+	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(switch_bundle_mline_t *) switch_bundle_group_demux_rtp(switch_bundle_group_t *group,
+												 const char *mid,
+												 uint32_t ssrc,
+												 switch_payload_t pt,
+												 switch_bundle_demux_t *method)
+{
+	uint32_t i;
+	switch_bundle_mline_t *mline = NULL;
+
+	if (method) {
+		*method = SWITCH_BUNDLE_DEMUX_NONE;
+	}
+
+	if (!group || group->state != SWITCH_BUNDLE_STATE_ACCEPTED) {
+		return NULL;
+	}
+
+	if (!zstr(mid)) {
+		mline = switch_bundle_group_find_mline_by_mid(group, mid);
+		if (!mline || !mline->in_bundle_group || mline->rejected) {
+			return NULL;
+		}
+
+		if (ssrc && switch_bundle_group_learn_remote_ssrc(group, mline, ssrc) != SWITCH_STATUS_SUCCESS) {
+			return NULL;
+		}
+
+		if (method) {
+			*method = SWITCH_BUNDLE_DEMUX_MID;
+		}
+		return mline;
+	}
+
+	if (ssrc) {
+		for (i = 0; i < group->mline_count; i++) {
+			switch_bundle_mline_t *candidate = &group->mlines[i];
+
+			if (!candidate->in_bundle_group || candidate->rejected) {
+				continue;
+			}
+
+			if (candidate->remote_ssrc == ssrc) {
+				if (method) {
+					*method = SWITCH_BUNDLE_DEMUX_SSRC;
+				}
+				return candidate;
+			}
+		}
+	}
+
+	if (switch_bundle_group_payload_type_unique(group, pt, &mline) == SWITCH_TRUE) {
+		if (ssrc && switch_bundle_group_learn_remote_ssrc(group, mline, ssrc) != SWITCH_STATUS_SUCCESS) {
+			return NULL;
+		}
+		if (method) {
+			*method = SWITCH_BUNDLE_DEMUX_PAYLOAD_TYPE;
+		}
+		return mline;
+	}
+
+	return NULL;
+}
+
 SWITCH_DECLARE(switch_bool_t) switch_bundle_group_payload_type_unique(switch_bundle_group_t *group, switch_payload_t pt, switch_bundle_mline_t **mline_out)
 {
 	uint32_t i, j, matches = 0;

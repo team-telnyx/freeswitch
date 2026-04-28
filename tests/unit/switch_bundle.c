@@ -132,6 +132,96 @@ FST_SUITE_BEGIN(switch_bundle)
 		fst_check(switch_bundle_group_payload_type_unique(&group, 96, &match) == SWITCH_FALSE);
 	}
 	FST_TEST_END()
+	FST_TEST_BEGIN(test_rtp_demux_order_mid_ssrc_pt)
+	{
+		switch_bundle_group_t group;
+		switch_bundle_mline_t *audio, *video, *match;
+		switch_bundle_demux_t method = SWITCH_BUNDLE_DEMUX_NONE;
+
+		switch_bundle_group_init(&group, SWITCH_BUNDLE_POLICY_AUTO);
+		fst_check(switch_bundle_group_set_offered_mids(&group, "BUNDLE 0 1") == SWITCH_STATUS_SUCCESS);
+		audio = switch_bundle_group_add_mline(&group, 0, SWITCH_MEDIA_TYPE_AUDIO, "0", 10000, SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE);
+		video = switch_bundle_group_add_mline(&group, 1, SWITCH_MEDIA_TYPE_VIDEO, "1", 10000, SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE);
+		fst_check(audio && video);
+		fst_check(switch_bundle_mline_add_payload_type(audio, 111) == SWITCH_STATUS_SUCCESS);
+		fst_check(switch_bundle_mline_add_payload_type(video, 96) == SWITCH_STATUS_SUCCESS);
+		fst_check(switch_bundle_group_validate(&group) == SWITCH_STATUS_SUCCESS);
+
+		match = switch_bundle_group_demux_rtp(&group, "1", 2222, 111, &method);
+		fst_check(match == video);
+		fst_check(method == SWITCH_BUNDLE_DEMUX_MID);
+		fst_check(video->remote_ssrc == 2222);
+
+		match = switch_bundle_group_demux_rtp(&group, NULL, 2222, 111, &method);
+		fst_check(match == video);
+		fst_check(method == SWITCH_BUNDLE_DEMUX_SSRC);
+
+		match = switch_bundle_group_demux_rtp(&group, NULL, 0, 96, &method);
+		fst_check(match == video);
+		fst_check(method == SWITCH_BUNDLE_DEMUX_PAYLOAD_TYPE);
+	}
+	FST_TEST_END()
+
+	FST_TEST_BEGIN(test_rtp_demux_ambiguous_payload_drops)
+	{
+		switch_bundle_group_t group;
+		switch_bundle_mline_t *audio, *video, *match;
+		switch_bundle_demux_t method = SWITCH_BUNDLE_DEMUX_MID;
+
+		switch_bundle_group_init(&group, SWITCH_BUNDLE_POLICY_AUTO);
+		fst_check(switch_bundle_group_set_offered_mids(&group, "BUNDLE 0 1") == SWITCH_STATUS_SUCCESS);
+		audio = switch_bundle_group_add_mline(&group, 0, SWITCH_MEDIA_TYPE_AUDIO, "0", 10000, SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE);
+		video = switch_bundle_group_add_mline(&group, 1, SWITCH_MEDIA_TYPE_VIDEO, "1", 10000, SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE);
+		fst_check(audio && video);
+		fst_check(switch_bundle_mline_add_payload_type(audio, 96) == SWITCH_STATUS_SUCCESS);
+		fst_check(switch_bundle_mline_add_payload_type(video, 96) == SWITCH_STATUS_SUCCESS);
+		fst_check(switch_bundle_group_validate(&group) == SWITCH_STATUS_SUCCESS);
+
+		match = switch_bundle_group_demux_rtp(&group, NULL, 0, 96, &method);
+		fst_check(match == NULL);
+		fst_check(method == SWITCH_BUNDLE_DEMUX_NONE);
+	}
+	FST_TEST_END()
+
+	FST_TEST_BEGIN(test_rtp_demux_rejects_ssrc_collision)
+	{
+		switch_bundle_group_t group;
+		switch_bundle_mline_t *audio, *video;
+
+		switch_bundle_group_init(&group, SWITCH_BUNDLE_POLICY_AUTO);
+		fst_check(switch_bundle_group_set_offered_mids(&group, "BUNDLE 0 1") == SWITCH_STATUS_SUCCESS);
+		audio = switch_bundle_group_add_mline(&group, 0, SWITCH_MEDIA_TYPE_AUDIO, "0", 10000, SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE);
+		video = switch_bundle_group_add_mline(&group, 1, SWITCH_MEDIA_TYPE_VIDEO, "1", 10000, SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE);
+		fst_check(audio && video);
+		fst_check(switch_bundle_group_validate(&group) == SWITCH_STATUS_SUCCESS);
+
+		fst_check(switch_bundle_group_learn_remote_ssrc(&group, audio, 4444) == SWITCH_STATUS_SUCCESS);
+		fst_check(switch_bundle_group_learn_remote_ssrc(&group, video, 4444) == SWITCH_STATUS_FALSE);
+		fst_check(video->remote_ssrc == 0);
+	}
+	FST_TEST_END()
+
+	FST_TEST_BEGIN(test_rtp_demux_drops_mid_ssrc_collision)
+	{
+		switch_bundle_group_t group;
+		switch_bundle_mline_t *audio, *video, *match;
+		switch_bundle_demux_t method = SWITCH_BUNDLE_DEMUX_NONE;
+
+		switch_bundle_group_init(&group, SWITCH_BUNDLE_POLICY_AUTO);
+		fst_check(switch_bundle_group_set_offered_mids(&group, "BUNDLE 0 1") == SWITCH_STATUS_SUCCESS);
+		audio = switch_bundle_group_add_mline(&group, 0, SWITCH_MEDIA_TYPE_AUDIO, "0", 10000, SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE);
+		video = switch_bundle_group_add_mline(&group, 1, SWITCH_MEDIA_TYPE_VIDEO, "1", 10000, SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE);
+		fst_check(audio && video);
+		fst_check(switch_bundle_group_validate(&group) == SWITCH_STATUS_SUCCESS);
+		fst_check(switch_bundle_group_learn_remote_ssrc(&group, audio, 5555) == SWITCH_STATUS_SUCCESS);
+
+		match = switch_bundle_group_demux_rtp(&group, "1", 5555, 96, &method);
+		fst_check(match == NULL);
+		fst_check(method == SWITCH_BUNDLE_DEMUX_NONE);
+		fst_check(video->remote_ssrc == 0);
+	}
+	FST_TEST_END()
+
 }
 FST_SUITE_END()
 }
