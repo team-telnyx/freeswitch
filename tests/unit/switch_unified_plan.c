@@ -210,6 +210,7 @@ FCT_BGN()
             fct_req(rtp != NULL);
 
             fct_chk(switch_rtp_enable_mid(rtp, TEST_MID_EXT_ID, "0") == SWITCH_STATUS_SUCCESS);
+            fct_chk(switch_rtp_get_received_mid(rtp) == NULL);
 
             {
                 switch_status_t st;
@@ -224,6 +225,17 @@ FCT_BGN()
                     /* one element "0": 1 (id/len) + 1 (payload) => padded to 4 => >=1 word */
                     fct_chk(info.length_words >= 1);
                 }
+
+				fct_chk(switch_rtp_enable_mid_receive(rtp, TEST_MID_EXT_ID) == SWITCH_STATUS_SUCCESS);
+				bytes = sizeof(p);
+				memset(p, 0xEE, sizeof(p));
+				st = switch_rtp_write_raw(rtp, p, &bytes, SWITCH_TRUE);
+				fct_chk(st == SWITCH_STATUS_SUCCESS);
+				{
+					switch_rtp_ext_info_t info = {0};
+					fct_chk(switch_rtp_get_extension_info(rtp, &info) == SWITCH_STATUS_SUCCESS);
+					fct_chk(info.has_ext == SWITCH_FALSE);
+				}
 			}
             cleanup_rtp(&rtp);
             cleanup_session_and_media(session);

@@ -586,7 +586,7 @@ typedef enum {
 	RESULT_GOTO_TIMERCHECK
 } handle_rfc2833_result_t;
 
-SWITCH_DECLARE(void) switch_rtp_handle_extensions(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(switch_status_t) switch_rtp_handle_extensions(switch_rtp_t *rtp_session, switch_size_t packet_bytes);
 SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session);
 static switch_status_t switch_rtp_sendto(switch_rtp_t *rtp_session, switch_socket_t *sock, switch_sockaddr_t *where, int32_t flags, rtp_msg_t *send_msg, switch_size_t *len);
 
@@ -7576,20 +7576,18 @@ fork_done:
 
 fork_end:
 
-		switch_rtp_handle_extensions(rtp_session);
+		if (switch_rtp_handle_extensions(rtp_session, *bytes) != SWITCH_STATUS_SUCCESS) {
+			*bytes = 0;
+			goto more;
+		}
 
 		rtp_session->last_recv_bytes = *bytes;
 		if (rtp_session->has_rtp) {
-			if (rtp_session->recv_msg.header.cc > 0) { /* Contributing Source Identifiers (4 bytes = sizeof CSRC header)*/
-				rtp_session->recv_msg.ebody = RTP_BODY(rtp_session) + (rtp_session->recv_msg.header.cc * 4);
-			}
-
 			/* recalculate body length in case rtp extension used */
 			if (!rtp_session->flags[SWITCH_RTP_FLAG_PROXY_MEDIA] && !rtp_session->flags[SWITCH_RTP_FLAG_UDPTL] &&
 				rtp_session->recv_msg.header.x) { /* header extensions */
 				uint16_t length;
 
-				rtp_session->recv_msg.ext = (switch_rtp_hdr_ext_t *) RTP_BODY(rtp_session);
 				length = ntohs((uint16_t)rtp_session->recv_msg.ext->length);
 
 				if (length < SWITCH_RTP_MAX_BUF_LEN_WORDS) {
@@ -11110,89 +11108,143 @@ rtp_extension_t *switch_rtp_find_extension(switch_rtp_t *rtp_session, uint8_t id
 	return NULL;
 }
 
-SWITCH_DECLARE(void) switch_rtp_handle_extensions(switch_rtp_t *rtp_session)
+SWITCH_DECLARE(switch_status_t) switch_rtp_handle_extensions(switch_rtp_t *rtp_session, switch_size_t packet_bytes)
 {
-	if (!rtp_session->has_rtp) return;
+	rtp_session->recv_msg.ext = NULL;
+	rtp_session->recv_msg.ebody = NULL;
+	rtp_session->recv_rtp_exts_size = 0;
+	rtp_session->ext_total_len = 0;
 
-	if (rtp_session->recv_msg.header.cc > 0) {
-		rtp_session->recv_msg.ebody = RTP_BODY(rtp_session) + (rtp_session->recv_msg.header.cc * 4);
+	if (rtp_session->ext_mid.enabled) {
+		memset(rtp_session->ext_mid.remote_mid, 0, sizeof(rtp_session->ext_mid.remote_mid));
 	}
 
-	if (rtp_session->recv_rtp_exts_size && !rtp_session->recv_msg.header.x) {
-		rtp_session->recv_rtp_exts_size = 0;
-	}
+	if (!rtp_session->has_rtp) return SWITCH_STATUS_SUCCESS;
+
+	{
+		uint8_t *packet_start = (uint8_t *) &rtp_session->recv_msg.header;
+		uint8_t *packet_end = packet_start + packet_bytes;
+		switch_size_t base_hdr_len = rtp_header_len + (rtp_session->recv_msg.header.cc * 4);
+
+		if (packet_bytes < base_hdr_len || packet_end < packet_start) {
+			return SWITCH_STATUS_FALSE;
+		}
+
+		rtp_session->recv_msg.ebody = (char *)packet_start + base_hdr_len;
+
 
 	if (!rtp_session->flags[SWITCH_RTP_FLAG_PROXY_MEDIA] &&
 		!rtp_session->flags[SWITCH_RTP_FLAG_UDPTL] &&
 		rtp_session->recv_msg.header.x) {
 
+		switch_rtp_hdr_ext_t *recv_ext = NULL;
 		uint16_t ext_len_field = 0;
 		uint16_t ext_profile = 0;
 		uint32_t total_ext_bytes = 0;
 		uint8_t *ext_data_ptr = NULL;
+		uint8_t *ext_end = NULL;
 		uint8_t ext_id = 0, ext_len = 0;
 		uint8_t ext_header_len = 1;
 		uint16_t ext_payload_len = 0;
-		uint32_t ssrc_recv = ntohl(rtp_session->recv_msg.header.ssrc);
 
-		rtp_session->recv_msg.ext = (switch_rtp_hdr_ext_t *) RTP_BODY(rtp_session);
-		ext_len_field = ntohs(rtp_session->recv_msg.ext->length);
+		recv_ext = (switch_rtp_hdr_ext_t *) rtp_session->recv_msg.ebody;
+		if ((uint8_t *)recv_ext + 4 > packet_end) {
+			return SWITCH_STATUS_FALSE;
+		}
+		ext_len_field = ntohs(recv_ext->length);
+		total_ext_bytes = ext_len_field * 4;
+		ext_data_ptr = (uint8_t *) recv_ext + 4;
+		if (total_ext_bytes > (uint32_t)(packet_end - ext_data_ptr)) {
+			return SWITCH_STATUS_FALSE;
+		}
+
+		rtp_session->recv_msg.ext = recv_ext;
 
 		if (ext_len_field > 0) {
-			rtp_session->recv_rtp_exts_size = ext_len_field * 4 + 4;
-			ext_profile = ntohs(rtp_session->recv_msg.ext->profile);
+			rtp_session->recv_rtp_exts_size = total_ext_bytes + 4;
+			ext_profile = ntohs(recv_ext->profile);
 
 			if (ext_profile == 0xbede) {
-				total_ext_bytes = ext_len_field * 4;
-				ext_data_ptr = (uint8_t *) rtp_session->recv_msg.ext + 4;
+				ext_end = ext_data_ptr + total_ext_bytes;
 
-				while (total_ext_bytes >= 1) {
+				while (ext_data_ptr < ext_end) {
+					uint32_t remaining_ext_bytes = (uint32_t)(ext_end - ext_data_ptr);
 					ext_id = (*ext_data_ptr & 0xF0) >> 4;
 					ext_len = *ext_data_ptr & 0x0F;
 					ext_payload_len = ext_len + 1;
 
 					if (ext_id == 0) {
-						if (ext_len > 0) {
-							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
-								"[%u] RTP extension parsing error: ID=0, LEN=%u\n", ssrc_recv, ext_len);
+						if (*ext_data_ptr != 0x00) {
+							return SWITCH_STATUS_FALSE;
 						}
 						ext_data_ptr += 1;
-						total_ext_bytes -= 1;
 						continue;
 					}
 
-					if (rtp_session->ext_mid.enabled && ext_id == rtp_session->ext_mid.ext_id) {
-						const size_t copy_len = (ext_payload_len > sizeof(rtp_session->ext_mid.mid) - 1) ? sizeof(rtp_session->ext_mid.mid) - 1 : ext_payload_len;
+					if (ext_id == 15) {
+						return SWITCH_STATUS_FALSE;
+					}
 
-						memset(rtp_session->ext_mid.mid, 0, sizeof(rtp_session->ext_mid.mid));
-						memcpy(rtp_session->ext_mid.mid, ext_data_ptr + 1, copy_len);
+					if ((uint32_t)(ext_header_len + ext_payload_len) > remaining_ext_bytes) {
+						return SWITCH_STATUS_FALSE;
+					}
+
+					if (rtp_session->ext_mid.enabled && ext_id == rtp_session->ext_mid.ext_id) {
+						const size_t copy_len = (ext_payload_len > sizeof(rtp_session->ext_mid.remote_mid) - 1) ? sizeof(rtp_session->ext_mid.remote_mid) - 1 : ext_payload_len;
+
+						memset(rtp_session->ext_mid.remote_mid, 0, sizeof(rtp_session->ext_mid.remote_mid));
+						memcpy(rtp_session->ext_mid.remote_mid, ext_data_ptr + 1, copy_len);
 					}
 
 					rtp_session->ext_total_len = ext_header_len + ext_payload_len;
 					ext_data_ptr += rtp_session->ext_total_len;
-					total_ext_bytes = (total_ext_bytes > rtp_session->ext_total_len) ? (total_ext_bytes - rtp_session->ext_total_len) : 0;
 				}
 			}
 		}
 	}
+	}
+	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_enable_mid_receive(switch_rtp_t *rtp_session, uint8_t ext_id)
+{
+	if (!rtp_session || !ext_id || ext_id > 14) return SWITCH_STATUS_FALSE;
+
+	rtp_session->ext_mid.ext_id = ext_id;
+	rtp_session->ext_mid.enabled = 1;
+	memset(rtp_session->ext_mid.local_mid, 0, sizeof(rtp_session->ext_mid.local_mid));
+	memset(rtp_session->ext_mid.remote_mid, 0, sizeof(rtp_session->ext_mid.remote_mid));
+
+	return SWITCH_STATUS_SUCCESS;
 }
 
 SWITCH_DECLARE(switch_status_t) switch_rtp_enable_mid(switch_rtp_t *rtp_session, uint8_t ext_id, const char *mid)
 {
 	size_t L;
 
-	if (!rtp_session || !mid || !ext_id || ext_id > 14) return SWITCH_STATUS_FALSE;
+	if (!rtp_session || !mid) return SWITCH_STATUS_FALSE;
 
 	L = strlen(mid);
 	if (!L) return SWITCH_STATUS_FALSE;
-    if (L > 16) L = 16;
+	if (L > 16) L = 16;
 
-    memset(rtp_session->ext_mid.mid, 0, sizeof(rtp_session->ext_mid.mid));
-    memcpy(rtp_session->ext_mid.mid, mid, L);
-    rtp_session->ext_mid.ext_id  = ext_id;
-    rtp_session->ext_mid.enabled = 1;
+	if (switch_rtp_enable_mid_receive(rtp_session, ext_id) != SWITCH_STATUS_SUCCESS) {
+		return SWITCH_STATUS_FALSE;
+	}
 
-    return SWITCH_STATUS_SUCCESS;
+	memset(rtp_session->ext_mid.local_mid, 0, sizeof(rtp_session->ext_mid.local_mid));
+	memcpy(rtp_session->ext_mid.local_mid, mid, L);
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(const char *) switch_rtp_get_received_mid(switch_rtp_t *rtp_session)
+{
+	if (!rtp_session || !rtp_session->ext_mid.enabled || zstr(rtp_session->ext_mid.remote_mid)) {
+		return NULL;
+	}
+
+	return rtp_session->ext_mid.remote_mid;
 }
 
 static void rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_t *send_msg, switch_size_t *bytes)
@@ -11204,7 +11256,7 @@ static void rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_t *send_msg
 
     if (!rtp_session->ext_mid.enabled) return;
 
-	payload_len = strlen(rtp_session->ext_mid.mid);
+	payload_len = strlen(rtp_session->ext_mid.local_mid);
 	if (!payload_len) return;
 	if (payload_len > 16) payload_len = 16;
 
@@ -11234,7 +11286,7 @@ static void rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_t *send_msg
 
         ext_ptr = (uint8_t *)send_msg->ext + 4;
         *ext_ptr++ = (rtp_session->ext_mid.ext_id << 4) | (len_field_tmp & 0x0F);
-        memcpy(ext_ptr, rtp_session->ext_mid.mid, payload_len);
+        memcpy(ext_ptr, rtp_session->ext_mid.local_mid, payload_len);
         ext_ptr += payload_len;
         if (pad_tmp) {
             memset(ext_ptr, 0, pad_tmp);
@@ -11261,7 +11313,7 @@ static void rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_t *send_msg
 
     len_field = (uint8_t)(payload_len - 1);
     *ext_ptr++ = (rtp_session->ext_mid.ext_id << 4) | (len_field & 0x0F);
-    memcpy(ext_ptr, rtp_session->ext_mid.mid, payload_len);
+    memcpy(ext_ptr, rtp_session->ext_mid.local_mid, payload_len);
     ext_ptr += payload_len;
 
     ext_bytes = (size_t)(ext_ptr - ((uint8_t *)send_msg->ext + 4));

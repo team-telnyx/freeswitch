@@ -15,6 +15,7 @@ static switch_rtp_t *rtp_session = NULL;
 static switch_rtp_flag_t flags[SWITCH_RTP_FLAG_INVALID] = {0};
 const char *err = NULL;
 static const switch_payload_t TEST_PT = 8;
+#define TEST_MID_EXT_ID 10
 switch_rtp_packet_t rtp_packet;
 switch_frame_flag_t *frame_flags;
 switch_io_flag_t io_flags;
@@ -79,6 +80,119 @@ FST_TEARDOWN_END()
 	}
 	FST_TEST_END()
 
+
+	FST_TEST_BEGIN(test_received_mid_clears_per_packet)
+	{
+		switch_memory_pool_t *test_pool = NULL;
+		switch_rtp_t *mid_rtp = NULL;
+		switch_socket_t *send_sock = NULL;
+		switch_sockaddr_t *send_bind_addr = NULL, *rtp_addr = NULL;
+		switch_rtp_flag_t mid_flags[SWITCH_RTP_FLAG_INVALID] = {0};
+		const char *mid_err = NULL;
+		const char *mid = NULL;
+		switch_frame_t frame = { 0 };
+		switch_frame_flag_t read_flags = SFF_NONE;
+		uint8_t read_buf[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
+		uint32_t read_len;
+		switch_payload_t malformed_pt = 0;
+		switch_port_t local_port = 0;
+		switch_port_t remote_port = 0;
+		switch_size_t packet_len;
+		switch_status_t status;
+		uint8_t packet_with_mid[] = {
+			0x90, TEST_PT, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x11, 0x22, 0x33, 0x44,
+			0xbe, 0xde, 0x00, 0x01, (TEST_MID_EXT_ID << 4) | 0x00, '1', 0x00, 0x00,
+			0xff
+		};
+		uint8_t packet_malformed_mid_ext[] = {
+			0x90, TEST_PT, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x11, 0x22, 0x33, 0x44,
+			0xbe, 0xde, 0x00, 0x01, (TEST_MID_EXT_ID << 4) | 0x0f, 0x00, 0x00, 0x00,
+			0xdd
+		};
+		uint8_t packet_truncated_csrc_ext[] = {
+			0x91, TEST_PT, 0x00, 0x03, 0x00, 0x00, 0x00, 0x03, 0x11, 0x22, 0x33, 0x44,
+			0xcc
+		};
+		uint8_t packet_short_ext_header[] = {
+			0x90, TEST_PT, 0x00, 0x04, 0x00, 0x00, 0x00, 0x04, 0x11, 0x22, 0x33, 0x44,
+			0xbe
+		};
+		uint8_t packet_oversized_ext_block[] = {
+			0x90, TEST_PT, 0x00, 0x05, 0x00, 0x00, 0x00, 0x05, 0x11, 0x22, 0x33, 0x44,
+			0xbe, 0xde, 0x00, 0x02, (TEST_MID_EXT_ID << 4) | 0x00, '2', 0x00, 0x00
+		};
+		uint8_t packet_malformed_padding[] = {
+			0x90, TEST_PT, 0x00, 0x06, 0x00, 0x00, 0x00, 0x06, 0x11, 0x22, 0x33, 0x44,
+			0xbe, 0xde, 0x00, 0x01, 0x0f, 0x00, 0x00, 0x00,
+			0xaa
+		};
+		uint8_t packet_reserved_ext_id[] = {
+			0x90, TEST_PT, 0x00, 0x07, 0x00, 0x00, 0x00, 0x07, 0x11, 0x22, 0x33, 0x44,
+			0xbe, 0xde, 0x00, 0x01, 0xf0, 'r', 0x00, 0x00,
+			0xbb
+		};
+		uint8_t packet_without_mid[] = {
+			0x80, TEST_PT, 0x00, 0x08, 0x00, 0x00, 0x00, 0x08, 0x11, 0x22, 0x33, 0x44,
+			0xee
+		};
+
+		fst_requires(switch_core_new_memory_pool(&test_pool) == SWITCH_STATUS_SUCCESS);
+		local_port = switch_rtp_request_port(rx_host);
+		remote_port = switch_rtp_request_port(rx_host);
+		fst_requires(local_port > 0);
+		fst_requires(remote_port > 0);
+		mid_rtp = switch_rtp_new(rx_host, local_port, tx_host, remote_port, TEST_PT, 8000, 20 * 1000, mid_flags, "soft", &mid_err, test_pool);
+		fst_requires(mid_rtp != NULL);
+		fst_requires(switch_rtp_ready(mid_rtp));
+		fst_check(switch_rtp_enable_mid_receive(mid_rtp, TEST_MID_EXT_ID) == SWITCH_STATUS_SUCCESS);
+		fst_check(switch_rtp_get_received_mid(mid_rtp) == NULL);
+		switch_rtp_clear_flag(mid_rtp, SWITCH_RTP_FLAG_PAUSE);
+
+		fst_requires(switch_sockaddr_info_get(&send_bind_addr, rx_host, SWITCH_UNSPEC, remote_port, 0, test_pool) == SWITCH_STATUS_SUCCESS);
+		fst_requires(switch_sockaddr_info_get(&rtp_addr, rx_host, SWITCH_UNSPEC, local_port, 0, test_pool) == SWITCH_STATUS_SUCCESS);
+		fst_requires(switch_socket_create(&send_sock, switch_sockaddr_get_family(send_bind_addr), SOCK_DGRAM, 0, test_pool) == SWITCH_STATUS_SUCCESS);
+		fst_requires(switch_socket_bind(send_sock, send_bind_addr) == SWITCH_STATUS_SUCCESS);
+
+		packet_len = sizeof(packet_with_mid);
+		fst_requires(switch_socket_sendto(send_sock, rtp_addr, 0, (const char *) packet_with_mid, &packet_len) == SWITCH_STATUS_SUCCESS);
+		status = switch_rtp_zerocopy_read_frame(mid_rtp, &frame, SWITCH_IO_FLAG_NONE);
+		fst_requires(status == SWITCH_STATUS_SUCCESS);
+		mid = switch_rtp_get_received_mid(mid_rtp);
+		fst_requires(mid != NULL);
+		fst_check(!strcmp(mid, "1"));
+
+		packet_len = sizeof(packet_malformed_mid_ext);
+		fst_requires(switch_socket_sendto(send_sock, rtp_addr, 0, (const char *) packet_malformed_mid_ext, &packet_len) == SWITCH_STATUS_SUCCESS);
+		packet_len = sizeof(packet_truncated_csrc_ext);
+		fst_requires(switch_socket_sendto(send_sock, rtp_addr, 0, (const char *) packet_truncated_csrc_ext, &packet_len) == SWITCH_STATUS_SUCCESS);
+		packet_len = sizeof(packet_short_ext_header);
+		fst_requires(switch_socket_sendto(send_sock, rtp_addr, 0, (const char *) packet_short_ext_header, &packet_len) == SWITCH_STATUS_SUCCESS);
+		packet_len = sizeof(packet_oversized_ext_block);
+		fst_requires(switch_socket_sendto(send_sock, rtp_addr, 0, (const char *) packet_oversized_ext_block, &packet_len) == SWITCH_STATUS_SUCCESS);
+		packet_len = sizeof(packet_malformed_padding);
+		fst_requires(switch_socket_sendto(send_sock, rtp_addr, 0, (const char *) packet_malformed_padding, &packet_len) == SWITCH_STATUS_SUCCESS);
+		packet_len = sizeof(packet_reserved_ext_id);
+		fst_requires(switch_socket_sendto(send_sock, rtp_addr, 0, (const char *) packet_reserved_ext_id, &packet_len) == SWITCH_STATUS_SUCCESS);
+		packet_len = sizeof(packet_without_mid);
+		fst_requires(switch_socket_sendto(send_sock, rtp_addr, 0, (const char *) packet_without_mid, &packet_len) == SWITCH_STATUS_SUCCESS);
+
+		read_len = sizeof(read_buf);
+		status = switch_rtp_read(mid_rtp, read_buf, &read_len, &malformed_pt, &read_flags, SWITCH_IO_FLAG_NONE);
+		fst_requires(status == SWITCH_STATUS_SUCCESS);
+		fst_check(switch_rtp_get_received_mid(mid_rtp) == NULL);
+		fst_check(read_len == 1);
+		fst_check(read_buf[0] == 0xee);
+
+		if (send_sock) {
+			switch_socket_close(send_sock);
+		}
+		switch_rtp_destroy(&mid_rtp);
+		if (remote_port) {
+			switch_rtp_release_port(rx_host, remote_port);
+		}
+		switch_core_destroy_memory_pool(&test_pool);
+	}
+	FST_TEST_END()
 	FST_TEST_BEGIN(test_session_with_rtp)
 	{
 		switch_core_session_t *session = NULL;
@@ -219,7 +333,7 @@ FST_TEARDOWN_END()
 		servaddr_rtp.sin_family = AF_INET; 
 		servaddr_rtp.sin_port = htons(audio_rx_port); 
 		server = gethostbyname(rx_host);
-		bcopy((char *)server->h_addr, (char *)&servaddr_rtp.sin_addr.s_addr, server->h_length);
+		memcpy((char *)&servaddr_rtp.sin_addr.s_addr, (char *)server->h_addr, server->h_length);
 
 		/*get local UDP port (tx side) to trick FS into accepting our packets*/
 		ret = sendto(sockfd_rtp, NULL, 0, MSG_CONFIRM, (const struct sockaddr *) &servaddr_rtp, sizeof(servaddr_rtp)); 
