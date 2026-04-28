@@ -235,6 +235,7 @@ struct switch_media_handle_s {
 	switch_channel_t *channel;
 	switch_core_media_flag_t media_flags[SCMF_MAX];
 	smh_flag_t flags;
+	switch_bundle_group_t bundle;
 	switch_rtp_engine_t engines[SWITCH_MEDIA_TYPE_TOTAL];
 	switch_msrp_session_t *msrp_session;
 	switch_mutex_t *read_mutex[SWITCH_MEDIA_TYPE_TOTAL];
@@ -5289,9 +5290,8 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 				continue;
 			}
 
-			/* RFC 5888 / RFC 8843: capture BUNDLE mids at session level */
 			if (!strcasecmp(attr->a_name, "group") && attr->a_value && !strncasecmp(attr->a_value, "BUNDLE", 6)) {
-				switch_channel_set_variable(smh->session->channel, "rtp_group_bundle", attr->a_value + 6);
+				continue;
 			} else if (!strcasecmp(attr->a_name, "ice-ufrag") && !zstr(attr->a_value)) {
 				if (is_trickle_recheck) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
@@ -6808,6 +6808,238 @@ done:
 }
 
 //?
+#define SWITCH_BUNDLE_MID_EXT_URI "urn:ietf:params:rtp-hdrext:sdes:mid"
+
+static switch_media_type_t switch_core_media_bundle_sdp_media_type(sdp_media_e type)
+{
+	switch (type) {
+	case sdp_media_audio:
+		return SWITCH_MEDIA_TYPE_AUDIO;
+	case sdp_media_video:
+		return SWITCH_MEDIA_TYPE_VIDEO;
+	case sdp_media_text:
+		return SWITCH_MEDIA_TYPE_TEXT;
+	default:
+		return SWITCH_MEDIA_TYPE_TOTAL;
+	}
+}
+
+static uint8_t switch_core_media_bundle_parse_extmap_id(const char *value, switch_bool_t *is_mid)
+{
+	const char *p = value, *sp;
+	char idpart[32] = { 0 };
+	char *slash;
+	size_t n;
+	long id;
+
+	if (is_mid) {
+		*is_mid = SWITCH_FALSE;
+	}
+
+	if (zstr(value)) {
+		return 0;
+	}
+
+	while (*p == ' ' || *p == '\t') {
+		p++;
+	}
+
+	sp = strchr(p, ' ');
+	if (!sp) {
+		return 0;
+	}
+
+	n = (size_t)(sp - p);
+	if (n > sizeof(idpart) - 1) {
+		n = sizeof(idpart) - 1;
+	}
+	memcpy(idpart, p, n);
+
+	slash = strchr(idpart, '/');
+	if (slash) {
+		*slash = '\0';
+	}
+
+	id = atol(idpart);
+	if (id <= 0 || id > 255) {
+		return 0;
+	}
+
+	while (*sp == ' ' || *sp == '\t') {
+		sp++;
+	}
+
+	if (is_mid && !strncasecmp(sp, SWITCH_BUNDLE_MID_EXT_URI, strlen(SWITCH_BUNDLE_MID_EXT_URI)) &&
+		(sp[strlen(SWITCH_BUNDLE_MID_EXT_URI)] == '\0' || sp[strlen(SWITCH_BUNDLE_MID_EXT_URI)] == ' ' || sp[strlen(SWITCH_BUNDLE_MID_EXT_URI)] == '\t')) {
+		*is_mid = SWITCH_TRUE;
+	}
+
+	return (uint8_t)id;
+}
+
+static switch_bool_t switch_core_media_bundle_negotiated(const switch_media_handle_t *smh)
+{
+	return smh && smh->bundle.state == SWITCH_BUNDLE_STATE_ACCEPTED ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
+static void switch_core_media_bundle_populate_from_sdp(switch_media_handle_t *smh, sdp_session_t *sdp, switch_sdp_type_t sdp_type)
+{
+	switch_channel_t *channel;
+	switch_bundle_policy_t policy = SWITCH_BUNDLE_POLICY_OFF;
+	const char *policy_value;
+	sdp_attribute_t *attr;
+	sdp_media_t *m;
+	int mline_index = 0;
+
+	if (!smh || !smh->session || !sdp) {
+		return;
+	}
+
+	channel = switch_core_session_get_channel(smh->session);
+	policy_value = switch_channel_get_variable(channel, "rtp-bundle");
+	if (zstr(policy_value)) {
+		policy_value = switch_channel_get_variable(channel, "rtp_bundle");
+	}
+	if (zstr(policy_value)) {
+		policy_value = switch_core_get_variable("rtp-bundle");
+	}
+	if (zstr(policy_value)) {
+		policy_value = switch_core_get_variable("rtp_bundle");
+	}
+
+	policy = switch_bundle_policy_parse(policy_value, SWITCH_BUNDLE_POLICY_OFF);
+	switch_bundle_group_init(&smh->bundle, policy);
+
+	for (attr = sdp->sdp_attributes; attr; attr = attr->a_next) {
+		const char *value;
+
+		if (zstr(attr->a_name) || strcasecmp(attr->a_name, "group") || zstr(attr->a_value)) {
+			continue;
+		}
+
+		value = attr->a_value;
+		while (*value == ' ' || *value == '\t') {
+			value++;
+		}
+
+		if (!strncasecmp(value, "BUNDLE", 6) && (value[6] == '\0' || value[6] == ' ' || value[6] == '\t')) {
+			switch_bundle_group_set_offered_mids(&smh->bundle, value);
+			break;
+		}
+	}
+
+	for (m = sdp->sdp_media; m; m = m->m_next, mline_index++) {
+		const char *mid = NULL;
+		switch_bool_t bundle_only = SWITCH_FALSE;
+		switch_bool_t rtcp_mux = SWITCH_FALSE;
+		switch_bool_t rtcp_mux_only = SWITCH_FALSE;
+		uint8_t extmap_used[256] = { 0 };
+		uint8_t extmap_mid[256] = { 0 };
+		uint8_t remote_mid_ext_id = 0;
+		switch_bool_t mid_extmap_collision = SWITCH_FALSE;
+		switch_bundle_mline_t *bundle_mline;
+		sdp_rtpmap_t *map;
+
+		for (attr = m->m_attributes; attr; attr = attr->a_next) {
+			if (zstr(attr->a_name)) {
+				continue;
+			}
+
+			if (!strcasecmp(attr->a_name, "mid") && !zstr(attr->a_value)) {
+				mid = attr->a_value;
+			} else if (!strcasecmp(attr->a_name, "bundle-only")) {
+				bundle_only = SWITCH_TRUE;
+			} else if (!strcasecmp(attr->a_name, "rtcp-mux")) {
+				rtcp_mux = SWITCH_TRUE;
+			} else if (!strcasecmp(attr->a_name, "rtcp-mux-only")) {
+				rtcp_mux_only = SWITCH_TRUE;
+				rtcp_mux = SWITCH_TRUE;
+			} else if (!strcasecmp(attr->a_name, "extmap") && !zstr(attr->a_value)) {
+				switch_bool_t is_mid = SWITCH_FALSE;
+				uint8_t ext_id = switch_core_media_bundle_parse_extmap_id(attr->a_value, &is_mid);
+
+				if (!ext_id) {
+					continue;
+				}
+
+				if (is_mid) {
+					if (extmap_used[ext_id] && !extmap_mid[ext_id]) {
+						mid_extmap_collision = SWITCH_TRUE;
+					} else if (!mid_extmap_collision) {
+						remote_mid_ext_id = ext_id;
+					}
+					extmap_mid[ext_id] = 1;
+				} else if (extmap_mid[ext_id]) {
+					mid_extmap_collision = SWITCH_TRUE;
+					if (remote_mid_ext_id == ext_id) {
+						remote_mid_ext_id = 0;
+					}
+				}
+
+				extmap_used[ext_id] = 1;
+			}
+		}
+
+		bundle_mline = switch_bundle_group_add_mline(&smh->bundle,
+			mline_index,
+			switch_core_media_bundle_sdp_media_type(m->m_type),
+			mid,
+			(switch_port_t)m->m_port,
+			rtcp_mux,
+			bundle_only,
+			rtcp_mux_only);
+
+		if (!bundle_mline) {
+			continue;
+		}
+
+		if (remote_mid_ext_id && !mid_extmap_collision) {
+			switch_bundle_mline_set_remote_mid_ext(bundle_mline, remote_mid_ext_id);
+		} else if (mid_extmap_collision) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
+				"BUNDLE SDP %s m-line %d has MID RTP extension id collision; leaving MID extension unaccepted\n",
+				sdp_type == SDP_ANSWER ? "answer" : "offer", mline_index);
+		}
+
+		for (map = m->m_rtpmaps; map; map = map->rm_next) {
+			if (map->rm_pt >= 0 && map->rm_pt <= 255) {
+				switch_bundle_mline_add_payload_type(bundle_mline, (switch_payload_t)map->rm_pt);
+			}
+		}
+	}
+
+	if (smh->bundle.offered_mid_count) {
+		if (switch_bundle_group_validate(&smh->bundle) == SWITCH_STATUS_SUCCESS) {
+			char mids[(SWITCH_BUNDLE_MAX_MIDS * (SWITCH_BUNDLE_MAX_MID_LEN + 1)) + 1] = "";
+			uint32_t i;
+
+			for (i = 0; i < smh->bundle.offered_mid_count; i++) {
+				if (i) {
+					switch_snprintf(mids + strlen(mids), sizeof(mids) - strlen(mids), " ");
+				}
+				switch_snprintf(mids + strlen(mids), sizeof(mids) - strlen(mids), "%s", smh->bundle.offered_mids[i]);
+			}
+			switch_channel_set_variable(channel, "rtp_group_bundle", mids);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
+				"BUNDLE SDP %s accepted in %s mode: tag=%s mline=%d mids=%u\n",
+				sdp_type == SDP_ANSWER ? "answer" : "offer",
+				switch_bundle_policy_str(smh->bundle.policy),
+				smh->bundle.bundle_tag_mid,
+				smh->bundle.bundle_tag_mline_index,
+				smh->bundle.offered_mid_count);
+		} else {
+			switch_channel_set_variable(channel, "rtp_group_bundle", NULL);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
+				"BUNDLE SDP %s rejected in %s mode: %s\n",
+				sdp_type == SDP_ANSWER ? "answer" : "offer",
+				switch_bundle_policy_str(smh->bundle.policy),
+				switch_bundle_group_reject_reason(&smh->bundle));
+		}
+	} else {
+		switch_channel_set_variable(channel, "rtp_group_bundle", NULL);
+	}
+}
+
 SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *session, const char *r_sdp, uint8_t *proceed, switch_sdp_type_t sdp_type)
 {
 	uint8_t match = 0, vmatch = 0, almost_vmatch = 0, tmatch = 0, fmatch = 0;
@@ -6899,6 +7131,8 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 	switch_media_handle_set_media_flag(smh, SCMF_RECV_SDP);
 
 	switch_core_session_parse_crypto_prefs(session);
+
+	switch_core_media_bundle_populate_from_sdp(smh, sdp, sdp_type);
 
 	clear_pmaps(a_engine);
 	clear_pmaps(v_engine);
@@ -7339,21 +7573,14 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 						continue;
 					}
 
-					if (!strcasecmp(attr->a_name, "group")) {
-						if (attr->a_value && !strncasecmp(attr->a_value, "BUNDLE", 6)) {
-							{
-								const char *p = attr->a_value + 6;
-								while (*p == ' ' || *p == '\t') ++p;
-								switch_channel_set_variable(smh->session->channel, "rtp_group_bundle", p);
-							}
-							a_engine->rtcp_mux = 1;
-							if (v_engine) { 
-								v_engine->rtcp_mux = 1;
-							}
-
-							if (t_engine) { 
-								t_engine->rtcp_mux = 1;
-							}
+					if (!strcasecmp(attr->a_name, "group") && attr->a_value && !strncasecmp(attr->a_value, "BUNDLE", 6) &&
+						switch_core_media_bundle_negotiated(smh)) {
+						a_engine->rtcp_mux = 1;
+						if (v_engine) {
+							v_engine->rtcp_mux = 1;
+						}
+						if (t_engine) {
+							t_engine->rtcp_mux = 1;
 						}
 					}
 
@@ -7457,7 +7684,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 				a_engine->rtcp_mux = -1;
 			}
 
-			if (switch_channel_get_variable(session->channel, "rtp_group_bundle")) {
+			if (switch_core_media_bundle_negotiated(smh)) {
 				got_rtcp_mux = 1;
 				a_engine->rtcp_mux = 1;
 			}
@@ -8398,7 +8625,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 				v_engine->rtcp_mux = -1;
 			}
 
-			if (switch_channel_get_variable(session->channel, "rtp_group_bundle")) {
+			if (switch_core_media_bundle_negotiated(smh)) {
 				got_video_rtcp_mux = 1;
 				v_engine->rtcp_mux = 1;
 			}
@@ -12297,7 +12524,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 			}
 			
 			/* BUNDLE reuse: if enabled and audio RTP exists, share session */
-			if (switch_true(switch_channel_get_variable(session->channel, "rtp_use_bundle")) && v_engine->rtcp_mux > 0 && a_engine->rtp_session) {
+			if (switch_core_media_bundle_negotiated(smh) && v_engine->rtcp_mux > 0 && a_engine->rtp_session) {
 				v_engine->rtp_session = a_engine->rtp_session;
 				v_engine->bundled_with_audio = 1;
 			} else {
@@ -12821,7 +13048,7 @@ static void generate_m(switch_core_session_t *session, char *buf, size_t buflen,
 	}
 
 	if (smh->mparams->rtcp_audio_interval_msec) {
-		if (a_engine->rtcp_mux > 0 || switch_channel_get_variable(session->channel, "rtp_group_bundle")) {
+		if (a_engine->rtcp_mux > 0 || switch_core_media_bundle_negotiated(smh)) {
 			switch_snprintf(buf + strlen(buf), buflen - strlen(buf), "a=rtcp-mux\r\n");
 			switch_snprintf(buf + strlen(buf), buflen - strlen(buf), "a=rtcp:%d IN %s %s\r\n", port, family, ip);
 		} else {
@@ -13131,7 +13358,6 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 	const char* video_mid = switch_channel_get_variable_dup(session->channel, "rtp_video_mid", SWITCH_FALSE, -1);
 	const char *clear_previous_negotiation = NULL;
 	int trickle;
-	const char *use_bundle = switch_channel_get_variable(session->channel, "rtp_use_bundle");
 	const char *use_trickle = switch_core_media_trickle_enabled(session) ? "true" : NULL;
 
 	switch_assert(session);
@@ -13524,7 +13750,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 	family = strchr(ip, ':') ? "IP6" : "IP4";
 
 	/* Optional Unified Plan BUNDLE grouping */
-	if (switch_channel_test_flag(session->channel, CF_BUNDLE_MEDIA) || switch_true(use_bundle)) {
+	if (switch_core_media_bundle_negotiated(smh)) {
 		const char *am = audio_mid ? audio_mid : "0";
 		const char *vm = (v_engine && (v_engine->codec_negotiated || switch_channel_test_flag(session->channel, CF_VIDEO))) ? (video_mid ? video_mid : "1") : NULL;
 		if (vm) {
@@ -13600,7 +13826,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 	}
 
 	if (a_engine->codec_negotiated && !switch_channel_test_flag(session->channel, CF_NOSDP_REINVITE)) {
-		if (switch_channel_test_flag(session->channel, CF_BUNDLE_MEDIA) && a_engine->rtcp_mux < 1) {
+		if (switch_core_media_bundle_negotiated(smh) && a_engine->rtcp_mux < 1) {
 			a_engine->rtcp_mux = 1;
 		}
 
@@ -13989,11 +14215,11 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 					gen_ice(session, SWITCH_MEDIA_TYPE_VIDEO, ip, (switch_port_t)v_port);
 				}
 
-				if (switch_channel_test_flag(session->channel, CF_BUNDLE_MEDIA) && v_engine && v_engine->rtcp_mux < 1) {
+				if (switch_core_media_bundle_negotiated(smh) && v_engine && v_engine->rtcp_mux < 1) {
 					v_engine->rtcp_mux = 1;
 				}
 
-				if (switch_channel_test_flag(session->channel, CF_BUNDLE_MEDIA) && v_engine) {
+				if (switch_core_media_bundle_negotiated(smh) && v_engine) {
 					if (zstr(v_engine->ice_out.ufrag) && !zstr(a_engine->ice_out.ufrag)) {
 						switch_set_string(v_engine->ice_out.ufrag, a_engine->ice_out.ufrag);
 					}
@@ -14360,7 +14586,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 					switch_stun_random_string(tmp3, 10, "0123456789");
 
 					
-				if (switch_true(switch_channel_get_variable(session->channel, "rtp_use_bundle"))) {
+				if (switch_core_media_bundle_negotiated(smh)) {
 					v_engine->ice_out.ufrag = a_engine->ice_out.ufrag;
 					v_engine->ice_out.pwd = a_engine->ice_out.pwd;
 				}
