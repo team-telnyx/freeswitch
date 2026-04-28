@@ -45,13 +45,14 @@ typedef void * (*switch_telnyx_sofia_find_nua_func)(const char *profile_name, vo
  * Must be called once for every successful find_nua call. */
 typedef void (*switch_telnyx_sofia_release_profile_func)(void *profile_handle);
 
-/* Get the advertised host:port for a named mod_sofia profile.
- * Uses ext-sip-ip/ext-sip-port when configured, otherwise the bound address.
- * When use_tls is true, returns the TLS port (requires PFLAG_TLS on the profile).
- * IPv6 addresses are bracket-wrapped per RFC 3986.
- * Writes into buf up to buflen bytes. Returns SWITCH_STATUS_SUCCESS on success,
- * SWITCH_STATUS_FALSE on error (profile not found, TLS not configured, truncation). */
-typedef switch_status_t (*switch_telnyx_sofia_find_profile_url_func)(const char *profile_name, int use_tls, char *buf, switch_size_t buflen);
+/* Get the advertised host:port (addr) for a named mod_sofia profile.
+ * Uses ext-sip-ip/ext-sip-port when explicitly configured (not auto-NAT),
+ * otherwise the bound address. When use_tls is true, returns the TLS port
+ * (requires PFLAG_TLS on the profile). IPv6 addresses are bracket-wrapped
+ * per RFC 3986. Writes into buf up to buflen bytes.
+ * Returns SWITCH_STATUS_SUCCESS on success, SWITCH_STATUS_FALSE on error
+ * (profile not found, TLS not configured, truncation). */
+typedef switch_status_t (*switch_telnyx_sofia_find_profile_addr_func)(const char *profile_name, int use_tls, char *buf, switch_size_t buflen);
 
 /* NUA event handler callback for external modules that own NUA handles.
  *
@@ -94,7 +95,7 @@ typedef struct switch_telnyx_event_dispatch_s {
 	switch_telnyx_sofia_register_handler_func switch_telnyx_sofia_register_handler;
 	switch_telnyx_sofia_find_nua_func switch_telnyx_sofia_find_nua;
 	switch_telnyx_sofia_release_profile_func switch_telnyx_sofia_release_profile;
-	switch_telnyx_sofia_find_profile_url_func switch_telnyx_sofia_find_profile_url;
+	switch_telnyx_sofia_find_profile_addr_func switch_telnyx_sofia_find_profile_addr;
 } switch_telnyx_event_dispatch_t;
 
 SWITCH_DECLARE(void) switch_telnyx_init(switch_memory_pool_t *pool);
@@ -129,7 +130,7 @@ SWITCH_DECLARE(switch_bool_t) switch_telnyx_on_add_media_bug(switch_media_bug_t 
 
 SWITCH_DECLARE(void *) switch_telnyx_sofia_find_nua(const char *profile_name, void **profile_handle);
 SWITCH_DECLARE(void) switch_telnyx_sofia_release_profile(void *profile_handle);
-SWITCH_DECLARE(switch_status_t) switch_telnyx_sofia_find_profile_url(const char *profile_name, int use_tls, char *buf, switch_size_t buflen);
+SWITCH_DECLARE(switch_status_t) switch_telnyx_sofia_find_profile_addr(const char *profile_name, int use_tls, char *buf, switch_size_t buflen);
 
 SWITCH_DECLARE(switch_bool_t) switch_telnyx_sofia_register_handler(
 	int event, int status, const char *phrase,

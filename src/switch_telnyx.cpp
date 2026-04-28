@@ -274,10 +274,10 @@ void switch_telnyx_sofia_release_profile(void *profile_handle)
 	}
 }
 
-switch_status_t switch_telnyx_sofia_find_profile_url(const char *profile_name, int use_tls, char *buf, switch_size_t buflen)
+switch_status_t switch_telnyx_sofia_find_profile_addr(const char *profile_name, int use_tls, char *buf, switch_size_t buflen)
 {
-	if (_event_dispatch.switch_telnyx_sofia_find_profile_url) {
-		return _event_dispatch.switch_telnyx_sofia_find_profile_url(profile_name, use_tls, buf, buflen);
+	if (_event_dispatch.switch_telnyx_sofia_find_profile_addr) {
+		return _event_dispatch.switch_telnyx_sofia_find_profile_addr(profile_name, use_tls, buf, buflen);
 	}
 	return SWITCH_STATUS_FALSE;
 }

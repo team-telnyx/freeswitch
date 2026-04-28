@@ -7061,9 +7061,15 @@ static void *sofia_find_nua_by_profile(const char *profile_name, void **profile_
 		return NULL;
 	}
 
+	/* Clear before dispatch so caller never sees stale data on error */
 	*profile_handle = NULL;
 	profile = sofia_glue_find_profile(profile_name);
 	if (!profile) return NULL;
+
+	if (!profile->nua) {
+		sofia_glue_release_profile(profile);
+		return NULL;
+	}
 
 	*profile_handle = (void *)profile;
 	return (void *)profile->nua;
@@ -7077,10 +7083,14 @@ static void sofia_release_profile_handle(void *profile_handle)
 	}
 }
 
-/* Return the host:port for a named sofia profile.
- * When use_tls is true, returns the TLS port instead.
- * IPv6 addresses are bracket-wrapped per RFC 3986. */
-static switch_status_t sofia_find_profile_url(const char *profile_name, int use_tls, char *buf, switch_size_t buflen)
+/* Return the advertised host:port (addr) for a named sofia profile.
+ * Uses ext-sip-ip/ext-sip-port when explicitly configured (not auto-NAT),
+ * otherwise the bound address. When use_tls is true, returns the TLS port
+ * (requires PFLAG_TLS on the profile). IPv6 addresses are bracket-wrapped
+ * per RFC 3986. Writes into buf up to buflen bytes.
+ * Returns SWITCH_STATUS_SUCCESS on success, SWITCH_STATUS_FALSE on error
+ * (profile not found, TLS not configured, truncation). */
+static switch_status_t sofia_find_profile_addr(const char *profile_name, int use_tls, char *buf, switch_size_t buflen)
 {
 	sofia_profile_t *profile;
 	const char *ip;
@@ -7098,15 +7108,33 @@ static switch_status_t sofia_find_profile_url(const char *profile_name, int use_
 			sofia_glue_release_profile(profile);
 			return SWITCH_STATUS_FALSE;
 		}
-		port = profile->tls_sip_port;
+		/* Mirror config_sofia_profile_urls(): use extsipip only when
+		 * explicitly configured (not auto-NAT). */
+		if (profile->extsipip && !sofia_test_pflag(profile, PFLAG_AUTO_NAT)) {
+			ip = profile->extsipip;
+			port = profile->tls_sip_port;
+		} else {
+			ip = profile->sipip;
+			port = profile->tls_sip_port;
+		}
+	} else if (profile->extsipip && !sofia_test_pflag(profile, PFLAG_AUTO_NAT)) {
+		ip = profile->extsipip;
+		port = profile->extsipport;
 	} else {
-		port = profile->extsipip ? profile->extsipport : profile->sip_port;
+		ip = profile->sipip;
+		port = profile->sip_port;
 	}
 
-	/* extsipport can be 0 if not explicitly configured */
-	if (!port) port = profile->sip_port;
-
-	ip = profile->extsipip ? profile->extsipip : profile->sipip;
+	/* Guard against zero port — for non-TLS, extsipport may be 0 if
+	 * not explicitly configured. For TLS, a zero port means TLS is
+	 * misconfigured — fail rather than return the wrong port. */
+	if (!port) {
+		if (use_tls) {
+			sofia_glue_release_profile(profile);
+			return SWITCH_STATUS_FALSE;
+		}
+		port = profile->sip_port;
+	}
 
 	/* Bracket-wrap IPv6 addresses */
 	ob = strchr(ip, ':') ? "[" : "";
@@ -7377,7 +7405,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_sofia_load)
 	switch_telnyx_event_dispatch()->switch_telnyx_call_recover = sofia_recover_callback;
 	switch_telnyx_event_dispatch()->switch_telnyx_sofia_find_nua = sofia_find_nua_by_profile;
 	switch_telnyx_event_dispatch()->switch_telnyx_sofia_release_profile = sofia_release_profile_handle;
-	switch_telnyx_event_dispatch()->switch_telnyx_sofia_find_profile_url = sofia_find_profile_url;
+	switch_telnyx_event_dispatch()->switch_telnyx_sofia_find_profile_addr = sofia_find_profile_addr;
 
 	management_interface = switch_loadable_module_create_interface(*module_interface, SWITCH_MANAGEMENT_INTERFACE);
 	management_interface->relative_oid = "1001";
