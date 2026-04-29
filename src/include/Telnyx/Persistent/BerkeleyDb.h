@@ -12,6 +12,9 @@
 #include <cerrno>
 #include <string>
 #include <sstream>
+#include <unistd.h>
+#include <iostream>
+#include <vector>
 
 #include "Telnyx/UTL/CoreUtils.h"
 
@@ -23,8 +26,7 @@ public:
 
   BerkeleyDb() :
     _isOpen(false),
-    _pDb(0),
-    _pCursor(0)
+    _pDb(0)
   {
   }
 
@@ -36,7 +38,7 @@ public:
   bool open(const std::string& path)
   {
     _path = path;
-    if (_isOpen || _pDb || _pCursor)
+    if (_isOpen || _pDb)
       return false;
 
     verify();
@@ -45,16 +47,6 @@ public:
     int ret = _pDb->open(0, path.c_str(), 0, DB_BTREE, DB_CREATE | DB_THREAD,0);
     if (ret != 0)
     {
-      delete _pDb;
-      _pDb = 0;
-      _isOpen = false;
-      return false;
-    }
-
-    _pDb->cursor(0, &_pCursor, 0);
-    if (!_pCursor)
-    {
-      _pDb->close(0);
       delete _pDb;
       _pDb = 0;
       _isOpen = false;
@@ -70,19 +62,12 @@ public:
     if (!_isOpen)
       return;
 
-    if (_pCursor)
-      _pCursor->close();
-
     if (_pDb)
       _pDb->close(0);
 
-    //
-    // cursor pointer is owned by the DB
-    //
-    _pCursor = 0;
-
     delete _pDb;
     _pDb = 0;
+    _isOpen = false;
   }
 
   const std::string& getPath() const
@@ -154,54 +139,78 @@ public:
       return false;
 
     Dbt key( (void*) key_.data(), (::u_int32_t)key_.size() );
-    _pDb->del(0, &key, 0);
-    _pDb->sync(0);
-    return true;
+    int ret = _pDb->del(0, &key, 0);
+    if (ret != 0 && ret != DB_NOTFOUND)
+    {
+      std::cerr << "BerkeleyDb::erase del() failed ret=" << ret
+                << " key=" << key_ << " path=" << _path << std::endl;
+      usleep(1000);
+      ret = _pDb->del(0, &key, 0);
+      if (ret != 0 && ret != DB_NOTFOUND)
+      {
+        std::cerr << "BerkeleyDb::erase del() retry failed ret=" << ret
+                  << " key=" << key_ << " path=" << _path << std::endl;
+      }
+    }
+    bool deleted = (ret == 0 || ret == DB_NOTFOUND);
+    int sync_ret = _pDb->sync(0);
+    if (sync_ret != 0)
+    {
+      std::cerr << "BerkeleyDb::erase sync() failed ret=" << sync_ret
+                << " key=" << key_ << " path=" << _path << std::endl;
+    }
+    return deleted;
   }
-
-bool nextKey(std::string& nextKey, bool first) const
-{
-  if (!_pDb || !_pCursor)
-      return false;
-
-  Dbt key, data;
-  int ret;
-
-  ret = _pCursor->get(&key,&data, first ? DB_FIRST : DB_NEXT);
-  if ( ret == DB_NOTFOUND )
-    return false;
-
-  if (ret != 0 || key.get_size() <= 0)
-    return false;
-
-  nextKey = std::string(reinterpret_cast<const char*>(key.get_data()), key.get_size() );
-  return true;
-}
 
 bool getKeys(std::vector<std::string>& keys) const
 {
-  bool first = true;
-  std::string key;
-  while(nextKey(key, first))
+  if (!_pDb)
+    return false;
+
+  Dbc* cursor = 0;
+  _pDb->cursor(0, &cursor, 0);
+  if (!cursor)
+    return false;
+
+  Dbt key, data;
+  int ret = cursor->get(&key, &data, DB_FIRST);
+  while (ret == 0)
   {
-    first = false;
-    keys.push_back(key);
+    if (key.get_size() > 0)
+    {
+      keys.push_back(std::string(reinterpret_cast<const char*>(key.get_data()), key.get_size()));
+    }
+    ret = cursor->get(&key, &data, DB_NEXT);
   }
+  cursor->close();
   return !keys.empty();
 }
 
 bool getKeys(const std::string& pattern, std::vector<std::string>& keys) const
 {
-  bool first = true;
-  std::string key;
-  while(nextKey(key, first))
+  if (!_pDb)
+    return false;
+
+  Dbc* cursor = 0;
+  _pDb->cursor(0, &cursor, 0);
+  if (!cursor)
+    return false;
+
+  Dbt key, data;
+  int ret = cursor->get(&key, &data, DB_FIRST);
+  while (ret == 0)
   {
-    first = false;
-    if (Telnyx::string_wildcard_compare(pattern.c_str(), key))
+    if (key.get_size() > 0)
     {
-      keys.push_back(key);
+      std::string k(reinterpret_cast<const char*>(key.get_data()), key.get_size());
+      if (Telnyx::string_wildcard_compare(pattern.c_str(), k))
+      {
+        keys.push_back(k);
+      }
     }
+    ret = cursor->get(&key, &data, DB_NEXT);
   }
+  cursor->close();
   return !keys.empty();
 }
 
@@ -235,16 +244,22 @@ int compact(int fillPercent = 80, int maxPages = 0)
 
 std::size_t recordCount() const
 {
-  if (!_pDb || !_pCursor)
+  if (!_pDb)
+    return 0;
+
+  Dbc* cursor = 0;
+  _pDb->cursor(0, &cursor, 0);
+  if (!cursor)
     return 0;
 
   std::size_t count = 0;
   Dbt key, data;
-  int ret = _pCursor->get(&key, &data, DB_FIRST);
+  int ret = cursor->get(&key, &data, DB_FIRST);
   while (ret == 0) {
     ++count;
-    ret = _pCursor->get(&key, &data, DB_NEXT);
+    ret = cursor->get(&key, &data, DB_NEXT);
   }
+  cursor->close();
   return count;
 }
 
@@ -263,7 +278,6 @@ std::size_t getFileSize() const
 protected:
   bool _isOpen;
   Db* _pDb;
-  Dbc* _pCursor;
   std::string _path;
 private:
   BerkeleyDb(const BerkeleyDb&){};
