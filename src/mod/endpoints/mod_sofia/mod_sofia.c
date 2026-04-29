@@ -7046,18 +7046,107 @@ char *sofia_stir_shaken_as_create_identity_header(switch_core_session_t *session
 }
 
 
-/* Return the NUA handle for a named sofia profile */
-static void *sofia_find_nua_by_profile(const char *profile_name)
+/* Acquire a ref-counted NUA handle for a named sofia profile.
+ * The profile read-lock is held until sofia_release_profile_handle() is called.
+ * This prevents the profile (and its NUA) from being destroyed while in use.
+ * profile_handle is required — callers MUST release via sofia_release_profile_handle(). */
+static void *sofia_find_nua_by_profile(const char *profile_name, void **profile_handle)
 {
-	sofia_profile_t *profile = sofia_glue_find_profile(profile_name);
-	void *nua;
+	sofia_profile_t *profile;
 
+	if (!profile_handle) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+			"sofia_find_nua_by_profile called without profile_handle output — "
+			"caller must use the ref-counted API\n");
+		return NULL;
+	}
+
+	/* Clear before dispatch so caller never sees stale data on error */
+	*profile_handle = NULL;
+	profile = sofia_glue_find_profile(profile_name);
 	if (!profile) return NULL;
 
-	nua = (void *)profile->nua;
+	if (!profile->nua) {
+		sofia_glue_release_profile(profile);
+		return NULL;
+	}
+
+	*profile_handle = (void *)profile;
+	return (void *)profile->nua;
+}
+
+/* Release the profile read-lock acquired by sofia_find_nua_by_profile() */
+static void sofia_release_profile_handle(void *profile_handle)
+{
+	if (profile_handle) {
+		sofia_glue_release_profile((sofia_profile_t *)profile_handle);
+	}
+}
+
+/* Return the advertised host:port (addr) for a named sofia profile.
+ * Uses ext-sip-ip/ext-sip-port when explicitly configured (not auto-NAT),
+ * otherwise the bound address. When use_tls is true, returns the TLS port
+ * (requires PFLAG_TLS on the profile). IPv6 addresses are bracket-wrapped
+ * per RFC 3986. Writes into buf up to buflen bytes.
+ * Returns SWITCH_STATUS_SUCCESS on success, SWITCH_STATUS_FALSE on error
+ * (profile not found, TLS not configured, truncation). */
+static switch_status_t sofia_find_profile_addr(const char *profile_name, int use_tls, char *buf, switch_size_t buflen)
+{
+	sofia_profile_t *profile;
+	const char *ip;
+	const char *ob, *cb;
+	int port;
+	int written;
+
+	if (!buf || buflen == 0) return SWITCH_STATUS_FALSE;
+
+	profile = sofia_glue_find_profile(profile_name);
+	if (!profile) return SWITCH_STATUS_FALSE;
+
+	if (use_tls) {
+		if (!sofia_test_pflag(profile, PFLAG_TLS)) {
+			sofia_glue_release_profile(profile);
+			return SWITCH_STATUS_FALSE;
+		}
+		/* Mirror config_sofia_profile_urls(): use extsipip only when
+		 * explicitly configured (not auto-NAT). */
+		if (profile->extsipip && !sofia_test_pflag(profile, PFLAG_AUTO_NAT)) {
+			ip = profile->extsipip;
+			port = profile->tls_sip_port;
+		} else {
+			ip = profile->sipip;
+			port = profile->tls_sip_port;
+		}
+	} else if (profile->extsipip && !sofia_test_pflag(profile, PFLAG_AUTO_NAT)) {
+		ip = profile->extsipip;
+		port = profile->extsipport;
+	} else {
+		ip = profile->sipip;
+		port = profile->sip_port;
+	}
+
+	/* Guard against zero port — for non-TLS, extsipport may be 0 if
+	 * not explicitly configured. For TLS, a zero port means TLS is
+	 * misconfigured — fail rather than return the wrong port. */
+	if (!port) {
+		if (use_tls) {
+			sofia_glue_release_profile(profile);
+			return SWITCH_STATUS_FALSE;
+		}
+		port = profile->sip_port;
+	}
+
+	/* Bracket-wrap IPv6 addresses */
+	ob = strchr(ip, ':') ? "[" : "";
+	cb = strchr(ip, ':') ? "]" : "";
+
+	written = switch_snprintf(buf, buflen, "%s%s%s:%d", ob, ip, cb, port);
+
 	sofia_glue_release_profile(profile);
 
-	return nua;
+	if (written < 0 || written >= (int)buflen) return SWITCH_STATUS_FALSE;
+
+	return SWITCH_STATUS_SUCCESS;
 }
 
 SWITCH_MODULE_LOAD_FUNCTION(mod_sofia_load)
@@ -7315,6 +7404,8 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_sofia_load)
 	//sofia_endpoint_interface->recover_callback = sofia_recover_callback;
 	switch_telnyx_event_dispatch()->switch_telnyx_call_recover = sofia_recover_callback;
 	switch_telnyx_event_dispatch()->switch_telnyx_sofia_find_nua = sofia_find_nua_by_profile;
+	switch_telnyx_event_dispatch()->switch_telnyx_sofia_release_profile = sofia_release_profile_handle;
+	switch_telnyx_event_dispatch()->switch_telnyx_sofia_find_profile_addr = sofia_find_profile_addr;
 
 	management_interface = switch_loadable_module_create_interface(*module_interface, SWITCH_MANAGEMENT_INTERFACE);
 	management_interface->relative_oid = "1001";
