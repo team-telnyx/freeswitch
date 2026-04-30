@@ -3,6 +3,8 @@
 
 FST_CORE_BEGIN("./conf")
 {
+	(void)fst_timer;
+
 FST_SUITE_BEGIN(switch_bundle)
 {
 	FST_TEST_BEGIN(test_policy_parse)
@@ -44,6 +46,8 @@ FST_SUITE_BEGIN(switch_bundle)
 		fst_check(switch_bundle_group_set_offered_mids(&group, "audio video") == SWITCH_STATUS_SUCCESS);
 		fst_check(audio->in_bundle_group && audio->bundle_tag);
 		fst_check(video->in_bundle_group);
+		fst_check(switch_bundle_mline_set_remote_mid_ext(audio, 1) == SWITCH_STATUS_SUCCESS);
+		fst_check(switch_bundle_mline_set_remote_mid_ext(video, 1) == SWITCH_STATUS_SUCCESS);
 		fst_check(switch_bundle_group_validate(&group) == SWITCH_STATUS_SUCCESS);
 	}
 	FST_TEST_END()
@@ -111,6 +115,8 @@ FST_SUITE_BEGIN(switch_bundle)
 		video = switch_bundle_group_add_mline(&group, 1, SWITCH_MEDIA_TYPE_VIDEO, "1", 0, SWITCH_FALSE, SWITCH_TRUE, SWITCH_FALSE);
 		fst_check(audio && video);
 		fst_check(video->zero_port && video->bundle_only && !video->rejected);
+		fst_check(switch_bundle_mline_set_remote_mid_ext(audio, 1) == SWITCH_STATUS_SUCCESS);
+		fst_check(switch_bundle_mline_set_remote_mid_ext(video, 1) == SWITCH_STATUS_SUCCESS);
 		fst_check(switch_bundle_group_validate(&group) == SWITCH_STATUS_SUCCESS);
 	}
 	FST_TEST_END()
