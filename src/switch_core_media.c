@@ -222,6 +222,8 @@ struct switch_rtp_engine_s {
 	void *engine_user_data;
 	int8_t engine_function_running;
 	switch_frame_buffer_t *write_fb;
+	switch_frame_buffer_t *read_fb;
+	switch_frame_t *read_fb_frame;
 	uint8_t ice_remote_initiator;
 	switch_thread_rwlock_t *dtls_init_rwlock;
 	rtp_extension_t rtp_recv_extensions[MAX_RTP_EXTENSIONS];
@@ -2604,6 +2606,13 @@ SWITCH_DECLARE(void) switch_media_handle_destroy(switch_core_session_t *session)
 
 	if (a_engine->write_fb) switch_frame_buffer_destroy(&a_engine->write_fb);
 
+	if (v_engine->read_fb_frame && v_engine->read_fb) {
+		switch_frame_buffer_free(v_engine->read_fb, &v_engine->read_fb_frame);
+		v_engine->read_fb_frame = NULL;
+	}
+
+	if (v_engine->read_fb) switch_frame_buffer_destroy(&v_engine->read_fb);
+
 	if (smh->msrp_session) switch_msrp_session_destroy(&smh->msrp_session);
 }
 
@@ -3695,6 +3704,54 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_refresh_media_timer(switch_cor
 	return SWITCH_STATUS_SUCCESS;
 }
 
+static void switch_core_media_release_queued_read_frame(switch_rtp_engine_t *engine)
+{
+	if (engine && engine->read_fb && engine->read_fb_frame) {
+		switch_frame_buffer_free(engine->read_fb, &engine->read_fb_frame);
+		engine->read_fb_frame = NULL;
+	}
+}
+
+static switch_bool_t switch_core_media_route_bundled_rtp(switch_media_handle_t *smh, switch_rtp_engine_t *engine, switch_media_type_t type)
+{
+	switch_rtp_engine_t *v_engine;
+	switch_bundle_mline_t *mline;
+	switch_bundle_demux_t method = SWITCH_BUNDLE_DEMUX_NONE;
+	const char *mid;
+
+	if (!smh || !engine || type != SWITCH_MEDIA_TYPE_AUDIO || smh->bundle.state != SWITCH_BUNDLE_STATE_ACCEPTED) {
+		return SWITCH_FALSE;
+	}
+
+	v_engine = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
+	if (!v_engine->bundled_with_audio || !v_engine->read_fb || !switch_test_flag(&engine->read_frame, SFF_RAW_RTP) || !engine->read_frame.datalen) {
+		return SWITCH_FALSE;
+	}
+
+	mid = switch_rtp_get_received_mid(engine->rtp_session);
+	mline = switch_bundle_group_demux_rtp(&smh->bundle, mid, engine->read_frame.ssrc, engine->read_frame.payload, &method);
+
+	if (!mline) {
+		return SWITCH_TRUE;
+	}
+
+	if (mline->media_type == SWITCH_MEDIA_TYPE_AUDIO) {
+		return SWITCH_FALSE;
+	}
+
+	if (mline->media_type == SWITCH_MEDIA_TYPE_VIDEO) {
+		switch_frame_t *dupframe = NULL;
+
+		if (switch_frame_buffer_dup(v_engine->read_fb, &engine->read_frame, &dupframe) == SWITCH_STATUS_SUCCESS) {
+			if (switch_frame_buffer_trypush(v_engine->read_fb, dupframe) != SWITCH_STATUS_SUCCESS) {
+				switch_frame_buffer_free(v_engine->read_fb, &dupframe);
+			}
+		}
+	}
+
+	return SWITCH_TRUE;
+}
+
 SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session_t *session, switch_frame_t **frame,
 															 switch_io_flag_t flags, int stream_id, switch_media_type_t type)
 {
@@ -3751,10 +3808,33 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 	engine->read_frame.m = SWITCH_FALSE;
 	engine->read_frame.img = NULL;
 	engine->read_frame.payload = 0;
+	engine->read_frame.pmap = NULL;
 
 	while (smh->media_flags[SCMF_RUNNING] && engine->read_frame.datalen == 0) {
+		void *pop = NULL;
+
 		engine->read_frame.flags = SFF_NONE;
-		status = switch_rtp_zerocopy_read_frame(engine->rtp_session, &engine->read_frame, flags);
+		engine->read_frame.pmap = NULL;
+		if (type == SWITCH_MEDIA_TYPE_VIDEO && engine->bundled_with_audio && engine->read_fb) {
+			switch_core_media_release_queued_read_frame(engine);
+
+			if (switch_frame_buffer_trypop(engine->read_fb, &pop) != SWITCH_STATUS_SUCCESS || !pop) {
+				switch_yield(5000);
+				*frame = NULL;
+				switch_goto_status(SWITCH_STATUS_BREAK, end);
+			}
+
+			engine->read_fb_frame = (switch_frame_t *) pop;
+			engine->read_frame = *engine->read_fb_frame;
+			engine->read_frame.codec = &engine->read_codec;
+			engine->read_frame.pmap = NULL;
+			if (engine->cur_payload_map) {
+				engine->read_frame.rate = engine->cur_payload_map->rm_rate;
+			}
+			status = SWITCH_STATUS_SUCCESS;
+		} else {
+			status = switch_rtp_zerocopy_read_frame(engine->rtp_session, &engine->read_frame, flags);
+		}
 
 
 		if (status != SWITCH_STATUS_SUCCESS && status != SWITCH_STATUS_BREAK) {
@@ -3782,6 +3862,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 				}
 			}
 			goto end;
+		}
+
+		if (switch_core_media_route_bundled_rtp(smh, engine, type) == SWITCH_TRUE) {
+			engine->read_frame.datalen = 0;
+			continue;
 		}
 
 		fire_readable = !switch_channel_test_flag(session->channel, CF_MEDIA_READABLE_FIRED);
@@ -12534,9 +12619,13 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 			if (switch_core_media_bundle_negotiated(smh) && v_engine->rtcp_mux > 0 && a_engine->rtp_session) {
 				v_engine->rtp_session = a_engine->rtp_session;
 				v_engine->bundled_with_audio = 1;
+				if (!v_engine->read_fb) {
+					switch_frame_buffer_create(&v_engine->read_fb, 500);
+				}
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 					"BUNDLE video is borrowing audio RTP transport; video engine will not own RTP teardown/reset\n");
 			} else {
+				v_engine->bundled_with_audio = 0;
 				v_engine->rtp_session = switch_rtp_new(a_engine->local_sdp_ip,
 														 v_engine->local_sdp_port,
 														 v_engine->cur_payload_map->remote_sdp_ip,
@@ -12709,7 +12798,14 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 					smh->mparams->manual_video_rtp_bugs = RTP_BUG_SEND_LINEAR_TIMESTAMPS;
 				}
 
-				switch_rtp_intentional_bugs(v_engine->rtp_session, v_engine->rtp_bugs | smh->mparams->manual_video_rtp_bugs);
+				if (v_engine->bundled_with_audio) {
+					switch_rtp_intentional_bugs(v_engine->rtp_session,
+						a_engine->rtp_bugs | smh->mparams->manual_rtp_bugs |
+						v_engine->rtp_bugs | smh->mparams->manual_video_rtp_bugs |
+						RTP_BUG_ACCEPT_ANY_PAYLOAD);
+				} else {
+					switch_rtp_intentional_bugs(v_engine->rtp_session, v_engine->rtp_bugs | smh->mparams->manual_video_rtp_bugs);
+				}
 
 				//XX
 
@@ -12765,7 +12861,12 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 		}
 
 		if (ve && ve->rtp_session && vext && vext->id && vmid && *vmid) {
-			switch_rtp_enable_mid(ve->rtp_session, (uint8_t)vext->id, vmid);
+			/* Shared BUNDLE RTP currently has one RTP session-level local MID.
+			 * Do not let the video m-line overwrite audio's send MID here;
+			 * per-packet MID selection belongs with BUNDLE write-path routing. */
+			if (!(ve->bundled_with_audio && ae && ve->rtp_session == ae->rtp_session)) {
+				switch_rtp_enable_mid(ve->rtp_session, (uint8_t)vext->id, vmid);
+			}
 		}
 
 		if (te && te->rtp_session && text && text->id && tmid && *tmid) {
@@ -14488,7 +14589,12 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 						mid_ext_id = 1;
 					}
 
-					switch_rtp_enable_mid(v_engine->rtp_session, mid_ext_id, video_mid && *video_mid ? video_mid : "video");
+					/* Shared BUNDLE RTP currently has one RTP session-level local MID.
+					 * Avoid overwriting audio's send MID until BUNDLE write routing
+					 * can select MID per packet. */
+					if (!(v_engine->bundled_with_audio && a_engine && v_engine->rtp_session == a_engine->rtp_session)) {
+						switch_rtp_enable_mid(v_engine->rtp_session, mid_ext_id, video_mid && *video_mid ? video_mid : "video");
+					}
 				}
 
 				if (v_engine->smode == SWITCH_MEDIA_FLOW_SENDRECV) {

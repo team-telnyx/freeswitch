@@ -529,7 +529,7 @@ struct switch_rtp {
 	rtcp_probe_func rtcp_probe;
 	uint8_t send_rtp_exts_size;
 	uint8_t send_rtp_exts_written;
-	uint8_t recv_rtp_exts_size;
+	uint32_t recv_rtp_exts_size;
 	uint8_t num_remote_extensions;
 	rtp_extension_t remote_extensions[MAX_RTP_EXTENSIONS];
 	uint8_t ext_total_len;
