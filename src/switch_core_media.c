@@ -10247,9 +10247,15 @@ static void *SWITCH_THREAD_FUNC video_helper_thread(switch_thread_t *thread, voi
 			}
 		}
 
+		read_frame = NULL;
 		status = switch_core_session_read_video_frame(session, &read_frame, SWITCH_IO_FLAG_NONE, 0);
 
 		if (!SWITCH_READ_ACCEPTABLE(status)) {
+			switch_cond_next();
+			continue;
+		}
+
+		if (!read_frame) {
 			switch_cond_next();
 			continue;
 		}
