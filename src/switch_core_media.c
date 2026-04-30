@@ -4482,10 +4482,22 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 	engine->timestamp_send += samples;
 
 	fire_writable = !switch_channel_test_flag(session->channel, CF_MEDIA_WRITABLE_FIRED);
-	if (switch_rtp_write_frame(engine->rtp_session, frame) < 0) {
+	if (type == SWITCH_MEDIA_TYPE_VIDEO && engine->bundled_with_audio) {
+		rtp_extension_t *ext = switch_core_media_get_send_extension_by_type(engine, SWITCH_MEDIA_EXTENSION_MID);
+		const char *mid = switch_channel_get_variable(session->channel, "rtp_video_mid");
+		uint8_t mid_ext_id = ext ? (uint8_t)ext->id : 0;
+
+		if (zstr(mid) || !mid_ext_id) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+				"BUNDLE video RTP write missing negotiated MID extension metadata: mid=%s ext_id=%u\n", switch_str_nil(mid), mid_ext_id);
+			status = SWITCH_STATUS_FALSE;
+		} else if (switch_rtp_write_frame_ex(engine->rtp_session, frame, engine->ssrc, mid_ext_id, mid) < 0) {
+			status = SWITCH_STATUS_FALSE;
+		}
+	} else if (switch_rtp_write_frame(engine->rtp_session, frame) < 0) {
 		status = SWITCH_STATUS_FALSE;
 	}
-	else if (fire_writable)
+	if (status == SWITCH_STATUS_SUCCESS && fire_writable)
 	{
 		switch_event_t *event = NULL;
 		if (switch_event_create(&event, SWITCH_EVENT_CHANNEL_MEDIA_WRITABLE) == SWITCH_STATUS_SUCCESS) {

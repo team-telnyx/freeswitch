@@ -747,6 +747,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_offer_audio_level_extension(switch_co
   \return the number of bytes written
 */
 SWITCH_DECLARE(int) switch_rtp_write_frame(switch_rtp_t *rtp_session, switch_frame_t *frame);
+SWITCH_DECLARE(int) switch_rtp_write_frame_ex(switch_rtp_t *rtp_session, switch_frame_t *frame, uint32_t ssrc, uint8_t mid_ext_id, const char *mid);
 
 /*!
   \brief Write data with a specified payload and sequence number to a given RTP session
