@@ -287,44 +287,67 @@ SWITCH_DECLARE(switch_bool_t) switch_bundle_group_payload_type_unique(switch_bun
 SWITCH_DECLARE(switch_status_t) switch_bundle_group_validate(switch_bundle_group_t *group)
 {
 	uint32_t i;
+	uint8_t remote_mid_ext_id = 0;
+
 	if (!group) return SWITCH_STATUS_FALSE;
 	group->reject_reason[0] = '\0';
+
 	if (!group->offered_mid_count) {
 		group->state = SWITCH_BUNDLE_STATE_NONE;
 		return SWITCH_STATUS_SUCCESS;
 	}
+
 	if (group->policy == SWITCH_BUNDLE_POLICY_OFF) {
 		bundle_reject(group, "rtp-bundle policy is off");
 		return SWITCH_STATUS_FALSE;
 	}
+
 	for (i = 0; i < group->offered_mid_count; i++) {
 		switch_bundle_mline_t *mline = switch_bundle_group_find_mline_by_mid(group, group->offered_mids[i]);
+
 		if (!mline) {
 			bundle_reject(group, "BUNDLE group references missing MID");
 			return SWITCH_STATUS_FALSE;
 		}
+
 		mline->in_bundle_group = 1;
 		if (i == 0) {
 			mline->bundle_tag = 1;
 			group->bundle_tag_mline_index = mline->mline_index;
+
 			if (mline->rejected || mline->zero_port) {
 				bundle_reject(group, "BUNDLE-tag m-line is rejected");
 				return SWITCH_STATUS_FALSE;
 			}
 		}
+
 		if (zstr(mline->mid)) {
 			bundle_reject(group, "accepted bundled m-line is missing MID");
 			return SWITCH_STATUS_FALSE;
 		}
+
 		if (!mline->rtcp_mux && !(mline->bundle_only && mline->zero_port)) {
 			bundle_reject(group, "accepted bundled m-line is missing rtcp-mux");
 			return SWITCH_STATUS_FALSE;
 		}
-		if (!mline->remote_mid_ext_id && group->policy == SWITCH_BUNDLE_POLICY_FORCE) {
-			bundle_reject(group, "accepted bundled m-line is missing MID RTP extension");
+
+		/* Runtime receive demux currently parses one-byte MID extensions only,
+		 * with one shared RTP-session MID id for the whole BUNDLE group. Do not
+		 * accept a BUNDLE group that negotiated missing, two-byte, or mismatched
+		 * MID extmap ids and then silently fall back to weaker SSRC/PT routing. */
+		if (mline->remote_mid_ext_id < 1 || mline->remote_mid_ext_id > 14) {
+			bundle_reject(group, "accepted bundled m-line is missing one-byte MID RTP extension");
+			return SWITCH_STATUS_FALSE;
+		}
+
+		if (!remote_mid_ext_id) {
+			remote_mid_ext_id = mline->remote_mid_ext_id;
+		} else if (remote_mid_ext_id != mline->remote_mid_ext_id) {
+			bundle_reject(group, "accepted bundled m-lines use different MID RTP extension ids");
 			return SWITCH_STATUS_FALSE;
 		}
 	}
+
 	group->state = SWITCH_BUNDLE_STATE_ACCEPTED;
 	return SWITCH_STATUS_SUCCESS;
 }
