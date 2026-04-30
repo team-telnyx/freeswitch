@@ -3,10 +3,9 @@
 
 FST_CORE_BEGIN("./conf")
 {
-	(void)fst_timer;
-
 FST_SUITE_BEGIN(switch_bundle)
 {
+	(void)fst_timer;
 	FST_TEST_BEGIN(test_policy_parse)
 	{
 		fst_check(switch_bundle_policy_parse(NULL, SWITCH_BUNDLE_POLICY_OFF) == SWITCH_BUNDLE_POLICY_OFF);
@@ -149,6 +148,8 @@ FST_SUITE_BEGIN(switch_bundle)
 		audio = switch_bundle_group_add_mline(&group, 0, SWITCH_MEDIA_TYPE_AUDIO, "0", 10000, SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE);
 		video = switch_bundle_group_add_mline(&group, 1, SWITCH_MEDIA_TYPE_VIDEO, "1", 10000, SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE);
 		fst_check(audio && video);
+		fst_check(switch_bundle_mline_set_remote_mid_ext(audio, 1) == SWITCH_STATUS_SUCCESS);
+		fst_check(switch_bundle_mline_set_remote_mid_ext(video, 1) == SWITCH_STATUS_SUCCESS);
 		fst_check(switch_bundle_mline_add_payload_type(audio, 111) == SWITCH_STATUS_SUCCESS);
 		fst_check(switch_bundle_mline_add_payload_type(video, 96) == SWITCH_STATUS_SUCCESS);
 		fst_check(switch_bundle_group_validate(&group) == SWITCH_STATUS_SUCCESS);
@@ -179,6 +180,8 @@ FST_SUITE_BEGIN(switch_bundle)
 		audio = switch_bundle_group_add_mline(&group, 0, SWITCH_MEDIA_TYPE_AUDIO, "0", 10000, SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE);
 		video = switch_bundle_group_add_mline(&group, 1, SWITCH_MEDIA_TYPE_VIDEO, "1", 10000, SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE);
 		fst_check(audio && video);
+		fst_check(switch_bundle_mline_set_remote_mid_ext(audio, 1) == SWITCH_STATUS_SUCCESS);
+		fst_check(switch_bundle_mline_set_remote_mid_ext(video, 1) == SWITCH_STATUS_SUCCESS);
 		fst_check(switch_bundle_mline_add_payload_type(audio, 96) == SWITCH_STATUS_SUCCESS);
 		fst_check(switch_bundle_mline_add_payload_type(video, 96) == SWITCH_STATUS_SUCCESS);
 		fst_check(switch_bundle_group_validate(&group) == SWITCH_STATUS_SUCCESS);
@@ -199,6 +202,8 @@ FST_SUITE_BEGIN(switch_bundle)
 		audio = switch_bundle_group_add_mline(&group, 0, SWITCH_MEDIA_TYPE_AUDIO, "0", 10000, SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE);
 		video = switch_bundle_group_add_mline(&group, 1, SWITCH_MEDIA_TYPE_VIDEO, "1", 10000, SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE);
 		fst_check(audio && video);
+		fst_check(switch_bundle_mline_set_remote_mid_ext(audio, 1) == SWITCH_STATUS_SUCCESS);
+		fst_check(switch_bundle_mline_set_remote_mid_ext(video, 1) == SWITCH_STATUS_SUCCESS);
 		fst_check(switch_bundle_group_validate(&group) == SWITCH_STATUS_SUCCESS);
 
 		fst_check(switch_bundle_group_learn_remote_ssrc(&group, audio, 4444) == SWITCH_STATUS_SUCCESS);
@@ -218,6 +223,8 @@ FST_SUITE_BEGIN(switch_bundle)
 		audio = switch_bundle_group_add_mline(&group, 0, SWITCH_MEDIA_TYPE_AUDIO, "0", 10000, SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE);
 		video = switch_bundle_group_add_mline(&group, 1, SWITCH_MEDIA_TYPE_VIDEO, "1", 10000, SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE);
 		fst_check(audio && video);
+		fst_check(switch_bundle_mline_set_remote_mid_ext(audio, 1) == SWITCH_STATUS_SUCCESS);
+		fst_check(switch_bundle_mline_set_remote_mid_ext(video, 1) == SWITCH_STATUS_SUCCESS);
 		fst_check(switch_bundle_group_validate(&group) == SWITCH_STATUS_SUCCESS);
 		fst_check(switch_bundle_group_learn_remote_ssrc(&group, audio, 5555) == SWITCH_STATUS_SUCCESS);
 
