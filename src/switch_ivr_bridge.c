@@ -400,13 +400,23 @@ static switch_bool_t is_silence_frame(switch_frame_t *frame, int silence_thresho
 	return is_silence;
 }
 
-static switch_status_t write_hold_generated_silence(switch_core_session_t *session_b, switch_frame_t *silence_frame,
-										 switch_codec_implementation_t *read_impl, int silence_val, int stream_id)
+static switch_status_t write_hold_generated_silence(switch_core_session_t *session_a, switch_core_session_t *session_b, switch_frame_t *silence_frame,
+										 switch_codec_implementation_t *read_impl, int silence_val, int stream_id, int source_held,
+										 int target_held, int *logged_generated_hold_silence)
 {
+	switch_media_flow_t target_audio_flow = switch_core_session_media_flow(session_b, SWITCH_MEDIA_TYPE_AUDIO);
+
+	if (logged_generated_hold_silence && !*logged_generated_hold_silence) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_DEBUG,
+						  "Writing hold-generated silence from %s to %s source_held=%d target_held=%d target_audio_flow=%d force_write=1\n",
+						  switch_core_session_get_name(session_a), switch_core_session_get_name(session_b), source_held, target_held, target_audio_flow);
+		*logged_generated_hold_silence = 1;
+	}
+
 	switch_generate_sln_silence((int16_t *) silence_frame->data, silence_frame->samples,
 							 read_impl->number_of_channels, silence_val);
 
-	return switch_core_session_write_frame(session_b, silence_frame, SWITCH_IO_FLAG_NONE, stream_id);
+	return switch_core_session_write_frame(session_b, silence_frame, SWITCH_IO_FLAG_FORCE, stream_id);
 }
 
 
@@ -449,7 +459,7 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 	const char *silence_var;
 	const char *continuous_silence_var;
 	int silence_val = 0, bypass_media_after_bridge = 0, max_continuous_silence_ms = 0, silence_threshold = 0;
-	int silence_codec_initialized = 0, generate_silence_on_hold = 0;
+	int silence_codec_initialized = 0, generate_silence_on_hold = 0, logged_generated_hold_silence = 0;
 	const char *bridge_answer_timeout = NULL;
 	int bridge_filter_dtmf, answer_timeout, sent_update = 0;
 	time_t answer_limit = 0;
@@ -857,7 +867,8 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 			   Use the held read (often SWITCH_STATUS_BREAK) only as the timer tick
 			   for generated silence, and never write toward a held peer. */
 			if (generate_silence_on_hold && source_held && !target_held) {
-				if (write_hold_generated_silence(session_b, &silence_frame, &read_impl, silence_val, stream_id) != SWITCH_STATUS_SUCCESS) {
+				if (write_hold_generated_silence(session_a, session_b, &silence_frame, &read_impl, silence_val, stream_id,
+										 source_held, target_held, &logged_generated_hold_silence) != SWITCH_STATUS_SUCCESS) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_DEBUG,
 									  "%s ending bridge by request from hold-generated silence write function\n", switch_channel_get_name(chan_b));
 					goto end_of_bridge_loop;
@@ -1203,7 +1214,8 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 				}
 			} else if (generate_silence_on_hold && source_held && !target_held) {
 				/* Held reads can return SWITCH_STATUS_BREAK; treat BREAK as pacing for generated silence only. */
-				if (write_hold_generated_silence(session_b, &silence_frame, &read_impl, silence_val, stream_id) != SWITCH_STATUS_SUCCESS) {
+				if (write_hold_generated_silence(session_a, session_b, &silence_frame, &read_impl, silence_val, stream_id,
+										 source_held, target_held, &logged_generated_hold_silence) != SWITCH_STATUS_SUCCESS) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_DEBUG,
 									  "%s ending bridge by request from hold-generated silence write function\n", switch_channel_get_name(chan_b));
 					goto end_of_bridge_loop;

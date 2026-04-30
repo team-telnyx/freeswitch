@@ -4324,7 +4324,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 	if (type == SWITCH_MEDIA_TYPE_AUDIO) {
 		switch_media_flow_t audio_flow = switch_core_session_media_flow(session, SWITCH_MEDIA_TYPE_AUDIO);
 
-		if (audio_flow != SWITCH_MEDIA_FLOW_SENDRECV && audio_flow != SWITCH_MEDIA_FLOW_SENDONLY) {
+		if (!(flags & SWITCH_IO_FLAG_FORCE) && audio_flow != SWITCH_MEDIA_FLOW_SENDRECV && audio_flow != SWITCH_MEDIA_FLOW_SENDONLY) {
 			switch_thread_rwlock_unlock(engine->dtls_init_rwlock);
 			return SWITCH_STATUS_SUCCESS;
 		}
