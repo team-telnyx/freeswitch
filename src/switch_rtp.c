@@ -9851,6 +9851,9 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 		}
 
 		send_msg = &rtp_session->send_msg;
+		send_msg->header.x = 0;
+		send_msg->ext = NULL;
+		send_msg->ebody = NULL;
 		send_msg->header.pt = payload;
 
 		if (write_state) {
@@ -10872,6 +10875,9 @@ SWITCH_DECLARE(int) switch_rtp_write_manual(switch_rtp_t *rtp_session,
 	WRITE_INC(rtp_session);
 
 	rtp_session->write_msg = rtp_session->send_msg;
+	rtp_session->write_msg.header.x = 0;
+	rtp_session->write_msg.ext = NULL;
+	rtp_session->write_msg.ebody = NULL;
 	rtp_session->write_msg.header.seq = htons(++rtp_session->seq);
 	rtp_session->write_msg.header.ts = htonl(ts);
 	rtp_session->write_msg.header.pt = payload;
@@ -10941,6 +10947,9 @@ static int rtp_write_manual_state(switch_rtp_t *rtp_session, switch_rtp_write_st
 	}
 
 	rtp_session->write_msg = rtp_session->send_msg;
+	rtp_session->write_msg.header.x = 0;
+	rtp_session->write_msg.ext = NULL;
+	rtp_session->write_msg.ebody = NULL;
 	rtp_session->write_msg.header.seq = htons(++(*seq));
 	rtp_session->write_msg.header.ts = htonl(ts);
 	rtp_session->write_msg.header.pt = payload;
