@@ -343,6 +343,13 @@ struct switch_rtp_write_state {
 	ts_normalize_t ts_norm;
 	uint16_t last_write_seq;
 	uint8_t video_delta_mode;
+	uint8_t video_frame_open;
+	uint8_t video_frame_last_set;
+	uint32_t video_frame_src_ts;
+	uint32_t video_frame_out_ts;
+	uint32_t video_frame_last_src_ts;
+	uint32_t video_frame_last_out_ts;
+	switch_time_t video_frame_last_timestamp;
 };
 
 static switch_status_t rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_t *send_msg, switch_size_t *bytes, uint8_t ext_id, const char *mid);
@@ -9744,6 +9751,10 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 	ts_normalize_t *ts_norm = NULL;
 	uint16_t *last_write_seq = NULL;
 	uint8_t *video_delta_mode = NULL;
+	uint8_t bundle_video_commit_marker = 0;
+	uint32_t bundle_video_commit_src_ts = 0;
+	uint32_t bundle_video_commit_out_ts = 0;
+	switch_time_t bundle_video_commit_timestamp = 0;
 #if DEBUG_RTP
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "RTP: common_write, timestamp: %s %u %p/%p\n", rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName", timestamp, (void*)rtp_session->session, (void*)rtp_session);
 #endif
@@ -9937,6 +9948,54 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 	send_msg->header.ssrc = htonl(ssrc ? ssrc : rtp_session->ssrc);
 	if (force_video || switch_rtp_test_flag(rtp_session, SWITCH_RTP_FLAG_VIDEO)) {
 		int external = (flags && *flags & SFF_EXTERNAL);
+
+		if (force_video && write_state && external) {
+			uint32_t src_ts = ntohl(send_msg->header.ts);
+			switch_time_t frame_now = switch_micro_time_now();
+
+			if (!write_state->video_frame_open) {
+				uint32_t out_ts = src_ts;
+
+				if (write_state->video_frame_last_set) {
+					uint32_t src_delta = src_ts - write_state->video_frame_last_src_ts;
+					uint32_t clock_delta = 1;
+
+					if (frame_now > write_state->video_frame_last_timestamp) {
+						switch_time_t elapsed = frame_now - write_state->video_frame_last_timestamp;
+						clock_delta = (uint32_t) ((elapsed * 90) / 1000);
+					}
+
+					/* Some upstream video sources advance RTP timestamps per packet instead of
+					   per frame.  For BUNDLE video passthrough, hold one timestamp for all
+					   fragments in a marker-bounded frame and synthesize a conservative 30fps
+					   frame delta when the source delta is implausibly small for a 90 kHz video
+					   clock.  Packet burst timing can be much shorter than the encoded frame
+					   interval, so do not let wall-clock fallback produce one-tick frames. */
+					if (!src_delta || src_delta < 90 || src_delta > 90000) {
+						if (clock_delta < 3000 || clock_delta > 90000) {
+							clock_delta = 3000;
+						}
+						out_ts = write_state->video_frame_last_out_ts + clock_delta;
+					} else {
+						out_ts = write_state->video_frame_last_out_ts + src_delta;
+					}
+				}
+
+				write_state->video_frame_src_ts = src_ts;
+				write_state->video_frame_out_ts = out_ts;
+				write_state->video_frame_open = 1;
+			}
+
+			send_msg->header.ts = htonl(write_state->video_frame_out_ts);
+
+			if (send_msg->header.m) {
+				bundle_video_commit_marker = 1;
+				bundle_video_commit_src_ts = write_state->video_frame_src_ts;
+				bundle_video_commit_out_ts = write_state->video_frame_out_ts;
+				bundle_video_commit_timestamp = frame_now;
+			}
+		}
+
 		/* Normalize the timestamps to our own base by generating a made up starting point then adding the measured deltas to that base
 		   so if the timestamps and ssrc of the source change, it will not break the other end's jitter buffer / decoder etc *cough* CHROME *cough*
 		 */
@@ -10386,6 +10445,14 @@ fork_done:
 				goto end;
 			}
 #endif
+
+		if (bundle_video_commit_marker && write_state) {
+			write_state->video_frame_last_src_ts = bundle_video_commit_src_ts;
+			write_state->video_frame_last_out_ts = bundle_video_commit_out_ts;
+			write_state->video_frame_last_timestamp = bundle_video_commit_timestamp;
+			write_state->video_frame_last_set = 1;
+			write_state->video_frame_open = 0;
+		}
 
 		*last_write_ts = this_ts;
 		*reset = 0;
