@@ -134,6 +134,7 @@ struct switch_rtp_engine_s {
 	switch_media_type_t type;
 
 	switch_rtp_t *rtp_session;
+	switch_rtp_write_state_t *bundle_write_state;
 	switch_frame_t read_frame;
 	switch_codec_t read_codec;
 	switch_codec_t write_codec;
@@ -4491,7 +4492,16 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
 				"BUNDLE video RTP write missing negotiated MID extension metadata: mid=%s ext_id=%u\n", switch_str_nil(mid), mid_ext_id);
 			status = SWITCH_STATUS_FALSE;
-		} else if (switch_rtp_write_frame_ex(engine->rtp_session, frame, engine->ssrc, mid_ext_id, mid) < 0) {
+		} else if (!engine->cur_payload_map) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+				"BUNDLE video RTP write missing negotiated payload map\n");
+			status = SWITCH_STATUS_FALSE;
+		} else if (!engine->bundle_write_state && switch_rtp_write_state_create(&engine->bundle_write_state, switch_core_session_get_pool(session)) != SWITCH_STATUS_SUCCESS) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+				"Unable to create isolated BUNDLE video RTP write state\n");
+			status = SWITCH_STATUS_FALSE;
+		} else if (switch_rtp_write_frame_ex_state(engine->rtp_session, frame, engine->bundle_write_state,
+										   engine->ssrc, mid_ext_id, mid, SWITCH_TRUE, engine->cur_payload_map->pt) < 0) {
 			status = SWITCH_STATUS_FALSE;
 		}
 	} else if (switch_rtp_write_frame(engine->rtp_session, frame) < 0) {
@@ -12671,6 +12681,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 			if (switch_core_media_bundle_negotiated(smh) && v_engine->rtcp_mux > 0 && a_engine->rtp_session) {
 				v_engine->rtp_session = a_engine->rtp_session;
 				v_engine->bundled_with_audio = 1;
+				if (v_engine->bundle_write_state) {
+					switch_rtp_write_state_reset(v_engine->bundle_write_state);
+				}
 				if (!v_engine->read_fb && switch_frame_buffer_create(&v_engine->read_fb, 500) != SWITCH_STATUS_SUCCESS) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
 						"BUNDLE video failed to create queued RTP read buffer\n");
@@ -12686,6 +12699,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 			} else {
 				if (v_engine->bundled_with_audio) {
 					switch_core_media_flush_queued_read_frames(v_engine);
+					if (v_engine->bundle_write_state) {
+						switch_rtp_write_state_reset(v_engine->bundle_write_state);
+					}
 				}
 				v_engine->bundled_with_audio = 0;
 				v_engine->rtp_session = switch_rtp_new(a_engine->local_sdp_ip,

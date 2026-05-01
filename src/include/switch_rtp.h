@@ -87,6 +87,8 @@ struct switch_rtp_crypto_key {
 };
 typedef struct switch_rtp_crypto_key switch_rtp_crypto_key_t;
 
+typedef struct switch_rtp_write_state switch_rtp_write_state_t;
+
 typedef enum {
 	IPR_RTP,
 	IPR_RTCP
@@ -745,9 +747,16 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_offer_audio_level_extension(switch_co
   \param rtp_session the RTP session to write to
   \param frame the frame to write
   \return the number of bytes written
+  \note switch_rtp_write_frame_ex_state can use write_state to isolate
+  seq/timestamp/write-tracking state from rtp_session while sharing the
+  session socket/security context.
 */
 SWITCH_DECLARE(int) switch_rtp_write_frame(switch_rtp_t *rtp_session, switch_frame_t *frame);
 SWITCH_DECLARE(int) switch_rtp_write_frame_ex(switch_rtp_t *rtp_session, switch_frame_t *frame, uint32_t ssrc, uint8_t mid_ext_id, const char *mid);
+SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, switch_frame_t *frame, switch_rtp_write_state_t *write_state,
+										   uint32_t ssrc, uint8_t mid_ext_id, const char *mid, switch_bool_t force_video, switch_payload_t payload_override);
+SWITCH_DECLARE(switch_status_t) switch_rtp_write_state_create(switch_rtp_write_state_t **write_state, switch_memory_pool_t *pool);
+SWITCH_DECLARE(void) switch_rtp_write_state_reset(switch_rtp_write_state_t *write_state);
 
 /*!
   \brief Write data with a specified payload and sequence number to a given RTP session
