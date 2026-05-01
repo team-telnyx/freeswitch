@@ -13485,11 +13485,13 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 						"Updating partner media mode to %d\n", opp_smode);
 						other_engine->smode = opp_smode;
 					}
-				} else if (new_smode != SWITCH_MEDIA_FLOW_INACTIVE || propagate_inactive_to_partner ||
-						   other_engine->rmode == SWITCH_MEDIA_FLOW_INACTIVE || partner_held) {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
-						"Updating partner media mode to %d\n", opp_smode);
-					other_engine->smode = opp_smode;
+				} else {
+					if (new_smode != SWITCH_MEDIA_FLOW_INACTIVE || propagate_inactive_to_partner ||
+						other_engine->rmode == SWITCH_MEDIA_FLOW_INACTIVE || partner_held) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
+							"Updating partner media mode to %d\n", opp_smode);
+						other_engine->smode = opp_smode;
+					}
 				}
 			}
 			switch_core_session_rwunlock(other_session);
