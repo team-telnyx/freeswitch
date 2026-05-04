@@ -4412,6 +4412,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 	int bytes = 0, samples = 0, frames = 0;
 	switch_rtp_engine_t *engine;
 	switch_media_handle_t *smh;
+	int bundle_video_wrote = 0;
 	int fire_writable = 0;
 
 	switch_assert(session);
@@ -4500,9 +4501,15 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
 				"Unable to create isolated BUNDLE video RTP write state\n");
 			status = SWITCH_STATUS_FALSE;
-		} else if (switch_rtp_write_frame_ex_state(engine->rtp_session, frame, engine->bundle_write_state,
-										   engine->ssrc, mid_ext_id, mid, SWITCH_TRUE, engine->cur_payload_map->pt) < 0) {
-			status = SWITCH_STATUS_FALSE;
+		} else {
+			bundle_video_wrote = switch_rtp_write_frame_ex_state(engine->rtp_session, frame, engine->bundle_write_state,
+									   engine->ssrc, mid_ext_id, mid, SWITCH_TRUE, engine->cur_payload_map->pt);
+			if (bundle_video_wrote <= 0) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+					"BUNDLE video RTP write produced no packet: wrote=%d flags=0x%x packetlen=%u datalen=%u\n",
+					bundle_video_wrote, frame->flags, frame->packetlen, frame->datalen);
+				status = SWITCH_STATUS_FALSE;
+			}
 		}
 	} else if (switch_rtp_write_frame(engine->rtp_session, frame) < 0) {
 		status = SWITCH_STATUS_FALSE;

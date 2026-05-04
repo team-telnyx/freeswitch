@@ -10677,8 +10677,12 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 		return 0;
 	}
 
+	/* Bundled video borrows the audio RTP transport, but it must not inherit
+	   audio-session proxy-media/UDPTL write shortcuts.  Those shortcuts can
+	   return 0 for non-proxy video frames, which makes BUNDLE video disappear
+	   before it reaches rtp_common_write(). */
 	if (switch_test_flag(frame, SFF_PROXY_PACKET) || switch_test_flag(frame, SFF_UDPTL_PACKET) ||
-		rtp_session->flags[SWITCH_RTP_FLAG_PROXY_MEDIA] || rtp_session->flags[SWITCH_RTP_FLAG_UDPTL]) {
+		(!force_video && (rtp_session->flags[SWITCH_RTP_FLAG_PROXY_MEDIA] || rtp_session->flags[SWITCH_RTP_FLAG_UDPTL]))) {
 
 		switch_size_t bytes;
 
