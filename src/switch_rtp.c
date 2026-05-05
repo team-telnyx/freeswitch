@@ -522,6 +522,13 @@ struct switch_rtp {
 	uint16_t last_seq;
 	uint16_t last_write_seq;
 	uint8_t video_delta_mode;
+	uint8_t video_frame_open;
+	uint8_t video_frame_last_set;
+	uint32_t video_frame_src_ts;
+	uint32_t video_frame_out_ts;
+	uint32_t video_frame_last_src_ts;
+	uint32_t video_frame_last_out_ts;
+	switch_time_t video_frame_last_timestamp;
 	switch_time_t last_read_time;
 	switch_time_t last_publish_stats;
 	int publish_stats_interval_ms;
@@ -9751,10 +9758,17 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 	ts_normalize_t *ts_norm = NULL;
 	uint16_t *last_write_seq = NULL;
 	uint8_t *video_delta_mode = NULL;
-	uint8_t bundle_video_commit_marker = 0;
-	uint32_t bundle_video_commit_src_ts = 0;
-	uint32_t bundle_video_commit_out_ts = 0;
-	switch_time_t bundle_video_commit_timestamp = 0;
+	uint8_t video_frame_commit_marker = 0;
+	uint32_t video_frame_commit_src_ts = 0;
+	uint32_t video_frame_commit_out_ts = 0;
+	switch_time_t video_frame_commit_timestamp = 0;
+	uint8_t *video_frame_open = NULL;
+	uint8_t *video_frame_last_set = NULL;
+	uint32_t *video_frame_src_ts = NULL;
+	uint32_t *video_frame_out_ts = NULL;
+	uint32_t *video_frame_last_src_ts = NULL;
+	uint32_t *video_frame_last_out_ts = NULL;
+	switch_time_t *video_frame_last_timestamp = NULL;
 #if DEBUG_RTP
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "RTP: common_write, timestamp: %s %u %p/%p\n", rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName", timestamp, (void*)rtp_session->session, (void*)rtp_session);
 #endif
@@ -9785,6 +9799,13 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 		ts_norm = &write_state->ts_norm;
 		last_write_seq = &write_state->last_write_seq;
 		video_delta_mode = &write_state->video_delta_mode;
+		video_frame_open = &write_state->video_frame_open;
+		video_frame_last_set = &write_state->video_frame_last_set;
+		video_frame_src_ts = &write_state->video_frame_src_ts;
+		video_frame_out_ts = &write_state->video_frame_out_ts;
+		video_frame_last_src_ts = &write_state->video_frame_last_src_ts;
+		video_frame_last_out_ts = &write_state->video_frame_last_out_ts;
+		video_frame_last_timestamp = &write_state->video_frame_last_timestamp;
 	} else {
 		seq = &rtp_session->seq;
 		ts = &rtp_session->ts;
@@ -9796,6 +9817,13 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 		ts_norm = &rtp_session->ts_norm;
 		last_write_seq = &rtp_session->last_write_seq;
 		video_delta_mode = &rtp_session->video_delta_mode;
+		video_frame_open = &rtp_session->video_frame_open;
+		video_frame_last_set = &rtp_session->video_frame_last_set;
+		video_frame_src_ts = &rtp_session->video_frame_src_ts;
+		video_frame_out_ts = &rtp_session->video_frame_out_ts;
+		video_frame_last_src_ts = &rtp_session->video_frame_last_src_ts;
+		video_frame_last_out_ts = &rtp_session->video_frame_last_out_ts;
+		video_frame_last_timestamp = &rtp_session->video_frame_last_timestamp;
 	}
 
 	if (rtp_session->flags[SWITCH_RTP_FLAG_USE_TIMER]) {
@@ -9949,50 +9977,51 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 	if (force_video || switch_rtp_test_flag(rtp_session, SWITCH_RTP_FLAG_VIDEO)) {
 		int external = (flags && *flags & SFF_EXTERNAL);
 
-		if (force_video && write_state && external) {
+		if ((force_video || rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) && external) {
 			uint32_t src_ts = ntohl(send_msg->header.ts);
 			switch_time_t frame_now = switch_micro_time_now();
 
-			if (!write_state->video_frame_open) {
+			if (!*video_frame_open) {
 				uint32_t out_ts = src_ts;
 
-				if (write_state->video_frame_last_set) {
-					uint32_t src_delta = src_ts - write_state->video_frame_last_src_ts;
+				if (*video_frame_last_set) {
+					uint32_t src_delta = src_ts - *video_frame_last_src_ts;
 					uint32_t clock_delta = 1;
 
-					if (frame_now > write_state->video_frame_last_timestamp) {
-						switch_time_t elapsed = frame_now - write_state->video_frame_last_timestamp;
+					if (frame_now > *video_frame_last_timestamp) {
+						switch_time_t elapsed = frame_now - *video_frame_last_timestamp;
 						clock_delta = (uint32_t) ((elapsed * 90) / 1000);
 					}
 
-					/* Some upstream video sources advance RTP timestamps per packet instead of
-					   per frame.  For BUNDLE video passthrough, hold one timestamp for all
-					   fragments in a marker-bounded frame and synthesize a conservative 30fps
-					   frame delta when the source delta is implausibly small for a 90 kHz video
-					   clock.  Packet burst timing can be much shorter than the encoded frame
-					   interval, so do not let wall-clock fallback produce one-tick frames. */
+					/* Some upstream video sources provide RTP timestamps that are static or
+					   advance per packet instead of per encoded frame. Hold one timestamp
+					   for all fragments in a marker-bounded frame and synthesize a
+					   conservative 30fps delta when the source delta is implausible for a
+					   90 kHz video clock. Packet burst timing can be much shorter than the
+					   encoded frame interval, so do not let wall-clock fallback produce
+					   one-tick frames. */
 					if (!src_delta || src_delta < 90 || src_delta > 90000) {
 						if (clock_delta < 3000 || clock_delta > 90000) {
 							clock_delta = 3000;
 						}
-						out_ts = write_state->video_frame_last_out_ts + clock_delta;
+						out_ts = *video_frame_last_out_ts + clock_delta;
 					} else {
-						out_ts = write_state->video_frame_last_out_ts + src_delta;
+						out_ts = *video_frame_last_out_ts + src_delta;
 					}
 				}
 
-				write_state->video_frame_src_ts = src_ts;
-				write_state->video_frame_out_ts = out_ts;
-				write_state->video_frame_open = 1;
+				*video_frame_src_ts = src_ts;
+				*video_frame_out_ts = out_ts;
+				*video_frame_open = 1;
 			}
 
-			send_msg->header.ts = htonl(write_state->video_frame_out_ts);
+			send_msg->header.ts = htonl(*video_frame_out_ts);
 
 			if (send_msg->header.m) {
-				bundle_video_commit_marker = 1;
-				bundle_video_commit_src_ts = write_state->video_frame_src_ts;
-				bundle_video_commit_out_ts = write_state->video_frame_out_ts;
-				bundle_video_commit_timestamp = frame_now;
+				video_frame_commit_marker = 1;
+				video_frame_commit_src_ts = *video_frame_src_ts;
+				video_frame_commit_out_ts = *video_frame_out_ts;
+				video_frame_commit_timestamp = frame_now;
 			}
 		}
 
@@ -10446,12 +10475,12 @@ fork_done:
 			}
 #endif
 
-		if (bundle_video_commit_marker && write_state) {
-			write_state->video_frame_last_src_ts = bundle_video_commit_src_ts;
-			write_state->video_frame_last_out_ts = bundle_video_commit_out_ts;
-			write_state->video_frame_last_timestamp = bundle_video_commit_timestamp;
-			write_state->video_frame_last_set = 1;
-			write_state->video_frame_open = 0;
+		if (video_frame_commit_marker) {
+			*video_frame_last_src_ts = video_frame_commit_src_ts;
+			*video_frame_last_out_ts = video_frame_commit_out_ts;
+			*video_frame_last_timestamp = video_frame_commit_timestamp;
+			*video_frame_last_set = 1;
+			*video_frame_open = 0;
 		}
 
 		*last_write_ts = this_ts;
