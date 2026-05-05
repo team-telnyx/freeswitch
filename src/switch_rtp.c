@@ -10878,7 +10878,12 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 	} else {
 		data = frame->data;
 		len = frame->datalen;
-		ts = (rtp_session->flags[SWITCH_RTP_FLAG_RAW_WRITE] || force_video) ? (uint32_t) frame->timestamp : 0;
+		if (rtp_session->flags[SWITCH_RTP_FLAG_RAW_WRITE] || force_video ||
+			(rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] && frame->timestamp)) {
+			ts = (uint32_t) frame->timestamp;
+		} else {
+			ts = 0;
+		}
 	}
 
 	/*

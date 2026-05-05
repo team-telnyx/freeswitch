@@ -18347,11 +18347,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_video_frame(switch_cor
 	}
 
 	if (!(switch_channel_test_flag(session->channel, CF_VIDEO_READY) || (flags & SWITCH_IO_FLAG_FORCE))) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-						  "TEL6738 video write skipped %s ready=0 force=0 seq=%u ts=%u len=%u marker=%d img=%d key=%d decoded_read=%d media_up=%d\n",
-						  switch_core_session_get_name(session), frame->seq, frame->timestamp, frame->datalen, frame->m,
-						  frame->img ? 1 : 0, switch_test_flag(frame, SFF_IS_KEYFRAME),
-						  switch_channel_test_flag(session->channel, CF_VIDEO_DECODED_READ), switch_channel_media_up(session->channel));
 		return SWITCH_STATUS_SUCCESS;
 	}
 
