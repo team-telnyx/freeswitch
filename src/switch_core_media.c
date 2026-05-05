@@ -7026,6 +7026,21 @@ static switch_bool_t switch_core_media_bundle_negotiated(const switch_media_hand
 	return smh && smh->bundle.state == SWITCH_BUNDLE_STATE_ACCEPTED ? SWITCH_TRUE : SWITCH_FALSE;
 }
 
+static switch_bool_t switch_core_media_bundle_should_offer(const switch_media_handle_t *smh)
+{
+	switch_channel_t *channel;
+
+	if (switch_core_media_bundle_negotiated(smh)) {
+		return SWITCH_TRUE;
+	}
+
+	if (!smh || !smh->session || !(channel = switch_core_session_get_channel(smh->session))) {
+		return SWITCH_FALSE;
+	}
+
+	return switch_channel_var_true(channel, "rtp_use_bundle") ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
 static switch_bool_t switch_core_media_engine_owns_rtp(const switch_rtp_engine_t *engine)
 {
 	return engine && !engine->bundled_with_audio ? SWITCH_TRUE : SWITCH_FALSE;
@@ -13943,7 +13958,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 	family = strchr(ip, ':') ? "IP6" : "IP4";
 
 	/* Optional Unified Plan BUNDLE grouping */
-	if (switch_core_media_bundle_negotiated(smh)) {
+	if (switch_core_media_bundle_should_offer(smh)) {
 		const char *am = audio_mid ? audio_mid : "0";
 		const char *vm = (v_engine && (v_engine->codec_negotiated || switch_channel_test_flag(session->channel, CF_VIDEO))) ? (video_mid ? video_mid : "1") : NULL;
 		if (vm) {
@@ -18332,6 +18347,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_video_frame(switch_cor
 	}
 
 	if (!(switch_channel_test_flag(session->channel, CF_VIDEO_READY) || (flags & SWITCH_IO_FLAG_FORCE))) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+						  "TEL6738 video write skipped %s ready=0 force=0 seq=%u ts=%u len=%u marker=%d img=%d key=%d decoded_read=%d media_up=%d\n",
+						  switch_core_session_get_name(session), frame->seq, frame->timestamp, frame->datalen, frame->m,
+						  frame->img ? 1 : 0, switch_test_flag(frame, SFF_IS_KEYFRAME),
+						  switch_channel_test_flag(session->channel, CF_VIDEO_DECODED_READ), switch_channel_media_up(session->channel));
 		return SWITCH_STATUS_SUCCESS;
 	}
 
