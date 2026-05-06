@@ -9981,6 +9981,20 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 			uint32_t src_ts = ntohl(send_msg->header.ts);
 			switch_time_t frame_now = switch_micro_time_now();
 
+			/* Some WebRTC sources advance the RTP timestamp on individual
+			   fragments.  Do not treat every source timestamp change as a new
+			   output video frame; keep one output timestamp until the source
+			   marker closes the frame.  If the source never sends a marker and
+			   the timestamp drift grows past ~100ms, synthesize a marker to avoid
+			   pinning the downstream jitter buffer forever. */
+			if (*video_frame_open && src_ts != *video_frame_src_ts && !send_msg->header.m) {
+				uint32_t open_src_delta = src_ts - *video_frame_src_ts;
+
+				if (open_src_delta > 9000) {
+					send_msg->header.m = 1;
+				}
+			}
+
 			if (!*video_frame_open) {
 				uint32_t out_ts = src_ts;
 
@@ -10019,7 +10033,7 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 
 			if (send_msg->header.m) {
 				video_frame_commit_marker = 1;
-				video_frame_commit_src_ts = *video_frame_src_ts;
+				video_frame_commit_src_ts = src_ts;
 				video_frame_commit_out_ts = *video_frame_out_ts;
 				video_frame_commit_timestamp = frame_now;
 			}
@@ -11019,6 +11033,17 @@ static int rtp_write_manual_state(switch_rtp_t *rtp_session, switch_rtp_write_st
 	uint16_t *seq;
 	uint32_t *last_write_ts;
 	uint32_t *reset;
+	uint8_t *video_frame_open;
+	uint8_t *video_frame_last_set;
+	uint32_t *video_frame_src_ts;
+	uint32_t *video_frame_out_ts;
+	uint32_t *video_frame_last_src_ts;
+	uint32_t *video_frame_last_out_ts;
+	switch_time_t *video_frame_last_timestamp;
+	uint8_t video_frame_commit_marker = 0;
+	uint32_t video_frame_commit_src_ts = 0;
+	uint32_t video_frame_commit_out_ts = 0;
+	switch_time_t video_frame_commit_timestamp = 0;
 	int ret = -1;
 
 	if (!switch_rtp_ready(rtp_session) || !rtp_session->remote_addr || datalen > SWITCH_RTP_MAX_BUF_LEN) {
@@ -11045,10 +11070,76 @@ static int rtp_write_manual_state(switch_rtp_t *rtp_session, switch_rtp_write_st
 		seq = &write_state->seq;
 		last_write_ts = &write_state->last_write_ts;
 		reset = &write_state->reset;
+		video_frame_open = &write_state->video_frame_open;
+		video_frame_last_set = &write_state->video_frame_last_set;
+		video_frame_src_ts = &write_state->video_frame_src_ts;
+		video_frame_out_ts = &write_state->video_frame_out_ts;
+		video_frame_last_src_ts = &write_state->video_frame_last_src_ts;
+		video_frame_last_out_ts = &write_state->video_frame_last_out_ts;
+		video_frame_last_timestamp = &write_state->video_frame_last_timestamp;
 	} else {
 		seq = &rtp_session->seq;
 		last_write_ts = &rtp_session->last_write_ts;
 		reset = &rtp_session->flags[SWITCH_RTP_FLAG_RESET];
+		video_frame_open = &rtp_session->video_frame_open;
+		video_frame_last_set = &rtp_session->video_frame_last_set;
+		video_frame_src_ts = &rtp_session->video_frame_src_ts;
+		video_frame_out_ts = &rtp_session->video_frame_out_ts;
+		video_frame_last_src_ts = &rtp_session->video_frame_last_src_ts;
+		video_frame_last_out_ts = &rtp_session->video_frame_last_out_ts;
+		video_frame_last_timestamp = &rtp_session->video_frame_last_timestamp;
+	}
+
+	if (flags && ((*flags) & SFF_EXTERNAL) && ssrc && mid_ext_id > 0 && mid && *mid) {
+		switch_time_t frame_now = switch_micro_time_now();
+		uint32_t src_ts = ts;
+
+		/* Manual BUNDLE video writes can carry per-fragment source timestamps.
+		   Hold one output timestamp until a source marker closes the frame, but
+		   synthesize a marker if timestamp drift grows past ~100ms without one. */
+		if (*video_frame_open && src_ts != *video_frame_src_ts && !m) {
+			uint32_t open_src_delta = src_ts - *video_frame_src_ts;
+
+			if (open_src_delta > 9000) {
+				m = 1;
+			}
+		}
+
+		if (!*video_frame_open) {
+			uint32_t out_ts = src_ts;
+
+			if (*video_frame_last_set) {
+				uint32_t src_delta = src_ts - *video_frame_last_src_ts;
+				uint32_t clock_delta = 1;
+
+				if (frame_now > *video_frame_last_timestamp) {
+					switch_time_t elapsed = frame_now - *video_frame_last_timestamp;
+					clock_delta = (uint32_t) ((elapsed * 90) / 1000);
+				}
+
+				if (!src_delta || src_delta < 90 || src_delta > 90000) {
+					if (clock_delta < 3000 || clock_delta > 90000) {
+						clock_delta = 3000;
+					}
+					out_ts = *video_frame_last_out_ts + clock_delta;
+				} else {
+					out_ts = *video_frame_last_out_ts + src_delta;
+				}
+			}
+
+			*video_frame_src_ts = src_ts;
+			*video_frame_out_ts = out_ts;
+			*video_frame_open = 1;
+		}
+
+		ts = *video_frame_out_ts;
+
+		if (m) {
+			video_frame_commit_marker = 1;
+			video_frame_commit_src_ts = src_ts;
+			video_frame_commit_out_ts = *video_frame_out_ts;
+			video_frame_commit_timestamp = frame_now;
+		}
 	}
 
 	rtp_session->write_msg = rtp_session->send_msg;
@@ -11078,6 +11169,14 @@ static int rtp_write_manual_state(switch_rtp_t *rtp_session, switch_rtp_write_st
 		(*seq)--;
 		ret = -1;
 		goto end;
+	}
+
+	if (video_frame_commit_marker) {
+		*video_frame_last_src_ts = video_frame_commit_src_ts;
+		*video_frame_last_out_ts = video_frame_commit_out_ts;
+		*video_frame_last_timestamp = video_frame_commit_timestamp;
+		*video_frame_last_set = 1;
+		*video_frame_open = 0;
 	}
 
 	if (flags && ((*flags) & SFF_RTP_HEADER)) {
@@ -11600,40 +11699,68 @@ static switch_status_t rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_
 			send_msg->ext = (switch_rtp_hdr_ext_t *) send_msg->ebody;
 		}
 
-		if (!send_msg->ext || ntohs(send_msg->ext->profile) != 0xBEDE) return SWITCH_STATUS_FALSE;
+		if (!send_msg->ext) return SWITCH_STATUS_FALSE;
 
 		words = ntohs(send_msg->ext->length);
 		old_ext_data_bytes = (size_t)words * 4;
 		old_ext_total = 4 + old_ext_data_bytes;
 
-		if (*bytes < rtp_header_len + body_header_bytes + old_ext_total) return SWITCH_STATUS_FALSE;
-
-		ext_data = (uint8_t *)send_msg->ext + 4;
-
-		for (off = 0; off < old_ext_data_bytes;) {
-			uint8_t hdr = ext_data[off];
-			size_t elem_len;
-
-			if (!hdr) {
-				off++;
-				continue;
+		if (*bytes < rtp_header_len + body_header_bytes + old_ext_total) {
+			if (ext_id > 0 && mid && *mid) {
+				/* The incoming RTP extension header is malformed for the packet size.
+				   For an explicit BUNDLE MID override, prefer replacing the bad
+				   extension with the negotiated MID over dropping media. */
+				old_ext_total = 0;
+				old_ext_data_bytes = 0;
+			} else {
+				return SWITCH_STATUS_FALSE;
 			}
-
-			elem_len = 1 + (size_t)((hdr & 0x0F) + 1);
-			if (off + elem_len > old_ext_data_bytes) return SWITCH_STATUS_FALSE;
-
-			if ((hdr >> 4) == mid_ext_id) {
-				memmove(ext_data + off, ext_data + off + elem_len, old_ext_data_bytes - off - elem_len);
-				old_ext_data_bytes -= elem_len;
-				memset(ext_data + old_ext_data_bytes, 0, elem_len);
-				continue;
-			}
-
-			off += elem_len;
 		}
 
-		while (old_ext_data_bytes && !ext_data[old_ext_data_bytes - 1]) {
-			old_ext_data_bytes--;
+		if (old_ext_total && ntohs(send_msg->ext->profile) == 0xBEDE && ext_id > 0 && mid && *mid) {
+			/* Explicit BUNDLE MID overrides are for forwarding media onto a
+			   different negotiated leg.  Do not preserve inbound RTP header
+			   extensions, because their ids are scoped to the previous leg and can
+			   collide with the browser extmap (for example id 1 carrying stale
+			   MID while the browser negotiated id 1 as audio-level).  Keep
+			   old_ext_total so payload_bytes below still skips the inbound extension
+			   block, then rebuild the block with only the negotiated outbound MID. */
+			old_ext_data_bytes = 0;
+		} else if (old_ext_total && ntohs(send_msg->ext->profile) == 0xBEDE) {
+			ext_data = (uint8_t *)send_msg->ext + 4;
+
+			for (off = 0; off < old_ext_data_bytes;) {
+				uint8_t hdr = ext_data[off];
+				size_t elem_len;
+
+				if (!hdr) {
+					off++;
+					continue;
+				}
+
+				elem_len = 1 + (size_t)((hdr & 0x0F) + 1);
+				if (off + elem_len > old_ext_data_bytes) return SWITCH_STATUS_FALSE;
+
+				if ((hdr >> 4) == mid_ext_id) {
+					memmove(ext_data + off, ext_data + off + elem_len, old_ext_data_bytes - off - elem_len);
+					old_ext_data_bytes -= elem_len;
+					memset(ext_data + old_ext_data_bytes, 0, elem_len);
+					continue;
+				}
+
+				off += elem_len;
+			}
+
+			while (old_ext_data_bytes && !ext_data[old_ext_data_bytes - 1]) {
+				old_ext_data_bytes--;
+			}
+		} else {
+			/* BUNDLE writes must stamp the negotiated MID for the outbound leg.
+			   If the forwarded packet carries a different RTP extension profile,
+			   strip that extension and replace it with the one-byte BEDE MID rather
+			   than failing the whole media write. The RTP extension header length is
+			   profile-independent, so payload_bytes below still skips it safely. */
+			old_ext_data_bytes = 0;
 		}
 	}
 

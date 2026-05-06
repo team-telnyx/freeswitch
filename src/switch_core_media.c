@@ -4504,11 +4504,18 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 		} else {
 			bundle_video_wrote = switch_rtp_write_frame_ex_state(engine->rtp_session, frame, engine->bundle_write_state,
 									   engine->ssrc, mid_ext_id, mid, SWITCH_TRUE, engine->cur_payload_map->pt);
-			if (bundle_video_wrote <= 0) {
+			if (bundle_video_wrote < 0) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-					"BUNDLE video RTP write produced no packet: wrote=%d flags=0x%x packetlen=%u datalen=%u\n",
+					"BUNDLE video RTP write failed: wrote=%d flags=0x%x packetlen=%u datalen=%u\n",
 					bundle_video_wrote, frame->flags, frame->packetlen, frame->datalen);
 				status = SWITCH_STATUS_FALSE;
+			} else if (bundle_video_wrote == 0) {
+				/* A zero-byte write can happen while the borrowed BUNDLE audio RTP
+				   transport is still completing ICE/DTLS. Treat it like the normal
+				   RTP write path, where only negative returns are fatal. */
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+					"BUNDLE video RTP write deferred: wrote=0 flags=0x%x packetlen=%u datalen=%u\n",
+					frame->flags, frame->packetlen, frame->datalen);
 			}
 		}
 	} else if (switch_rtp_write_frame(engine->rtp_session, frame) < 0) {
