@@ -229,6 +229,7 @@ static inline void free_context(shout_context_t *context)
 				fwrite(mp3buffer, 1, len, context->fp);
 			}
 
+			fflush(context->fp);
 			lame_mp3_tags_fid(context->gfp, context->fp);
 		}
 
@@ -839,6 +840,8 @@ static switch_status_t shout_file_open(switch_file_handle_t *handle, const char 
 			id3tag_init(context->gfp);
 			id3tag_v2_only(context->gfp);
 			id3tag_pad_v2(context->gfp);
+			lame_set_bWriteVbrTag(context->gfp, 0);
+			lame_mp3_tags_fid(context->gfp, NULL);
 
 		}
 		context->channels = handle->channels;
