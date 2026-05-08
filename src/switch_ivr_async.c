@@ -3361,6 +3361,32 @@ static int recording_var_true(switch_channel_t *channel, switch_event_t *vars, c
 	return switch_true(get_recording_var(channel, vars, name));
 }
 
+static switch_status_t parse_recording_file_params(switch_core_session_t *session, const char *file, switch_event_t **file_params)
+{
+	char *file_params_data = NULL;
+	char *file_params_path = NULL;
+
+	if (zstr(file) || *file != '{') {
+		return SWITCH_STATUS_SUCCESS;
+	}
+
+	if (!(file_params_data = switch_core_session_strdup(session, file))) {
+		return SWITCH_STATUS_MEMERR;
+	}
+
+	while (*file_params_data == '{') {
+		if (switch_event_create_brackets(file_params_data, '{', '}', ',', file_params, &file_params_path, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS || !file_params_path) {
+			switch_event_safe_destroy(*file_params);
+			return SWITCH_STATUS_FALSE;
+		}
+
+		file_params_data = file_params_path;
+		while (*file_params_data == ' ') file_params_data++;
+	}
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
 SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_session_t *session, const char *file, uint32_t limit, switch_file_handle_t *fh, switch_event_t *vars)
 {
 	switch_channel_t *channel = switch_core_session_get_channel(session);
@@ -3378,6 +3404,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 	char *file_path = NULL;
 	char *ext;
 	char *in_file = NULL, *out_file = NULL;
+	switch_event_t *file_params = NULL;
+	int have_recording_file_param_override = 0;
 
 	if ((p = get_recording_var(channel, vars, "RECORD_HANGUP_ON_ERROR"))) {
 		hangup_on_error = switch_true(p);
@@ -3445,6 +3473,10 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 			switch_goto_status(SWITCH_STATUS_MEMERR, err);
 		}
 	}
+
+	if ((status = parse_recording_file_params(session, file, &file_params)) != SWITCH_STATUS_SUCCESS) {
+		switch_goto_status(status, err);
+	}
 	
 	if (recording_var_true(channel, vars, "RECORD_WRITE_ONLY")) {
 		flags &= ~SMBF_READ_STREAM;
@@ -3467,10 +3499,15 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 	}
 
 	/* Per-recording 'stereo'/'stereo_swap' vars take precedence over channel-level
-	 * RECORD_STEREO, preventing cross-contamination between concurrent recordings. */
+	 * RECORD_STEREO, preventing cross-contamination between concurrent recordings.
+	 * Leading file params are also checked so record_session media-bug channel mode
+	 * matches file params that switch_core_file_open() already honors. */
 	{
 		int want_stereo = 0, want_swap = 0;
 		int have_override = 0;
+		int have_force_channels = 0;
+		int force_channels = 0;
+		const char *fc = NULL;
 
 		if (vars) {
 			const char *sv = switch_event_get_header(vars, "stereo");
@@ -3482,6 +3519,47 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 				if (sw) want_swap = switch_true(sw);
 				if (want_swap) want_stereo = 1;
 			}
+		}
+
+		fc = vars ? switch_event_get_header(vars, "force_channels") : NULL;
+
+		if (file_params) {
+			const char *sv = switch_event_get_header(file_params, "stereo");
+			const char *sw = switch_event_get_header(file_params, "stereo_swap");
+
+			if (!fc) {
+				fc = switch_event_get_header(file_params, "force_channels");
+			}
+
+			if (!have_override && (sv || sw)) {
+				/* Leading file-param override: resolve both from file params only, no channel fallback */
+				have_override = 1;
+				if (sv) want_stereo = switch_true(sv);
+				if (sw) want_swap = switch_true(sw);
+				if (want_swap) want_stereo = 1;
+			}
+
+			if (sv || sw || fc) {
+				have_recording_file_param_override = 1;
+			}
+		}
+
+		if (fc) {
+			have_recording_file_param_override = 1;
+		}
+
+		if (!zstr(fc)) {
+			force_channels = atoi(fc);
+			if (force_channels > 0 && force_channels < 3) {
+				have_force_channels = 1;
+			}
+		}
+
+		if (!have_override && have_force_channels) {
+			/* Match the media bug frame layout to the requested file channel count. */
+			have_override = 1;
+			want_stereo = (force_channels == 2) ? 1 : 0;
+			want_swap = 0;
 		}
 
 		if (!have_override) {
@@ -3511,6 +3589,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 			}
 		}
 	}
+
+	switch_event_safe_destroy(file_params);
 
 	if (recording_var_true(channel, vars, "RECORD_ANSWER_REQ")) {
 		flags |= SMBF_ANSWER_REQ;
@@ -3818,7 +3898,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 		"Recording %s: channels=%d stereo=%d stereo_swap=%d%s\n",
 		file, channels, rh->stereo, rh->stereo_swap,
 		(vars && (switch_event_get_header(vars, "stereo") || switch_event_get_header(vars, "stereo_swap")))
-			? " (per-recording override)" : "");
+			? " (per-recording override)"
+			: (have_recording_file_param_override ? " (file-param override)" : ""));
 
 	if ((status = switch_core_media_bug_add(session, "session_record", file,
 											record_callback, rh, to, flags, &bug)) != SWITCH_STATUS_SUCCESS) {
@@ -3854,6 +3935,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 	return SWITCH_STATUS_SUCCESS;
 
 err:
+	switch_event_safe_destroy(file_params);
+
 	if (!zstr(rh->completion_cause)) {
 		switch_channel_set_variable_printf(channel, "record_completion_cause", "%s", rh->completion_cause);
 	}
