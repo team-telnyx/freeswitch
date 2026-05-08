@@ -3509,6 +3509,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 		int force_channels = 0;
 		int stereo_force_channels = 0;
 		const char *fc = NULL;
+		const char *file_after_params = NULL;
+		const char *file_param_end = NULL;
 
 		if (vars) {
 			const char *sv = switch_event_get_header(vars, "stereo");
@@ -3595,8 +3597,20 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 		if (stereo_force_channels && have_force_channels && force_channels != stereo_force_channels && !zstr(file) && *file == '{') {
 			/* Keep switch_core_file_open() aligned with explicit stereo=true/false when
 			 * an older force_channels value is present in the leading file params. */
-			file = switch_core_sprintf(rh->helper_pool, "{force_channels=%d}%s", stereo_force_channels, file);
-			have_recording_file_param_override = 1;
+			file_after_params = file;
+			while (!zstr(file_after_params) && *file_after_params == '{') {
+				file_param_end = switch_find_end_paren(file_after_params, '{', '}');
+				if (!file_param_end) {
+					break;
+				}
+				file_after_params = file_param_end + 1;
+				while (*file_after_params == ' ') file_after_params++;
+			}
+			if (file_after_params && file_after_params != file) {
+				file = switch_core_sprintf(rh->helper_pool, "%.*s{force_channels=%d}%s",
+										 (int)(file_after_params - file), file, stereo_force_channels, file_after_params);
+				have_recording_file_param_override = 1;
+			}
 		}
 	}
 
