@@ -3894,12 +3894,19 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 	rh->stereo = (flags & SMBF_STEREO) ? 1 : 0;
 	rh->stereo_swap = (flags & SMBF_STEREO_SWAP) ? 1 : 0;
 
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-		"Recording %s: channels=%d stereo=%d stereo_swap=%d%s\n",
-		file, channels, rh->stereo, rh->stereo_swap,
-		(vars && (switch_event_get_header(vars, "stereo") || switch_event_get_header(vars, "stereo_swap")))
-			? " (per-recording override)"
-			: (have_recording_file_param_override ? " (file-param override)" : ""));
+	{
+		const char *recording_override_label = "";
+
+		if (vars && (switch_event_get_header(vars, "stereo") || switch_event_get_header(vars, "stereo_swap"))) {
+			recording_override_label = " (per-recording override)";
+		} else if (have_recording_file_param_override) {
+			recording_override_label = " (file-param override)";
+		}
+
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+			"Recording %s: channels=%d stereo=%d stereo_swap=%d%s\n",
+			file, channels, rh->stereo, rh->stereo_swap, recording_override_label);
+	}
 
 	if ((status = switch_core_media_bug_add(session, "session_record", file,
 											record_callback, rh, to, flags, &bug)) != SWITCH_STATUS_SUCCESS) {
