@@ -3890,8 +3890,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 	rh->stereo_swap = (flags & SMBF_STEREO_SWAP) ? 1 : 0;
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-		"Recording %s: channels=%d stereo=%d stereo_swap=%d%s
-",
+		"Recording %s: channels=%d stereo=%d stereo_swap=%d%s\n",
 		file, channels, rh->stereo, rh->stereo_swap,
 		(vars && (switch_event_get_header(vars, "stereo") || switch_event_get_header(vars, "stereo_swap")))
 			? " (per-recording override)"
