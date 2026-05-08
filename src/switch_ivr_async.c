@@ -3697,12 +3697,18 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 	if (file_path && !strstr(file_path, SWITCH_URL_SEPARATOR)) {
 		char *p;
 		char *path = switch_core_strdup(rh->helper_pool, file_path);
+		char *path_param_end = NULL;
 
 		if ((p = strrchr(path, *SWITCH_PATH_SEPARATOR))) {
 			*p = '\0';
 
-			if (*path == '{') {
-				path = switch_find_end_paren(path, '{', '}') + 1;
+			while (*path == '{') {
+				path_param_end = switch_find_end_paren(path, '{', '}');
+				if (!path_param_end) {
+					break;
+				}
+				path = path_param_end + 1;
+				while (*path == ' ') path++;
 			}
 
 			if (switch_dir_make_recursive(path, SWITCH_DEFAULT_DIR_PERMS, switch_core_session_get_pool(session)) != SWITCH_STATUS_SUCCESS) {
