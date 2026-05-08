@@ -99,7 +99,6 @@ struct switch_ivr_dmachine {
 
 static const char *get_recording_var(switch_channel_t *channel, switch_event_t *vars, const char *name);
 static int recording_var_true(switch_channel_t *channel, switch_event_t *vars, const char *name);
-static const char *get_recording_file_var(switch_event_t *vars, switch_event_t *file_vars, const char *name);
 static switch_status_t parse_recording_file_vars(switch_core_session_t *session, const char *file, switch_event_t **file_vars);
 static switch_status_t speech_on_dtmf(switch_core_session_t *session, const switch_dtmf_t *dtmf, switch_dtmf_direction_t direction);
 
@@ -3363,21 +3362,6 @@ static int recording_var_true(switch_channel_t *channel, switch_event_t *vars, c
 	return switch_true(get_recording_var(channel, vars, name));
 }
 
-static const char *get_recording_file_var(switch_event_t *vars, switch_event_t *file_vars, const char *name)
-{
-	const char *val = NULL;
-
-	if (vars) {
-		val = switch_event_get_header(vars, name);
-	}
-
-	if (!val && file_vars) {
-		val = switch_event_get_header(file_vars, name);
-	}
-
-	return val;
-}
-
 static switch_status_t parse_recording_file_vars(switch_core_session_t *session, const char *file, switch_event_t **file_vars)
 {
 	char *file_vars_data = NULL;
@@ -3520,19 +3504,44 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 		int have_force_channels = 0;
 		int force_channels = 0;
 
-		const char *sv = get_recording_file_var(vars, file_vars, "stereo");
-		const char *sw = get_recording_file_var(vars, file_vars, "stereo_swap");
-		const char *fc = get_recording_file_var(vars, file_vars, "force_channels");
+		const char *sv = NULL;
+		const char *sw = NULL;
+		const char *fc = NULL;
+
+		if (vars) {
+			sv = switch_event_get_header(vars, "stereo");
+			sw = switch_event_get_header(vars, "stereo_swap");
+			fc = switch_event_get_header(vars, "force_channels");
+			if (sv || sw) {
+				/* Per-recording override: resolve both from vars only, no channel fallback */
+				have_override = 1;
+				if (sv) want_stereo = switch_true(sv);
+				if (sw) want_swap = switch_true(sw);
+				if (want_swap) want_stereo = 1;
+			}
+		}
+
+		if (file_vars) {
+			if (!sv) {
+				sv = switch_event_get_header(file_vars, "stereo");
+			}
+			if (!sw) {
+				sw = switch_event_get_header(file_vars, "stereo_swap");
+			}
+			if (!fc) {
+				fc = switch_event_get_header(file_vars, "force_channels");
+			}
+
+			if (!have_override && (sv || sw)) {
+				/* Per-recording override: resolve both from file vars only, no channel fallback */
+				have_override = 1;
+				if (sv) want_stereo = switch_true(sv);
+				if (sw) want_swap = switch_true(sw);
+				if (want_swap) want_stereo = 1;
+			}
+		}
 
 		have_recording_channel_override = (sv || sw || fc) ? 1 : 0;
-
-		if (sv || sw) {
-			/* Per-recording override: resolve both from recording-specific vars only, no channel fallback */
-			have_override = 1;
-			if (sv) want_stereo = switch_true(sv);
-			if (sw) want_swap = switch_true(sw);
-			if (want_swap) want_stereo = 1;
-		}
 
 		if (!zstr(fc)) {
 			force_channels = atoi(fc);
