@@ -3507,6 +3507,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 		int have_override = 0;
 		int have_force_channels = 0;
 		int force_channels = 0;
+		int stereo_force_channels = 0;
 		const char *fc = NULL;
 
 		if (vars) {
@@ -3518,6 +3519,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 				if (sv) want_stereo = switch_true(sv);
 				if (sw) want_swap = switch_true(sw);
 				if (want_swap) want_stereo = 1;
+				stereo_force_channels = want_stereo ? 2 : 1;
 			}
 		}
 
@@ -3537,6 +3539,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 				if (sv) want_stereo = switch_true(sv);
 				if (sw) want_swap = switch_true(sw);
 				if (want_swap) want_stereo = 1;
+				stereo_force_channels = want_stereo ? 2 : 1;
 			}
 
 			if (sv || sw || fc) {
@@ -3587,6 +3590,13 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 			if (!(flags & SMBF_STEREO)) {
 				channels = 1;
 			}
+		}
+
+		if (stereo_force_channels && have_force_channels && force_channels != stereo_force_channels && !zstr(file) && *file == '{') {
+			/* Keep switch_core_file_open() aligned with explicit stereo=true/false when
+			 * an older force_channels value is present in the leading file params. */
+			file = switch_core_sprintf(rh->helper_pool, "{force_channels=%d}%s", stereo_force_channels, file);
+			have_recording_file_param_override = 1;
 		}
 	}
 
