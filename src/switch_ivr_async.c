@@ -3404,6 +3404,9 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 	char *file_path = NULL;
 	char *ext;
 	char *in_file = NULL, *out_file = NULL;
+	/* Keep file as the caller-visible recording identity; file_open_file may
+	 * include effective writer params used only for switch_core_file_open(). */
+	const char *file_open_file = file;
 	switch_event_t *file_params = NULL;
 	int have_recording_file_param_override = 0;
 
@@ -3607,7 +3610,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 				while (*file_after_params == ' ') file_after_params++;
 			}
 			if (file_after_params && file_after_params != file) {
-				file = switch_core_sprintf(rh->helper_pool, "%.*s{force_channels=%d}%s",
+				file_open_file = switch_core_sprintf(rh->helper_pool, "%.*s{force_channels=%d}%s",
 										 (int)(file_after_params - file), file, stereo_force_channels, file_after_params);
 				have_recording_file_param_override = 1;
 			}
@@ -3666,7 +3669,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 		fh->pre_buffer_datalen = SWITCH_DEFAULT_FILE_BUFFER_LEN;
 	}
 
-	if (!switch_is_file_path(file)) {
+	if (!switch_is_file_path(file_open_file)) {
 		char *tfile = NULL;
 		char *e;
 		const char *prefix;
@@ -3677,21 +3680,21 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 			prefix = SWITCH_GLOBAL_dirs.base_dir;
 		}
 
-		if (*file == '[') {
-			tfile = switch_core_strdup(rh->helper_pool, file);
+		if (*file_open_file == '[') {
+			tfile = switch_core_strdup(rh->helper_pool, file_open_file);
 			if ((e = switch_find_end_paren(tfile, '[', ']'))) {
 				*e = '\0';
-				file = e + 1;
+				file_open_file = e + 1;
 			} else {
 				tfile = NULL;
 			}
 		} else {
-			file_path = switch_core_sprintf(rh->helper_pool, "%s%s%s", prefix, SWITCH_PATH_SEPARATOR, file);
+			file_path = switch_core_sprintf(rh->helper_pool, "%s%s%s", prefix, SWITCH_PATH_SEPARATOR, file_open_file);
 		}
 
-		file = switch_core_sprintf(rh->helper_pool, "%s%s%s%s%s", switch_str_nil(tfile), tfile ? "]" : "", prefix, SWITCH_PATH_SEPARATOR, file);
+		file_open_file = switch_core_sprintf(rh->helper_pool, "%s%s%s%s%s", switch_str_nil(tfile), tfile ? "]" : "", prefix, SWITCH_PATH_SEPARATOR, file_open_file);
 	} else {
-		file_path = switch_core_strdup(rh->helper_pool, file);
+		file_path = switch_core_strdup(rh->helper_pool, file_open_file);
 	}
 
 	if (file_path && !strstr(file_path, SWITCH_URL_SEPARATOR)) {
@@ -3723,20 +3726,20 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 		}
 	}
 
-	if ((ext = strrchr(file, '.'))) {
+	if ((ext = strrchr(file_open_file, '.'))) {
 		ext++;
 
 		if (switch_channel_test_flag(channel, CF_VIDEO)) {
 			file_flags |= SWITCH_FILE_FLAG_VIDEO;
 		}
 
-		if (switch_core_file_open(fh, file, channels, read_impl.actual_samples_per_second, file_flags, NULL) != SWITCH_STATUS_SUCCESS) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error opening %s\n", file);
+		if (switch_core_file_open(fh, file_open_file, channels, read_impl.actual_samples_per_second, file_flags, NULL) != SWITCH_STATUS_SUCCESS) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error opening %s\n", file_open_file);
 			if (hangup_on_error) {
 				switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
 				switch_core_session_reset(session, SWITCH_TRUE, SWITCH_TRUE);
 			}
-			send_record_error_event(channel, file, "Error opening file");
+			send_record_error_event(channel, file_open_file, "Error opening file");
 			set_completion_cause(rh, "uri-failure");
 			switch_goto_status(SWITCH_STATUS_GENERR, err);
 		}
@@ -3777,8 +3780,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 
 		ext = read_impl.iananame;
 
-		in_file = switch_core_sprintf(rh->helper_pool, "%s-in.%s", file, ext);
-		out_file = switch_core_sprintf(rh->helper_pool, "%s-out.%s", file, ext);
+		in_file = switch_core_sprintf(rh->helper_pool, "%s-in.%s", file_open_file, ext);
+		out_file = switch_core_sprintf(rh->helper_pool, "%s-out.%s", file_open_file, ext);
 		rh->in_fh.pre_buffer_datalen = rh->out_fh.pre_buffer_datalen = fh->pre_buffer_datalen;
 		channels = 1;
 		switch_set_flag(&rh->in_fh, SWITCH_FILE_NATIVE);
@@ -3935,7 +3938,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 			"Recording %s: channels=%d stereo=%d stereo_swap=%d%s\n",
-			file, channels, rh->stereo, rh->stereo_swap, recording_override_label);
+			file_open_file, channels, rh->stereo, rh->stereo_swap, recording_override_label);
 	}
 
 	if ((status = switch_core_media_bug_add(session, "session_record", file,
