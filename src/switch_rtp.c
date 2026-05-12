@@ -1,6 +1,6 @@
 /*
  * FreeSWITCH Modular Media Switching Software Library / Soft-Switch Application
- * Copyright (C) 2005-2014, Anthony Minessale II <anthm@freeswitch.org>
+ * Copyright (C) 2005-2025, Anthony Minessale II <anthm@freeswitch.org>
  *
  * Version: MPL 1.1
  *
@@ -1480,7 +1480,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 								break;
 							}
 
-							old = rtp_session->remote_port;
+							old = rtp_session->eff_remote_port;
 
 							old_host = switch_get_addr(bufb, sizeof(bufb), rtp_session->remote_addr);
 
@@ -3967,8 +3967,13 @@ static int dtls_state_setup(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 	if ((dtls->type & DTLS_TYPE_SERVER)) {
 		r = 1;
 	} else if ((cert = SSL_get_peer_certificate(dtls->ssl))) {
-		switch_core_cert_extract_fingerprint(cert, dtls->remote_fp);
-		r = switch_core_cert_verify(dtls->remote_fp);
+		dtls_fingerprint_t fp = {0};
+
+		fp.type = dtls->remote_fp->type;
+
+		switch_core_cert_extract_fingerprint(cert, &fp);
+		r = (!zstr(fp.str) && !strncasecmp(fp.str, dtls->remote_fp->str, MAX_FPSTRLEN));
+
 		X509_free(cert);
 	}
 
@@ -4228,9 +4233,12 @@ static int cb_verify_peer(int preverify_ok, X509_STORE_CTX *ctx)
 	}
 
 	if ((cert = SSL_get_peer_certificate(dtls->ssl))) {
-		switch_core_cert_extract_fingerprint(cert, dtls->remote_fp);
+		dtls_fingerprint_t fp = {0};
 
-		r = switch_core_cert_verify(dtls->remote_fp);
+		fp.type = dtls->remote_fp->type;
+
+		switch_core_cert_extract_fingerprint(cert, &fp);
+		r = (!zstr(fp.str) && !strncasecmp(fp.str, dtls->remote_fp->str, MAX_FPSTRLEN));
 
 		X509_free(cert);
 	} else {
@@ -4804,8 +4812,6 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_add_dtls(switch_rtp_t *rtp_session, d
 	}
 	
 	BIO_ctrl(dtls->filter_bio, BIO_CTRL_DGRAM_SET_MTU, dtls->mtu, NULL);
-	
-	switch_core_cert_expand_fingerprint(remote_fp, remote_fp->str);
 
 	if ((type & DTLS_TYPE_RTP)) {
 		rtp_session->dtls = dtls;
@@ -5641,6 +5647,11 @@ SWITCH_DECLARE(switch_rtp_t *) switch_rtp_new(const char *rx_host,
 	rtp_session->flags[SWITCH_RTP_FLAG_DEBUG_RTP_READ]++;
 	rtp_session->flags[SWITCH_RTP_FLAG_DEBUG_RTP_WRITE]++;
 #endif
+
+	/* once we have the remote_addr set, change from_addr to it, since this is the one we should expect incoming packets from later on */
+	switch_cp_addr(rtp_session->from_addr, rtp_session->remote_addr);
+
+
  end:
 
 	if (rtp_session) {
@@ -9117,7 +9128,7 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 			if (!switch_cmp_addr(rtp_session->rtp_from_addr, rtp_session->remote_addr, SWITCH_FALSE)) {
 				if (++rtp_session->autoadj_tally >= rtp_session->autoadj_threshold) {
 					const char *err;
-					uint32_t old = rtp_session->remote_port;
+					uint32_t old = rtp_session->eff_remote_port;
 					const char *tx_host;
 					const char *old_host;
 					char bufa[50], bufb[50];

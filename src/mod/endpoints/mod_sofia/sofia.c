@@ -4497,7 +4497,7 @@ static void parse_gateways(sofia_profile_t *profile, switch_xml_t gateways_tag, 
 
 			if (extension_in_contact) {
 				if (rfc_5626) {
-					format = strchr(sipip, ':') ? "<sip:%s@[%s]:%d>%s" : "<sip:%s@%s:%d%s>%s";
+					format = strchr(sipip, ':') ? "<sip:%s@[%s]:%d%s>%s" : "<sip:%s@%s:%d%s>%s";
 					gateway->register_contact = switch_core_sprintf(gateway->pool, format, extension,
 							sipip,
 							sofia_glue_transport_has_tls(gateway->register_transport) ?
@@ -8793,13 +8793,15 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 				goto done;
 			}
 
+			switch_channel_set_flag(channel, CF_NOSDP_REINVITE);
+
 			regenerate_offer = switch_channel_get_variable(channel, "3pcc_always_regenerate_offer");
 			if ((zstr(regenerate_offer) && sofia_test_pflag(profile, PFLAG_ALWAYS_REGENERATE_OFFER)) || switch_true(regenerate_offer)) {
 				switch_channel_set_variable(channel, "sdp_clear_previous_negotiation", "true");
 				sofia_clear_flag(tech_pvt, TFLAG_ENABLE_SOA);
 				switch_core_media_set_local_sdp(session, NULL, SWITCH_FALSE);
 				switch_core_media_check_video_codecs(session);
-				switch_core_media_gen_local_sdp(session, SDP_TYPE_REQUEST, NULL, 0, 
+				switch_core_media_gen_local_sdp(session, SDP_TYPE_REQUEST, NULL, 0,
 										switch_channel_var_true(channel, "sip_unhold_nosdp") ? "sendrecv" : NULL,
 										zstr(tech_pvt->mparams.local_sdp_str) || !switch_channel_test_flag(channel, CF_PROXY_MODE));
 			} else {
@@ -9390,14 +9392,14 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 
 				if (tech_pvt->mparams.num_codecs) {
 					if (sofia_test_flag(tech_pvt, TFLAG_GOT_ACK)) {
-						// TODO: 
+						// TODO:
 						// Telnyx Fix for 3pcc and SRTP conflicts with the 3pcc fixes in Freeswitch.
 						// It requires redoing 3pcc and SRTP patches to comply with FS patches.
 						// For now we will revert to FS fix by changing the SDP_TYPE_REQUEST
 						// to SDP_TYPE_RESPONSE.
 						match = sofia_media_negotiate_sdp(session, r_sdp, SDP_TYPE_RESPONSE);
 					} else {
-						match = sofia_media_negotiate_sdp(session, r_sdp, SDP_TYPE_RESPONSE);
+						match = sofia_media_negotiate_sdp(session, r_sdp, SDP_ANSWER);
 					}
 				}
 
@@ -11551,7 +11553,7 @@ void sofia_handle_sip_i_invite(switch_core_session_t *session, nua_t *nua, sofia
 		(!is_tcp && !is_tls && (zstr(network_ip) || !switch_check_network_list_ip(network_ip, profile->local_network)) &&
 		 profile->server_rport_level >= 2 && sip->sip_user_agent &&
 		 sip->sip_user_agent->g_string &&
-		 (!strncasecmp(sip->sip_user_agent->g_string, "Polycom", 7) || !strncasecmp(sip->sip_user_agent->g_string, "KIRK Wireless Server", 20)))
+		 (!strncasecmp(sip->sip_user_agent->g_string, "Poly", 4) || !strncasecmp(sip->sip_user_agent->g_string, "KIRK Wireless Server", 20)))
 		) {
 		if (sip->sip_via) {
 			const char *port = sip->sip_via->v_port;
