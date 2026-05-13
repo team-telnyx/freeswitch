@@ -181,6 +181,17 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 	int set_decoded_read = 0, refresh_timer = 0;
 	int refresh_cnt = 300;
 	int pass_val = 0, last_pass_val = 0;
+	uint32_t tel6738_video_debug_reads = 0, tel6738_video_debug_writes = 0;
+	uint32_t tel6738_bridge_read_ok = 0, tel6738_bridge_read_bad = 0, tel6738_bridge_cng_skip = 0;
+	uint32_t tel6738_bridge_block_skip = 0, tel6738_bridge_no_dst_media = 0;
+	uint32_t tel6738_bridge_write_attempts = 0, tel6738_bridge_write_ok = 0, tel6738_bridge_write_fail = 0;
+	uint32_t tel6738_bridge_cng_streak = 0, tel6738_bridge_source_refreshes = 0;
+	uint32_t tel6738_bridge_periodic_refreshes = 0;
+	switch_time_t tel6738_last_real_video = 0, tel6738_last_cng_refresh = 0, tel6738_last_cng_log = 0;
+	switch_time_t tel6738_bridge_start = switch_micro_time_now();
+	switch_time_t tel6738_last_periodic_refresh = 0;
+	switch_time_t tel6738_periodic_refresh_interval = 10000000;
+	switch_time_t tel6738_periodic_refresh_initial_delay = 20000000;
 
 	vh->up = 1;
 
@@ -194,6 +205,25 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 		return;
 	}
 	channel = switch_core_session_get_channel(vh->session_a);
+
+	{
+		const char *interval_ms = switch_channel_get_variable(channel, "tel6738_video_refresh_interval_ms");
+		const char *initial_delay_ms = switch_channel_get_variable(channel, "tel6738_video_refresh_initial_delay_ms");
+
+		if (!zstr(interval_ms)) {
+			int val = atoi(interval_ms);
+			if (val >= 5000 && val <= 120000) {
+				tel6738_periodic_refresh_interval = (switch_time_t) val * 1000;
+			}
+		}
+
+		if (!zstr(initial_delay_ms)) {
+			int val = atoi(initial_delay_ms);
+			if (val >= 0 && val <= 120000) {
+				tel6738_periodic_refresh_initial_delay = (switch_time_t) val * 1000;
+			}
+		}
+	}
 
 	if (!zstr(vh->session_b_uuid)) {
 		if (!(vh->session_b = switch_core_session_locate(vh->session_b_uuid))) {
@@ -222,10 +252,29 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 			}
 
 			if (pass_val != last_pass_val) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
+							  "TEL6738 video bridge mode %s -> %s pass_val=%d src_ready=%d dst_ready=%d src_decoded=%d dst_decoded=%d\n",
+							  switch_channel_get_name(channel), switch_channel_get_name(b_channel), pass_val,
+							  switch_channel_test_flag(channel, CF_VIDEO_READY), switch_channel_test_flag(b_channel, CF_VIDEO_READY),
+							  switch_channel_test_flag(channel, CF_VIDEO_DECODED_READ), switch_channel_test_flag(b_channel, CF_VIDEO_DECODED_READ));
 				switch_core_session_passthru(session, SWITCH_MEDIA_TYPE_VIDEO, pass_val == 2 ? SWITCH_TRUE : SWITCH_FALSE);
 				last_pass_val = pass_val;
 			}
 			
+			if (switch_channel_test_flag(b_channel, CF_VIDEO_REFRESH_REQ)) {
+				switch_status_t refresh_status;
+
+				switch_channel_clear_flag(b_channel, CF_VIDEO_REFRESH_REQ);
+				refresh_status = switch_core_session_force_request_video_refresh(vh->session_a);
+				tel6738_bridge_source_refreshes++;
+				refresh_timer = refresh_cnt;
+
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
+							  "TEL6738 video bridge propagated refresh %s -> %s source_refresh=%u refresh_status=%d\n",
+							  switch_channel_get_name(channel), switch_channel_get_name(b_channel),
+							  tel6738_bridge_source_refreshes, refresh_status);
+			}
+
 			if (switch_channel_test_flag(channel, CF_VIDEO_REFRESH_REQ)) {
 				switch_channel_clear_flag(channel, CF_VIDEO_REFRESH_REQ);
 				refresh_timer = refresh_cnt;
@@ -241,6 +290,11 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 				if (switch_channel_test_flag(channel, CF_VIDEO_DECODED_READ)) {
 					if (session_a_codec_implementation.impl_id == session_b_codec_implementation.impl_id && !switch_channel_test_flag(b_channel, CF_VIDEO_DECODED_READ)) {
 						if (set_decoded_read) {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
+										  "TEL6738 video bridge clear decoded-read %s -> %s read_impl=%u write_impl=%u dst_decoded=%d\n",
+										  switch_channel_get_name(channel), switch_channel_get_name(b_channel),
+										  session_a_codec_implementation.impl_id, session_b_codec_implementation.impl_id,
+										  switch_channel_test_flag(b_channel, CF_VIDEO_DECODED_READ));
 							switch_channel_clear_flag_recursive(channel, CF_VIDEO_DECODED_READ);
 							set_decoded_read = 0;
 							refresh_timer = refresh_cnt;
@@ -249,6 +303,11 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 				} else {
 					if (session_a_codec_implementation.impl_id != session_b_codec_implementation.impl_id ||
 						switch_channel_test_flag(b_channel, CF_VIDEO_DECODED_READ)) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
+									  "TEL6738 video bridge set decoded-read %s -> %s read_impl=%u write_impl=%u dst_decoded=%d\n",
+									  switch_channel_get_name(channel), switch_channel_get_name(b_channel),
+									  session_a_codec_implementation.impl_id, session_b_codec_implementation.impl_id,
+									  switch_channel_test_flag(b_channel, CF_VIDEO_DECODED_READ));
 						switch_channel_set_flag_recursive(channel, CF_VIDEO_DECODED_READ);
 						set_decoded_read = 1;
 						refresh_timer = refresh_cnt;
@@ -258,29 +317,161 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 
 			if (refresh_timer) {
 				if (refresh_timer > 0 && (refresh_timer % 100) == 0) {
-					switch_core_session_request_video_refresh(vh->session_b);
+					switch_status_t refresh_status = switch_core_session_request_video_refresh(vh->session_a);
+
+					tel6738_bridge_source_refreshes++;
+					if (tel6738_bridge_source_refreshes <= 5) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
+									  "TEL6738 video bridge retry refresh %s -> %s source_refresh=%u refresh_status=%d\n",
+									  switch_channel_get_name(channel), switch_channel_get_name(b_channel),
+									  tel6738_bridge_source_refreshes, refresh_status);
+					}
 				}
 				refresh_timer--;
+			} else if (tel6738_last_real_video) {
+				switch_time_t now = switch_micro_time_now();
+
+				if ((now - tel6738_bridge_start) >= tel6738_periodic_refresh_initial_delay &&
+					(!tel6738_last_periodic_refresh || (now - tel6738_last_periodic_refresh) >= tel6738_periodic_refresh_interval)) {
+					switch_status_t refresh_status = switch_core_session_request_video_refresh(vh->session_a);
+
+					tel6738_last_periodic_refresh = now;
+					tel6738_bridge_source_refreshes++;
+					tel6738_bridge_periodic_refreshes++;
+
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
+									  "TEL6738 video bridge periodic refresh %s -> %s periodic_refresh=%u source_refresh=%u refresh_status=%d age_ms=%lld interval_ms=%lld read_ok=%u write_ok=%u write_fail=%u\n",
+									  switch_channel_get_name(channel), switch_channel_get_name(b_channel),
+									  tel6738_bridge_periodic_refreshes, tel6738_bridge_source_refreshes, refresh_status,
+									  (long long)((now - tel6738_bridge_start) / 1000),
+									  (long long)(tel6738_periodic_refresh_interval / 1000),
+									  tel6738_bridge_read_ok, tel6738_bridge_write_ok, tel6738_bridge_write_fail);
+				}
 			}
 
 			status = switch_core_session_read_video_frame(vh->session_a, &read_frame, SWITCH_IO_FLAG_NONE, 0);
 
 			if (!SWITCH_READ_ACCEPTABLE(status)) {
+				tel6738_bridge_read_bad++;
+				if (tel6738_bridge_read_bad <= 20 || (tel6738_bridge_read_bad % 500) == 0) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
+							  "TEL6738 video bridge read-bad %s -> %s status=%d read_ok=%u read_bad=%u write_attempt=%u write_ok=%u write_fail=%u\n",
+							  switch_channel_get_name(channel), switch_channel_get_name(b_channel), status, tel6738_bridge_read_ok,
+							  tel6738_bridge_read_bad, tel6738_bridge_write_attempts, tel6738_bridge_write_ok, tel6738_bridge_write_fail);
+				}
 				switch_cond_next();
 				continue;
+			}
+
+			if (read_frame && !switch_test_flag(read_frame, SFF_CNG)) {
+				tel6738_bridge_read_ok++;
+				tel6738_bridge_cng_streak = 0;
+				tel6738_last_real_video = switch_micro_time_now();
+			}
+
+			if (read_frame && !switch_test_flag(read_frame, SFF_CNG) &&
+				(tel6738_video_debug_reads < 20 || switch_test_flag(read_frame, SFF_IS_KEYFRAME) || !switch_channel_test_flag(channel, CF_VIDEO_READY))) {
+				tel6738_video_debug_reads++;
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
+							  "TEL6738 video bridge read %s -> %s status=%d seq=%u ts=%u len=%u marker=%d img=%d key=%d src_ready=%d dst_ready=%d src_decoded=%d dst_decoded=%d\n",
+							  switch_channel_get_name(channel), switch_channel_get_name(b_channel), status, read_frame->seq,
+							  read_frame->timestamp, read_frame->datalen, read_frame->m, read_frame->img ? 1 : 0,
+							  switch_test_flag(read_frame, SFF_IS_KEYFRAME), switch_channel_test_flag(channel, CF_VIDEO_READY),
+							  switch_channel_test_flag(b_channel, CF_VIDEO_READY), switch_channel_test_flag(channel, CF_VIDEO_DECODED_READ),
+							  switch_channel_test_flag(b_channel, CF_VIDEO_DECODED_READ));
 			}
 		}
 
 
 		if (read_frame && (switch_test_flag(read_frame, SFF_CNG) ||
 			switch_channel_test_flag(channel, CF_LEG_HOLDING) || switch_channel_test_flag(b_channel, CF_VIDEO_READ_FILE_ATTACHED))) {
+			if (switch_test_flag(read_frame, SFF_CNG)) {
+				switch_time_t now = switch_micro_time_now();
+
+				tel6738_bridge_cng_skip++;
+				if (tel6738_last_real_video && switch_channel_media_up(channel) && switch_channel_media_up(b_channel)) {
+					tel6738_bridge_cng_streak++;
+
+					if (tel6738_bridge_cng_streak >= 25 && (!tel6738_last_cng_refresh || (now - tel6738_last_cng_refresh) > 1000000)) {
+						switch_status_t refresh_status;
+
+						tel6738_last_cng_refresh = now;
+						tel6738_bridge_source_refreshes++;
+						refresh_status = switch_core_session_request_video_refresh(vh->session_a);
+
+						if (tel6738_bridge_source_refreshes <= 5 || !tel6738_last_cng_log || (now - tel6738_last_cng_log) > 5000000) {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
+										  "TEL6738 video source stalled %s -> %s cng_streak=%u cng_skip=%u read_ok=%u read_bad=%u write_ok=%u write_fail=%u source_refresh=%u refresh_status=%d last_real_age_ms=%" SWITCH_TIME_T_FMT " src_media_up=%d dst_media_up=%d\n",
+										  switch_channel_get_name(channel), switch_channel_get_name(b_channel), tel6738_bridge_cng_streak,
+										  tel6738_bridge_cng_skip, tel6738_bridge_read_ok, tel6738_bridge_read_bad,
+										  tel6738_bridge_write_ok, tel6738_bridge_write_fail, tel6738_bridge_source_refreshes,
+										  refresh_status, (now - tel6738_last_real_video) / 1000, switch_channel_media_up(channel),
+										  switch_channel_media_up(b_channel));
+							tel6738_last_cng_log = now;
+						}
+					}
+				}
+			} else {
+				tel6738_bridge_block_skip++;
+			}
 			continue;
 		}
 
+		if (read_frame && !switch_channel_media_up(b_channel)) {
+			tel6738_bridge_no_dst_media++;
+			if (!switch_test_flag(read_frame, SFF_CNG) && (tel6738_bridge_no_dst_media <= 20 || (tel6738_bridge_no_dst_media % 500) == 0)) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
+						  "TEL6738 video bridge no-dst-media %s -> %s read_ok=%u no_dst=%u seq=%u ts=%u len=%u marker=%d dst_media_up=%d\n",
+						  switch_channel_get_name(channel), switch_channel_get_name(b_channel), tel6738_bridge_read_ok,
+						  tel6738_bridge_no_dst_media, read_frame->seq, read_frame->timestamp, read_frame->datalen, read_frame->m,
+						  switch_channel_media_up(b_channel));
+			}
+		}
+
 		if (read_frame && switch_channel_media_up(b_channel)) {
-			if (switch_core_session_write_video_frame(vh->session_b, read_frame, SWITCH_IO_FLAG_NONE, 0) != SWITCH_STATUS_SUCCESS) {
+			switch_status_t write_status;
+
+			if (!switch_test_flag(read_frame, SFF_CNG) &&
+				(tel6738_video_debug_writes < 20 || switch_test_flag(read_frame, SFF_IS_KEYFRAME) || !switch_channel_test_flag(b_channel, CF_VIDEO_READY))) {
+				tel6738_video_debug_writes++;
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
+							  "TEL6738 video bridge write-attempt %s -> %s seq=%u ts=%u len=%u marker=%d img=%d key=%d src_ready=%d dst_ready=%d src_decoded=%d dst_decoded=%d dst_media_up=%d\n",
+							  switch_channel_get_name(channel), switch_channel_get_name(b_channel), read_frame->seq,
+							  read_frame->timestamp, read_frame->datalen, read_frame->m, read_frame->img ? 1 : 0,
+							  switch_test_flag(read_frame, SFF_IS_KEYFRAME), switch_channel_test_flag(channel, CF_VIDEO_READY),
+							  switch_channel_test_flag(b_channel, CF_VIDEO_READY), switch_channel_test_flag(channel, CF_VIDEO_DECODED_READ),
+							  switch_channel_test_flag(b_channel, CF_VIDEO_DECODED_READ), switch_channel_media_up(b_channel));
+			}
+
+			if (!switch_test_flag(read_frame, SFF_CNG)) {
+				tel6738_bridge_write_attempts++;
+			}
+
+			write_status = switch_core_session_write_video_frame(vh->session_b, read_frame, SWITCH_IO_FLAG_NONE, 0);
+			if (write_status == SWITCH_STATUS_SUCCESS) {
+				if (!switch_test_flag(read_frame, SFF_CNG)) {
+					tel6738_bridge_write_ok++;
+				}
+			} else {
+				if (!switch_test_flag(read_frame, SFF_CNG)) {
+					tel6738_bridge_write_fail++;
+				}
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
+						  "TEL6738 video bridge write-result %s -> %s status=%d read_ok=%u write_attempt=%u write_ok=%u write_fail=%u\n",
+						  switch_channel_get_name(channel), switch_channel_get_name(b_channel), write_status, tel6738_bridge_read_ok,
+						  tel6738_bridge_write_attempts, tel6738_bridge_write_ok, tel6738_bridge_write_fail);
 				switch_cond_next();
 				continue;
+			}
+
+			if (!switch_test_flag(read_frame, SFF_CNG) &&
+				(tel6738_bridge_write_attempts <= 20 || (tel6738_bridge_write_attempts % 500) == 0)) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
+						  "TEL6738 video bridge counters %s -> %s read_ok=%u read_bad=%u cng_skip=%u block_skip=%u no_dst=%u write_attempt=%u write_ok=%u write_fail=%u last_seq=%u last_ts=%u last_len=%u last_marker=%d\n",
+						  switch_channel_get_name(channel), switch_channel_get_name(b_channel), tel6738_bridge_read_ok, tel6738_bridge_read_bad,
+						  tel6738_bridge_cng_skip, tel6738_bridge_block_skip, tel6738_bridge_no_dst_media,
+						  tel6738_bridge_write_attempts, tel6738_bridge_write_ok, tel6738_bridge_write_fail, read_frame->seq,
+						  read_frame->timestamp, read_frame->datalen, read_frame->m);
 			}
 		}
 	}
@@ -290,6 +481,12 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 	}
 
 	switch_core_session_kill_channel(vh->session_b, SWITCH_SIG_BREAK);
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
+					  "TEL6738 video bridge final %s -> %s read_ok=%u read_bad=%u cng_skip=%u block_skip=%u no_dst=%u write_attempt=%u write_ok=%u write_fail=%u cng_streak=%u source_refresh=%u periodic_refresh=%u\n",
+					  switch_channel_get_name(channel), switch_channel_get_name(b_channel),
+					  tel6738_bridge_read_ok, tel6738_bridge_read_bad, tel6738_bridge_cng_skip, tel6738_bridge_block_skip,
+					  tel6738_bridge_no_dst_media, tel6738_bridge_write_attempts, tel6738_bridge_write_ok, tel6738_bridge_write_fail,
+					  tel6738_bridge_cng_streak, tel6738_bridge_source_refreshes, tel6738_bridge_periodic_refreshes);
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG, "%s video thread ended.\n", switch_channel_get_name(channel));
 
 	switch_core_session_request_video_refresh(vh->session_a);

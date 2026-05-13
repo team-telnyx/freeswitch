@@ -203,6 +203,33 @@ struct switch_rtp_engine_s {
 	uint8_t bundled_with_audio;
 	uint32_t bundle_demux_miss_drops;
 	uint32_t bundle_queue_full_drops;
+	uint32_t bundle_demux_packets;
+	uint32_t bundle_audio_demux_packets;
+	uint32_t bundle_video_demux_packets;
+	uint32_t bundle_video_enqueued;
+	uint32_t bundle_video_dup_fail_drops;
+	uint32_t bundle_video_dequeued;
+	uint32_t bundle_video_empty_polls;
+	uint32_t bundle_audio_drain_passes;
+	uint32_t bundle_video_write_attempts;
+	uint32_t bundle_video_write_success;
+	uint32_t bundle_video_write_zero;
+	uint32_t bundle_video_write_fail;
+	uint32_t bundle_demux_method_counts[4];
+
+	/* TEL-6738: BUNDLE drain thread state and fields */
+	volatile int bundle_drain_state;  /* 0=inactive, 1=starting, 2=running, 3=stopping */
+	switch_thread_t *bundle_drain_thread;
+	uint32_t bundle_drain_generation;
+	uint32_t bundle_drain_thread_reads;
+	uint32_t bundle_drain_thread_video_routed;
+	uint32_t bundle_drain_thread_audio_routed;
+	uint32_t bundle_drain_thread_miss;
+	uint32_t bundle_drain_thread_qfail;
+	uint32_t bundle_drain_thread_audio_qfail;
+	switch_frame_buffer_t *bundle_audio_read_fb;
+	switch_frame_t *bundle_audio_read_fb_frame;
+
 	uint8_t no_crypto;
 	uint8_t dtls_controller;
 	uint8_t pass_codecs;
@@ -258,6 +285,7 @@ struct switch_media_handle_s {
 	switch_mutex_t *mutex;
 	switch_mutex_t *sdp_mutex;
 	switch_mutex_t *control_mutex;
+	switch_mutex_t *bundle_drain_mutex;  /* TEL-6738: protects drain thread start/stop */
 
 	const switch_codec_implementation_t *negotiated_codecs[SWITCH_MAX_CODECS];
 	int num_negotiated_codecs;
@@ -2616,6 +2644,13 @@ SWITCH_DECLARE(void) switch_media_handle_destroy(switch_core_session_t *session)
 
 	if (v_engine->read_fb) switch_frame_buffer_destroy(&v_engine->read_fb);
 
+	/* TEL-6738: cleanup audio drain frame buffer */
+	if (v_engine->bundle_audio_read_fb_frame && v_engine->bundle_audio_read_fb) {
+		switch_frame_buffer_free(v_engine->bundle_audio_read_fb, &v_engine->bundle_audio_read_fb_frame);
+		v_engine->bundle_audio_read_fb_frame = NULL;
+	}
+	if (v_engine->bundle_audio_read_fb) switch_frame_buffer_destroy(&v_engine->bundle_audio_read_fb);
+
 	if (smh->msrp_session) switch_msrp_session_destroy(&smh->msrp_session);
 }
 
@@ -2696,6 +2731,7 @@ SWITCH_DECLARE(switch_status_t) switch_media_handle_create(switch_media_handle_t
 		switch_mutex_init(&session->media_handle->mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 		switch_mutex_init(&session->media_handle->sdp_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 		switch_mutex_init(&session->media_handle->control_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
+		switch_mutex_init(&session->media_handle->bundle_drain_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 
 		session->media_handle->engines[SWITCH_MEDIA_TYPE_AUDIO].ssrc =
 			(uint32_t) ((intptr_t) &session->media_handle->engines[SWITCH_MEDIA_TYPE_AUDIO] + (switch_time_t) time(NULL));
@@ -3732,6 +3768,334 @@ static void switch_core_media_flush_queued_read_frames(switch_rtp_engine_t *engi
 	}
 }
 
+static const char *switch_core_media_bundle_demux_method2str(switch_bundle_demux_t method)
+{
+	switch(method) {
+	case SWITCH_BUNDLE_DEMUX_MID:
+		return "mid";
+	case SWITCH_BUNDLE_DEMUX_SSRC:
+		return "ssrc";
+	case SWITCH_BUNDLE_DEMUX_PAYLOAD_TYPE:
+		return "pt";
+	case SWITCH_BUNDLE_DEMUX_NONE:
+	default:
+		return "none";
+	}
+}
+
+
+/* TEL-6738: BUNDLE drain thread states */
+#define BUNDLE_DRAIN_INACTIVE   0
+#define BUNDLE_DRAIN_STARTING   1
+#define BUNDLE_DRAIN_RUNNING    2
+#define BUNDLE_DRAIN_STOPPING   3
+
+static const char *bundle_drain_state_str(int state) {
+	switch(state) {
+	case BUNDLE_DRAIN_INACTIVE: return "inactive";
+	case BUNDLE_DRAIN_STARTING: return "starting";
+	case BUNDLE_DRAIN_RUNNING:  return "running";
+	case BUNDLE_DRAIN_STOPPING: return "stopping";
+	default: return "unknown";
+	}
+}
+
+/* TEL-6738: Continuous drain thread for BUNDLE socket.
+ * This is the ONLY reader of a_engine->rtp_session while active.
+ * Audio packets are cloned and queued to v_engine->bundle_audio_read_fb.
+ * Video packets are cloned and queued to v_engine->read_fb.
+ *
+ * Tradeoff for audio delivery: We bypass the jitter buffer for audio packets.
+ * The drain thread reads raw RTP frames and queues them directly. The audio
+ * read path receives raw RTP frames (SFF_RAW_RTP set) which will be decoded
+ * by the normal codec path in switch_core_media_read_frame. JB smoothing is
+ * lost but this is acceptable because:
+ * 1. Audio over BUNDLE is already unusual (most BUNDLE is audio+video on
+ *    audio socket, so audio is the "native" stream).
+ * 2. The alternative (feeding back into RTP internals) would require exposing
+ *    JB internals and risks deadlocks on the shared RTP session.
+ * 3. Raw packet delivery with queue timing provides adequate ordering. */
+static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread, void *obj)
+{
+	switch_core_session_t *session = (switch_core_session_t *) obj;
+	switch_media_handle_t *smh;
+	switch_rtp_engine_t *a_engine, *v_engine;
+	switch_frame_t drain_frame;
+	uint8_t drain_buf[SWITCH_RTP_MAX_BUF_LEN];
+	uint32_t generation;
+
+	if (!session || !(smh = session->media_handle)) {
+		return NULL;
+	}
+
+	a_engine = &smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
+	v_engine = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
+	generation = v_engine->bundle_drain_generation;
+
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+		"TEL-6738 BUNDLE drain thread started gen=%u\n", generation);
+
+	v_engine->bundle_drain_state = BUNDLE_DRAIN_RUNNING;
+
+	while (v_engine->bundle_drain_state == BUNDLE_DRAIN_RUNNING
+		   && switch_channel_up_nosig(session->channel)
+		   && smh->media_flags[SCMF_RUNNING]
+		   && switch_rtp_ready(a_engine->rtp_session)
+		   && v_engine->bundled_with_audio) {
+
+		switch_status_t st;
+		switch_bundle_demux_t method = SWITCH_BUNDLE_DEMUX_NONE;
+		switch_bundle_mline_t *mline;
+		const char *mid;
+
+		/* Zero out the local frame for each read */
+		memset(&drain_frame, 0, sizeof(drain_frame));
+		drain_frame.data = drain_buf;
+		drain_frame.buflen = sizeof(drain_buf);
+		drain_frame.datalen = 0;
+
+		/* Blocking single-packet read. This is the sole reader. */
+		st = switch_rtp_zerocopy_read_frame(a_engine->rtp_session, &drain_frame,
+										   SWITCH_IO_FLAG_SINGLE_READ | SWITCH_IO_FLAG_BUNDLE_DRAIN);
+
+		if (v_engine->bundle_drain_state != BUNDLE_DRAIN_RUNNING) {
+			break;
+		}
+
+		if (st != SWITCH_STATUS_SUCCESS || drain_frame.datalen == 0) {
+			if (st == SWITCH_STATUS_BREAK) {
+				/* woken up by switch_rtp_break, re-check loop conditions */
+				continue;
+			}
+			/* TIMEOUT or error: re-check loop, small yield to avoid spin */
+			if (v_engine->bundle_drain_state == BUNDLE_DRAIN_RUNNING) {
+				switch_yield(1000);
+			}
+			continue;
+		}
+
+		v_engine->bundle_drain_thread_reads++;
+
+		/* CNG frames from JB - skip, not real packets */
+		if (switch_test_flag(&drain_frame, SFF_CNG)) {
+			continue;
+		}
+
+		if (!switch_test_flag(&drain_frame, SFF_RAW_RTP)) {
+			continue;
+		}
+
+		if (!drain_frame.buflen) {
+			drain_frame.buflen = SWITCH_RTP_MAX_BUF_LEN;
+		}
+
+		/* Demux: determine if audio or video */
+		mid = switch_rtp_get_received_mid(a_engine->rtp_session);
+		v_engine->bundle_demux_packets++;
+		mline = switch_bundle_group_demux_rtp(&smh->bundle, mid, drain_frame.ssrc,
+											 drain_frame.payload, &method);
+		if (method >= SWITCH_BUNDLE_DEMUX_NONE && method <= SWITCH_BUNDLE_DEMUX_PAYLOAD_TYPE) {
+			v_engine->bundle_demux_method_counts[method]++;
+		}
+
+		if (!mline) {
+			v_engine->bundle_drain_thread_miss++;
+			v_engine->bundle_demux_miss_drops++;
+			if (v_engine->bundle_demux_miss_drops <= 10 || !(v_engine->bundle_demux_miss_drops % 1000)) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+					"TEL-6738 drain thread demux miss count=%u mid=%s ssrc=%u pt=%u\n",
+					v_engine->bundle_demux_miss_drops, switch_str_nil(mid),
+					drain_frame.ssrc, drain_frame.payload);
+			}
+			continue;
+		}
+
+		if (mline->media_type == SWITCH_MEDIA_TYPE_VIDEO) {
+			/* Clone and queue to video read_fb */
+			switch_frame_t *dupframe = NULL;
+
+			v_engine->bundle_video_demux_packets++;
+			v_engine->bundle_drain_thread_video_routed++;
+
+			if (switch_frame_buffer_dup(v_engine->read_fb, &drain_frame, &dupframe) == SWITCH_STATUS_SUCCESS) {
+				if (switch_frame_buffer_trypush(v_engine->read_fb, dupframe) != SWITCH_STATUS_SUCCESS) {
+					v_engine->bundle_queue_full_drops++;
+					v_engine->bundle_drain_thread_qfail++;
+					if (v_engine->bundle_queue_full_drops <= 10 || !(v_engine->bundle_queue_full_drops % 1000)) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+							"TEL-6738 drain thread video queue full count=%u enq=%u deq=%u\n",
+							v_engine->bundle_queue_full_drops,
+							v_engine->bundle_video_enqueued, v_engine->bundle_video_dequeued);
+					}
+					switch_frame_buffer_free(v_engine->read_fb, &dupframe);
+				} else {
+					v_engine->bundle_video_enqueued++;
+				}
+			} else {
+				v_engine->bundle_video_dup_fail_drops++;
+			}
+		} else if (mline->media_type == SWITCH_MEDIA_TYPE_AUDIO) {
+			/* Clone and queue to audio read_fb for the audio read path */
+			switch_frame_t *dupframe = NULL;
+
+			v_engine->bundle_audio_demux_packets++;
+			v_engine->bundle_drain_thread_audio_routed++;
+
+			if (v_engine->bundle_audio_read_fb) {
+				if (switch_frame_buffer_dup(v_engine->bundle_audio_read_fb, &drain_frame, &dupframe) == SWITCH_STATUS_SUCCESS) {
+					if (switch_frame_buffer_trypush(v_engine->bundle_audio_read_fb, dupframe) != SWITCH_STATUS_SUCCESS) {
+						v_engine->bundle_drain_thread_audio_qfail++;
+						if (v_engine->bundle_drain_thread_audio_qfail <= 10 || !(v_engine->bundle_drain_thread_audio_qfail % 1000)) {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+								"TEL-6738 drain thread audio queue full count=%u\n",
+								v_engine->bundle_drain_thread_audio_qfail);
+						}
+						switch_frame_buffer_free(v_engine->bundle_audio_read_fb, &dupframe);
+					}
+				}
+			}
+		}
+	}
+
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+		"TEL-6738 BUNDLE drain thread exiting gen=%u state=%s reads=%u video_routed=%u audio_routed=%u "
+		"miss=%u vqfail=%u aqfail=%u demux_total=%u venq=%u vdeq=%u\n",
+		generation, bundle_drain_state_str(v_engine->bundle_drain_state),
+		v_engine->bundle_drain_thread_reads, v_engine->bundle_drain_thread_video_routed,
+		v_engine->bundle_drain_thread_audio_routed, v_engine->bundle_drain_thread_miss,
+		v_engine->bundle_drain_thread_qfail, v_engine->bundle_drain_thread_audio_qfail,
+		v_engine->bundle_demux_packets, v_engine->bundle_video_enqueued, v_engine->bundle_video_dequeued);
+
+	v_engine->bundle_drain_state = BUNDLE_DRAIN_INACTIVE;
+	return NULL;
+}
+
+/* TEL-6738: Start the BUNDLE drain thread.
+ * Caller must hold smh->bundle_drain_mutex or be in single-threaded init. */
+static void bundle_drain_thread_start(switch_core_session_t *session)
+{
+	switch_media_handle_t *smh = session->media_handle;
+	switch_rtp_engine_t *a_engine, *v_engine;
+	switch_threadattr_t *thd_attr = NULL;
+	switch_memory_pool_t *pool;
+
+	if (!smh) return;
+
+	a_engine = &smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
+	v_engine = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
+
+	/* Preconditions */
+	if (!v_engine->bundled_with_audio || !a_engine->rtp_session || !v_engine->read_fb) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+			"TEL-6738 drain thread start skipped: bundled=%d rtp=%p read_fb=%p\n",
+			v_engine->bundled_with_audio, (void *)a_engine->rtp_session, (void *)v_engine->read_fb);
+		return;
+	}
+
+	if (smh->bundle.state != SWITCH_BUNDLE_STATE_ACCEPTED) {
+		return;
+	}
+
+	if (v_engine->bundle_drain_state != BUNDLE_DRAIN_INACTIVE) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+			"TEL-6738 drain thread start skipped: already state=%s\n",
+			bundle_drain_state_str(v_engine->bundle_drain_state));
+		return;
+	}
+
+	pool = switch_core_session_get_pool(session);
+
+	/* Create audio read frame buffer if not yet present.
+	 * Audio queue depth 200: ~4 seconds at 20ms ptime, enough to absorb bursts. */
+	if (!v_engine->bundle_audio_read_fb) {
+		if (switch_frame_buffer_create(&v_engine->bundle_audio_read_fb, 200) != SWITCH_STATUS_SUCCESS) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+				"TEL-6738 failed to create audio drain frame buffer\n");
+			return;
+		}
+	}
+
+	v_engine->bundle_drain_generation++;
+	v_engine->bundle_drain_thread_reads = 0;
+	v_engine->bundle_drain_thread_video_routed = 0;
+	v_engine->bundle_drain_thread_audio_routed = 0;
+	v_engine->bundle_drain_thread_miss = 0;
+	v_engine->bundle_drain_thread_qfail = 0;
+	v_engine->bundle_drain_thread_audio_qfail = 0;
+
+	v_engine->bundle_drain_state = BUNDLE_DRAIN_STARTING;
+
+	switch_threadattr_create(&thd_attr, pool);
+	switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
+
+	if (switch_thread_create(&v_engine->bundle_drain_thread, thd_attr,
+							  bundle_drain_thread_func, session, pool) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+			"TEL-6738 failed to create drain thread\n");
+		v_engine->bundle_drain_state = BUNDLE_DRAIN_INACTIVE;
+		v_engine->bundle_drain_thread = NULL;
+		return;
+	}
+
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+		"TEL-6738 drain thread launched gen=%u\n", v_engine->bundle_drain_generation);
+}
+
+/* TEL-6738: Stop the BUNDLE drain thread.
+ * Safe to call even if thread is not running. Does NOT hold bundle_drain_mutex during join. */
+static void bundle_drain_thread_stop(switch_core_session_t *session)
+{
+	switch_media_handle_t *smh = session->media_handle;
+	switch_rtp_engine_t *a_engine, *v_engine;
+	switch_thread_t *thd;
+
+	if (!smh) return;
+
+	a_engine = &smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
+	v_engine = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
+
+	switch_mutex_lock(smh->bundle_drain_mutex);
+	thd = v_engine->bundle_drain_thread;
+	if (v_engine->bundle_drain_state == BUNDLE_DRAIN_INACTIVE || !thd) {
+		switch_mutex_unlock(smh->bundle_drain_mutex);
+		return;
+	}
+
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+		"TEL-6738 stopping drain thread gen=%u state=%s\n",
+		v_engine->bundle_drain_generation, bundle_drain_state_str(v_engine->bundle_drain_state));
+
+	v_engine->bundle_drain_state = BUNDLE_DRAIN_STOPPING;
+	switch_mutex_unlock(smh->bundle_drain_mutex);
+
+	/* Wake the blocking RTP read so the thread notices STOPPING.
+	 * Do NOT hold any mutex during this. */
+	if (switch_rtp_ready(a_engine->rtp_session)) {
+		switch_rtp_break(a_engine->rtp_session);
+	}
+
+	/* Also interrupt the audio drain queue in case audio reader is blocked on pop */
+	if (v_engine->bundle_audio_read_fb) {
+		/* Push a sentinel to unblock any waiting pop */
+		switch_frame_buffer_trypush(v_engine->bundle_audio_read_fb, (void *) 1);
+	}
+
+	/* Join outside all locks */
+	{
+		switch_status_t st;
+		switch_thread_join(&st, thd);
+	}
+
+	switch_mutex_lock(smh->bundle_drain_mutex);
+	v_engine->bundle_drain_thread = NULL;
+	v_engine->bundle_drain_state = BUNDLE_DRAIN_INACTIVE;
+	switch_mutex_unlock(smh->bundle_drain_mutex);
+
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+		"TEL-6738 drain thread stopped and joined gen=%u\n",
+		v_engine->bundle_drain_generation);
+}
+
 static switch_bool_t switch_core_media_route_bundled_rtp(switch_media_handle_t *smh, switch_rtp_engine_t *engine, switch_media_type_t type)
 {
 	switch_rtp_engine_t *v_engine;
@@ -3749,7 +4113,11 @@ static switch_bool_t switch_core_media_route_bundled_rtp(switch_media_handle_t *
 	}
 
 	mid = switch_rtp_get_received_mid(engine->rtp_session);
+	v_engine->bundle_demux_packets++;
 	mline = switch_bundle_group_demux_rtp(&smh->bundle, mid, engine->read_frame.ssrc, engine->read_frame.payload, &method);
+	if (method >= SWITCH_BUNDLE_DEMUX_NONE && method <= SWITCH_BUNDLE_DEMUX_PAYLOAD_TYPE) {
+		v_engine->bundle_demux_method_counts[method]++;
+	}
 
 	if (!mline) {
 		v_engine->bundle_demux_miss_drops++;
@@ -3762,26 +4130,142 @@ static switch_bool_t switch_core_media_route_bundled_rtp(switch_media_handle_t *
 	}
 
 	if (mline->media_type == SWITCH_MEDIA_TYPE_AUDIO) {
+		v_engine->bundle_audio_demux_packets++;
+		if (v_engine->bundle_audio_demux_packets <= 10 || !(v_engine->bundle_audio_demux_packets % 500)) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
+				"BUNDLE RTP audio demux diag total=%u audio=%u video=%u miss=%u method=%s mid=%s ssrc=%u pt=%u seq=%u ts=%u m=%d len=%u\n",
+				v_engine->bundle_demux_packets, v_engine->bundle_audio_demux_packets, v_engine->bundle_video_demux_packets,
+				v_engine->bundle_demux_miss_drops, switch_core_media_bundle_demux_method2str(method), switch_str_nil(mid),
+				engine->read_frame.ssrc, engine->read_frame.payload, engine->read_frame.seq, engine->read_frame.timestamp,
+				engine->read_frame.m, engine->read_frame.datalen);
+		}
 		return SWITCH_FALSE;
 	}
 
 	if (mline->media_type == SWITCH_MEDIA_TYPE_VIDEO) {
 		switch_frame_t *dupframe = NULL;
 
+		if (!engine->read_frame.buflen) {
+			engine->read_frame.buflen = SWITCH_RTP_MAX_BUF_LEN;
+		}
+
+		v_engine->bundle_video_demux_packets++;
 		if (switch_frame_buffer_dup(v_engine->read_fb, &engine->read_frame, &dupframe) == SWITCH_STATUS_SUCCESS) {
 			if (switch_frame_buffer_trypush(v_engine->read_fb, dupframe) != SWITCH_STATUS_SUCCESS) {
 				v_engine->bundle_queue_full_drops++;
 				if (v_engine->bundle_queue_full_drops <= 10 || !(v_engine->bundle_queue_full_drops % 1000)) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
-						"BUNDLE RTP video queue full/drop count=%u mid=%s ssrc=%u pt=%u\n",
-						v_engine->bundle_queue_full_drops, switch_str_nil(mid), engine->read_frame.ssrc, engine->read_frame.payload);
+						"BUNDLE RTP video queue full/drop count=%u total=%u video=%u enq=%u deq=%u mid=%s ssrc=%u pt=%u seq=%u ts=%u m=%d len=%u\n",
+						v_engine->bundle_queue_full_drops, v_engine->bundle_demux_packets, v_engine->bundle_video_demux_packets,
+						v_engine->bundle_video_enqueued, v_engine->bundle_video_dequeued, switch_str_nil(mid), engine->read_frame.ssrc,
+						engine->read_frame.payload, engine->read_frame.seq, engine->read_frame.timestamp, engine->read_frame.m, engine->read_frame.datalen);
 				}
 				switch_frame_buffer_free(v_engine->read_fb, &dupframe);
+			} else {
+				v_engine->bundle_video_enqueued++;
+				if (v_engine->bundle_video_enqueued <= 10 || !(v_engine->bundle_video_enqueued % 500)) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
+						"BUNDLE RTP video enqueue diag total=%u video=%u enq=%u deq=%u write_attempts=%u write_ok=%u write_zero=%u write_fail=%u method=%s mid=%s ssrc=%u pt=%u seq=%u ts=%u m=%d len=%u\n",
+						v_engine->bundle_demux_packets, v_engine->bundle_video_demux_packets, v_engine->bundle_video_enqueued,
+						v_engine->bundle_video_dequeued, v_engine->bundle_video_write_attempts, v_engine->bundle_video_write_success,
+						v_engine->bundle_video_write_zero, v_engine->bundle_video_write_fail, switch_core_media_bundle_demux_method2str(method),
+						switch_str_nil(mid), engine->read_frame.ssrc, engine->read_frame.payload, engine->read_frame.seq,
+						engine->read_frame.timestamp, engine->read_frame.m, engine->read_frame.datalen);
+				}
+			}
+		} else {
+			v_engine->bundle_video_dup_fail_drops++;
+			if (v_engine->bundle_video_dup_fail_drops <= 10 || !(v_engine->bundle_video_dup_fail_drops % 1000)) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
+					"BUNDLE RTP video dup/drop count=%u total=%u video=%u enq=%u deq=%u mid=%s ssrc=%u pt=%u seq=%u ts=%u m=%d len=%u\n",
+					v_engine->bundle_video_dup_fail_drops, v_engine->bundle_demux_packets, v_engine->bundle_video_demux_packets,
+					v_engine->bundle_video_enqueued, v_engine->bundle_video_dequeued, switch_str_nil(mid), engine->read_frame.ssrc,
+					engine->read_frame.payload, engine->read_frame.seq, engine->read_frame.timestamp, engine->read_frame.m, engine->read_frame.datalen);
 			}
 		}
 	}
 
 	return SWITCH_TRUE;
+}
+
+#define SWITCH_BUNDLE_AUDIO_DRAIN_MAX 128
+
+/* Drain remaining socket packets after a video packet was routed.
+ * Uses NOBLOCK reads so we never block on the timer.
+ * Video packets are cloned and enqueued to the video frame buffer.
+ * Audio packets are absorbed into the JB by rtp_common_read internally.
+ * Returns SWITCH_TRUE if an audio frame was extracted from JB during drain,
+ * in which case engine->read_frame contains the audio data. */
+static switch_bool_t switch_core_media_drain_bundled_rtp(switch_media_handle_t *smh, switch_rtp_engine_t *engine)
+{
+	int budget = SWITCH_BUNDLE_AUDIO_DRAIN_MAX;
+	uint32_t video_routed = 0, audio_absorbed = 0;
+	switch_bool_t got_audio = SWITCH_FALSE;
+	switch_rtp_engine_t *v_engine;
+
+	if (!smh || !engine || smh->bundle.state != SWITCH_BUNDLE_STATE_ACCEPTED || !switch_rtp_ready(engine->rtp_session)) {
+		return SWITCH_FALSE;
+	}
+
+	v_engine = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
+	if (!v_engine->bundled_with_audio) {
+		return SWITCH_FALSE;
+	}
+
+	while (budget-- > 0) {
+		switch_status_t st;
+
+		engine->read_frame.datalen = 0;
+		engine->read_frame.flags = SFF_NONE;
+		engine->read_frame.m = SWITCH_FALSE;
+		engine->read_frame.img = NULL;
+		engine->read_frame.payload = 0;
+		engine->read_frame.pmap = NULL;
+
+		st = switch_rtp_zerocopy_read_frame(engine->rtp_session, &engine->read_frame,
+											SWITCH_IO_FLAG_NOBLOCK | SWITCH_IO_FLAG_SINGLE_READ);
+
+		if (st != SWITCH_STATUS_SUCCESS || engine->read_frame.datalen == 0) {
+			break;
+		}
+
+		/* CNG frames come from JB-absorbed audio with no ready output; skip */
+		if (switch_test_flag(&engine->read_frame, SFF_CNG)) {
+			continue;
+		}
+
+		if (!switch_test_flag(&engine->read_frame, SFF_RAW_RTP)) {
+			continue;
+		}
+
+		/* Ensure buflen is set for any downstream frame_buffer_dup */
+		if (!engine->read_frame.buflen) {
+			engine->read_frame.buflen = SWITCH_RTP_MAX_BUF_LEN;
+		}
+
+		/* Route: video goes to queue, audio is already in JB */
+		if (switch_core_media_route_bundled_rtp(smh, engine, SWITCH_MEDIA_TYPE_AUDIO) == SWITCH_TRUE) {
+			video_routed++;
+			continue;
+		}
+
+		/* Audio packet extracted from JB during the NOBLOCK read */
+		got_audio = SWITCH_TRUE;
+		break;
+	}
+
+	if (video_routed || audio_absorbed) {
+		v_engine->bundle_audio_drain_passes++;
+		if (v_engine->bundle_audio_drain_passes <= 10 || !(v_engine->bundle_audio_drain_passes % 500)) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
+				"BUNDLE RTP drain diag pass=%u video_routed=%u venq=%u vdeq=%u budget_left=%d got_audio=%d\n",
+				v_engine->bundle_audio_drain_passes, video_routed,
+				v_engine->bundle_video_enqueued, v_engine->bundle_video_dequeued,
+				budget, got_audio);
+		}
+	}
+
+	return got_audio;
 }
 
 SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session_t *session, switch_frame_t **frame,
@@ -3851,6 +4335,13 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 			switch_core_media_release_queued_read_frame(engine);
 
 			if (switch_frame_buffer_trypop(engine->read_fb, &pop) != SWITCH_STATUS_SUCCESS || !pop) {
+				engine->bundle_video_empty_polls++;
+				if (engine->bundle_video_empty_polls <= 10 || !(engine->bundle_video_empty_polls % 1000)) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+						"BUNDLE RTP video dequeue empty diag empty=%u enq=%u deq=%u write_attempts=%u write_ok=%u write_zero=%u write_fail=%u\n",
+						engine->bundle_video_empty_polls, engine->bundle_video_enqueued, engine->bundle_video_dequeued,
+						engine->bundle_video_write_attempts, engine->bundle_video_write_success, engine->bundle_video_write_zero, engine->bundle_video_write_fail);
+				}
 				switch_yield(5000);
 				*frame = NULL;
 				switch_goto_status(SWITCH_STATUS_BREAK, end);
@@ -3860,10 +4351,51 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 			engine->read_frame = *engine->read_fb_frame;
 			engine->read_frame.codec = &engine->read_codec;
 			engine->read_frame.pmap = NULL;
+			engine->bundle_video_dequeued++;
+			if (engine->bundle_video_dequeued <= 10 || !(engine->bundle_video_dequeued % 500)) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+					"BUNDLE RTP video dequeue diag enq=%u deq=%u write_attempts=%u write_ok=%u write_zero=%u write_fail=%u pt=%u seq=%u ts=%u m=%d len=%u\n",
+					engine->bundle_video_enqueued, engine->bundle_video_dequeued, engine->bundle_video_write_attempts,
+					engine->bundle_video_write_success, engine->bundle_video_write_zero, engine->bundle_video_write_fail,
+					engine->read_frame.payload, engine->read_frame.seq, engine->read_frame.timestamp, engine->read_frame.m, engine->read_frame.datalen);
+			}
 			if (engine->cur_payload_map) {
 				engine->read_frame.rate = engine->cur_payload_map->rm_rate;
 			}
 			status = SWITCH_STATUS_SUCCESS;
+		} else if (type == SWITCH_MEDIA_TYPE_AUDIO
+				   && smh->engines[SWITCH_MEDIA_TYPE_VIDEO].bundle_drain_state == BUNDLE_DRAIN_RUNNING
+				   && smh->engines[SWITCH_MEDIA_TYPE_VIDEO].bundle_audio_read_fb) {
+			/* TEL-6738: Drain thread is the sole socket reader.
+			 * Audio path pops from the drain thread's audio queue. */
+			switch_rtp_engine_t *veng = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
+			void *apop = NULL;
+			switch_status_t qst;
+
+			/* Timed pop: wait up to ~20ms (one audio frame interval) for data.
+			 * This prevents busy-spinning while giving reasonable latency. */
+			qst = switch_frame_buffer_pop_timeout(veng->bundle_audio_read_fb, &apop, 20000);
+
+			if (qst == SWITCH_STATUS_SUCCESS && apop && apop != (void *)1) {
+				switch_frame_t *audio_fb_frame = (switch_frame_t *) apop;
+				/* Release previous frame if any */
+				if (veng->bundle_audio_read_fb_frame) {
+					switch_frame_buffer_free(veng->bundle_audio_read_fb, &veng->bundle_audio_read_fb_frame);
+				}
+				veng->bundle_audio_read_fb_frame = audio_fb_frame;
+				engine->read_frame = *audio_fb_frame;
+				engine->read_frame.codec = &engine->read_codec;
+				engine->read_frame.pmap = NULL;
+				status = SWITCH_STATUS_SUCCESS;
+			} else if (apop == (void *)1) {
+				/* Sentinel from drain thread stop; treat as break */
+				status = SWITCH_STATUS_BREAK;
+				goto end;
+			} else {
+				/* Timeout or empty; CNG-like behavior for audio */
+				engine->read_frame.datalen = 0;
+				continue;
+			}
 		} else {
 			status = switch_rtp_zerocopy_read_frame(engine->rtp_session, &engine->read_frame, flags);
 		}
@@ -3896,9 +4428,40 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 			goto end;
 		}
 
-		if (switch_core_media_route_bundled_rtp(smh, engine, type) == SWITCH_TRUE) {
-			engine->read_frame.datalen = 0;
-			continue;
+		/* TEL-6738: When drain thread is active, audio path reads from queue above
+		 * and should not reach this point. Old route+drain fallback only runs
+		 * when drain thread is inactive. */
+		if (smh->engines[SWITCH_MEDIA_TYPE_VIDEO].bundle_drain_state != BUNDLE_DRAIN_RUNNING
+			&& switch_core_media_route_bundled_rtp(smh, engine, type) == SWITCH_TRUE) {
+			/* Video packet routed. Drain remaining socket to video queue
+			 * without 20ms timer penalty per packet. */
+			if (switch_core_media_drain_bundled_rtp(smh, engine) == SWITCH_TRUE) {
+				/* Drain yielded an audio frame from JB; check it isn't also video */
+				if (switch_core_media_route_bundled_rtp(smh, engine, type) == SWITCH_TRUE) {
+					engine->read_frame.datalen = 0;
+					continue;
+				}
+				/* Got audio from drain, fall through */
+			} else {
+				/* No audio yet. One more NOBLOCK read to extract from JB. */
+				engine->read_frame.datalen = 0;
+				engine->read_frame.flags = SFF_NONE;
+				status = switch_rtp_zerocopy_read_frame(engine->rtp_session, &engine->read_frame,
+														  SWITCH_IO_FLAG_NOBLOCK | SWITCH_IO_FLAG_SINGLE_READ);
+				if (status == SWITCH_STATUS_SUCCESS && engine->read_frame.datalen > 0
+					&& switch_test_flag(&engine->read_frame, SFF_RAW_RTP)
+					&& !switch_test_flag(&engine->read_frame, SFF_CNG)) {
+					if (switch_core_media_route_bundled_rtp(smh, engine, type) == SWITCH_TRUE) {
+						engine->read_frame.datalen = 0;
+						continue;
+					}
+					/* Got audio from JB extraction */
+				} else {
+					/* JB empty or only CNG; wait for next timer tick */
+					engine->read_frame.datalen = 0;
+					continue;
+				}
+			}
 		}
 
 		fire_readable = !switch_channel_test_flag(session->channel, CF_MEDIA_READABLE_FIRED);
@@ -4502,20 +5065,38 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 				"Unable to create isolated BUNDLE video RTP write state\n");
 			status = SWITCH_STATUS_FALSE;
 		} else {
+			engine->bundle_video_write_attempts++;
 			bundle_video_wrote = switch_rtp_write_frame_ex_state(engine->rtp_session, frame, engine->bundle_write_state,
 									   engine->ssrc, mid_ext_id, mid, SWITCH_TRUE, engine->cur_payload_map->pt);
 			if (bundle_video_wrote < 0) {
+				engine->bundle_video_write_fail++;
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-					"BUNDLE video RTP write failed: wrote=%d flags=0x%x packetlen=%u datalen=%u\n",
-					bundle_video_wrote, frame->flags, frame->packetlen, frame->datalen);
+					"BUNDLE video RTP write failed: wrote=%d attempts=%u ok=%u zero=%u fail=%u enq=%u deq=%u flags=0x%x pt=%u seq=%u ts=%u m=%d packetlen=%u datalen=%u\n",
+					bundle_video_wrote, engine->bundle_video_write_attempts, engine->bundle_video_write_success,
+					engine->bundle_video_write_zero, engine->bundle_video_write_fail, engine->bundle_video_enqueued,
+					engine->bundle_video_dequeued, frame->flags, frame->payload, frame->seq, frame->timestamp, frame->m,
+					frame->packetlen, frame->datalen);
 				status = SWITCH_STATUS_FALSE;
 			} else if (bundle_video_wrote == 0) {
+				engine->bundle_video_write_zero++;
 				/* A zero-byte write can happen while the borrowed BUNDLE audio RTP
 				   transport is still completing ICE/DTLS. Treat it like the normal
 				   RTP write path, where only negative returns are fatal. */
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-					"BUNDLE video RTP write deferred: wrote=0 flags=0x%x packetlen=%u datalen=%u\n",
-					frame->flags, frame->packetlen, frame->datalen);
+					"BUNDLE video RTP write deferred: wrote=0 attempts=%u ok=%u zero=%u fail=%u enq=%u deq=%u flags=0x%x pt=%u seq=%u ts=%u m=%d packetlen=%u datalen=%u\n",
+					engine->bundle_video_write_attempts, engine->bundle_video_write_success, engine->bundle_video_write_zero,
+					engine->bundle_video_write_fail, engine->bundle_video_enqueued, engine->bundle_video_dequeued,
+					frame->flags, frame->payload, frame->seq, frame->timestamp, frame->m, frame->packetlen, frame->datalen);
+			} else {
+				engine->bundle_video_write_success++;
+				if (engine->bundle_video_write_success <= 10 || !(engine->bundle_video_write_success % 500)) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+						"BUNDLE video RTP write success diag wrote=%d attempts=%u ok=%u zero=%u fail=%u enq=%u deq=%u flags=0x%x pt=%u seq=%u ts=%u m=%d packetlen=%u datalen=%u\n",
+						bundle_video_wrote, engine->bundle_video_write_attempts, engine->bundle_video_write_success,
+						engine->bundle_video_write_zero, engine->bundle_video_write_fail, engine->bundle_video_enqueued,
+						engine->bundle_video_dequeued, frame->flags, frame->payload, frame->seq, frame->timestamp, frame->m,
+						frame->packetlen, frame->datalen);
+				}
 			}
 		}
 	} else if (switch_rtp_write_frame(engine->rtp_session, frame) < 0) {
@@ -11381,6 +11962,12 @@ SWITCH_DECLARE(void) switch_core_media_deactivate_rtp(switch_core_session_t *ses
 		a_engine->media_thread = NULL;
 	}
 
+	/* TEL-6738: Stop drain thread before video engine teardown */
+	bundle_drain_thread_stop(session);
+	if (v_engine->bundled_with_audio && a_engine->rtp_session) {
+		switch_rtp_clear_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_BUNDLE_ACCEPT_ANY_PT);
+	}
+
 	if (v_engine->media_thread) {
 		switch_status_t st;
 		switch_channel_clear_flag(session->channel, CF_VIDEO_PASSIVE);
@@ -12710,6 +13297,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 			if (switch_core_media_bundle_negotiated(smh) && v_engine->rtcp_mux > 0 && a_engine->rtp_session) {
 				v_engine->rtp_session = a_engine->rtp_session;
 				v_engine->bundled_with_audio = 1;
+				switch_rtp_set_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_BUNDLE_ACCEPT_ANY_PT);
 				if (v_engine->bundle_write_state) {
 					switch_rtp_write_state_reset(v_engine->bundle_write_state);
 				}
@@ -12723,13 +13311,35 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 				switch_core_media_flush_queued_read_frames(v_engine);
 				v_engine->bundle_demux_miss_drops = 0;
 				v_engine->bundle_queue_full_drops = 0;
+				v_engine->bundle_demux_packets = 0;
+				v_engine->bundle_audio_demux_packets = 0;
+				v_engine->bundle_video_demux_packets = 0;
+				v_engine->bundle_video_enqueued = 0;
+				v_engine->bundle_video_dup_fail_drops = 0;
+				v_engine->bundle_video_dequeued = 0;
+				v_engine->bundle_video_empty_polls = 0;
+				v_engine->bundle_audio_drain_passes = 0;
+				v_engine->bundle_video_write_attempts = 0;
+				v_engine->bundle_video_write_success = 0;
+				v_engine->bundle_video_write_zero = 0;
+				v_engine->bundle_video_write_fail = 0;
+				memset(v_engine->bundle_demux_method_counts, 0, sizeof(v_engine->bundle_demux_method_counts));
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 					"BUNDLE video is borrowing audio RTP transport; video engine will not own RTP teardown/reset\n");
+				/* TEL-6738: Start the continuous drain thread */
+				switch_mutex_lock(smh->bundle_drain_mutex);
+				bundle_drain_thread_start(session);
+				switch_mutex_unlock(smh->bundle_drain_mutex);
 			} else {
 				if (v_engine->bundled_with_audio) {
+					/* TEL-6738: Stop drain thread before disabling BUNDLE */
+					bundle_drain_thread_stop(session);
 					switch_core_media_flush_queued_read_frames(v_engine);
 					if (v_engine->bundle_write_state) {
 						switch_rtp_write_state_reset(v_engine->bundle_write_state);
+					}
+					if (a_engine->rtp_session) {
+						switch_rtp_clear_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_BUNDLE_ACCEPT_ANY_PT);
 					}
 				}
 				v_engine->bundled_with_audio = 0;

@@ -220,6 +220,7 @@ static switch_frame_t *find_free_frame(switch_frame_buffer_t *fb, switch_frame_t
 		np->frame->packetlen = data_offset + datalen;
 		np->frame->data = packet + data_offset;
 		np->frame->datalen = datalen;
+		np->frame->buflen = SWITCH_RTP_MAX_BUF_LEN;
 	} else {
 		np->frame->packet = NULL;
 		np->frame->packetlen = 0;
@@ -304,6 +305,11 @@ SWITCH_DECLARE(switch_status_t) switch_frame_buffer_pop(switch_frame_buffer_t *f
 SWITCH_DECLARE(switch_status_t) switch_frame_buffer_trypop(switch_frame_buffer_t *fb, void **ptr)
 {
 	return switch_queue_trypop(fb->queue, ptr);
+}
+
+SWITCH_DECLARE(switch_status_t) switch_frame_buffer_pop_timeout(switch_frame_buffer_t *fb, void **ptr, switch_interval_time_t timeout)
+{
+	return switch_queue_pop_timeout(fb->queue, ptr, timeout);
 }
 
 SWITCH_DECLARE(int) switch_frame_buffer_size(switch_frame_buffer_t *fb)
