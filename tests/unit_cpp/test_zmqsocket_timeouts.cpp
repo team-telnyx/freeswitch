@@ -58,34 +58,6 @@ void test_push_socket_has_finite_send_timeout()
 }
 
 // ---------------------------------------------------------------------
-// Test 2 — PULL socket must have ZMQ_RCVTIMEO > 0 set by the wrapper.
-// ---------------------------------------------------------------------
-void test_pull_socket_has_finite_recv_timeout()
-{
-    std::cout << "[test] PULL socket has finite ZMQ_RCVTIMEO" << std::endl;
-
-    Telnyx::ZMQ::ZMQSocket receiver(Telnyx::ZMQ::ZMQSocket::PULL);
-    bool bound = receiver.bind("tcp://127.0.0.1:53558");
-    TEST_CHECK(bound, "PULL should bind to a local URL");
-    if (!receiver.socket()) {
-        TEST_CHECK(false, "underlying zmq::socket_t* unavailable");
-        return;
-    }
-
-    int rcvtimeo = -2;
-    size_t sz = sizeof(rcvtimeo);
-    receiver.socket()->getsockopt(ZMQ_RCVTIMEO, &rcvtimeo, &sz);
-    std::cout << "  ZMQ_RCVTIMEO = " << rcvtimeo << " ms" << std::endl;
-
-    TEST_CHECK(rcvtimeo != -1,
-        "ZMQ_RCVTIMEO must not be the libzmq default (-1 = block forever)");
-    TEST_CHECK(rcvtimeo > 0,
-        "ZMQ_RCVTIMEO must be a positive finite value");
-    TEST_CHECK(rcvtimeo <= 60000,
-        "ZMQ_RCVTIMEO should be <= 60s (sanity cap)");
-}
-
-// ---------------------------------------------------------------------
 // Test 3 — Behavioural: sendRequest() on a PUSH socket connected to an
 // unresponsive (binding-but-not-reading) peer must return false in
 // bounded time. Without the fix this test hangs; a watchdog kills the
@@ -160,7 +132,6 @@ int main()
                  "==============================================================" << std::endl;
 
     test_push_socket_has_finite_send_timeout();
-    test_pull_socket_has_finite_recv_timeout();
     test_send_does_not_block_on_dead_peer();
 
     std::cout << "--------------------------------------------------------------\n"

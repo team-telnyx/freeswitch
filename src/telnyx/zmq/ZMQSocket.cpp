@@ -55,8 +55,6 @@ static zmq::socket_t* zeromq_create_socket(zmq::context_t* context, int type)
   socket->setsockopt (ZMQ_LINGER, &linger, sizeof (linger));
   int sndtimeo = 5000;   // bail at 5s rather than block forever on a dead peer
   socket->setsockopt (ZMQ_SNDTIMEO, &sndtimeo, sizeof (sndtimeo));
-  int rcvtimeo = 5000;
-  socket->setsockopt (ZMQ_RCVTIMEO, &rcvtimeo, sizeof (rcvtimeo));
   return socket;
 }
 
