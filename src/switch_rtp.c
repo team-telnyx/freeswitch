@@ -6370,7 +6370,13 @@ SWITCH_DECLARE(void) switch_rtp_clear_flags(switch_rtp_t *rtp_session, switch_rt
 
 SWITCH_DECLARE(void) switch_rtp_set_flag(switch_rtp_t *rtp_session, switch_rtp_flag_t flag)
 {
-	int old_flag = rtp_session->flags[flag];
+	int old_flag;
+
+	if (!rtp_session) {
+		return;
+	}
+
+	old_flag = rtp_session->flags[flag];
 
 	switch_mutex_lock(rtp_session->flag_mutex);
 	rtp_session->flags[flag] = 1;
@@ -6429,7 +6435,13 @@ SWITCH_DECLARE(uint32_t) switch_rtp_test_flag(switch_rtp_t *rtp_session, switch_
 
 SWITCH_DECLARE(void) switch_rtp_clear_flag(switch_rtp_t *rtp_session, switch_rtp_flag_t flag)
 {
-	int old_flag = rtp_session->flags[flag];
+	int old_flag;
+
+	if (!rtp_session) {
+		return;
+	}
+
+	old_flag = rtp_session->flags[flag];
 
 	switch_mutex_lock(rtp_session->flag_mutex);
 	rtp_session->flags[flag] = 0;
