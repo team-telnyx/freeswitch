@@ -565,6 +565,8 @@ SWITCH_DECLARE(switch_jb_t *) switch_rtp_get_jitter_buffer(switch_rtp_t *rtp_ses
   \param flags the flags to set
 */
 SWITCH_DECLARE(void) switch_rtp_set_flag(switch_rtp_t *rtp_session, switch_rtp_flag_t flag);
+SWITCH_DECLARE(void) switch_rtp_set_bundle_has_video(switch_rtp_t *rtp_session, switch_bool_t enabled);
+SWITCH_DECLARE(void) switch_rtp_set_bundle_video_ssrcs(switch_rtp_t *rtp_session, uint32_t local_ssrc, uint32_t remote_ssrc);
 SWITCH_DECLARE(void) switch_rtp_set_flags(switch_rtp_t *rtp_session, switch_rtp_flag_t flags[SWITCH_RTP_FLAG_INVALID]);
 SWITCH_DECLARE(void) switch_rtp_clear_flags(switch_rtp_t *rtp_session, switch_rtp_flag_t flags[SWITCH_RTP_FLAG_INVALID]);
 

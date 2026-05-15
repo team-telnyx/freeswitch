@@ -427,6 +427,8 @@ struct switch_rtp {
 	uint16_t seq;
 	uint32_t ssrc;
 	uint32_t remote_ssrc;
+	uint32_t rtcp_fb_local_ssrc;
+	uint32_t rtcp_fb_remote_ssrc;
 	uint32_t last_jb_read_ssrc;
 	int8_t sending_dtmf;
 	uint8_t need_mark;
@@ -446,6 +448,7 @@ struct switch_rtp {
 	uint32_t queue_delay;
 	switch_time_t last_write_timestamp;
 	uint32_t flags[SWITCH_RTP_FLAG_INVALID];
+	uint8_t bundle_has_video;
 	switch_memory_pool_t *pool;
 	switch_sockaddr_t *from_addr, *rtp_from_addr, *rtcp_from_addr, *bundle_internal_addr, *bundle_external_addr;
 	char *rx_host;
@@ -645,6 +648,9 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_get_extension_info(
 }
 
 #define rtp_type(rtp_session) rtp_session->flags[SWITCH_RTP_FLAG_TEXT] ?  "text" : (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] ? "video" : "audio")
+#define rtp_has_video_feedback(rtp_session) ((rtp_session)->flags[SWITCH_RTP_FLAG_VIDEO] || (rtp_session)->bundle_has_video)
+#define rtp_feedback_local_ssrc(rtp_session) (((rtp_session)->bundle_has_video && !(rtp_session)->flags[SWITCH_RTP_FLAG_VIDEO] && (rtp_session)->rtcp_fb_local_ssrc) ? (rtp_session)->rtcp_fb_local_ssrc : (rtp_session)->ssrc)
+#define rtp_feedback_remote_ssrc(rtp_session) (((rtp_session)->bundle_has_video && !(rtp_session)->flags[SWITCH_RTP_FLAG_VIDEO] && (rtp_session)->rtcp_fb_remote_ssrc) ? (rtp_session)->rtcp_fb_remote_ssrc : (rtp_session)->remote_ssrc)
 
 #define FORK_SSRC_CHECK 0
 
@@ -2416,6 +2422,18 @@ static int rtcp_stats(switch_rtp_t *rtp_session)
 	if(!rtp_session->rtcp_sock_output || !rtp_session->flags[SWITCH_RTP_FLAG_ENABLE_RTCP] || rtp_session->flags[SWITCH_RTP_FLAG_RTCP_PASSTHRU] || !rtp_session->rtcp_interval)
 		return 0; /* do not process RTCP in current state */
 
+	/* TEL6738: In BUNDLE mode the shared audio RTP session receives both audio
+	 * and video packets with different SSRCs and independent seq number spaces.
+	 * Running rtcp_stats on video packets corrupts audio RTCP stats (seq tracking,
+	 * jitter, loss) and triggers rtcp_stats_init on every SSRC flip (~2000+/call).
+	 * Skip RTCP stats entirely for packets whose SSRC matches the known video SSRC. */
+	if (rtp_session->bundle_has_video && !rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
+		uint32_t pkt_ssrc = ntohl(hdr->ssrc);
+		if (rtp_session->rtcp_fb_remote_ssrc && pkt_ssrc == rtp_session->rtcp_fb_remote_ssrc) {
+			return 0;
+		}
+	}
+
 	pkt_seq = (uint16_t) ntohs((uint16_t) rtp_session->last_rtp_hdr.seq);
 
 	/* Detect sequence number cycle change */
@@ -2689,13 +2707,14 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 		struct switch_rtcp_sender_info *rtcp_sender_info = 0;
 		switch_bool_t is_only_receiver = FALSE;
 		switch_bool_t report_sent = FALSE;
+		int tel6738_fb_pli = 0, tel6738_fb_fir = 0, tel6738_fb_nack = 0;
 
 		if (!rtcp_fb) {
 			rtp_session->rtcp_last_sent = now;
 			rtp_session->rtcp_sent_packets++;
 		}
 
-		if (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] && 
+		if (rtp_has_video_feedback(rtp_session) &&
 				rtp_session->vb && rtcp_cyclic) {
 				nack_dup = rtp_session->prev_nacks_inflight;
 				rtp_session->prev_nacks_inflight = 0;
@@ -2780,7 +2799,8 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 
 		rtp_session->rtcp_send_msg.header.length = htons((uint16_t)(rtcp_bytes / 4) - 1);
 
-		if (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
+		/* TEL6738: tel6738_fb_{pli,fir,nack} declared at block top above */
+		if (rtp_has_video_feedback(rtp_session)) {
 			if (rtp_session->pli_count) {
 				switch_rtcp_ext_hdr_t *ext_hdr;
 
@@ -2792,13 +2812,15 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 				ext_hdr->fmt = _RTCP_PSFB_PLI;
 				ext_hdr->pt = _RTCP_PT_PSFB;
 
-				ext_hdr->send_ssrc = htonl(rtp_session->ssrc);
-				ext_hdr->recv_ssrc = htonl(rtp_session->remote_ssrc);
+				ext_hdr->send_ssrc = htonl(rtp_feedback_local_ssrc(rtp_session));
+				ext_hdr->recv_ssrc = htonl(rtp_feedback_remote_ssrc(rtp_session));
 				rtp_session->rtcp_vstats.video_in.pli_count++;
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG1,
-								  "TEL6738 RTCP send PLI %s local_ssrc=%u remote_ssrc=%u count=%u\n",
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+								  "TEL6738 RTCP send PLI %s local_ssrc=%u remote_ssrc=%u fb_local_ssrc=%u fb_remote_ssrc=%u count=%u\n",
 								  switch_core_session_get_name(rtp_session->session), rtp_session->ssrc, rtp_session->remote_ssrc,
+								  rtp_feedback_local_ssrc(rtp_session), rtp_feedback_remote_ssrc(rtp_session),
 								  rtp_session->rtcp_vstats.video_in.pli_count);
+				tel6738_fb_pli = 1;
 
 				ext_hdr->length = htons((uint8_t)(sizeof(switch_rtcp_ext_hdr_t) / 4) - 1);
 				rtcp_bytes += sizeof(switch_rtcp_ext_hdr_t);
@@ -2819,17 +2841,18 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 					ext_hdr->p = 0;
 					ext_hdr->fmt = _RTCP_RTPFB_NACK;
 					ext_hdr->pt = _RTCP_PT_RTPFB;
-					ext_hdr->send_ssrc = htonl(rtp_session->ssrc);
-					ext_hdr->recv_ssrc = htonl(rtp_session->remote_ssrc);
+					ext_hdr->send_ssrc = htonl(rtp_feedback_local_ssrc(rtp_session));
+					ext_hdr->recv_ssrc = htonl(rtp_feedback_remote_ssrc(rtp_session));
 					ext_hdr->length = htons(3);
 					p += sizeof(switch_rtcp_ext_hdr_t);
 					nack = (uint32_t *) p;
 					*nack = cur_nack[n];
 
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG2,
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
 								  "TEL6738 RTCP send NACK %s seq=%u local_ssrc=%u remote_ssrc=%u count=%d\n",
 								  switch_core_session_get_name(rtp_session->session), ntohs(*nack & 0xFFFF),
-								  rtp_session->ssrc, rtp_session->remote_ssrc, rtp_session->rtcp_vstats.video_in.nack_count);
+								  rtp_feedback_local_ssrc(rtp_session), rtp_feedback_remote_ssrc(rtp_session), rtp_session->rtcp_vstats.video_in.nack_count);
+					tel6738_fb_nack = 1;
 
 					rtcp_bytes += sizeof(switch_rtcp_ext_hdr_t) + sizeof(cur_nack[n]);
 					cur_nack[n] = 0;
@@ -2862,18 +2885,19 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 				ext_hdr->fmt = _RTCP_PSFB_FIR;
 				ext_hdr->pt = _RTCP_PT_PSFB;
 
-				ext_hdr->send_ssrc = htonl(rtp_session->ssrc);
-				ext_hdr->recv_ssrc = htonl(rtp_session->remote_ssrc);
+				ext_hdr->send_ssrc = htonl(rtp_feedback_local_ssrc(rtp_session));
+				ext_hdr->recv_ssrc = htonl(rtp_feedback_remote_ssrc(rtp_session));
 
-				fir->ssrc = htonl(rtp_session->remote_ssrc);
+				fir->ssrc = htonl(rtp_feedback_remote_ssrc(rtp_session));
 				fir->seq = rtp_session->fir_seq;
 				fir->r1 = fir->r2 = fir->r3 = 0;
 
 				rtp_session->rtcp_vstats.video_in.fir_count++;
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG2,
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
 								  "TEL6738 RTCP send FIR %s fir_seq=%d local_ssrc=%u remote_ssrc=%u count=%u\n",
 								  switch_core_session_get_name(rtp_session->session), rtp_session->fir_seq,
-								  rtp_session->ssrc, rtp_session->remote_ssrc, rtp_session->rtcp_vstats.video_in.fir_count);
+								  rtp_feedback_local_ssrc(rtp_session), rtp_feedback_remote_ssrc(rtp_session), rtp_session->rtcp_vstats.video_in.fir_count);
+				tel6738_fb_fir = 1;
 
 				rtp_session->fir_seq++;
 
@@ -2899,7 +2923,7 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 				ext_hdr->version = 2;
 				ext_hdr->p = 0;
 				ext_hdr->pt = _RTCP_PT_RTPFB;
-				ext_hdr->send_ssrc = htonl(rtp_session->ssrc);
+				ext_hdr->send_ssrc = htonl(rtp_feedback_local_ssrc(rtp_session));
 				ext_hdr->recv_ssrc = 0;
 
 				if (rtp_session->tmmbr) {
@@ -2914,7 +2938,7 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 					rtp_session->tmmbn = 0;
 				}
 
-				tmmbx->ssrc = htonl(rtp_session->remote_ssrc);
+				tmmbx->ssrc = htonl(rtp_feedback_remote_ssrc(rtp_session));
 				calc_bw_exp(bps, 17, tmmbx);
 
 				ext_hdr->length = htons((uint8_t)((sizeof(switch_rtcp_ext_hdr_t) + sizeof(rtcp_tmmbx_t)) / 4) - 1);
@@ -3008,6 +3032,12 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,"RTCP packet not written\n");
 		} else {
 			rtp_session->stats.inbound.period_packet_count = 0;
+			if (rtp_session->bundle_has_video && (tel6738_fb_pli || tel6738_fb_fir || tel6738_fb_nack)) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+								  "TEL6738 RTCP BUNDLE fb sent bytes=%" SWITCH_SIZE_T_FMT " pli=%d fir=%d nack=%d fb_local=%u fb_remote=%u\n",
+								  rtcp_bytes, tel6738_fb_pli, tel6738_fb_fir, tel6738_fb_nack,
+								  rtp_feedback_local_ssrc(rtp_session), rtp_feedback_remote_ssrc(rtp_session));
+			}
 		}
 	}
 
@@ -6089,11 +6119,30 @@ SWITCH_DECLARE(void) switch_rtp_video_refresh(switch_rtp_t *rtp_session)
 {
 
 	if (!rtp_write_ready(rtp_session, 0, __LINE__)) {
+		if (rtp_session && rtp_session->bundle_has_video && rtp_session->session) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+							  "TEL6738 RTCP queue FIR DROPPED: rtp_write_ready=0 ice_user=%s ice_rready=%d dtls=%p dtls_state=%d\n",
+							  rtp_session->ice.ice_user ? rtp_session->ice.ice_user : "(null)",
+							  (int)(rtp_session->ice.rready || rtp_session->ice.ready),
+							  (void *)rtp_session->dtls,
+							  rtp_session->dtls ? (int)rtp_session->dtls->state : -1);
+		}
 		return;
 	}
 
-	if (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] && (rtp_session->ice.ice_user || rtp_session->flags[SWITCH_RTP_FLAG_FIR] || rtp_session->flags[SWITCH_RTP_FLAG_OLD_FIR])) {
+	if (rtp_has_video_feedback(rtp_session) && (rtp_session->ice.ice_user || rtp_session->flags[SWITCH_RTP_FLAG_FIR] || rtp_session->flags[SWITCH_RTP_FLAG_OLD_FIR])) {
 		rtp_session->fir_count = 1;
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+						  "TEL6738 RTCP queue FIR %s local_ssrc=%u remote_ssrc=%u fb_local_ssrc=%u fb_remote_ssrc=%u\n",
+						  switch_core_session_get_name(rtp_session->session), rtp_session->ssrc, rtp_session->remote_ssrc,
+						  rtp_feedback_local_ssrc(rtp_session), rtp_feedback_remote_ssrc(rtp_session));
+	} else if (rtp_session->bundle_has_video) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+						  "TEL6738 RTCP queue FIR DROPPED: has_video_fb=%d ice_user=%s fir=%d old_fir=%d\n",
+						  rtp_has_video_feedback(rtp_session) ? 1 : 0,
+						  rtp_session->ice.ice_user ? rtp_session->ice.ice_user : "(null)",
+						  (int)rtp_session->flags[SWITCH_RTP_FLAG_FIR],
+						  (int)rtp_session->flags[SWITCH_RTP_FLAG_OLD_FIR]);
 	}
 }
 
@@ -6101,11 +6150,29 @@ SWITCH_DECLARE(void) switch_rtp_video_loss(switch_rtp_t *rtp_session)
 {
 
 	if (!rtp_write_ready(rtp_session, 0, __LINE__)) {
+		if (rtp_session && rtp_session->bundle_has_video && rtp_session->session) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+							  "TEL6738 RTCP queue PLI DROPPED: rtp_write_ready=0 ice_user=%s ice_rready=%d dtls=%p dtls_state=%d\n",
+							  rtp_session->ice.ice_user ? rtp_session->ice.ice_user : "(null)",
+							  (int)(rtp_session->ice.rready || rtp_session->ice.ready),
+							  (void *)rtp_session->dtls,
+							  rtp_session->dtls ? (int)rtp_session->dtls->state : -1);
+		}
 		return;
 	}
 
-	if (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] && (rtp_session->ice.ice_user || rtp_session->flags[SWITCH_RTP_FLAG_PLI])) {
+	if (rtp_has_video_feedback(rtp_session) && (rtp_session->ice.ice_user || rtp_session->flags[SWITCH_RTP_FLAG_PLI])) {
 		rtp_session->pli_count = 1;
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+						  "TEL6738 RTCP queue PLI %s local_ssrc=%u remote_ssrc=%u fb_local_ssrc=%u fb_remote_ssrc=%u\n",
+						  switch_core_session_get_name(rtp_session->session), rtp_session->ssrc, rtp_session->remote_ssrc,
+						  rtp_feedback_local_ssrc(rtp_session), rtp_feedback_remote_ssrc(rtp_session));
+	} else if (rtp_session->bundle_has_video) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+						  "TEL6738 RTCP queue PLI DROPPED: has_video_fb=%d ice_user=%s pli=%d\n",
+						  rtp_has_video_feedback(rtp_session) ? 1 : 0,
+						  rtp_session->ice.ice_user ? rtp_session->ice.ice_user : "(null)",
+						  (int)rtp_session->flags[SWITCH_RTP_FLAG_PLI]);
 	}
 }
 
@@ -6424,6 +6491,33 @@ SWITCH_DECLARE(void) switch_rtp_clear_flags(switch_rtp_t *rtp_session, switch_rt
 			switch_rtp_clear_flag(rtp_session, i);
 		}
 	}
+}
+
+SWITCH_DECLARE(void) switch_rtp_set_bundle_has_video(switch_rtp_t *rtp_session, switch_bool_t enabled)
+{
+	if (!rtp_session) {
+		return;
+	}
+
+	switch_mutex_lock(rtp_session->flag_mutex);
+	rtp_session->bundle_has_video = enabled ? 1 : 0;
+	if (!enabled) {
+		rtp_session->rtcp_fb_local_ssrc = 0;
+		rtp_session->rtcp_fb_remote_ssrc = 0;
+	}
+	switch_mutex_unlock(rtp_session->flag_mutex);
+}
+
+SWITCH_DECLARE(void) switch_rtp_set_bundle_video_ssrcs(switch_rtp_t *rtp_session, uint32_t local_ssrc, uint32_t remote_ssrc)
+{
+	if (!rtp_session) {
+		return;
+	}
+
+	switch_mutex_lock(rtp_session->flag_mutex);
+	rtp_session->rtcp_fb_local_ssrc = local_ssrc;
+	rtp_session->rtcp_fb_remote_ssrc = remote_ssrc;
+	switch_mutex_unlock(rtp_session->flag_mutex);
 }
 
 SWITCH_DECLARE(void) switch_rtp_set_flag(switch_rtp_t *rtp_session, switch_rtp_flag_t flag)
@@ -8139,7 +8233,7 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 			} else {
 				switch_core_media_gen_key_frame(rtp_session->session);
 				switch_core_session_request_video_refresh(rtp_session->session);
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG2,
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
 								  "TEL6738 RTCP recv FIR/PLI %s type=%u fmt=%u send_ssrc=%u recv_ssrc=%u local_ssrc=%u remote_ssrc=%u\n",
 								  switch_core_session_get_name(rtp_session->session), msg->header.type, extp->header.fmt,
 								  ntohl(extp->header.send_ssrc), ntohl(extp->header.recv_ssrc), rtp_session->ssrc, rtp_session->remote_ssrc);
@@ -8151,7 +8245,7 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 			uint32_t *nack = (uint32_t *) extp->body;
 			int i;
 
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG2,
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
 							  "TEL6738 RTCP recv NACK %s count=%d send_ssrc=%u recv_ssrc=%u local_ssrc=%u remote_ssrc=%u\n",
 							  switch_core_session_get_name(rtp_session->session), ntohs(extp->header.length) - 2,
 							  ntohl(extp->header.send_ssrc), ntohl(extp->header.recv_ssrc), rtp_session->ssrc, rtp_session->remote_ssrc);
@@ -9425,7 +9519,12 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 			*flags |= SFF_CNG;
 			*payload_type = (switch_payload_t) rtp_session->last_rtp_hdr.pt;
 			ret = 2 + rtp_header_len;
-			rtp_session->stats.inbound.skip_packet_count++;
+			/* TEL6738: BUNDLE drain thread poll-timeouts produce CNG returns at ~1ms
+			 * intervals. These are not real packet skips -- do not inflate the counter
+			 * which is shared with the video engine stats via BUNDLE RTP session. */
+			if (!(io_flags & SWITCH_IO_FLAG_BUNDLE_DRAIN)) {
+				rtp_session->stats.inbound.skip_packet_count++;
+			}
 			goto end;
 		}
 

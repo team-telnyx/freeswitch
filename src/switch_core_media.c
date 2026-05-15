@@ -6125,6 +6125,19 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 					switch_rtp_set_remote_ssrc(engine->rtp_session, engine->remote_ssrc);
 				}
 
+				/* TEL6738: when BUNDLE is reusing the audio RTP session for video,
+				 * the just-learned video remote SSRC must be wired into the shared
+				 * session so PLI/FIR/NACK target the correct stream. */
+				if (type == SWITCH_MEDIA_TYPE_VIDEO && engine->bundled_with_audio && engine->remote_ssrc) {
+					switch_rtp_engine_t *bundle_a_engine = &smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
+					if (bundle_a_engine->rtp_session && engine->rtp_session == bundle_a_engine->rtp_session) {
+						switch_rtp_set_bundle_video_ssrcs(engine->rtp_session, engine->ssrc, engine->remote_ssrc);
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
+										  "TEL6738 BUNDLE video SSRCs wired local=%u remote=%u (sdp ssrc-learn)\n",
+										  engine->ssrc, engine->remote_ssrc);
+					}
+				}
+
 
 #ifdef RTCP_MUX
 			} else if (!strcasecmp(attr->a_name, "rtcp-mux")) {
@@ -13295,9 +13308,37 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 			
 			/* BUNDLE reuse: if enabled and audio RTP exists, share session */
 			if (switch_core_media_bundle_negotiated(smh) && v_engine->rtcp_mux > 0 && a_engine->rtp_session) {
+				const char *video_ssrc;
 				v_engine->rtp_session = a_engine->rtp_session;
 				v_engine->bundled_with_audio = 1;
+				switch_rtp_set_bundle_has_video(a_engine->rtp_session, SWITCH_TRUE);
 				switch_rtp_set_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_BUNDLE_ACCEPT_ANY_PT);
+
+				if ((video_ssrc = switch_channel_get_variable(session->channel, "rtp_use_video_ssrc"))) {
+					uint32_t ssrc_ul = (uint32_t) strtoul(video_ssrc, NULL, 10);
+					v_engine->ssrc = ssrc_ul;
+				}
+
+				switch_rtp_set_bundle_video_ssrcs(a_engine->rtp_session, v_engine->ssrc, v_engine->remote_ssrc);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+					"TEL6738 BUNDLE video SSRCs wired local=%u remote=%u audio_local=%u audio_remote=%u (activate_rtp)\n",
+					v_engine->ssrc, v_engine->remote_ssrc, a_engine->ssrc, a_engine->remote_ssrc);
+
+				if (v_engine->fir) {
+					switch_rtp_set_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_FIR);
+				}
+
+				if (v_engine->pli) {
+					switch_rtp_set_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_PLI);
+				}
+
+				if ((v_engine->nack) && !switch_channel_var_true(session->channel, "rtp_video_nack_disable")) {
+					switch_rtp_set_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_NACK);
+				}
+
+				if (v_engine->tmmbr) {
+					switch_rtp_set_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_TMMBR);
+				}
 				if (v_engine->bundle_write_state) {
 					switch_rtp_write_state_reset(v_engine->bundle_write_state);
 				}
@@ -13339,6 +13380,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 						switch_rtp_write_state_reset(v_engine->bundle_write_state);
 					}
 					if (a_engine->rtp_session) {
+						switch_rtp_set_bundle_has_video(a_engine->rtp_session, SWITCH_FALSE);
 						switch_rtp_clear_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_BUNDLE_ACCEPT_ANY_PT);
 					}
 				}
@@ -16971,6 +17013,19 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_receive_message(switch_core_se
 	case SWITCH_MESSAGE_INDICATE_VIDEO_REFRESH_REQ:
 		{
 			if (v_engine->rtp_session) {
+				if (v_engine->bundled_with_audio && a_engine && v_engine->rtp_session == a_engine->rtp_session) {
+					switch_rtp_set_bundle_video_ssrcs(v_engine->rtp_session, v_engine->ssrc, v_engine->remote_ssrc);
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+									  "TEL6738 BUNDLE refresh_req: bundled=%d rtp=%p fir_flag=%d pli_flag=%d numeric_arg=%ld manual_refresh=%d v_ssrc=%u v_remote_ssrc=%u\n",
+									  v_engine->bundled_with_audio,
+									  (void *)v_engine->rtp_session,
+									  switch_rtp_test_flag(v_engine->rtp_session, SWITCH_RTP_FLAG_FIR) ? 1 : 0,
+									  switch_rtp_test_flag(v_engine->rtp_session, SWITCH_RTP_FLAG_PLI) ? 1 : 0,
+									  (long)msg->numeric_arg,
+									  switch_channel_test_flag(session->channel, CF_MANUAL_VID_REFRESH) ? 1 : 0,
+									  v_engine->ssrc, v_engine->remote_ssrc);
+				}
+
 				if (msg->numeric_arg || !switch_channel_test_flag(session->channel, CF_MANUAL_VID_REFRESH)) {
 					if (switch_rtp_test_flag(v_engine->rtp_session, SWITCH_RTP_FLAG_FIR)) {
 						switch_rtp_video_refresh(v_engine->rtp_session);
