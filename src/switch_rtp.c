@@ -10523,30 +10523,59 @@ fork_done:
 			}
 		}
 			if ((mid_ext_id > 0 && mid && *mid) || (rtp_session->ext_mid.enabled && rtp_session->ext_mid.ext_id > 0)) {
-				switch_status_t mid_status = rtp_add_mid_extension(rtp_session, send_msg, &bytes, mid_ext_id, mid);
+				/* TEL-6738 Guard 1: On a BUNDLE shared session (audio RTP carrying video),
+				   skip session-level MID stamping for audio packets. The session ext_mid
+				   holds the VIDEO MID value which must not be stamped on audio packets.
+				   Only stamp when there is an explicit override (mid_ext_id > 0 && mid)
+				   or when this is actually a video write (force_video). */
+				if (!(mid_ext_id > 0 && mid && *mid) && rtp_session->bundle_has_video
+					&& !rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] && !force_video) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+						"TEL6738 MID skip: bundle audio write, pt=%u ext_mid_id=%u (video MID, not for audio)\n",
+						send_msg->header.pt, rtp_session->ext_mid.ext_id);
+				} else {
+					switch_status_t mid_status = rtp_add_mid_extension(rtp_session, send_msg, &bytes, mid_ext_id, mid);
 
-				if (mid_status != SWITCH_STATUS_SUCCESS) {
-					if (mid_ext_id > 0 && mid && *mid) {
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR,
-							"Unable to apply RTP MID extension override id=%u mid=%s\n", mid_ext_id, switch_str_nil(mid));
-						ret = -1;
-						goto end;
+					if (mid_status != SWITCH_STATUS_SUCCESS) {
+						if (mid_ext_id > 0 && mid && *mid) {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR,
+								"Unable to apply RTP MID extension override id=%u mid=%s\n", mid_ext_id, switch_str_nil(mid));
+							ret = -1;
+							goto end;
+						}
+
+						/* TEL-6738 Guard 3: For session-level MID (not explicit override), strip
+						   the extension header and send the packet without MID rather than dropping.
+						   A packet without MID is better than no packet. This prevents audio drops
+						   on bridge legs where the inbound BEDE header has elements the MID parser
+						   cannot handle. Clear header.x so libsrtp sees a clean packet. */
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+							"TEL6738 MID strip: session MID failed, sending without extension media=%s pt=%u seq=%u ts=%u ssrc=%u bundle_has_video=%u header_x=%d ext_profile=0x%04x ext_len=%u\n",
+							rtp_type(rtp_session), send_msg->header.pt, ntohs(send_msg->header.seq), ntohl(send_msg->header.ts),
+							ntohl(send_msg->header.ssrc), rtp_session->bundle_has_video, send_msg->header.x,
+							send_msg->ext ? ntohs(send_msg->ext->profile) : 0, send_msg->ext ? ntohs(send_msg->ext->length) : 0);
+						if (send_msg->header.x) {
+							/* Strip the entire extension: move payload back over the extension block
+							   and clear the extension bit so libsrtp sees a clean packet. */
+							size_t strip_csrc = (size_t)send_msg->header.cc * sizeof(uint32_t);
+							size_t strip_body_hdr = strip_csrc;
+							if (send_msg->ext) {
+								size_t strip_ext_total = 4 + (size_t)ntohs(send_msg->ext->length) * 4;
+								size_t strip_payload_off = rtp_header_len + strip_body_hdr + strip_ext_total;
+								if (bytes > strip_payload_off) {
+									size_t strip_payload_bytes = bytes - strip_payload_off;
+									memmove(send_msg->body + strip_body_hdr, send_msg->body + strip_body_hdr + strip_ext_total, strip_payload_bytes);
+									bytes = rtp_header_len + strip_body_hdr + strip_payload_bytes;
+								} else {
+									/* Extension spans entire remaining bytes, truncate */
+									bytes = rtp_header_len + strip_body_hdr;
+								}
+							}
+							send_msg->header.x = 0;
+							send_msg->ext = NULL;
+							send_msg->ebody = NULL;
+						}
 					}
-
-					/* Do not pass a packet with a malformed/preserved RTP extension header to
-					   libsrtp.  libsrtp validates the advertised extension length before
-					   protection and returns bad_param, which tears the bridge down.  A single
-					   bad inbound extension packet is safer to drop than to turn into a call
-					   failure. */
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
-						"Unable to apply RTP MID session extension, dropping packet before SRTP media=%s pt=%u seq=%u ts=%u ssrc=%u marker=%d bytes=%" SWITCH_SIZE_T_FMT " flags=0x%x header_x=%d ext_profile=0x%04x ext_len=%u\n",
-						rtp_type(rtp_session), send_msg->header.pt, ntohs(send_msg->header.seq), ntohl(send_msg->header.ts),
-						ntohl(send_msg->header.ssrc), send_msg->header.m, bytes, flags ? *flags : 0, send_msg->header.x,
-						send_msg->ext ? ntohs(send_msg->ext->profile) : 0, send_msg->ext ? ntohs(send_msg->ext->length) : 0);
-					*seq -= delta;
-					bytes = 0;
-					ret = 0;
-					goto end;
 				}
 			}
 
@@ -11983,7 +12012,11 @@ static switch_status_t rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_
 				elem_len = 1 + elem_payload_len;
 				if (off + elem_len > old_ext_data_bytes) return SWITCH_STATUS_FALSE;
 
-				if (elem_id == mid_ext_id || elem_payload_len > 1) {
+				if (elem_id == mid_ext_id) {
+					/* TEL-6738 Guard 2: Only strip elements matching the MID ext id.
+					   Previously also stripped all elements with payload > 1 byte,
+					   which broke legitimate multi-byte extensions (e.g. abs-send-time)
+					   and could cause SWITCH_STATUS_FALSE returns on bridge legs. */
 					memmove(ext_data + off, ext_data + off + elem_len, old_ext_data_bytes - off - elem_len);
 					old_ext_data_bytes -= elem_len;
 					memset(ext_data + old_ext_data_bytes, 0, elem_len);
