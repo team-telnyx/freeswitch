@@ -414,6 +414,18 @@ static switch_bool_t scm_should_use_m_port(switch_core_session_t *session, switc
 
 	if (trickle_accept_enabled(session)) {
 		if (engine->ice_in.is_chosen[0]) {
+			/* Never let trickle placeholder 0.0.0.0:9 or :::9 overwrite */
+			/* a valid ICE-selected remote address. */
+			if (engine->cur_payload_map &&
+				engine->cur_payload_map->remote_sdp_port == 9 &&
+				engine->cur_payload_map->remote_sdp_ip &&
+				(!strcmp(engine->cur_payload_map->remote_sdp_ip, "0.0.0.0") ||
+				 !strcmp(engine->cur_payload_map->remote_sdp_ip, "::"))) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+					"Refusing to overwrite ICE-selected address with trickle placeholder %s:%d\n",
+					engine->cur_payload_map->remote_sdp_ip, engine->cur_payload_map->remote_sdp_port);
+				return SWITCH_FALSE;
+			}
 			return SWITCH_TRUE;
 		}
 		return SWITCH_FALSE;
