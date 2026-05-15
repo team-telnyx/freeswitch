@@ -2527,15 +2527,26 @@ void sofia_event_callback(nua_event_t event,
 	uint32_t sess_max = switch_core_session_limit(0);
 	
 	/* External handle dispatch: if an external module (e.g. mod_dynamic_gateway)
-	 * owns this handle, dispatch ALL events to it — not just register/unregister.
-	 * The handler identifies its own handles via a magic sentinel and returns
-	 * SWITCH_TRUE to consume the event, preventing mod_sofia from misinterpreting
-	 * the handle's magic pointer as a sofia_private_t. */
-	if (switch_telnyx_sofia_register_handler(
-			(int)event, status, phrase,
-			(void *)nua, (void *)nh, (void *)sofia_private,
-			(const void *)sip, (void *)tags) == SWITCH_TRUE) {
-		return;
+	 * owns this handle, dispatch the event to it. The handler identifies its own
+	 * handles via a magic sentinel in sofia_private and returns SWITCH_TRUE to
+	 * consume the event, preventing mod_sofia from misinterpreting the handle's
+	 * magic pointer as a sofia_private_t.
+	 *
+	 * Pre-filter: only dispatch registration-related events that external handles
+	 * receive. Call-path events (INVITE, BYE, ACK) on mod_sofia's own handles
+	 * bypass this entirely for zero overhead on the hot path.
+	 *
+	 * NOTE: external modules that bind NUA handles receiving events outside this
+	 * set must add their event types here, or risk sofia_private misinterpretation. */
+	if (sofia_private &&
+		(event == nua_r_register || event == nua_r_unregister ||
+		 event == nua_r_authenticate || event == nua_i_outbound)) {
+		if (switch_telnyx_sofia_register_handler(
+				(int)event, status, phrase,
+				(void *)nua, (void *)nh, (void *)sofia_private,
+				(const void *)sip, (void *)tags) == SWITCH_TRUE) {
+			return;
+		}
 	}
 
 	switch(event) {
@@ -9331,6 +9342,9 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 		if (r_sdp && sofia_test_flag(tech_pvt, TFLAG_NOSDP_REINVITE)) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Received SDP in ACK. NOSDP Re-INVITE process completion.\n");
 			sofia_clear_flag_locked(tech_pvt, TFLAG_NOSDP_REINVITE);
+			if (switch_true(switch_channel_get_variable(channel, "rtp_hold_resume_compat"))) {
+				tech_pvt->mparams.hold_laps = 0;
+			}
 			if (switch_channel_test_flag(channel, CF_PROXY_MODE) || switch_channel_test_flag(channel, CF_PROXY_MEDIA)) {
 				if (switch_channel_test_flag(channel, CF_PROXY_MEDIA)) {
 					if (sofia_media_activate_rtp(tech_pvt) != SWITCH_STATUS_SUCCESS) {

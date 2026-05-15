@@ -28,16 +28,46 @@ typedef switch_bool_t (*switch_telnyx_on_media_timeout_func)(switch_channel_t*, 
 typedef void (*switch_telnyx_channel_event_set_basic_data_func)(switch_channel_t*, switch_event_t*);
 typedef switch_bool_t (*switch_telnyx_on_add_media_bug_func)(switch_media_bug_t**, switch_media_bug_t*, const char*, const char*);
 
-/* Get the NUA handle for a named mod_sofia profile. Returns nua_t* as void*.
- * Returns NULL if the profile is not found or not running.
- * The returned pointer is valid as long as the profile is alive. */
-typedef void * (*switch_telnyx_sofia_find_nua_func)(const char *profile_name);
+/* Acquire a ref-counted NUA handle for a named mod_sofia profile.
+ * Returns nua_t* as void*. The caller MUST call switch_telnyx_sofia_release_profile()
+ * when done using the NUA pointer to release the read-lock on the profile.
+ * The profile_handle output parameter is required and receives an opaque handle
+ * that must be passed to the release function. Returns NULL if profile is not
+ * found/running or if profile_handle is NULL.
+ *
+ * LIFETIME: hold profile_handle only for the duration of a single NUA operation.
+ * Do NOT cache the NUA pointer or profile_handle across sleeps or blocking calls
+ * -- re-acquire on each use and release before blocking. Holding the read-lock
+ * indefinitely blocks profile restarts and shutdown. */
+typedef void * (*switch_telnyx_sofia_find_nua_func)(const char *profile_name, void **profile_handle);
 
-/* Registration handler callback for external registration engines.
- * When set, mod_sofia dispatches nua_r_register/nua_r_unregister events to this handler
- * before processing them internally. Sofia-SIP types are passed as void* to avoid
- * pulling sofia-sip headers into the core.
- * Returns SWITCH_TRUE if the event was handled, SWITCH_FALSE to fall through to mod_sofia. */
+/* Release the profile read-lock acquired by switch_telnyx_sofia_find_nua().
+ * Must be called once for every successful find_nua call. */
+typedef void (*switch_telnyx_sofia_release_profile_func)(void *profile_handle);
+
+/* Get the advertised host:port (addr) for a named mod_sofia profile.
+ * Uses ext-sip-ip/ext-sip-port when explicitly configured (not auto-NAT),
+ * otherwise the bound address. When use_tls is true, returns the TLS port
+ * (requires PFLAG_TLS on the profile). IPv6 addresses are bracket-wrapped
+ * per RFC 3986. Writes into buf up to buflen bytes.
+ * Returns SWITCH_STATUS_SUCCESS on success, SWITCH_STATUS_FALSE on error
+ * (profile not found, TLS not configured, truncation). */
+typedef switch_status_t (*switch_telnyx_sofia_find_profile_addr_func)(const char *profile_name, int use_tls, char *buf, switch_size_t buflen);
+
+/* NUA event handler callback for external modules that own NUA handles.
+ *
+ * When set, mod_sofia dispatches registration-related NUA events to this handler
+ * before its own processing. This is necessary because external modules bind their
+ * own structs (not sofia_private_t) to NUA handles -- if mod_sofia processed these
+ * events, it would dereference the wrong struct type.
+ *
+ * The handler identifies its own handles via a magic sentinel in hmagic and
+ * returns SWITCH_TRUE to consume the event, SWITCH_FALSE to fall through.
+ *
+ * Dispatched events: nua_r_register, nua_r_unregister, nua_r_authenticate,
+ * nua_i_outbound. Call-path events (INVITE, BYE, ACK, etc.) are never dispatched.
+ * External modules that bind handles receiving events outside this set must update
+ * the pre-filter in sofia_event_callback(). */
 typedef switch_bool_t (*switch_telnyx_sofia_register_handler_func)(
 	int event, int status, const char *phrase,
 	void *nua, void *nh, void *hmagic,
@@ -64,6 +94,8 @@ typedef struct switch_telnyx_event_dispatch_s {
 	switch_telnyx_on_add_media_bug_func switch_telnyx_on_add_media_bug;
 	switch_telnyx_sofia_register_handler_func switch_telnyx_sofia_register_handler;
 	switch_telnyx_sofia_find_nua_func switch_telnyx_sofia_find_nua;
+	switch_telnyx_sofia_release_profile_func switch_telnyx_sofia_release_profile;
+	switch_telnyx_sofia_find_profile_addr_func switch_telnyx_sofia_find_profile_addr;
 } switch_telnyx_event_dispatch_t;
 
 SWITCH_DECLARE(void) switch_telnyx_init(switch_memory_pool_t *pool);
@@ -96,7 +128,9 @@ SWITCH_DECLARE(switch_bool_t) switch_telnyx_sip_on_media_timeout(switch_channel_
 SWITCH_DECLARE(void) switch_telnyx_channel_event_set_basic_data(switch_channel_t *channel, switch_event_t *event);
 SWITCH_DECLARE(switch_bool_t) switch_telnyx_on_add_media_bug(switch_media_bug_t **list, switch_media_bug_t *bug, const char* function, const char* target);
 
-SWITCH_DECLARE(void *) switch_telnyx_sofia_find_nua(const char *profile_name);
+SWITCH_DECLARE(void *) switch_telnyx_sofia_find_nua(const char *profile_name, void **profile_handle);
+SWITCH_DECLARE(void) switch_telnyx_sofia_release_profile(void *profile_handle);
+SWITCH_DECLARE(switch_status_t) switch_telnyx_sofia_find_profile_addr(const char *profile_name, int use_tls, char *buf, switch_size_t buflen);
 
 SWITCH_DECLARE(switch_bool_t) switch_telnyx_sofia_register_handler(
 	int event, int status, const char *phrase,
@@ -106,4 +140,3 @@ SWITCH_DECLARE(switch_bool_t) switch_telnyx_sofia_register_handler(
 SWITCH_END_EXTERN_C
 
 #endif /* SWITCH_TELNYX_H */
-

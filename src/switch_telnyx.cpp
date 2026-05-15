@@ -258,10 +258,26 @@ switch_bool_t switch_telnyx_sofia_register_handler(
 	return SWITCH_FALSE;
 }
 
-void * switch_telnyx_sofia_find_nua(const char *profile_name)
+void * switch_telnyx_sofia_find_nua(const char *profile_name, void **profile_handle)
 {
+	if (profile_handle) *profile_handle = NULL;
 	if (_event_dispatch.switch_telnyx_sofia_find_nua) {
-		return _event_dispatch.switch_telnyx_sofia_find_nua(profile_name);
+		return _event_dispatch.switch_telnyx_sofia_find_nua(profile_name, profile_handle);
 	}
 	return NULL;
+}
+
+void switch_telnyx_sofia_release_profile(void *profile_handle)
+{
+	if (profile_handle && _event_dispatch.switch_telnyx_sofia_release_profile) {
+		_event_dispatch.switch_telnyx_sofia_release_profile(profile_handle);
+	}
+}
+
+switch_status_t switch_telnyx_sofia_find_profile_addr(const char *profile_name, int use_tls, char *buf, switch_size_t buflen)
+{
+	if (_event_dispatch.switch_telnyx_sofia_find_profile_addr) {
+		return _event_dispatch.switch_telnyx_sofia_find_profile_addr(profile_name, use_tls, buf, buflen);
+	}
+	return SWITCH_STATUS_FALSE;
 }
