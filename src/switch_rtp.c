@@ -10523,35 +10523,19 @@ fork_done:
 			}
 		}
 			if ((mid_ext_id > 0 && mid && *mid) || (rtp_session->ext_mid.enabled && rtp_session->ext_mid.ext_id > 0)) {
-				/* TEL-6738 Guard 1: On a BUNDLE shared session (audio RTP carrying video),
-				   skip session-level MID stamping for audio packets. The session ext_mid
-				   holds the VIDEO MID value which must not be stamped on audio packets.
-				   Only stamp when there is an explicit override (mid_ext_id > 0 && mid)
-				   or when this is actually a video write (force_video). */
-				if (!(mid_ext_id > 0 && mid && *mid) && rtp_session->bundle_has_video
-					&& !rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] && !force_video) {
-					/* TEL6738 Guard 1: Also strip any inbound BEDE extension the packet
-					   may carry — sending it through SRTP with raw inbound extension
-					   bytes causes srtp_err_status_bad_param (code=2). */
-					if (send_msg->header.x && send_msg->ext) {
-						size_t g1_csrc = (size_t)send_msg->header.cc * sizeof(uint32_t);
-						size_t g1_ext_total = 4 + (size_t)ntohs(send_msg->ext->length) * 4;
-						size_t g1_payload_off = rtp_header_len + g1_csrc + g1_ext_total;
-						if (bytes > g1_payload_off) {
-							size_t g1_payload = bytes - g1_payload_off;
-							memmove(send_msg->body + g1_csrc, send_msg->body + g1_csrc + g1_ext_total, g1_payload);
-							bytes = rtp_header_len + g1_csrc + g1_payload;
-						} else {
-							bytes = rtp_header_len + g1_csrc;
-						}
-						send_msg->header.x = 0;
-						send_msg->ext = NULL;
-						send_msg->ebody = NULL;
-					}
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-						"TEL6738 MID skip: bundle audio write, pt=%u ext_mid_id=%u (video MID, not for audio)\n",
-						send_msg->header.pt, rtp_session->ext_mid.ext_id);
-				} else {
+				/* TEL-6738: Stamp MID on all outbound packets including BUNDLE audio.
+				   On a BUNDLE shared session, the session-level ext_mid contains the
+				   AUDIO MID value (local_mid is set by the audio m-line in
+				   gen_local_sdp / activate_rtp; the video m-line path guards against
+				   overwriting it on the shared session).  Audio packets need MID for
+				   the browser to demux audio from video on the shared transport
+				   (RFC 9143 BUNDLE).  Without MID, Safari cannot associate audio
+				   packets with the correct m-line, which degrades video quality.
+				   rtp_add_mid_extension() strips only the old MID element (Guard 2)
+				   and preserves other extensions (audio-level, abs-send-time, etc.),
+				   producing a clean BEDE header for SRTP.  Video writes arrive via
+				   force_video with an explicit mid_ext_id/mid carrying the VIDEO MID. */
+				{
 					switch_status_t mid_status = rtp_add_mid_extension(rtp_session, send_msg, &bytes, mid_ext_id, mid);
 
 					if (mid_status != SWITCH_STATUS_SUCCESS) {
