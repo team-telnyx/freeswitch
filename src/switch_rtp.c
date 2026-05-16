@@ -8206,7 +8206,7 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 					  "RTCP packet bytes %" SWITCH_SIZE_T_FMT " type %d pad %d\n",
 					  bytes, msg->header.type, msg->header.p);
 
-	if (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] && (msg->header.type == _RTCP_PT_RTPFB || msg->header.type == _RTCP_PT_PSFB || msg->header.type < 200)) {
+	if (rtp_has_video_feedback(rtp_session) && (msg->header.type == _RTCP_PT_RTPFB || msg->header.type == _RTCP_PT_PSFB || msg->header.type < 200)) {
 		rtcp_ext_msg_t *extp = (rtcp_ext_msg_t *) msg;
 
 		if (extp->header.fmt != 15) { // <---- REMOVE WHEN BRIA STOPS SENDING UNSOLICITED REMB
@@ -8230,13 +8230,40 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 			if (switch_core_session_media_flow(rtp_session->session, SWITCH_MEDIA_TYPE_VIDEO) == SWITCH_MEDIA_FLOW_RECVONLY) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG2, "%s Ignoring FIR/PLI from a sendonly stream.\n", 
 								  switch_core_session_get_name(rtp_session->session));
+			} else if (rtp_session->bundle_has_video && !rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
+				/* BUNDLE shared audio session received FIR/PLI from the far end (e.g. Safari).
+				 * The video refresh must propagate to the bridged partner (SIP caller) whose
+				 * video engine can forward it to the actual video source (SIP callee).
+				 * We cannot rely on CF_VIDEO_REFRESH_REQ alone because there is a race:
+				 * the BUNDLE->partner video bridge thread checks channel (BUNDLE) and
+				 * clears the flag before the partner->BUNDLE thread sees it on b_channel.
+				 * Bypass the race by calling force_request_video_refresh on the partner directly. */
+				switch_core_session_t *partner_session = NULL;
+
+				if (switch_core_session_get_partner(rtp_session->session, &partner_session) == SWITCH_STATUS_SUCCESS) {
+					switch_core_media_gen_key_frame(partner_session);
+					switch_core_session_force_request_video_refresh(partner_session);
+					switch_channel_set_flag(switch_core_session_get_channel(partner_session), CF_VIDEO_REFRESH_REQ);
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+									  "TEL6738 RTCP recv BUNDLE FIR/PLI %s -> partner %s type=%u fmt=%u send_ssrc=%u recv_ssrc=%u\n",
+									  switch_core_session_get_name(rtp_session->session), switch_core_session_get_name(partner_session),
+									  msg->header.type, extp->header.fmt,
+									  ntohl(extp->header.send_ssrc), ntohl(extp->header.recv_ssrc));
+					switch_core_session_rwunlock(partner_session);
+				} else {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
+									  "TEL6738 RTCP recv BUNDLE FIR/PLI %s but no bridged partner found\n",
+									  switch_core_session_get_name(rtp_session->session));
+				}
+				/* Also flag local channel for bridge thread b_channel visibility (belt-and-suspenders) */
+				switch_channel_set_flag(switch_core_session_get_channel(rtp_session->session), CF_VIDEO_REFRESH_REQ);
 			} else {
 				switch_core_media_gen_key_frame(rtp_session->session);
 				switch_core_session_request_video_refresh(rtp_session->session);
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-								  "TEL6738 RTCP recv FIR/PLI %s type=%u fmt=%u send_ssrc=%u recv_ssrc=%u local_ssrc=%u remote_ssrc=%u\n",
+								  "TEL6738 RTCP recv FIR/PLI %s type=%u fmt=%u send_ssrc=%u recv_ssrc=%u\n",
 								  switch_core_session_get_name(rtp_session->session), msg->header.type, extp->header.fmt,
-								  ntohl(extp->header.send_ssrc), ntohl(extp->header.recv_ssrc), rtp_session->ssrc, rtp_session->remote_ssrc);
+								  ntohl(extp->header.send_ssrc), ntohl(extp->header.recv_ssrc));
 				switch_channel_set_flag(switch_core_session_get_channel(rtp_session->session), CF_VIDEO_REFRESH_REQ);
 			}
 		}
@@ -8246,9 +8273,11 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 			int i;
 
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-							  "TEL6738 RTCP recv NACK %s count=%d send_ssrc=%u recv_ssrc=%u local_ssrc=%u remote_ssrc=%u\n",
+							  "TEL6738 RTCP recv %sNACK %s count=%d send_ssrc=%u recv_ssrc=%u local_ssrc=%u remote_ssrc=%u bundle_has_video=%u\n",
+							  rtp_session->bundle_has_video ? "BUNDLE " : "",
 							  switch_core_session_get_name(rtp_session->session), ntohs(extp->header.length) - 2,
-							  ntohl(extp->header.send_ssrc), ntohl(extp->header.recv_ssrc), rtp_session->ssrc, rtp_session->remote_ssrc);
+							  ntohl(extp->header.send_ssrc), ntohl(extp->header.recv_ssrc), rtp_session->ssrc, rtp_session->remote_ssrc,
+							  rtp_session->bundle_has_video);
 
 
 			for (i = 0; i < ntohs(extp->header.length) - 2; i++) {
