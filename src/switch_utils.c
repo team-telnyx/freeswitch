@@ -2709,7 +2709,7 @@ static char *cleanup_separated_string(char *str, char delim)
 			}
 		}
 		if (!esc) {
-			if (*ptr == '"' && !inside_quotes) {
+			if (*ptr == '"' && !inside_quotes && (inside_dquotes || strchr(ptr + 1, '"'))) {
 				inside_dquotes = (1 - inside_dquotes);
 				*dest++ = *ptr;
 				if (*ptr != ' ') {
@@ -2779,7 +2779,7 @@ static unsigned int separate_string_char_delim(char *buf, char delim, char **arr
 			/* escaped characters are copied verbatim to the destination string */
 			if (*ptr == ESCAPE_META) {
 				++ptr;
-			} else if (*ptr == '"' && !inside_quotes) {
+			} else if (*ptr == '"' && !inside_quotes && (inside_dquotes || strchr(ptr + 1, '"'))) {
 				inside_dquotes = (1 - inside_dquotes);
 			} else if (*ptr == '\'' && !inside_dquotes && (inside_quotes || strchr(ptr+1, '\''))) {
 				inside_quotes = (1 - inside_quotes);

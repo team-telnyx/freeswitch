@@ -2893,7 +2893,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 						dq = 0;
 					}
 
-					if (end && p < end && *p == '"' && !q && (p == pipe_names[r] || *(p-1) != '\\')) {
+					if (end && p < end && *p == '"' && !q && (dq || memchr(p + 1, '"', end - p - 1)) && (p == pipe_names[r] || *(p-1) != '\\')) {
 						dq = !dq;
 					}
 
