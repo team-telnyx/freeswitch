@@ -383,6 +383,8 @@ char *generate_pai_str(private_object_t *tech_pvt)
 
 	if (!zstr(callee_name) && strcmp(callee_name, "_undef_") && !zstr(callee_number)) {
 		check_decode(callee_name, tech_pvt->session);
+		/* Sanitize display-name before quoted-string embed. */
+		callee_name = sofia_glue_sanitize_display_name((char *)callee_name);
 
 		if (switch_stristr("update_display", tech_pvt->x_freeswitch_support_remote)) {
 			pai = switch_core_session_sprintf(tech_pvt->session, "%s: \"%s\" <%s>%s\n"
@@ -2386,6 +2388,10 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 				const char *session_id_header = sofia_glue_session_id_header(tech_pvt->session, tech_pvt->profile);
 
 				check_decode(name, tech_pvt->session);
+				/* Sanitize before quoted-string embed (nua_info/nua_update). */
+				if (!zstr(name)) {
+					name = sofia_glue_sanitize_display_name(switch_core_session_strdup(tech_pvt->session, name));
+				}
 
 				if (allow) {
 					update_allowed = !!switch_stristr("UPDATE", allow);
@@ -2523,16 +2529,18 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 					char message[256] = "";
 					const char *ua = switch_channel_get_variable(tech_pvt->channel, "sip_user_agent");
 					const char *session_id_header = sofia_glue_session_id_header(tech_pvt->session, tech_pvt->profile);
+					/* Sanitize display-name before quoted-string embed. */
+					char *hold_display = sofia_glue_sanitize_display_name(switch_core_session_strdup(tech_pvt->session, msg->string_arg));
 
 					if (ua && switch_stristr("snom", ua)) {
-						snprintf(message, sizeof(message), "From:\r\nTo: \"%s\" %s\r\n", msg->string_arg, tech_pvt->caller_profile->destination_number);
+						snprintf(message, sizeof(message), "From:\r\nTo: \"%s\" %s\r\n", hold_display, tech_pvt->caller_profile->destination_number);
 						nua_info(tech_pvt->nh, SIPTAG_CONTENT_TYPE_STR("message/sipfrag"),
 								 TAG_IF(!zstr(tech_pvt->user_via), SIPTAG_VIA_STR(tech_pvt->user_via)),
 								 SIPTAG_PAYLOAD_STR(message),
 								 TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)),
 								 TAG_END());
 					} else if (ua && switch_stristr("polycom", ua)) {
-						snprintf(message, sizeof(message), "P-Asserted-Identity: \"%s\" <%s>", msg->string_arg, tech_pvt->caller_profile->destination_number);
+						snprintf(message, sizeof(message), "P-Asserted-Identity: \"%s\" <%s>", hold_display, tech_pvt->caller_profile->destination_number);
 						nua_update(tech_pvt->nh,
 								   NUTAG_SESSION_TIMER(tech_pvt->session_timeout),
 								   NUTAG_SESSION_REFRESHER(tech_pvt->session_refresher),
