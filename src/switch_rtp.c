@@ -486,6 +486,7 @@ struct switch_rtp {
 	switch_mutex_t *flag_mutex;
 	switch_mutex_t *read_mutex;
 	switch_mutex_t *write_mutex;
+	switch_mutex_t *bundle_video_frame_lock;  /* TEL-6738: serializes video frame burst vs audio */
 	switch_mutex_t *ice_mutex;
 	switch_timer_t timer;
 	switch_timer_t write_timer;
@@ -5470,6 +5471,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_create(switch_rtp_t **new_rtp_session
 	switch_mutex_init(&rtp_session->flag_mutex, SWITCH_MUTEX_NESTED, pool);
 	switch_mutex_init(&rtp_session->read_mutex, SWITCH_MUTEX_NESTED, pool);
 	switch_mutex_init(&rtp_session->write_mutex, SWITCH_MUTEX_NESTED, pool);
+	switch_mutex_init(&rtp_session->bundle_video_frame_lock, SWITCH_MUTEX_NESTED, pool);
 	switch_mutex_init(&rtp_session->ice_mutex, SWITCH_MUTEX_NESTED, pool);
 	switch_mutex_init(&rtp_session->dtmf_data.dtmf_mutex, SWITCH_MUTEX_NESTED, pool);
 	switch_queue_create(&rtp_session->dtmf_data.dtmf_queue, 100, rtp_session->pool);
@@ -8237,26 +8239,49 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 				 * We cannot rely on CF_VIDEO_REFRESH_REQ alone because there is a race:
 				 * the BUNDLE->partner video bridge thread checks channel (BUNDLE) and
 				 * clears the flag before the partner->BUNDLE thread sees it on b_channel.
-				 * Bypass the race by calling force_request_video_refresh on the partner directly. */
-				switch_core_session_t *partner_session = NULL;
+				 * Bypass the race by calling force_request_video_refresh on the partner directly.
+				 *
+				 * TEL-6738 hangup-race guard: a stray RTCP packet can be drained after the
+				 * local BUNDLE channel has begun teardown. Calling
+				 * switch_core_session_force_request_video_refresh() on the partner during
+				 * that window has been observed to delay the partner's CS_HANGUP transition
+				 * (partner stuck in CS_EXCHANGE_MEDIA until the far-end timeout fires).
+				 * Skip the partner propagation entirely once either side is no longer up. */
+				switch_channel_t *local_channel = switch_core_session_get_channel(rtp_session->session);
 
-				if (switch_core_session_get_partner(rtp_session->session, &partner_session) == SWITCH_STATUS_SUCCESS) {
-					switch_core_media_gen_key_frame(partner_session);
-					switch_core_session_force_request_video_refresh(partner_session);
-					switch_channel_set_flag(switch_core_session_get_channel(partner_session), CF_VIDEO_REFRESH_REQ);
+				if (!switch_channel_up_nosig(local_channel)) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-									  "TEL6738 RTCP recv BUNDLE FIR/PLI %s -> partner %s type=%u fmt=%u send_ssrc=%u recv_ssrc=%u\n",
-									  switch_core_session_get_name(rtp_session->session), switch_core_session_get_name(partner_session),
-									  msg->header.type, extp->header.fmt,
-									  ntohl(extp->header.send_ssrc), ntohl(extp->header.recv_ssrc));
-					switch_core_session_rwunlock(partner_session);
-				} else {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
-									  "TEL6738 RTCP recv BUNDLE FIR/PLI %s but no bridged partner found\n",
+									  "TEL6738 RTCP recv BUNDLE FIR/PLI %s local channel down, skipping partner propagation\n",
 									  switch_core_session_get_name(rtp_session->session));
+				} else {
+					switch_core_session_t *partner_session = NULL;
+
+					if (switch_core_session_get_partner(rtp_session->session, &partner_session) == SWITCH_STATUS_SUCCESS) {
+						switch_channel_t *partner_channel = switch_core_session_get_channel(partner_session);
+
+						if (switch_channel_up_nosig(partner_channel)) {
+							switch_core_media_gen_key_frame(partner_session);
+							switch_core_session_force_request_video_refresh(partner_session);
+							switch_channel_set_flag(partner_channel, CF_VIDEO_REFRESH_REQ);
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+											  "TEL6738 RTCP recv BUNDLE FIR/PLI %s -> partner %s type=%u fmt=%u send_ssrc=%u recv_ssrc=%u\n",
+											  switch_core_session_get_name(rtp_session->session), switch_core_session_get_name(partner_session),
+											  msg->header.type, extp->header.fmt,
+											  ntohl(extp->header.send_ssrc), ntohl(extp->header.recv_ssrc));
+						} else {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+											  "TEL6738 RTCP recv BUNDLE FIR/PLI %s partner %s not up, skipping refresh\n",
+											  switch_core_session_get_name(rtp_session->session), switch_core_session_get_name(partner_session));
+						}
+						switch_core_session_rwunlock(partner_session);
+					} else {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
+										  "TEL6738 RTCP recv BUNDLE FIR/PLI %s but no bridged partner found\n",
+										  switch_core_session_get_name(rtp_session->session));
+					}
+					/* Also flag local channel for bridge thread b_channel visibility (belt-and-suspenders) */
+					switch_channel_set_flag(local_channel, CF_VIDEO_REFRESH_REQ);
 				}
-				/* Also flag local channel for bridge thread b_channel visibility (belt-and-suspenders) */
-				switch_channel_set_flag(switch_core_session_get_channel(rtp_session->session), CF_VIDEO_REFRESH_REQ);
 			} else {
 				switch_core_media_gen_key_frame(rtp_session->session);
 				switch_core_session_request_video_refresh(rtp_session->session);
@@ -11140,6 +11165,17 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 
 //after:
 
+	/* TEL-6738: BUNDLE audio/video packet serialization (per-packet).
+	   Serialize each individual packet write against the shared UDP socket to prevent
+	   kernel-level reordering between audio and video on the BUNDLE transport.
+	   Per-PACKET (not per-frame): holding the lock across an entire video frame burst
+	   caused fatal deadlocks when the video bridge thread exited mid-frame (lock held
+	   forever, audio thread blocked permanently -> SIP caller stuck in CS_EXCHANGE_MEDIA).
+	   Per-packet is safe: the browser demuxes by SSRC regardless of interleave order. */
+	if (rtp_session->bundle_has_video) {
+		switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+	}
+
 	if (switch_test_flag(frame, SFF_RTP_HEADER) || rtp_session->flags[SWITCH_RTP_FLAG_TEXT]) {
 		switch_size_t wrote;
 		wrote = rtp_write_manual_state(rtp_session, write_state, frame->data, frame->datalen,
@@ -11154,6 +11190,11 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 #if DEBUG_RTP
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "RTP: write frame fwd: %u WROTE_MANUAL %p/%p\n", fwd, (void*)rtp_session->session, (void*)rtp_session);
 #endif
+
+		/* TEL-6738: Release per-packet BUNDLE lock after manual write path */
+		if (rtp_session->bundle_has_video) {
+			switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+		}
 
 		return wrote;
 	}
@@ -11211,6 +11252,11 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 
 	r = rtp_common_write(rtp_session, send_msg, data, len, payload, ts, &frame->flags, write_state, ssrc, mid_ext_id, mid, force_video);
 
+	/* TEL-6738: Release per-packet BUNDLE lock after common write path */
+	if (rtp_session->bundle_has_video) {
+		switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+	}
+
 	if (send_msg) {
 		send_msg->header = local_header;
 	}
@@ -11264,6 +11310,11 @@ SWITCH_DECLARE(int) switch_rtp_write_manual(switch_rtp_t *rtp_session,
 		return 0;
 	}
 
+	/* TEL-6738: Block audio/DTMF while BUNDLE video frame burst in progress */
+	if (rtp_session->bundle_has_video) {
+		switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+	}
+
 	WRITE_INC(rtp_session);
 
 	rtp_session->write_msg = rtp_session->send_msg;
@@ -11294,6 +11345,11 @@ SWITCH_DECLARE(int) switch_rtp_write_manual(switch_rtp_t *rtp_session,
  end:
 
 	WRITE_DEC(rtp_session);
+
+	/* TEL-6738: Release BUNDLE video frame burst lock */
+	if (rtp_session->bundle_has_video) {
+		switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+	}
 
 	return ret;
 }
@@ -12005,10 +12061,12 @@ static switch_status_t rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_
 		old_ext_total = 4 + old_ext_data_bytes;
 
 		if (*bytes < rtp_header_len + body_header_bytes + old_ext_total) {
-			if (ext_id > 0 && mid && *mid) {
+			if (mid_ext_id > 0 && !zstr(mid_value)) {
 				/* The incoming RTP extension header is malformed for the packet size.
-				   For an explicit BUNDLE MID override, prefer replacing the bad
-				   extension with the negotiated MID over dropping media. */
+				   Prefer replacing the bad extension with the negotiated MID over
+				   dropping media.  Use effective mid_ext_id/mid_value (after session
+				   fallback) so both explicit overrides AND session-level MID can
+				   recover from forwarded packets with garbled extension lengths. */
 				old_ext_total = 0;
 				old_ext_data_bytes = 0;
 			} else {
@@ -12076,7 +12134,20 @@ static switch_status_t rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_
 	new_ext_total = 4 + ext_data_padded;
 	payload_bytes = *bytes - rtp_header_len - body_header_bytes - old_ext_total;
 
-	if (body_header_bytes + new_ext_total + payload_bytes > SWITCH_RTP_MAX_BUF_LEN) return SWITCH_STATUS_FALSE;
+	/* TEL-6738 explicit bound: compute the final post-rewrite total bytes and verify
+	 * we will not overflow send_msg->body[SWITCH_RTP_MAX_BUF_LEN+...]. The packet body
+	 * after rewrite is body_header_bytes + new_ext_total + payload_bytes; reject any
+	 * write that would exceed SWITCH_RTP_MAX_BUF_LEN rather than corrupt the buffer. */
+	if (body_header_bytes + new_ext_total + payload_bytes > SWITCH_RTP_MAX_BUF_LEN) {
+		return SWITCH_STATUS_FALSE;
+	}
+	/* TEL-6738 sanity: ensure the existing packet was large enough that payload_bytes
+	 * is a valid (non-negative) span. Combined with the earlier "*bytes < rtp_header_len
+	 * + body_header_bytes + old_ext_total" guard, this means the source memmove range is
+	 * fully inside the input packet. */
+	if (*bytes < rtp_header_len + body_header_bytes + old_ext_total) {
+		return SWITCH_STATUS_FALSE;
+	}
 
 	memmove(send_msg->body + body_header_bytes + new_ext_total,
 			send_msg->body + body_header_bytes + old_ext_total,

@@ -187,6 +187,8 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 	uint32_t tel6738_bridge_write_attempts = 0, tel6738_bridge_write_ok = 0, tel6738_bridge_write_fail = 0;
 	uint32_t tel6738_bridge_cng_streak = 0, tel6738_bridge_source_refreshes = 0;
 	uint32_t tel6738_bridge_periodic_refreshes = 0;
+	uint32_t tel6738_bundle_kf_kick = 0;  /* TEL-6738: keyframe kick on first write to BUNDLE dst */
+	switch_bool_t tel6738_dst_is_bundle = SWITCH_FALSE;
 	switch_time_t tel6738_last_real_video = 0, tel6738_last_cng_refresh = 0, tel6738_last_cng_log = 0;
 	switch_time_t tel6738_bridge_start = switch_micro_time_now();
 	switch_time_t tel6738_last_periodic_refresh = 0;
@@ -237,6 +239,14 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 		return;
 	}
 	b_channel = switch_core_session_get_channel(vh->session_b);
+
+	/* TEL-6738: sample once whether destination video is bundled with audio. */
+	tel6738_dst_is_bundle = switch_core_media_video_is_bundled(vh->session_b);
+	if (tel6738_dst_is_bundle) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
+						  "TEL6738 video bridge dst-is-bundle %s -> %s; will bypass CF_VIDEO_READY and kick keyframe on first write\n",
+						  switch_channel_get_name(channel), switch_channel_get_name(b_channel));
+	}
 
 	switch_core_session_request_video_refresh(vh->session_a);
 	switch_core_session_request_video_refresh(vh->session_b);
@@ -447,10 +457,33 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 				tel6738_bridge_write_attempts++;
 			}
 
-			write_status = switch_core_session_write_video_frame(vh->session_b, read_frame, SWITCH_IO_FLAG_NONE, 0);
+			{
+				/* TEL-6738: When destination video shares the BUNDLE transport with audio,
+				 * the underlying transport is already up via audio ICE/DTLS. Pass
+				 * SWITCH_IO_FLAG_FORCE so the CF_VIDEO_READY gate in
+				 * switch_core_session_write_video_frame() does not silently drop the
+				 * callee->Safari video for the 10-20s before Safari's own video flips
+				 * CF_VIDEO_READY. Non-BUNDLE destinations keep the original gating. */
+				switch_io_flag_t write_flags = tel6738_dst_is_bundle ? SWITCH_IO_FLAG_FORCE : SWITCH_IO_FLAG_NONE;
+				write_status = switch_core_session_write_video_frame(vh->session_b, read_frame, write_flags, 0);
+			}
 			if (write_status == SWITCH_STATUS_SUCCESS) {
 				if (!switch_test_flag(read_frame, SFF_CNG)) {
 					tel6738_bridge_write_ok++;
+					/* TEL-6738: On the FIRST real video write to a BUNDLE destination, request a
+					 * keyframe from the source so Safari's first decodable frame is an IDR rather
+					 * than an inter-frame. Without this Safari sees the slice mid-stream and
+					 * renders nothing until the next periodic keyframe. */
+					if (tel6738_dst_is_bundle && tel6738_bundle_kf_kick == 0) {
+						switch_status_t kf_status = switch_core_session_force_request_video_refresh(vh->session_a);
+						tel6738_bundle_kf_kick++;
+						tel6738_bridge_source_refreshes++;
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
+										  "TEL6738 video bridge bundle-kf-kick %s -> %s seq=%u ts=%u len=%u marker=%d key=%d refresh_status=%d source_refresh=%u\n",
+										  switch_channel_get_name(channel), switch_channel_get_name(b_channel),
+										  read_frame->seq, read_frame->timestamp, read_frame->datalen, read_frame->m,
+										  switch_test_flag(read_frame, SFF_IS_KEYFRAME), kf_status, tel6738_bridge_source_refreshes);
+					}
 				}
 			} else {
 				if (!switch_test_flag(read_frame, SFF_CNG)) {
@@ -482,11 +515,12 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 
 	switch_core_session_kill_channel(vh->session_b, SWITCH_SIG_BREAK);
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
-					  "TEL6738 video bridge final %s -> %s read_ok=%u read_bad=%u cng_skip=%u block_skip=%u no_dst=%u write_attempt=%u write_ok=%u write_fail=%u cng_streak=%u source_refresh=%u periodic_refresh=%u\n",
+					  "TEL6738 video bridge final %s -> %s read_ok=%u read_bad=%u cng_skip=%u block_skip=%u no_dst=%u write_attempt=%u write_ok=%u write_fail=%u cng_streak=%u source_refresh=%u periodic_refresh=%u bundle_kf_kick=%u\n",
 					  switch_channel_get_name(channel), switch_channel_get_name(b_channel),
 					  tel6738_bridge_read_ok, tel6738_bridge_read_bad, tel6738_bridge_cng_skip, tel6738_bridge_block_skip,
 					  tel6738_bridge_no_dst_media, tel6738_bridge_write_attempts, tel6738_bridge_write_ok, tel6738_bridge_write_fail,
-					  tel6738_bridge_cng_streak, tel6738_bridge_source_refreshes, tel6738_bridge_periodic_refreshes);
+					  tel6738_bridge_cng_streak, tel6738_bridge_source_refreshes,
+					  tel6738_bridge_periodic_refreshes, tel6738_bundle_kf_kick);
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG, "%s video thread ended.\n", switch_channel_get_name(channel));
 
 	switch_core_session_request_video_refresh(vh->session_a);

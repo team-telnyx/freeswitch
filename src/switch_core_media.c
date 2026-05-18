@@ -127,6 +127,40 @@ struct switch_rtp_text_factory_s {
 };
 
 
+
+/* TEL-6738: Pre-DTLS video packet buffer for BUNDLE.
+ * When BUNDLE video writes return wrote==0 (ICE/DTLS not ready on the shared
+ * audio transport), raw RTP packet data is copied into this bounded ring buffer.
+ * On the first successful write (transport ready), buffered packets are flushed
+ * in FIFO order through the same write path to preserve the initial keyframe.
+ * Allocated lazily from the session pool on first use; freed with the session. */
+#define TEL6738_PRE_DTLS_CAPACITY  64
+/* TEL-6738: use SWITCH_RTP_MAX_BUF_LEN so we cannot drop valid RTP packets.
+ * The PCAP frame length and downstream RTP datalen may exceed 1500 (e.g. larger
+ * NALU slices or RTCP). Matching the engine-wide max prevents silent truncation. */
+#define TEL6738_PRE_DTLS_PKT_SIZE  SWITCH_RTP_MAX_BUF_LEN
+
+typedef struct {
+	uint8_t  data[TEL6738_PRE_DTLS_PKT_SIZE];
+	uint32_t datalen;
+	switch_frame_flag_t flags;
+	uint8_t  m;
+	switch_payload_t payload;
+	uint32_t timestamp;
+	uint16_t seq;
+	uint32_t ssrc;
+} tel6738_pre_dtls_entry_t;
+
+typedef struct {
+	tel6738_pre_dtls_entry_t *entries;  /* pool-allocated array[TEL6738_PRE_DTLS_CAPACITY] */
+	uint32_t head;          /* index of oldest entry */
+	uint32_t count;         /* number of valid entries */
+	uint32_t stat_queued;   /* total packets ever queued */
+	uint32_t stat_flushed;  /* total packets successfully flushed */
+	uint32_t stat_dropped;  /* total packets dropped (buffer full) */
+	switch_bool_t active;   /* SWITCH_TRUE while buffering (DTLS not ready) */
+} tel6738_pre_dtls_buf_t;
+
 struct switch_rtp_engine_s {
 	switch_secure_settings_t ssec[CRYPTO_INVALID+1];
 	switch_rtp_crypto_key_type_t crypto_type;
@@ -215,6 +249,7 @@ struct switch_rtp_engine_s {
 	uint32_t bundle_video_write_success;
 	uint32_t bundle_video_write_zero;
 	uint32_t bundle_video_write_fail;
+	tel6738_pre_dtls_buf_t *pre_dtls_buf; /* TEL-6738: lazily allocated pre-DTLS video buffer */
 	uint32_t bundle_demux_method_counts[4];
 
 	/* TEL-6738: BUNDLE drain thread state and fields */
@@ -5065,9 +5100,87 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 				"Unable to create isolated BUNDLE video RTP write state\n");
 			status = SWITCH_STATUS_FALSE;
 		} else {
-			engine->bundle_video_write_attempts++;
-			bundle_video_wrote = switch_rtp_write_frame_ex_state(engine->rtp_session, frame, engine->bundle_write_state,
-									   engine->ssrc, mid_ext_id, mid, SWITCH_TRUE, engine->cur_payload_map->pt);
+			/* TEL-6738: Pre-DTLS buffer logic for BUNDLE video.
+			 * If buffered packets exist from prior wrote==0 rounds, try to flush
+			 * them first (FIFO order) before writing the current frame.
+			 * If transport is still not ready, buffer the current frame too. */
+			if (engine->pre_dtls_buf && engine->pre_dtls_buf->count > 0) {
+				/* Probe transport by trying to flush oldest buffered packet */
+				tel6738_pre_dtls_entry_t *pe;
+				switch_frame_t pf;
+				int pw;
+				pe = &engine->pre_dtls_buf->entries[engine->pre_dtls_buf->head];
+				memset(&pf, 0, sizeof(pf));
+				pf.data = pe->data;
+				pf.datalen = pe->datalen;
+				pf.flags = pe->flags;
+				pf.m = pe->m;
+				pf.payload = pe->payload;
+				pf.timestamp = pe->timestamp;
+				pf.seq = pe->seq;
+				pf.ssrc = pe->ssrc;
+				pw = switch_rtp_write_frame_ex_state(engine->rtp_session, &pf,
+						engine->bundle_write_state, engine->ssrc, mid_ext_id, mid,
+						SWITCH_TRUE, engine->cur_payload_map->pt);
+				if (pw > 0) {
+					/* Transport ready. Dequeue probe and flush remaining. */
+					engine->pre_dtls_buf->head = (engine->pre_dtls_buf->head + 1) % TEL6738_PRE_DTLS_CAPACITY;
+					engine->pre_dtls_buf->count--;
+					engine->pre_dtls_buf->stat_flushed++;
+					engine->bundle_video_write_success++;
+					engine->bundle_video_write_attempts++;
+					while (engine->pre_dtls_buf->count > 0) {
+						tel6738_pre_dtls_entry_t *fe;
+						switch_frame_t ff;
+						int fw;
+						fe = &engine->pre_dtls_buf->entries[engine->pre_dtls_buf->head];
+						memset(&ff, 0, sizeof(ff));
+						ff.data = fe->data;
+						ff.datalen = fe->datalen;
+						ff.flags = fe->flags;
+						ff.m = fe->m;
+						ff.payload = fe->payload;
+						ff.timestamp = fe->timestamp;
+						ff.seq = fe->seq;
+						ff.ssrc = fe->ssrc;
+						fw = switch_rtp_write_frame_ex_state(engine->rtp_session, &ff,
+								engine->bundle_write_state, engine->ssrc, mid_ext_id, mid,
+								SWITCH_TRUE, engine->cur_payload_map->pt);
+						if (fw <= 0) {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+								"TEL6738 pre-DTLS flush stalled: wrote=%d remaining=%u flushed=%u\n",
+								fw, engine->pre_dtls_buf->count, engine->pre_dtls_buf->stat_flushed);
+							break;
+						}
+						engine->pre_dtls_buf->head = (engine->pre_dtls_buf->head + 1) % TEL6738_PRE_DTLS_CAPACITY;
+						engine->pre_dtls_buf->count--;
+						engine->pre_dtls_buf->stat_flushed++;
+						engine->bundle_video_write_success++;
+						engine->bundle_video_write_attempts++;
+					}
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
+						"TEL6738 pre-DTLS buffer flushed: flushed=%u remaining=%u dropped=%u queued=%u\n",
+						engine->pre_dtls_buf->stat_flushed, engine->pre_dtls_buf->count,
+						engine->pre_dtls_buf->stat_dropped, engine->pre_dtls_buf->stat_queued);
+					engine->pre_dtls_buf->active = SWITCH_FALSE;
+					/* Now write the current frame */
+					engine->bundle_video_write_attempts++;
+					bundle_video_wrote = switch_rtp_write_frame_ex_state(engine->rtp_session, frame,
+							engine->bundle_write_state, engine->ssrc, mid_ext_id, mid,
+							SWITCH_TRUE, engine->cur_payload_map->pt);
+				} else {
+					/* Transport still not ready - buffer current frame too */
+					engine->bundle_video_write_zero++;
+					engine->bundle_video_write_attempts++;
+					goto tel6738_enqueue_pkt;
+				}
+			} else {
+				/* No buffered packets - normal write */
+				engine->bundle_video_write_attempts++;
+				bundle_video_wrote = switch_rtp_write_frame_ex_state(engine->rtp_session, frame,
+						engine->bundle_write_state, engine->ssrc, mid_ext_id, mid,
+						SWITCH_TRUE, engine->cur_payload_map->pt);
+			}
 			if (bundle_video_wrote < 0) {
 				engine->bundle_video_write_fail++;
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
@@ -5079,16 +5192,69 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 				status = SWITCH_STATUS_FALSE;
 			} else if (bundle_video_wrote == 0) {
 				engine->bundle_video_write_zero++;
-				/* A zero-byte write can happen while the borrowed BUNDLE audio RTP
-				   transport is still completing ICE/DTLS. Treat it like the normal
-				   RTP write path, where only negative returns are fatal. */
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-					"BUNDLE video RTP write deferred: wrote=0 attempts=%u ok=%u zero=%u fail=%u enq=%u deq=%u flags=0x%x pt=%u seq=%u ts=%u m=%d packetlen=%u datalen=%u\n",
-					engine->bundle_video_write_attempts, engine->bundle_video_write_success, engine->bundle_video_write_zero,
-					engine->bundle_video_write_fail, engine->bundle_video_enqueued, engine->bundle_video_dequeued,
-					frame->flags, frame->payload, frame->seq, frame->timestamp, frame->m, frame->packetlen, frame->datalen);
+tel6738_enqueue_pkt:
+				/* TEL-6738: Buffer the packet for later flush.
+				 * Allocate lazily on first use from the session pool. */
+				if (!engine->pre_dtls_buf) {
+					engine->pre_dtls_buf = switch_core_session_alloc(session, sizeof(tel6738_pre_dtls_buf_t));
+					memset(engine->pre_dtls_buf, 0, sizeof(tel6738_pre_dtls_buf_t));
+					engine->pre_dtls_buf->entries = switch_core_session_alloc(session,
+						TEL6738_PRE_DTLS_CAPACITY * sizeof(tel6738_pre_dtls_entry_t));
+					memset(engine->pre_dtls_buf->entries, 0,
+						TEL6738_PRE_DTLS_CAPACITY * sizeof(tel6738_pre_dtls_entry_t));
+					engine->pre_dtls_buf->active = SWITCH_TRUE;
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
+						"TEL6738 pre-DTLS buffer allocated: capacity=%d pkt_size=%d\n",
+						TEL6738_PRE_DTLS_CAPACITY, TEL6738_PRE_DTLS_PKT_SIZE);
+				}
+				if (frame->datalen > 0 && frame->datalen <= TEL6738_PRE_DTLS_PKT_SIZE && frame->data) {
+					if (engine->pre_dtls_buf->count >= TEL6738_PRE_DTLS_CAPACITY) {
+						/* Buffer full: drop oldest */
+						engine->pre_dtls_buf->head = (engine->pre_dtls_buf->head + 1) % TEL6738_PRE_DTLS_CAPACITY;
+						engine->pre_dtls_buf->count--;
+						engine->pre_dtls_buf->stat_dropped++;
+					}
+					{
+						uint32_t idx = (engine->pre_dtls_buf->head + engine->pre_dtls_buf->count) % TEL6738_PRE_DTLS_CAPACITY;
+						tel6738_pre_dtls_entry_t *e = &engine->pre_dtls_buf->entries[idx];
+						memcpy(e->data, frame->data, frame->datalen);
+						e->datalen = frame->datalen;
+						e->flags = frame->flags;
+						e->m = frame->m;
+						e->payload = frame->payload;
+						e->timestamp = frame->timestamp;
+						e->seq = frame->seq;
+						e->ssrc = frame->ssrc;
+						engine->pre_dtls_buf->count++;
+						engine->pre_dtls_buf->stat_queued++;
+					}
+					if (engine->pre_dtls_buf->stat_queued <= 10 || !(engine->pre_dtls_buf->stat_queued % 50)) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+							"TEL6738 pre-DTLS enqueue: queued=%u buffered=%u dropped=%u seq=%u ts=%u m=%d len=%u\n",
+							engine->pre_dtls_buf->stat_queued, engine->pre_dtls_buf->count,
+							engine->pre_dtls_buf->stat_dropped, frame->seq, frame->timestamp,
+							frame->m, frame->datalen);
+					}
+					/* Packet buffered successfully - return SUCCESS (will be sent later) */
+				} else {
+					/* Packet too large or empty - signal non-fatal drop and bump the
+					 * dropped counter so flush logs surface that data was lost. */
+					engine->pre_dtls_buf->stat_dropped++;
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+						"TEL6738 pre-DTLS cannot buffer (dropped non-fatal): datalen=%u max=%d dropped_total=%u\n",
+						frame->datalen, TEL6738_PRE_DTLS_PKT_SIZE, engine->pre_dtls_buf->stat_dropped);
+					status = SWITCH_STATUS_BREAK;
+				}
 			} else {
 				engine->bundle_video_write_success++;
+				/* TEL-6738: Log when first write succeeds after flush */
+				if (engine->pre_dtls_buf && engine->pre_dtls_buf->stat_flushed > 0
+					&& !engine->pre_dtls_buf->active
+					&& engine->bundle_video_write_success == engine->pre_dtls_buf->stat_flushed + 1) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
+						"TEL6738 pre-DTLS flush complete, first live write ok: flushed=%u dropped=%u\n",
+						engine->pre_dtls_buf->stat_flushed, engine->pre_dtls_buf->stat_dropped);
+				}
 				if (engine->bundle_video_write_success <= 10 || !(engine->bundle_video_write_success % 500)) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 						"BUNDLE video RTP write success diag wrote=%d attempts=%u ok=%u zero=%u fail=%u enq=%u deq=%u flags=0x%x pt=%u seq=%u ts=%u m=%d packetlen=%u datalen=%u\n",
@@ -18985,6 +19151,25 @@ SWITCH_DECLARE(void) switch_core_session_video_reinit(switch_core_session_t *ses
 
 }
 
+/* TEL-6738: see header docstring. */
+SWITCH_DECLARE(switch_bool_t) switch_core_media_video_is_bundled(switch_core_session_t *session)
+{
+	switch_media_handle_t *smh;
+	switch_rtp_engine_t *v_engine, *a_engine;
+
+	if (!session) return SWITCH_FALSE;
+	if (!(smh = session->media_handle)) return SWITCH_FALSE;
+
+	v_engine = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
+	a_engine = &smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
+
+	if (!v_engine->bundled_with_audio) return SWITCH_FALSE;
+	if (!a_engine->rtp_session) return SWITCH_FALSE;
+	if (!switch_rtp_ready(a_engine->rtp_session)) return SWITCH_FALSE;
+
+	return SWITCH_TRUE;
+}
+
 SWITCH_DECLARE(switch_status_t) switch_core_session_write_video_frame(switch_core_session_t *session, switch_frame_t *frame, switch_io_flag_t flags,
 																	  int stream_id)
 {
@@ -19024,7 +19209,14 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_video_frame(switch_cor
 	}
 
 	if (!(switch_channel_test_flag(session->channel, CF_VIDEO_READY) || (flags & SWITCH_IO_FLAG_FORCE))) {
-		return SWITCH_STATUS_SUCCESS;
+		/* TEL-6738: On a BUNDLE leg, the shared transport (ICE+DTLS) is already up via
+		 * audio long before CF_VIDEO_READY flips. Dropping callee->Safari video for the
+		 * 10-20s gap that follows leaves the user staring at a black frame. If the video
+		 * engine is bundled_with_audio and the bundled audio RTP session is ready, treat
+		 * the transport as ready and allow the write. Non-BUNDLE sessions are unaffected. */
+		if (!switch_core_media_video_is_bundled(session)) {
+			return SWITCH_STATUS_SUCCESS;
+		}
 	}
 
 	v_engine = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
