@@ -3370,9 +3370,7 @@ static switch_status_t parse_recording_file_params(switch_core_session_t *sessio
 		return SWITCH_STATUS_SUCCESS;
 	}
 
-	if (!(file_params_data = switch_core_session_strdup(session, file))) {
-		return SWITCH_STATUS_MEMERR;
-	}
+	file_params_data = switch_core_session_strdup(session, file);
 
 	while (*file_params_data == '{') {
 		if (switch_event_create_brackets(file_params_data, '{', '}', ',', file_params, &file_params_path, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS || !file_params_path) {
@@ -3604,7 +3602,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 			while (!zstr(file_after_params) && *file_after_params == '{') {
 				file_param_end = switch_find_end_paren(file_after_params, '{', '}');
 				if (!file_param_end) {
-					break;
+					switch_goto_status(SWITCH_STATUS_FALSE, err);
 				}
 				file_after_params = file_param_end + 1;
 				while (*file_after_params == ' ') file_after_params++;
