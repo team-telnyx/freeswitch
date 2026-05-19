@@ -752,22 +752,47 @@ static void trickle_eoc_cleanup(const void *rtp)
 	}
 }
 
+static switch_bool_t ice_candidate_matches_addr(const icand_t *cand, const char *host, switch_port_t port)
+{
+	return cand && cand->con_addr && host && !strcmp(cand->con_addr, host) && cand->con_port == port;
+}
+
+static switch_bool_t ice_candidate_matches_host(const icand_t *cand, const char *host)
+{
+	return cand && cand->con_addr && host && !strcmp(cand->con_addr, host);
+}
+
+static switch_bool_t ice_candidate_is_relay(const icand_t *cand)
+{
+	return cand && cand->cand_type && !strcasecmp(cand->cand_type, "relay");
+}
+
+static const char *ice_candidate_addr_safe(const icand_t *cand)
+{
+	return (cand && cand->con_addr) ? cand->con_addr : "(null)";
+}
+
+static const char *ice_candidate_type_safe(const icand_t *cand)
+{
+	return (cand && cand->cand_type) ? cand->cand_type : "(unknown)";
+}
+
 static void switch_rtp_change_ice_dest(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, const char *host, switch_port_t port)
 {
 	int is_rtcp = ice == &rtp_session->rtcp_ice;
 	const char *err = "";
 	int i;
-	uint8_t ice_cand_found_idx = 0;
+	int ice_cand_found_idx = -1;
 
 	for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; ++i) {
-		if (!strcmp(host, ice->ice_params->cands[i][ice->proto].con_addr) && port == ice->ice_params->cands[i][ice->proto].con_port) {
+		if (ice_candidate_matches_addr(&ice->ice_params->cands[i][ice->proto], host, port)) {
 			ice_cand_found_idx = i;
 		}
 	}
 
-	if (!ice_cand_found_idx) {
+	if (ice_cand_found_idx < 0) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "ICE candidate [%s:%d] replaced with [%s:%d]\n",
-			ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, host, port);
+			ice_candidate_addr_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]), ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, host, port);
 		ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr = switch_core_strdup(rtp_session->pool, host);
 		ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port = port;
 	} else {
@@ -1250,7 +1275,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 			{
 				ice->rready = 1;
 				for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; ++i) {
-					if (!strcmp(ice->ice_params->cands[i][ice->proto].con_addr, from_host) && ice->ice_params->cands[i][ice->proto].con_port == from_port) {
+					if (ice_candidate_matches_addr(&ice->ice_params->cands[i][ice->proto], from_host, from_port)) {
 						ice->ice_params->cands[i][ice->proto].use_candidate = 1;
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG6, "Got USE-CANDIDATE on %s cand %s:%d\n", rtp_type(rtp_session), ice->ice_params->cands[i][ice->proto].con_addr, ice->ice_params->cands[i][ice->proto].con_port);
 					}
@@ -1374,11 +1399,11 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 
 			if (ice->ice_params) {
 				for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; i++) {
-					if (!strcmp(ice->ice_params->cands[i][ice->proto].con_addr, from_host) && ice->ice_params->cands[i][ice->proto].con_port == from_port) {
+					if (ice_candidate_matches_addr(&ice->ice_params->cands[i][ice->proto], from_host, from_port)) {
 						int is_relay = 0;
 
 						ice->ice_params->cands[i][ice->proto].responsive = 1;
-						if (!strcasecmp(ice->ice_params->cands[i][ice->proto].cand_type, "relay")) {
+						if (ice_candidate_is_relay(&ice->ice_params->cands[i][ice->proto])) {
 							is_relay = 1;
 						}
 
@@ -1413,7 +1438,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 							ice->last_ok = switch_micro_time_now();
 						}
 
-						if (!strcmp(ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr, from_host) && ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port == from_port) {
+						if (ice_candidate_matches_addr(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto], from_host, from_port)) {
 							ice->cand_responsive = 1;
 							ice->initializing = 0;
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "Chosen %s ICE candidate %s:%d is responsive (is_relay: %d)\n", rtp_type(rtp_session), ice->ice_params->cands[i][ice->proto].con_addr, ice->ice_params->cands[i][ice->proto].con_port, is_relay);
@@ -1586,8 +1611,8 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 			cmp = switch_cmp_addr(from_addr, ice->addr, SWITCH_FALSE);
 
 			for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; i++) {
-				if (!strcmp(ice->ice_params->cands[i][ice->proto].con_addr, from_host) && ice->ice_params->cands[i][ice->proto].con_port == from_port) {
-					if (!strcasecmp(ice->ice_params->cands[i][ice->proto].cand_type, "relay")) {
+				if (ice_candidate_matches_addr(&ice->ice_params->cands[i][ice->proto], from_host, from_port)) {
+					if (ice_candidate_is_relay(&ice->ice_params->cands[i][ice->proto])) {
 						is_relay = 1;
 					}
 
@@ -1608,7 +1633,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 				if (!rtp_session->adj_window && (!ice->ready || !ice->rready || (!rtp_session->dtls || rtp_session->dtls->state != DS_READY))) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s %s %s ICE set ADJUST window to 10 seconds on binding request from %s:%d (is_relay: %d, is_responsivie: %d, use_candidate: %d) Current cand: %s:%d typ: %s\n",
 									switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp", from_host, from_port, is_relay, is_responsive, use_candidate,
-									ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].cand_type);
+									ice_candidate_addr_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]), ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice_candidate_type_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]));
 
 					rtp_session->adj_window = now + 10000000;
 				}
@@ -1617,12 +1642,12 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 					if (rtp_session->adj_window > now) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s %s %s ICE check: %d >= 3000 or window closed and not from relay on binding request from %s:%d (is_relay: %d, is_responsive: %d, use_candidate: %d) Current cand: %s:%d typ: %s\n",
 										switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp", rtp_session->elapsed_stun, from_host, from_port, is_relay, is_responsive, use_candidate,
-										ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].cand_type);
+										ice_candidate_addr_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]), ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice_candidate_type_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]));
 
 						if (!is_relay && (rtp_session->elapsed_stun >= 3000 || rtp_session->adj_window == (now + 10000000))) {
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s %s %s ICE ADJUST HIT 1 on binding request from %s:%d (is_relay: %d, is_responsive: %d, use_candidate: %d) Current cand: %s:%d typ: %s\n",
 											switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp", from_host, from_port, is_relay, is_responsive, use_candidate,
-											ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].cand_type);
+											ice_candidate_addr_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]), ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice_candidate_type_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]));
 
 							do_adj++;
 							rtp_session->last_adj = now;
@@ -1634,7 +1659,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s %s %s ICE CHECK SAME IP DIFFT PORT %d %d on binding request from %s:%d (is_relay: %d, is_responsive: %d, use_candidate: %d) Current cand: %s:%d typ: %s\n",
 								switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp",ice->initializing, switch_cmp_addr(from_addr, ice->addr, SWITCH_TRUE), from_host, from_port, is_relay, is_responsive, use_candidate,
-								ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].cand_type);
+								ice_candidate_addr_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]), ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice_candidate_type_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]));
 
 				if (!do_adj && (switch_cmp_addr(from_addr, ice->addr, SWITCH_TRUE) || (use_candidate && !is_relay))) {
 					do_adj++;
@@ -1642,7 +1667,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s %s %s ICE ADJUST HIT 2 on binding request from %s:%d (is_relay: %d, is_responsive: %d, use_candidate: %d) Current cand: %s:%d typ: %s\n",
 									switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp", from_host, from_port, is_relay, is_responsive, use_candidate,
-									ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].cand_type);
+									ice_candidate_addr_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]), ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice_candidate_type_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]));
 				}
 			}
 
@@ -1653,20 +1678,20 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s %s %s ICE ADJUST ELAPSED vs 1000 %d on binding request from %s:%d (is_relay: %d, is_responsive: %d, use_candidate: %d) Current cand: %s:%d typ: %s\n",
 								switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp" ,rtp_session->elapsed_adj, from_host, from_port, is_relay, is_responsive, use_candidate,
-								ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].cand_type);
+								ice_candidate_addr_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]), ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice_candidate_type_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]));
 
 				if (rtp_session->elapsed_adj > 1000) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s %s %s ICE IF DTLS NOT READY or %d >= 3000 or media too long %d or stun too long %d on binding request from %s:%d (is_relay: %d, is_responsive: %d, use_candidate: %d) Current cand: %s:%d typ: %s\n",
 									switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp", rtp_session->elapsed_stun, rtp_session->elapsed_media >= MEDIA_TOO_LONG,
 									rtp_session->elapsed_stun >= STUN_TOO_LONG, from_host, from_port, is_relay, is_responsive, use_candidate,
-									ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].cand_type);
+									ice_candidate_addr_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]), ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice_candidate_type_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]));
 
 					if (!is_relay && ((rtp_session->dtls && rtp_session->dtls->state != DS_READY) ||
 						((!ice->ready || !ice->rready) && (rtp_session->elapsed_stun >= 3000 || switch_cmp_addr(from_addr, ice->addr, SWITCH_TRUE))))) {
 
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s %s %s ICE ADJUST HIT 3 on binding request from %s:%d (is_relay: %d, is_responsive: %d, use_candidate: %d) Current cand: %s:%d typ: %s\n",
 										switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp", from_host, from_port, is_relay, is_responsive, use_candidate,
-										ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].cand_type);
+										ice_candidate_addr_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]), ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice_candidate_type_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]));
 
 						do_adj++;
 						rtp_session->last_adj = now;
@@ -1674,7 +1699,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s %s %s ICE ADJUST HIT 4 (FLIP TO TURN) on binding request from %s:%d (is_relay: %d, is_responsive: %d, use_candidate: %d) Current cand: %s:%d typ: %s\n",
 										switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp", from_host, from_port, is_relay, is_responsive, use_candidate,
-										ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].cand_type);
+										ice_candidate_addr_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]), ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice_candidate_type_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]));
 
 						do_adj++;
 						rtp_session->last_adj = now;
@@ -1683,14 +1708,14 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s %s %s ICE ADJUST HIT 5 on binding request from %s:%d (is_relay: %d, is_responsive: %d, use_candidate: %d) Current cand: %s:%d typ: %s\n",
 										switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp", from_host, from_port, is_relay, is_responsive, use_candidate,
-										ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].cand_type);
+										ice_candidate_addr_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]), ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice_candidate_type_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]));
 
 						do_adj++;
 						rtp_session->last_adj = now;
 					}
 
 					for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; i++) {
-						if (!strcmp(ice->ice_params->cands[i][ice->proto].con_addr, from_host)) {
+						if (ice_candidate_matches_host(&ice->ice_params->cands[i][ice->proto], from_host)) {
 							cur_idx = i;
 						}
 					}
