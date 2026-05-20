@@ -511,7 +511,6 @@ SWITCH_DECLARE(int) switch_core_media_trickle_accept(switch_core_session_t *sess
 
 SWITCH_DECLARE(switch_bool_t) switch_rtp_trickle_is_registered(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(void) switch_rtp_trickle_emit_local_candidate(switch_rtp_t *rtp_session, const switch_rtp_ice_cand_t *cand, const char *mid, int mline_index, int end_of_candidates);
-SWITCH_DECLARE(void) switch_rtp_set_ice_role(switch_rtp_t *rtp_session, switch_bool_t controlling);
 SWITCH_DECLARE(void) switch_rtp_dtls_init_once(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(switch_status_t) switch_rtp_extmap_register(switch_rtp_t *rtp_session, uint8_t id, const char *uri);
 SWITCH_DECLARE(void) switch_rtp_mark_ice_connectivity_failed(switch_rtp_t *rtp_session, const char *reason);

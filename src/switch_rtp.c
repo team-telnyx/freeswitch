@@ -11652,21 +11652,6 @@ SWITCH_DECLARE(void) switch_rtp_trickle_emit_local_candidate(switch_rtp_t *rtp_s
 	}
 }
 
-SWITCH_DECLARE(void) switch_rtp_set_ice_role(switch_rtp_t *rtp_session, switch_bool_t controlling)
-{
-#ifdef SWITCH_HAVE_ICE
-	if (!rtp_session || !rtp_session->ice.ice_params) return;
-	rtp_session->ice.ice_params->controlling = controlling ? 1 : 0;
-	if (!rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX] && rtp_session->rtcp_ice.ice_params) {
-		rtp_session->rtcp_ice.ice_params->controlling = controlling ? 1 : 0;
-	}
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-	                  "ICE role set to %s\n", controlling ? "controlling" : "controlled");
-#else
-	(void)rtp_session; (void)controlling;
-#endif
-}
-
 SWITCH_DECLARE(switch_status_t) switch_rtp_extmap_register(switch_rtp_t *rtp_session, uint8_t id, const char *uri)
 {
 #ifdef SWITCH_HAVE_RTP
