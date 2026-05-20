@@ -4994,7 +4994,10 @@ static switch_call_direction_t switch_ice_direction(switch_rtp_engine_t *engine,
 		r = (r == SWITCH_CALL_DIRECTION_INBOUND) ? SWITCH_CALL_DIRECTION_OUTBOUND : SWITCH_CALL_DIRECTION_INBOUND;
 	}
 
-	if (switch_rtp_has_dtls() && dtls_ok(smh->session)) {
+	/* Gate DTLS controller-role on CF_DTLS (set when a=fingerprint is parsed);
+	 * CF_DTLS_OK alone is always-on and misleading for non-DTLS sessions. */
+	if (switch_rtp_has_dtls() && dtls_ok(smh->session)
+	    && switch_channel_test_flag(session->channel, CF_DTLS)) {
 		if (switch_channel_test_flag(session->channel, CF_OBSERVE_INITIATOR)) {
 			r = engine->ice_remote_initiator ? SWITCH_CALL_DIRECTION_INBOUND : SWITCH_CALL_DIRECTION_OUTBOUND;
 		} else {
@@ -5012,6 +5015,7 @@ static switch_call_direction_t switch_ice_direction(switch_rtp_engine_t *engine,
 
 static switch_core_media_ice_type_t switch_determine_ice_type(switch_rtp_engine_t *engine, switch_core_session_t *session) {
 	switch_core_media_ice_type_t ice_type = ICE_VANILLA;
+	const char *role_override = NULL;
 
 	if (switch_channel_var_true(session->channel, "ice_lite")) {
 		ice_type |= ICE_CONTROLLED;
@@ -5023,6 +5027,25 @@ static switch_core_media_ice_type_t switch_determine_ice_type(switch_rtp_engine_
 		if (direction == SWITCH_CALL_DIRECTION_INBOUND) {
 			ice_type |= ICE_CONTROLLED;
 		}
+	}
+
+	/* Dialplan override (rtp_ice_role=controlling|controlled). Skipped for ICE-lite
+	 * peers: a lite peer cannot run checks or nominate, FS must stay controlling. */
+	role_override = switch_channel_get_variable(session->channel, "rtp_ice_role");
+	if (!zstr(role_override) && !(ice_type & (ICE_LITE | ICE_LITE_INBOUND))) {
+		if (!strcasecmp(role_override, "controlled")) {
+			ice_type |= ICE_CONTROLLED;
+		} else if (!strcasecmp(role_override, "controlling")) {
+			ice_type &= ~ICE_CONTROLLED;
+		} else {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+			                  "Ignoring invalid rtp_ice_role=%s (expected 'controlling' or 'controlled')\n",
+			                  role_override);
+		}
+	} else if (!zstr(role_override)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+		                  "Ignoring rtp_ice_role=%s: ICE-lite forces FS to remain controlling\n",
+		                  role_override);
 	}
 
 	return ice_type;
@@ -11132,16 +11155,6 @@ static void gen_ice(switch_core_session_t *session, switch_media_type_t type, co
 	engine->ice_out.cands[0][0].generation = "0";
 
 	engine->ice_out.cands[0][0].ready = 1;
-
-	/* Dynamic ICE role: offerer is controlling unless remote is ice-lite; allow override via var "rtp_ice_role" */
-	{
-		const char *role_override = switch_channel_get_variable(session->channel, "rtp_ice_role");
-		switch_bool_t controlling = SWITCH_TRUE;
-		if (role_override) {
-			controlling = !strcasecmp(role_override, "controlling") ? SWITCH_TRUE : SWITCH_FALSE;
-		}
-		switch_rtp_set_ice_role(engine->rtp_session, controlling);
-	}
 
 	if (engine->rtp_session && switch_core_media_trickle_enabled(session) && switch_rtp_trickle_is_registered(engine->rtp_session)) {
 		switch_rtp_ice_cand_t cand;
