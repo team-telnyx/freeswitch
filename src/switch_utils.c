@@ -2689,6 +2689,7 @@ static char *cleanup_separated_string(char *str, char delim)
 	char *start;
 	char *end = NULL;
 	int inside_quotes = 0;
+	int inside_dquotes = 0;
 
 	/* Skip initial whitespace */
 	for (ptr = str; *ptr == ' '; ++ptr) {
@@ -2708,7 +2709,13 @@ static char *cleanup_separated_string(char *str, char delim)
 			}
 		}
 		if (!esc) {
-			if (*ptr == '\'' && (inside_quotes || strchr(ptr+1, '\''))) {
+			if (*ptr == '"' && !inside_quotes && (inside_dquotes || strchr(ptr + 1, '"'))) {
+				inside_dquotes = (1 - inside_dquotes);
+				*dest++ = *ptr;
+				if (*ptr != ' ') {
+					end = dest;
+				}
+			} else if (*ptr == '\'' && !inside_dquotes && (inside_quotes || strchr(ptr+1, '\''))) {
 				if ((inside_quotes = (1 - inside_quotes))) {
 					end = dest;
 				}
@@ -2758,6 +2765,7 @@ static unsigned int separate_string_char_delim(char *buf, char delim, char **arr
 	unsigned int count = 0;
 	char *ptr = buf;
 	int inside_quotes = 0;
+	int inside_dquotes = 0;
 	unsigned int i;
 
 	while (*ptr && count < arraylen) {
@@ -2771,9 +2779,11 @@ static unsigned int separate_string_char_delim(char *buf, char delim, char **arr
 			/* escaped characters are copied verbatim to the destination string */
 			if (*ptr == ESCAPE_META) {
 				++ptr;
-			} else if (*ptr == '\'' && (inside_quotes || strchr(ptr+1, '\''))) {
+			} else if (*ptr == '"' && !inside_quotes && (inside_dquotes || strchr(ptr + 1, '"'))) {
+				inside_dquotes = (1 - inside_dquotes);
+			} else if (*ptr == '\'' && !inside_dquotes && (inside_quotes || strchr(ptr+1, '\''))) {
 				inside_quotes = (1 - inside_quotes);
-			} else if (*ptr == delim && !inside_quotes) {
+			} else if (*ptr == delim && !inside_quotes && !inside_dquotes) {
 				*ptr = '\0';
 				state = START;
 			}
