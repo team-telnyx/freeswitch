@@ -33,6 +33,7 @@
 #include <test/switch_test.h>
 
 int protect_dest_uri(switch_caller_profile_t *cp);
+char *sofia_glue_sanitize_display_name(char *name);
 
 static int timeout_sec = 10;
 static switch_interval_time_t delay_start_ms = 5000;
@@ -55,6 +56,64 @@ FST_TEARDOWN_BEGIN()
 {
 }
 FST_TEARDOWN_END()
+
+FST_TEST_BEGIN(test_sanitize_display_name)
+{
+	char buf[128];
+	char *result;
+
+	/* Clean input passes through unchanged. */
+	switch_copy_string(buf, "Alice", sizeof(buf));
+	result = sofia_glue_sanitize_display_name(buf);
+	fst_check_string_equals(result, "Alice");
+
+	/* Trailing backslash runs of length 1/2/3 (odd strips, even keeps). */
+	switch_copy_string(buf, "Sami\\", sizeof(buf));
+	result = sofia_glue_sanitize_display_name(buf);
+	fst_check_string_equals(result, "Sami");
+
+	switch_copy_string(buf, "Sami\\\\", sizeof(buf));
+	result = sofia_glue_sanitize_display_name(buf);
+	fst_check_string_equals(result, "Sami\\\\");
+
+	switch_copy_string(buf, "Sami\\\\\\", sizeof(buf));
+	result = sofia_glue_sanitize_display_name(buf);
+	fst_check_string_equals(result, "Sami\\\\");
+
+	/* Customer-reported wire shape "Sami\ ": lone '\<space>' neutralized. */
+	switch_copy_string(buf, "Sami\\ ", sizeof(buf));
+	result = sofia_glue_sanitize_display_name(buf);
+	fst_check_string_equals(result, "Sami  ");
+
+	/* Raw '"' neutralized; valid '\"' / '\\' quoted-pairs left intact. */
+	switch_copy_string(buf, "Bob\"Smith", sizeof(buf));
+	result = sofia_glue_sanitize_display_name(buf);
+	fst_check_string_equals(result, "Bob Smith");
+
+	switch_copy_string(buf, "foo\\\"bar", sizeof(buf));
+	result = sofia_glue_sanitize_display_name(buf);
+	fst_check_string_equals(result, "foo\\\"bar");
+
+	switch_copy_string(buf, "foo\\\\bar", sizeof(buf));
+	result = sofia_glue_sanitize_display_name(buf);
+	fst_check_string_equals(result, "foo\\\\bar");
+
+	/* Stray '\X' is neutralized (sofia-strict, stricter than RFC 3261). */
+	switch_copy_string(buf, "Joe\\,Bloggs", sizeof(buf));
+	result = sofia_glue_sanitize_display_name(buf);
+	fst_check_string_equals(result, "Joe ,Bloggs");
+
+	switch_copy_string(buf, "a\"b\"c", sizeof(buf));
+	result = sofia_glue_sanitize_display_name(buf);
+	fst_check_string_equals(result, "a b c");
+
+	/* NULL / empty are no-ops. */
+	fst_check(sofia_glue_sanitize_display_name(NULL) == NULL);
+	switch_copy_string(buf, "", sizeof(buf));
+	result = sofia_glue_sanitize_display_name(buf);
+	fst_check_string_equals(result, "");
+}
+FST_TEST_END()
 
 FST_TEST_BEGIN(test_protect_url)
 {

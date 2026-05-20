@@ -12519,6 +12519,10 @@ void sofia_handle_sip_i_invite(switch_core_session_t *session, nua_t *nua, sofia
 
 
 	check_decode(displayname, session);
+	/* Sanitize inbound display-name to protect outbound nua_handle(). */
+	if (!zstr(displayname)) {
+		displayname = sofia_glue_sanitize_display_name(switch_core_session_strdup(session, displayname));
+	}
 
 	profile_dup_clean(from_user, tech_pvt->caller_profile->username, tech_pvt->caller_profile->pool);
 	profile_dup_clean(dialplan, tech_pvt->caller_profile->dialplan, tech_pvt->caller_profile->pool);
