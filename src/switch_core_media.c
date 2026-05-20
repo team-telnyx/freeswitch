@@ -11739,7 +11739,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 				}
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
 								  "Activating RTCP for ICE (no send interval) PORT %d\n", rtcp_port);
-				switch_rtp_activate_rtcp(a_engine->rtp_session, 0, rtcp_port, a_engine->rtcp_mux > 0);
+				if (switch_rtp_activate_rtcp(a_engine->rtp_session, 0, rtcp_port, a_engine->rtcp_mux > 0) != SWITCH_STATUS_SUCCESS) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+									  "Failed to activate RTCP socket for ICE, skipping RTCP ICE\n");
+					goto skip_audio_rtcp_ice;
+				}
 			}
 
 			if (a_engine->rtcp_mux > 0 &&
@@ -11765,6 +11769,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 									);
 			}
 		}
+
+		skip_audio_rtcp_ice:
 
 		if (!zstr(a_engine->local_dtls_fingerprint.str) && switch_rtp_has_dtls() && dtls_ok(smh->session)) {
 			dtls_type_t xtype, dtype = a_engine->dtls_controller ? DTLS_TYPE_CLIENT : DTLS_TYPE_SERVER;
@@ -12122,7 +12128,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 						}
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
 										  "Activating TEXT RTCP for ICE (no send interval) PORT %d\n", rtcp_port);
-						switch_rtp_activate_rtcp(t_engine->rtp_session, 0, rtcp_port, t_engine->rtcp_mux > 0);
+						if (switch_rtp_activate_rtcp(t_engine->rtp_session, 0, rtcp_port, t_engine->rtcp_mux > 0) != SWITCH_STATUS_SUCCESS) {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+										  "Failed to activate TEXT RTCP socket for ICE, skipping TEXT RTCP ICE\n");
+							goto skip_text_rtcp_ice;
+						}
 					}
 
 					if (t_engine->rtcp_mux > 0 && !strcmp(t_engine->ice_in.cands[t_engine->ice_in.chosen[1]][1].con_addr,
@@ -12147,6 +12157,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 												);
 					}
 				}
+
+				skip_text_rtcp_ice:
 
 				if (!zstr(t_engine->local_dtls_fingerprint.str) && switch_rtp_has_dtls() && dtls_ok(smh->session)) {
 					dtls_type_t xtype,
@@ -12473,7 +12485,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 						}
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
 										  "Activating VIDEO RTCP for ICE (no send interval) PORT %d\n", rtcp_port);
-						switch_rtp_activate_rtcp(v_engine->rtp_session, 0, rtcp_port, v_engine->rtcp_mux > 0);
+						if (switch_rtp_activate_rtcp(v_engine->rtp_session, 0, rtcp_port, v_engine->rtcp_mux > 0) != SWITCH_STATUS_SUCCESS) {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+										  "Failed to activate VIDEO RTCP socket for ICE, skipping VIDEO RTCP ICE\n");
+							goto skip_video_rtcp_ice;
+						}
 					}
 
 					if (v_engine->rtcp_mux > 0 && !strcmp(v_engine->ice_in.cands[v_engine->ice_in.chosen[1]][1].con_addr, v_engine->ice_in.cands[v_engine->ice_in.chosen[0]][0].con_addr)
@@ -12497,6 +12513,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 												);
 					}
 				}
+
+				skip_video_rtcp_ice:
 
 				if (!zstr(v_engine->local_dtls_fingerprint.str) && switch_rtp_has_dtls() && dtls_ok(smh->session)) {
 					dtls_type_t xtype,
