@@ -159,6 +159,52 @@ static void test_reload_clears_previous_list(void)
 		"reload: uuid_transfer throttled after reset");
 }
 
+/* Regression for the do_config() boundary: do_config() only calls the
+ * setters for params that are present and non-empty, so it now resets
+ * helper state up front. This mimics that sequence — a reload where
+ * throttle-api / throttle-on-idle-cpu have been emptied or removed must
+ * end with throttling fully disabled, not with the previous state stuck. */
+static void test_config_reload_to_empty_disables_throttle(void)
+{
+	reset_state();
+
+	/* Initial config load: throttle active. */
+	set_throttled_api_calls("bgapi originate uuid_transfer");
+	set_min_idle_cpu_watermark("10");
+	g_idle_cpu = 1.0;
+	CHECK(is_resource_available("originate", "sofia/foo") == SWITCH_FALSE,
+		"config_reload: throttle active after first load");
+
+	/* Reload with the throttle params removed: do_config() resets helper
+	 * state, and since the params are absent the setters are not called
+	 * again. Modelled here as the bare reset do_config() performs. */
+	set_throttled_api_calls(NULL);
+	set_min_idle_cpu_watermark("0");
+	CHECK(is_resource_available("originate", "sofia/foo") == SWITCH_TRUE,
+		"config_reload: direct call no longer throttled after params removed");
+	CHECK(is_resource_available("bgapi", "originate x") == SWITCH_TRUE,
+		"config_reload: bgapi indirection no longer throttled after params removed");
+}
+
+/* Same boundary, but the reload supplies an explicitly empty throttle-api
+ * value (throttle-api=""). do_config() skips the empty param, so only the
+ * up-front reset clears the prior list. */
+static void test_config_reload_to_empty_string_disables_throttle(void)
+{
+	reset_state();
+	set_throttled_api_calls("originate");
+	set_min_idle_cpu_watermark("10");
+	g_idle_cpu = 1.0;
+	CHECK(is_resource_available("originate", "sofia/foo") == SWITCH_FALSE,
+		"config_reload_empty: throttle active after first load");
+
+	set_throttled_api_calls(NULL);
+	set_min_idle_cpu_watermark("0");
+	set_throttled_api_calls("");
+	CHECK(is_resource_available("originate", "sofia/foo") == SWITCH_TRUE,
+		"config_reload_empty: throttle disabled after empty throttle-api");
+}
+
 /* Defensive: set_throttled_api_calls must not crash on NULL/empty. */
 static void test_set_throttled_handles_null_and_empty(void)
 {
@@ -225,6 +271,8 @@ int main(void)
 		{"unlisted_cmd_allowed_even_when_idle_low",    test_unlisted_cmd_allowed_even_when_idle_low},
 		{"bgapi_subcmd_lookup",                        test_bgapi_subcmd_lookup},
 		{"reload_clears_previous_list",                test_reload_clears_previous_list},
+		{"config_reload_to_empty_disables_throttle",   test_config_reload_to_empty_disables_throttle},
+		{"config_reload_to_empty_string_disables_throttle", test_config_reload_to_empty_string_disables_throttle},
 		{"set_throttled_handles_null_and_empty",       test_set_throttled_handles_null_and_empty},
 		{"whitespace_tokenization",                    test_whitespace_tokenization},
 		{"idle_exactly_at_watermark_allowed",          test_idle_exactly_at_watermark_allowed},
