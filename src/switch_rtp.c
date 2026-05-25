@@ -5529,9 +5529,12 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_create(switch_rtp_t **new_rtp_session
 	}
 
 
-	if (channel) {
-		switch_channel_set_private(channel, "__rtcp_audio_rtp_session", rtp_session);
-	}
+	/* The "__rtcp_audio_rtp_session" private pointer is published by
+	 * switch_rtp_new once setup completes successfully. Doing it here
+	 * would leave a dangling pointer in the channel if any subsequent
+	 * step in switch_rtp_new (set_local_address / set_remote_address)
+	 * fails, since the rtp_session lives in the session pool that the
+	 * caller will then tear down. */
 
 
 	/* Jitter */
@@ -5727,6 +5730,16 @@ SWITCH_DECLARE(switch_rtp_t *) switch_rtp_new(const char *rx_host,
 		rtp_session->rx_port = rx_port;
 		switch_rtp_set_flag(rtp_session, SWITCH_RTP_FLAG_FLUSH);
 		switch_rtp_set_flag(rtp_session, SWITCH_RTP_FLAG_DETECT_SSRC);
+
+		/* Publish on the channel only once setup has fully succeeded.
+		 * Readers (e.g. RTCP relay on the partner leg) rely on this key
+		 * pointing to a live rtp_session whose pool is still owned. */
+		if (rtp_session->session) {
+			switch_channel_t *channel = switch_core_session_get_channel(rtp_session->session);
+			if (channel) {
+				switch_channel_set_private(channel, "__rtcp_audio_rtp_session", rtp_session);
+			}
+		}
 	} else {
 		switch_rtp_release_port(rx_host, rx_port);
 	}
