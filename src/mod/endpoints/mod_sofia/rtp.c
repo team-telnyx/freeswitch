@@ -327,9 +327,12 @@ static switch_rtp_t *create_rtp_session_with_bind_retry(crtp_private_t *tech_pvt
         /* switch_rtp_new released tech_pvt->local_port back to the
          * allocator before returning NULL -- do not release it again. */
 
+        /* Match the full known error prefixes including the trailing '!'
+         * so a future error message that happens to start with "Bind
+         * Error" (e.g. "Bind ErrorValidation") is not silently retried. */
         if (!*err
-            || (strncmp(*err, "Bind Error", 10) != 0
-                && strncmp(*err, "RTCP Bind Error", 15) != 0)
+            || (strncmp(*err, "Bind Error!", 11) != 0
+                && strncmp(*err, "RTCP Bind Error!", 16) != 0)
             || retry_count >= max_bind_retries) {
             return NULL;
         }
@@ -371,7 +374,7 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
     switch_caller_profile_t *caller_profile;
     switch_rtp_flag_t rtp_flags[SWITCH_RTP_FLAG_INVALID] = {0};
 
-    const char *err;
+    const char *err = NULL;
 
 
     const char  *local_addr = switch_event_get_header_nil(var_event, kLOCALADDR),
@@ -512,6 +515,11 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
         switch_channel_set_variable(channel, "local_media_port", NULL);
         goto fail;
     }
+    /* The helper may have migrated tech_pvt->local_port to a different
+     * port after a retry; keep the stack `local_port` in sync so any
+     * future fail-branch using `local_port` does not act on the
+     * already-released original. */
+    local_port = tech_pvt->local_port;
 
     if (switch_core_session_thread_launch(*new_session) != SWITCH_STATUS_SUCCESS) {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Couldn't start session thread.\n");
