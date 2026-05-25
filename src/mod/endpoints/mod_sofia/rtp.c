@@ -294,14 +294,21 @@ static switch_rtp_t *create_rtp_session_with_bind_retry(crtp_private_t *tech_pvt
     const char *var;
 
     var = switch_channel_get_variable(channel, "rtp_bind_max_retries");
-    if (!zstr(var) && switch_is_number(var)) {
-        int v = atoi(var);
-        if (v >= 0 && v <= 10) {
-            max_bind_retries = v;
-        } else {
+    if (!zstr(var)) {
+        char *end = NULL;
+        long v;
+        errno = 0;
+        v = strtol(var, &end, 10);
+        if (errno != 0 || end == var || *end != '\0') {
             switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-                              "rtp_bind_max_retries=%d out of range [0,10], using default %d\n",
+                              "rtp_bind_max_retries='%s' is not a valid integer, using default %d\n",
+                              var, max_bind_retries);
+        } else if (v < 0 || v > 10) {
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                              "rtp_bind_max_retries=%ld out of range [0,10], using default %d\n",
                               v, max_bind_retries);
+        } else {
+            max_bind_retries = (int)v;
         }
     }
 
@@ -338,7 +345,10 @@ static switch_rtp_t *create_rtp_session_with_bind_retry(crtp_private_t *tech_pvt
             if (new_port == 0) {
                 /* Previous iteration's port was already released by
                  * switch_rtp_new; no new port was obtained here, so
-                 * nothing to release. */
+                 * nothing to release. Overwrite *err so the caller's
+                 * log reflects the real reason for giving up instead
+                 * of the previous iteration's bind error. */
+                *err = "Port allocator exhausted during bind retry";
                 switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
                                   "RTP bind retry: port allocator returned no free port\n");
                 return NULL;
@@ -496,6 +506,10 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
          * clear the cached value so channel_on_destroy does not call
          * switch_rtp_release_port a second time. */
         tech_pvt->local_port = 0;
+        /* The helper may have updated "local_media_port" to the last
+         * (failed) retry port; unset it so downstream consumers / events
+         * / CDR do not see a port that this session never owned. */
+        switch_channel_set_variable(channel, "local_media_port", NULL);
         goto fail;
     }
 
