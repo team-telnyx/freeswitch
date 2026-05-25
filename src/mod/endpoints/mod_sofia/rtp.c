@@ -397,6 +397,11 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 												 tech_pvt->read_codec.implementation->samples_per_packet, ptime * 1000,
 												 rtp_flags, "soft", &err, switch_core_session_get_pool(*new_session)))) {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Couldn't setup RTP session: [%s]\n", err);
+        /* switch_rtp_new already released the port internally on failure.
+         * Clear the cached value so channel_on_destroy (reached via the
+         * fail -> switch_core_session_destroy path below) does not call
+         * switch_rtp_release_port a second time. */
+        tech_pvt->local_port = 0;
         goto fail;
     }
 
