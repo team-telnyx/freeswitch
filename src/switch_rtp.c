@@ -5596,10 +5596,11 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_create(switch_rtp_t **new_rtp_session
 
 	rtp_session->ready = 1;
 	*new_rtp_session = rtp_session;
-	
-	if (create_probe){
-		create_probe(rtp_session, channel);
-	}
+
+	/* The homer RTCP probe (if registered) is created by switch_rtp_new
+	 * once setup completes successfully, not here. Creating it before
+	 * set_local_address / set_remote_address would register a probe on a
+	 * session that switch_rtp_new abandons on a failed bind/retry. */
 
 	return SWITCH_STATUS_SUCCESS;
 }
@@ -5738,6 +5739,14 @@ SWITCH_DECLARE(switch_rtp_t *) switch_rtp_new(const char *rx_host,
 			switch_channel_t *channel = switch_core_session_get_channel(rtp_session->session);
 			if (channel) {
 				switch_channel_set_private(channel, "__rtcp_audio_rtp_session", rtp_session);
+
+				/* Register the homer RTCP probe (if any) now that setup has
+				 * succeeded, rather than in switch_rtp_create before the
+				 * bind: keeps probe registration off sessions abandoned on a
+				 * failed bind/retry, symmetric with the publish above. */
+				if (create_probe) {
+					create_probe(rtp_session, channel);
+				}
 			}
 		}
 	} else {
