@@ -5827,6 +5827,12 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 				}
 			}
 
+			/* Trickle-recheck can race the SDP-answer path; ensure local ufrag/pwd
+			   exist before activating ICE so outbound STUN is signed correctly. */
+			if (zstr(engine->ice_out.ufrag) || zstr(engine->ice_out.pwd)) {
+				gen_ice(smh->session, type, NULL, 0);
+			}
+
 			switch_rtp_activate_ice(engine->rtp_session,
 									engine->ice_in.ufrag,
 									engine->ice_out.ufrag,
