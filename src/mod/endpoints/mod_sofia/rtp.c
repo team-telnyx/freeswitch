@@ -253,6 +253,115 @@ void crtp_init(switch_loadable_module_interface_t *mod_interface)
 
 }
 
+/* Create the RTP session for a crtp leg, retrying with a freshly allocated
+ * port on transient bind failures.
+ *
+ * The underlying problem is a timing race rather than real port exhaustion:
+ * when a previous session's pool has not yet been collected, its bound UDP
+ * socket can outlive the release of its port back to the allocator, and
+ * the next caller that picks the same port hits EADDRINUSE. Requesting a
+ * different port and trying again is usually enough to escape the conflict.
+ *
+ * Only retries on bind-specific failures ("Bind Error" / "RTCP Bind Error"
+ * from switch_rtp_set_local_address / enable_local_rtcp_socket) -- other
+ * failures (missing args, socket create errors, etc.) are terminal and
+ * surfaced immediately.
+ *
+ * Port lifecycle: switch_rtp_new always disposes of the port it was given
+ * -- on success the new rtp_session owns it (and switch_rtp_destroy will
+ * release it later); on failure switch_rtp_new calls
+ * switch_rtp_release_port itself before returning NULL. This helper
+ * therefore never needs to release a port on its own NULL-return paths,
+ * and the caller must not release tech_pvt->local_port either (clearing
+ * tech_pvt->local_port to 0 is the right pattern to keep
+ * channel_on_destroy from double-releasing).
+ *
+ * Returns the new rtp_session on success (with tech_pvt->local_port
+ * reflecting the actually-bound port -- it may have been updated mid-way
+ * if a retry was needed). Returns NULL on failure with *err set.
+ *
+ * Retry budget defaults to 3. Override per call via the
+ * "rtp_bind_max_retries" channel variable (0..10).
+ */
+static switch_rtp_t *create_rtp_session_with_bind_retry(crtp_private_t *tech_pvt,
+                                                        switch_rtp_flag_t flags[SWITCH_RTP_FLAG_INVALID],
+                                                        const char **err)
+{
+    switch_channel_t *channel = tech_pvt->channel;
+    switch_rtp_t *rtp_session = NULL;
+    int max_bind_retries = 3;
+    int retry_count = 0;
+    const char *var;
+
+    var = switch_channel_get_variable(channel, "rtp_bind_max_retries");
+    if (!zstr(var)) {
+        char *end = NULL;
+        long v;
+        errno = 0;
+        v = strtol(var, &end, 10);
+        if (errno != 0 || end == var || *end != '\0') {
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                              "rtp_bind_max_retries='%s' is not a valid integer, using default %d\n",
+                              var, max_bind_retries);
+        } else if (v < 0 || v > 10) {
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                              "rtp_bind_max_retries=%ld out of range [0,10], using default %d\n",
+                              v, max_bind_retries);
+        } else {
+            max_bind_retries = (int)v;
+        }
+    }
+
+    for (;;) {
+        rtp_session = switch_rtp_new(tech_pvt->local_address, tech_pvt->local_port,
+                                     tech_pvt->remote_address, tech_pvt->remote_port,
+                                     tech_pvt->agreed_pt,
+                                     tech_pvt->read_codec.implementation->samples_per_packet,
+                                     tech_pvt->ptime * 1000,
+                                     flags, "soft", err,
+                                     switch_core_session_get_pool(tech_pvt->session));
+        if (rtp_session) {
+            return rtp_session;
+        }
+
+        /* switch_rtp_new released tech_pvt->local_port back to the
+         * allocator before returning NULL -- do not release it again. */
+
+        /* Match the full known error prefixes including the trailing '!'
+         * so a future error message that happens to start with "Bind
+         * Error" (e.g. "Bind ErrorValidation") is not silently retried. */
+        if (!*err
+            || (strncmp(*err, "Bind Error!", 11) != 0
+                && strncmp(*err, "RTCP Bind Error!", 16) != 0)
+            || retry_count >= max_bind_retries) {
+            return NULL;
+        }
+
+        retry_count++;
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                          "RTP bind failure on %s:%d [%s], retrying with fresh port (attempt %d/%d)\n",
+                          tech_pvt->local_address, tech_pvt->local_port, *err,
+                          retry_count, max_bind_retries);
+
+        {
+            switch_port_t new_port = switch_rtp_request_port(tech_pvt->local_address);
+            if (new_port == 0) {
+                /* Previous iteration's port was already released by
+                 * switch_rtp_new; no new port was obtained here, so
+                 * nothing to release. Overwrite *err so the caller's
+                 * log reflects the real reason for giving up instead
+                 * of the previous iteration's bind error. */
+                *err = "Port allocator exhausted during bind retry";
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+                                  "RTP bind retry: port allocator returned no free port\n");
+                return NULL;
+            }
+            tech_pvt->local_port = new_port;
+            switch_channel_set_variable_printf(channel, "local_media_port", "%d", new_port);
+        }
+    }
+}
+
 static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *session, switch_event_t *var_event,
 													switch_caller_profile_t *outbound_profile,
 													switch_core_session_t **new_session,
@@ -265,7 +374,7 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
     switch_caller_profile_t *caller_profile;
     switch_rtp_flag_t rtp_flags[SWITCH_RTP_FLAG_INVALID] = {0};
 
-    const char *err;
+    const char *err = NULL;
 
 
     const char  *local_addr = switch_event_get_header_nil(var_event, kLOCALADDR),
@@ -393,12 +502,24 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
     switch_channel_set_variable(channel, "local_media_ip", local_addr);
     switch_channel_set_variable_printf(channel, "local_media_port", "%d", local_port);
 
-    if (!(tech_pvt->rtp_session = switch_rtp_new(local_addr, local_port, remote_addr, remote_port, tech_pvt->agreed_pt,
-												 tech_pvt->read_codec.implementation->samples_per_packet, ptime * 1000,
-												 rtp_flags, "soft", &err, switch_core_session_get_pool(*new_session)))) {
+    if (!(tech_pvt->rtp_session = create_rtp_session_with_bind_retry(tech_pvt, rtp_flags, &err))) {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Couldn't setup RTP session: [%s]\n", err);
+        /* The helper has already released (via switch_rtp_new) every port
+         * it tried and never allocated a replacement on the failure path;
+         * clear the cached value so channel_on_destroy does not call
+         * switch_rtp_release_port a second time. */
+        tech_pvt->local_port = 0;
+        /* The helper may have updated "local_media_port" to the last
+         * (failed) retry port; unset it so downstream consumers / events
+         * / CDR do not see a port that this session never owned. */
+        switch_channel_set_variable(channel, "local_media_port", NULL);
         goto fail;
     }
+    /* The helper may have migrated tech_pvt->local_port to a different
+     * port after a retry; keep the stack `local_port` in sync so any
+     * future fail-branch using `local_port` does not act on the
+     * already-released original. */
+    local_port = tech_pvt->local_port;
 
     if (switch_core_session_thread_launch(*new_session) != SWITCH_STATUS_SUCCESS) {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Couldn't start session thread.\n");

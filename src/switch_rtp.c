@@ -5529,9 +5529,12 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_create(switch_rtp_t **new_rtp_session
 	}
 
 
-	if (channel) {
-		switch_channel_set_private(channel, "__rtcp_audio_rtp_session", rtp_session);
-	}
+	/* The "__rtcp_audio_rtp_session" private pointer is published by
+	 * switch_rtp_new once setup completes successfully. Doing it here
+	 * would leave a dangling pointer in the channel if any subsequent
+	 * step in switch_rtp_new (set_local_address / set_remote_address)
+	 * fails, since the rtp_session lives in the session pool that the
+	 * caller will then tear down. */
 
 
 	/* Jitter */
@@ -5593,12 +5596,62 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_create(switch_rtp_t **new_rtp_session
 
 	rtp_session->ready = 1;
 	*new_rtp_session = rtp_session;
-	
-	if (create_probe){
-		create_probe(rtp_session, channel);
-	}
+
+	/* The homer RTCP probe (if registered) is created by switch_rtp_new
+	 * once setup completes successfully, not here. Creating it before
+	 * set_local_address / set_remote_address would register a probe on a
+	 * session that switch_rtp_new abandons on a failed bind/retry. */
 
 	return SWITCH_STATUS_SUCCESS;
+}
+
+/* Synchronously close any RTP/RTCP sockets owned by an rtp_session that is
+ * about to be abandoned mid-setup. Mirrors the close sequence at the end of
+ * switch_rtp_destroy: handles sock_input == sock_output aliasing (used when
+ * the local and remote ends share an address family) and rtcp_sock_*
+ * aliasing onto sock_*.
+ *
+ * Used by switch_rtp_new's failure paths. The session pool is destroyed
+ * asynchronously by the pool_thread (~1s sleep cycle), but the port is
+ * returned to the allocator immediately on failure. Without an explicit
+ * close here the kernel bind outlives the port release, and the next caller
+ * that picks the same port hits EADDRINUSE. The session has not been
+ * published to other threads at this point, so no shutdown/ping is needed --
+ * a plain close is enough to drop the kernel bind.
+ */
+static void close_rtp_sockets(switch_rtp_t *rtp_session)
+{
+	switch_socket_t *sock;
+
+	if (rtp_session->rtcp_sock_input == rtp_session->sock_input) {
+		rtp_session->rtcp_sock_input = NULL;
+	}
+	if (rtp_session->rtcp_sock_output == rtp_session->sock_output) {
+		rtp_session->rtcp_sock_output = NULL;
+	}
+
+	sock = rtp_session->sock_input;
+	rtp_session->sock_input = NULL;
+	if (sock) {
+		switch_socket_close(sock);
+	}
+
+	if (rtp_session->sock_output && rtp_session->sock_output != sock) {
+		sock = rtp_session->sock_output;
+		rtp_session->sock_output = NULL;
+		switch_socket_close(sock);
+	}
+
+	if ((sock = rtp_session->rtcp_sock_input)) {
+		rtp_session->rtcp_sock_input = NULL;
+		switch_socket_close(sock);
+	}
+
+	if (rtp_session->rtcp_sock_output && rtp_session->rtcp_sock_output != sock) {
+		sock = rtp_session->rtcp_sock_output;
+		rtp_session->rtcp_sock_output = NULL;
+		switch_socket_close(sock);
+	}
 }
 
 SWITCH_DECLARE(switch_rtp_t *) switch_rtp_new(const char *rx_host,
@@ -5653,12 +5706,14 @@ SWITCH_DECLARE(switch_rtp_t *) switch_rtp_new(const char *rx_host,
 	switch_mutex_lock(rtp_session->flag_mutex);
 
 	if (switch_rtp_set_local_address(rtp_session, rx_host, rx_port, err) != SWITCH_STATUS_SUCCESS) {
+		close_rtp_sockets(rtp_session);
 		switch_mutex_unlock(rtp_session->flag_mutex);
 		rtp_session = NULL;
 		goto end;
 	}
 
 	if (switch_rtp_set_remote_address(rtp_session, tx_host, tx_port, 0, SWITCH_TRUE, err) != SWITCH_STATUS_SUCCESS) {
+		close_rtp_sockets(rtp_session);
 		switch_mutex_unlock(rtp_session->flag_mutex);
 		rtp_session = NULL;
 		goto end;
@@ -5676,6 +5731,24 @@ SWITCH_DECLARE(switch_rtp_t *) switch_rtp_new(const char *rx_host,
 		rtp_session->rx_port = rx_port;
 		switch_rtp_set_flag(rtp_session, SWITCH_RTP_FLAG_FLUSH);
 		switch_rtp_set_flag(rtp_session, SWITCH_RTP_FLAG_DETECT_SSRC);
+
+		/* Publish on the channel only once setup has fully succeeded.
+		 * Readers (e.g. RTCP relay on the partner leg) rely on this key
+		 * pointing to a live rtp_session whose pool is still owned. */
+		if (rtp_session->session) {
+			switch_channel_t *channel = switch_core_session_get_channel(rtp_session->session);
+			if (channel) {
+				switch_channel_set_private(channel, "__rtcp_audio_rtp_session", rtp_session);
+
+				/* Register the homer RTCP probe (if any) now that setup has
+				 * succeeded, rather than in switch_rtp_create before the
+				 * bind: keeps probe registration off sessions abandoned on a
+				 * failed bind/retry, symmetric with the publish above. */
+				if (create_probe) {
+					create_probe(rtp_session, channel);
+				}
+			}
+		}
 	} else {
 		switch_rtp_release_port(rx_host, rx_port);
 	}
