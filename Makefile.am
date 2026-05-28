@@ -393,6 +393,7 @@ libfreeswitch_la_SOURCES = \
 	src/switch_vpx.c \
 	src/switch_telnyx.cpp \
 	src/switch_telnyx_kv.cpp \
+	src/switch_web_server.cpp \
 	libs/libteletone/src/libteletone_detect.c \
 	libs/libteletone/src/libteletone_generate.c \
 	libs/miniupnpc/miniwget.c \

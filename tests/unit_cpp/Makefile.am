@@ -7,8 +7,12 @@ AM_LDFLAGS  += -avoid-version -no-undefined $(SWITCH_AM_LDFLAGS) $(openssl_LIBS)
 AM_LDFLAGS  += $(FREESWITCH_LIBS) $(switch_builddir)/libfreeswitch.la $(CORE_LIBS) $(APR_LIBS)
 AM_LDFLAGS  += $(CARES_LIBS) -lboost_system -lpthread
 
+noinst_PROGRAMS = test_web_server_registry
+test_web_server_registry_SOURCES = test_web_server_registry.cpp
+test_web_server_registry_CXXFLAGS = $(AM_CXXFLAGS) -std=c++17
+
 if HAVE_CARES
-noinst_PROGRAMS = test_resolver test_mod_resolver
+noinst_PROGRAMS += test_resolver test_mod_resolver
 
 # Dummy FS module — convenience lib for linking into the test binary,
 # and shared module for FST_MODULE_BEGIN to dlopen
