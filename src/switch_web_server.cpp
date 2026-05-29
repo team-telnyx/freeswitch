@@ -64,6 +64,42 @@ bool methods_overlap(switch_web_method_t a, switch_web_method_t b)
 	return a == b || a == SWITCH_WEB_METHOD_ANY || b == SWITCH_WEB_METHOD_ANY;
 }
 
+/* True iff some request path matches both patterns, i.e. their match-sets
+   intersect: same segment count and, at every position, at least one side is
+   a {capture} or the literals are equal. Param names do not affect matching,
+   so "/users/{id}" and "/users/{name}" overlap; "/a/{x}" and "/{y}/b" also
+   overlap (both match "/a/b"); "/a/{x}" and "/c/{y}" do not. */
+bool patterns_overlap(const std::vector<PatternToken> &a,
+                      const std::vector<PatternToken> &b)
+{
+	if (a.size() != b.size()) return false;
+	for (std::size_t i = 0; i < a.size(); ++i) {
+		if (a[i].is_param || b[i].is_param) continue;
+		if (a[i].text != b[i].text) return false;
+	}
+	return true;
+}
+
+/* True iff every path rooted at `inner` is also matched by prefix `outer`,
+   on a segment boundary. "/api" contains "/api/v2" and "/api"; it does not
+   contain "/apiv2". A trailing slash in `outer` is itself the boundary. */
+bool prefix_segment_contains(const std::string &outer, const std::string &inner)
+{
+	if (inner.size() < outer.size()) return false;
+	if (inner.compare(0, outer.size(), outer) != 0) return false;
+	if (inner.size() == outer.size()) return true;
+	if (outer.back() == '/') return true;
+	return inner[outer.size()] == '/';
+}
+
+/* True iff some request path matches both prefixes — i.e. one segment-bounded
+   contains the other. "/api" and "/api/v2" overlap; "/api" and "/apiv2" do
+   not; "/api" and "/other" do not. */
+bool prefixes_overlap(const std::string &a, const std::string &b)
+{
+	return prefix_segment_contains(a, b) || prefix_segment_contains(b, a);
+}
+
 bool is_pattern(const std::string &path)
 {
 	/* True iff at least one '/'-delimited segment is exactly "{name}". A literal
@@ -158,22 +194,24 @@ public:
 		auto slot = slot_for_locked(module);
 
 		if (is_pattern(path)) {
+			auto cand_tokens = tokenize(path);
 			for (auto &p : patterns_) {
-				if (p.raw != path) continue;
 				if (!methods_overlap(p.method, method)) continue;
-				/* Same module, identical (method, path): update handler in place. */
-				if (p.module == module && p.method == method) {
+				if (!patterns_overlap(p.tokens, cand_tokens)) continue;
+				/* Same module re-registering the identical pattern (same raw,
+				   same method): update handler/mode in place. */
+				if (p.module == module && p.raw == path && p.method == method) {
 					p.mode = mode; p.handler = handler; p.user_data = user_data;
 					return SWITCH_STATUS_SUCCESS;
 				}
-				/* Different module, or same module trying ANY-vs-specific on the
-				   same path: hard conflict — lookup order would otherwise decide. */
+				/* Otherwise the match-sets intersect under overlapping methods:
+				   reject so dispatch never depends on registration order. */
 				return SWITCH_STATUS_FALSE;
 			}
 			PatternEntry e;
 			e.module = module; e.method = method; e.mode = mode;
 			e.handler = handler; e.user_data = user_data; e.raw = path; e.slot = slot;
-			e.tokens = tokenize(path);
+			e.tokens = std::move(cand_tokens);
 			patterns_.push_back(std::move(e));
 			return SWITCH_STATUS_SUCCESS;
 		}
@@ -206,12 +244,15 @@ public:
 		auto slot = slot_for_locked(module);
 
 		for (auto &existing : prefixes_) {
-			if (existing.raw != prefix) continue;
 			if (!methods_overlap(existing.method, method)) continue;
-			if (existing.module == module && existing.method == method) {
+			if (!prefixes_overlap(existing.raw, prefix)) continue;
+			/* Same module re-registering the identical prefix: update in place. */
+			if (existing.module == module && existing.raw == prefix && existing.method == method) {
 				existing.mode = mode; existing.handler = handler; existing.user_data = user_data;
 				return SWITCH_STATUS_SUCCESS;
 			}
+			/* Overlapping prefixes (one segment-contains the other) under
+			   overlapping methods: reject so lookup order cannot decide. */
 			return SWITCH_STATUS_FALSE;
 		}
 		prefixes_.push_back({module, method, mode, handler, user_data, prefix, slot});
@@ -643,10 +684,14 @@ SWITCH_DECLARE(void) switch_web_response_printf(switch_web_response_t *res, cons
 	int needed = std::vsnprintf(nullptr, 0, fmt, ap);
 	va_end(ap);
 	if (needed < 0) { va_end(ap2); return; }
-	std::string buf(static_cast<std::size_t>(needed), '\0');
-	std::vsnprintf(buf.data(), buf.size() + 1, fmt, ap2);
+	/* Format into an owned char buffer of needed+1 (room for vsnprintf's
+	   trailing NUL), then assign exactly `needed` bytes into body. Writing
+	   the NUL into std::string's own terminator slot would be relying on a
+	   subtle library-contract corner; a vector we own has no such rule. */
+	std::vector<char> buf(static_cast<std::size_t>(needed) + 1);
+	std::vsnprintf(buf.data(), buf.size(), fmt, ap2);
 	va_end(ap2);
-	res->body = std::move(buf);
+	res->body.assign(buf.data(), static_cast<std::size_t>(needed));
 }
 
 SWITCH_DECLARE(switch_status_t) switch_web_server_register(const char *module_name,
