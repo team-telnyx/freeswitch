@@ -17,10 +17,11 @@ AM_LIBAPR_LIBS := $(subst $(switch_builddir)/,,$(shell ./libs/apr/apr-1-config \
 endif
 
 
-AM_CFLAGS   = $(SWITCH_AM_CFLAGS) $(SWITCH_ANSI_CFLAGS) 
+AM_CFLAGS   = $(SWITCH_AM_CFLAGS) $(SWITCH_ANSI_CFLAGS)
 AM_CPPFLAGS =
 AM_CPPFLAGS += -I$(switch_srcdir)/libs/libvpx
 AM_CPPFLAGS += $(SWITCH_AM_CXXFLAGS)
+AM_CXXFLAGS = -std=c++17
 AM_LDFLAGS  = $(SWITCH_AM_LDFLAGS) $(AM_LIBAPR_LDFLAGS) $(AM_LIBAPU_LDFLAGS)
 
 DEFAULT_SOUNDS=en-us-callie-8000

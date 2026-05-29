@@ -57,6 +57,13 @@ bool method_matches(switch_web_method_t route, switch_web_method_t request)
 	return route == SWITCH_WEB_METHOD_ANY || route == request;
 }
 
+/* True iff two registered methods compete for the same dispatch slot, i.e.
+   a request method exists that would match either. ANY overlaps everything. */
+bool methods_overlap(switch_web_method_t a, switch_web_method_t b)
+{
+	return a == b || a == SWITCH_WEB_METHOD_ANY || b == SWITCH_WEB_METHOD_ANY;
+}
+
 bool is_pattern(const std::string &path)
 {
 	/* True iff at least one '/'-delimited segment is exactly "{name}". A literal
@@ -141,8 +148,10 @@ public:
 	                    switch_web_handler_func handler,
 	                    void *user_data)
 	{
+		/* GENERR = malformed call; FALSE = route conflict. Keep them
+		   distinct so callers can log "bad input" vs "shadowed route". */
 		if (module.empty() || path.empty() || path[0] != '/' || !handler) {
-			return SWITCH_STATUS_FALSE;
+			return SWITCH_STATUS_GENERR;
 		}
 
 		std::unique_lock<std::shared_mutex> lock(mu_);
@@ -150,11 +159,16 @@ public:
 
 		if (is_pattern(path)) {
 			for (auto &p : patterns_) {
-				if (p.raw == path && p.method == method) {
-					if (p.module != module) return SWITCH_STATUS_FALSE;
+				if (p.raw != path) continue;
+				if (!methods_overlap(p.method, method)) continue;
+				/* Same module, identical (method, path): update handler in place. */
+				if (p.module == module && p.method == method) {
 					p.mode = mode; p.handler = handler; p.user_data = user_data;
 					return SWITCH_STATUS_SUCCESS;
 				}
+				/* Different module, or same module trying ANY-vs-specific on the
+				   same path: hard conflict — lookup order would otherwise decide. */
+				return SWITCH_STATUS_FALSE;
 			}
 			PatternEntry e;
 			e.module = module; e.method = method; e.mode = mode;
@@ -166,11 +180,12 @@ public:
 
 		auto &bucket = exact_[path];
 		for (auto &existing : bucket) {
-			if (existing.method == method) {
-				if (existing.module != module) return SWITCH_STATUS_FALSE;
+			if (!methods_overlap(existing.method, method)) continue;
+			if (existing.module == module && existing.method == method) {
 				existing.mode = mode; existing.handler = handler; existing.user_data = user_data;
 				return SWITCH_STATUS_SUCCESS;
 			}
+			return SWITCH_STATUS_FALSE;
 		}
 		bucket.push_back({module, method, mode, handler, user_data, path, slot});
 		return SWITCH_STATUS_SUCCESS;
@@ -184,18 +199,20 @@ public:
 	                           void *user_data)
 	{
 		if (module.empty() || prefix.empty() || prefix[0] != '/' || !handler) {
-			return SWITCH_STATUS_FALSE;
+			return SWITCH_STATUS_GENERR;
 		}
 
 		std::unique_lock<std::shared_mutex> lock(mu_);
 		auto slot = slot_for_locked(module);
 
 		for (auto &existing : prefixes_) {
-			if (existing.raw == prefix && existing.method == method) {
-				if (existing.module != module) return SWITCH_STATUS_FALSE;
+			if (existing.raw != prefix) continue;
+			if (!methods_overlap(existing.method, method)) continue;
+			if (existing.module == module && existing.method == method) {
 				existing.mode = mode; existing.handler = handler; existing.user_data = user_data;
 				return SWITCH_STATUS_SUCCESS;
 			}
+			return SWITCH_STATUS_FALSE;
 		}
 		prefixes_.push_back({module, method, mode, handler, user_data, prefix, slot});
 		return SWITCH_STATUS_SUCCESS;
@@ -275,18 +292,21 @@ public:
 
 		if (slot) {
 			std::unique_lock<std::mutex> lk(slot->mu);
-			/* Keep waiting until handlers drain — proceeding while in_flight > 0
-			   risks invoking a handler after the .so is unloaded. Warn every 5s
-			   so the operator can see which module is blocking. */
-			while (slot->in_flight.load(std::memory_order_acquire) != 0) {
-				if (slot->cv.wait_for(lk, std::chrono::seconds(5)) == std::cv_status::timeout) {
-					int n_left = slot->in_flight.load(std::memory_order_acquire);
-					if (n_left > 0) {
-						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-							"mod_web_server: still waiting for %d in-flight handler(s) "
-							"from module '%s' to return before unload\n",
-							n_left, module.c_str());
-					}
+			/* Predicate-variant wait_for re-checks in_flight on every wake
+			   (including spurious ones) and races safely against the notify in
+			   InFlightTicket's destructor — a notify fired between our load
+			   and the wait is not lost. wait_for returns true when drained,
+			   false on the 5s timeout; on timeout we warn and loop. */
+			auto drained = [&] {
+				return slot->in_flight.load(std::memory_order_acquire) == 0;
+			};
+			while (!slot->cv.wait_for(lk, std::chrono::seconds(5), drained)) {
+				int n_left = slot->in_flight.load(std::memory_order_acquire);
+				if (n_left > 0) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+						"mod_web_server: still waiting for %d in-flight handler(s) "
+						"from module '%s' to return before unload\n",
+						n_left, module.c_str());
 				}
 			}
 		}
@@ -336,9 +356,17 @@ public:
 			out.allowed.insert(p.method);
 		}
 
-		/* Prefix tier. */
+		/* Prefix tier. Segment-bounded: prefix "/api" matches "/api" and
+		   "/api/v2/foo" but NOT "/apiv2"; prefix "/api/" matches "/api/"
+		   and "/api/v2/foo". Raw substring matching would silently shadow
+		   unrelated routes (e.g. /api would catch /apiv2). */
 		for (const auto &pr : prefixes_) {
 			if (path.compare(0, pr.raw.size(), pr.raw) != 0) continue;
+			if (path.size() > pr.raw.size()
+			    && pr.raw.back() != '/'
+			    && path[pr.raw.size()] != '/') {
+				continue;
+			}
 			if (method_matches(pr.method, method)) { fill_hit(pr, "prefix", nullptr); return out; }
 			out.allowed.insert(pr.method);
 		}
@@ -628,7 +656,7 @@ SWITCH_DECLARE(switch_status_t) switch_web_server_register(const char *module_na
                                                             switch_web_handler_func handler,
                                                             void *user_data)
 {
-	if (!module_name || !path) return SWITCH_STATUS_FALSE;
+	if (!module_name || !path) return SWITCH_STATUS_GENERR;
 	return Registry::instance().add(module_name, method, path, mode, handler, user_data);
 }
 
@@ -639,7 +667,7 @@ SWITCH_DECLARE(switch_status_t) switch_web_server_register_prefix(const char *mo
                                                                    switch_web_handler_func handler,
                                                                    void *user_data)
 {
-	if (!module_name || !prefix) return SWITCH_STATUS_FALSE;
+	if (!module_name || !prefix) return SWITCH_STATUS_GENERR;
 	return Registry::instance().add_prefix(module_name, method, prefix, mode, handler, user_data);
 }
 
@@ -647,7 +675,7 @@ SWITCH_DECLARE(switch_status_t) switch_web_server_unregister(const char *module_
                                                               switch_web_method_t method,
                                                               const char *path)
 {
-	if (!module_name || !path) return SWITCH_STATUS_FALSE;
+	if (!module_name || !path) return SWITCH_STATUS_GENERR;
 	return Registry::instance().remove(module_name, method, path) ? SWITCH_STATUS_SUCCESS : SWITCH_STATUS_NOTFOUND;
 }
 
