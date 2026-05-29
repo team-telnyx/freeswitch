@@ -160,6 +160,41 @@ static void test_prefix()
 	CHECK_EQ((int)miss.outcome, (int)internal::LookupOutcome::NotFound);
 }
 
+static void test_prefix_segment_boundary()
+{
+	std::cout << "[test] prefix matches only on path-segment boundary, not raw string\n";
+
+	/* No trailing slash: must match "/api" exactly and "/api/anything",
+	   must NOT match "/apiv2..." since that would shadow unrelated routes. */
+	wipe();
+	switch_web_server_register_prefix("modA", SWITCH_WEB_METHOD_GET, "/api",
+	                                  SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+
+	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/api").outcome,
+	         (int)internal::LookupOutcome::Hit);
+	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/api/v2/users").outcome,
+	         (int)internal::LookupOutcome::Hit);
+	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/apiv2/users").outcome,
+	         (int)internal::LookupOutcome::NotFound);
+	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/apix").outcome,
+	         (int)internal::LookupOutcome::NotFound);
+
+	/* Trailing slash: the slash itself is the boundary. Must NOT match
+	   "/api" (shorter than prefix), must match "/api/" and below. */
+	wipe();
+	switch_web_server_register_prefix("modA", SWITCH_WEB_METHOD_GET, "/api/",
+	                                  SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+
+	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/api/").outcome,
+	         (int)internal::LookupOutcome::Hit);
+	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/api/v2/users").outcome,
+	         (int)internal::LookupOutcome::Hit);
+	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/api").outcome,
+	         (int)internal::LookupOutcome::NotFound);
+	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/apiv2/users").outcome,
+	         (int)internal::LookupOutcome::NotFound);
+}
+
 /* ----- Conflict + idempotence ----- */
 
 static void test_conflict_other_module()
@@ -211,6 +246,107 @@ static void test_reregister_updates_handler()
 	CHECK(second.route.handler == alt_handler);
 	CHECK(second.route.user_data == (void *)0x222);
 	CHECK_EQ((int)second.route.mode, (int)SWITCH_WEB_DISPATCH_POOL);
+}
+
+/* ----- ANY-vs-specific conflict, both insertion orders, all three tiers ----- */
+
+static void test_exact_any_blocks_specific()
+{
+	std::cout << "[test] exact: ANY registered first blocks later specific from another module\n";
+	wipe();
+	auto a = switch_web_server_register("modA", SWITCH_WEB_METHOD_ANY, "/foo",
+	                                    SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	CHECK_EQ((int)a, (int)SWITCH_STATUS_SUCCESS);
+	auto b = switch_web_server_register("modB", SWITCH_WEB_METHOD_GET, "/foo",
+	                                    SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	CHECK_EQ((int)b, (int)SWITCH_STATUS_FALSE);
+}
+
+static void test_exact_specific_blocks_any()
+{
+	std::cout << "[test] exact: specific registered first blocks later ANY from another module\n";
+	wipe();
+	auto a = switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/foo",
+	                                    SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	CHECK_EQ((int)a, (int)SWITCH_STATUS_SUCCESS);
+	auto b = switch_web_server_register("modB", SWITCH_WEB_METHOD_ANY, "/foo",
+	                                    SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	CHECK_EQ((int)b, (int)SWITCH_STATUS_FALSE);
+}
+
+static void test_pattern_any_blocks_specific_both_orders()
+{
+	std::cout << "[test] pattern: ANY-vs-specific conflict in both insertion orders\n";
+	wipe();
+	auto a1 = switch_web_server_register("modA", SWITCH_WEB_METHOD_ANY, "/users/{id}",
+	                                     SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	CHECK_EQ((int)a1, (int)SWITCH_STATUS_SUCCESS);
+	auto b1 = switch_web_server_register("modB", SWITCH_WEB_METHOD_GET, "/users/{id}",
+	                                     SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	CHECK_EQ((int)b1, (int)SWITCH_STATUS_FALSE);
+
+	wipe();
+	auto a2 = switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/users/{id}",
+	                                     SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	CHECK_EQ((int)a2, (int)SWITCH_STATUS_SUCCESS);
+	auto b2 = switch_web_server_register("modB", SWITCH_WEB_METHOD_ANY, "/users/{id}",
+	                                     SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	CHECK_EQ((int)b2, (int)SWITCH_STATUS_FALSE);
+}
+
+static void test_prefix_any_blocks_specific_both_orders()
+{
+	std::cout << "[test] prefix: ANY-vs-specific conflict in both insertion orders\n";
+	wipe();
+	auto a1 = switch_web_server_register_prefix("modA", SWITCH_WEB_METHOD_ANY, "/static/",
+	                                            SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	CHECK_EQ((int)a1, (int)SWITCH_STATUS_SUCCESS);
+	auto b1 = switch_web_server_register_prefix("modB", SWITCH_WEB_METHOD_GET, "/static/",
+	                                            SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	CHECK_EQ((int)b1, (int)SWITCH_STATUS_FALSE);
+
+	wipe();
+	auto a2 = switch_web_server_register_prefix("modA", SWITCH_WEB_METHOD_GET, "/static/",
+	                                            SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	CHECK_EQ((int)a2, (int)SWITCH_STATUS_SUCCESS);
+	auto b2 = switch_web_server_register_prefix("modB", SWITCH_WEB_METHOD_ANY, "/static/",
+	                                            SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	CHECK_EQ((int)b2, (int)SWITCH_STATUS_FALSE);
+}
+
+static void test_any_vs_any_cross_module_blocked()
+{
+	std::cout << "[test] ANY-vs-ANY across modules is a conflict\n";
+	wipe();
+	auto a = switch_web_server_register("modA", SWITCH_WEB_METHOD_ANY, "/foo",
+	                                    SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	CHECK_EQ((int)a, (int)SWITCH_STATUS_SUCCESS);
+	auto b = switch_web_server_register("modB", SWITCH_WEB_METHOD_ANY, "/foo",
+	                                    SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	CHECK_EQ((int)b, (int)SWITCH_STATUS_FALSE);
+}
+
+static void test_same_module_any_reregister_updates()
+{
+	std::cout << "[test] same module re-registering identical ANY route updates in place\n";
+	wipe();
+	auto a = switch_web_server_register("modA", SWITCH_WEB_METHOD_ANY, "/foo",
+	                                    SWITCH_WEB_DISPATCH_LITE, dummy_handler, (void *)0x1);
+	CHECK_EQ((int)a, (int)SWITCH_STATUS_SUCCESS);
+	auto b = switch_web_server_register("modA", SWITCH_WEB_METHOD_ANY, "/foo",
+	                                    SWITCH_WEB_DISPATCH_POOL, alt_handler, (void *)0x2);
+	CHECK_EQ((int)b, (int)SWITCH_STATUS_SUCCESS);
+
+	/* ANY must still match every verb after the update — that's the whole
+	   point of ANY. Walk all the methods we expose, not just GET. */
+	for (auto m : { SWITCH_WEB_METHOD_GET, SWITCH_WEB_METHOD_POST, SWITCH_WEB_METHOD_PUT,
+	                SWITCH_WEB_METHOD_DELETE, SWITCH_WEB_METHOD_PATCH }) {
+		auto hit = internal::lookup(m, "/foo");
+		CHECK_EQ((int)hit.outcome, (int)internal::LookupOutcome::Hit);
+		CHECK(hit.route.handler == alt_handler);
+		CHECK(hit.route.user_data == (void *)0x2);
+		CHECK_EQ((int)hit.route.mode, (int)SWITCH_WEB_DISPATCH_POOL);
+	}
 }
 
 /* ----- Sweep on module unregister ----- */
@@ -269,9 +405,16 @@ int main()
 	test_pattern_capture();
 	test_pattern_multi_segment();
 	test_prefix();
+	test_prefix_segment_boundary();
 	test_conflict_other_module();
 	test_idempotent_same_module();
 	test_reregister_updates_handler();
+	test_exact_any_blocks_specific();
+	test_exact_specific_blocks_any();
+	test_pattern_any_blocks_specific_both_orders();
+	test_prefix_any_blocks_specific_both_orders();
+	test_any_vs_any_cross_module_blocked();
+	test_same_module_any_reregister_updates();
 	test_unregister_module_sweep();
 	test_unregister_specific();
 	test_snapshot();

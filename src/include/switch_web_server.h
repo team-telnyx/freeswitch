@@ -62,8 +62,18 @@ SWITCH_DECLARE(void) switch_web_response_printf(switch_web_response_t *res, cons
  * {name} captures ("/users/{id}"). Captures are read via
  * switch_web_request_param(req, "id").
  *
- * Returns SUCCESS on insert, FALSE on conflict (same method+path already
- * registered by a different module).
+ * Returns:
+ *   SUCCESS  — inserted, or the same module re-registered the identical
+ *              (method, path) — handler and mode are updated in place.
+ *   FALSE    — route conflict: another registration already exists on this
+ *              path whose method overlaps the requested one. ANY overlaps
+ *              every specific method (and vice versa), so registering
+ *              ANY /foo while GET /foo exists, or GET /foo while ANY /foo
+ *              exists, both fail; cross-module identical (method, path)
+ *              also fails. Rejected at registration so lookup order does
+ *              not silently decide the winner.
+ *   GENERR   — invalid arguments: null/empty module_name, null/empty path,
+ *              path that does not start with '/', or null handler.
  */
 SWITCH_DECLARE(switch_status_t) switch_web_server_register(const char *module_name,
                                                            switch_web_method_t method,
@@ -72,7 +82,10 @@ SWITCH_DECLARE(switch_status_t) switch_web_server_register(const char *module_na
                                                            switch_web_handler_func handler,
                                                            void *user_data);
 
-/* Prefix route: matches any request path beginning with `prefix`. Walked after exact + pattern misses. */
+/* Prefix route: matches request paths bounded on a path segment. Prefix
+   "/api" matches "/api" and "/api/v2/foo" but NOT "/apiv2"; prefix "/api/"
+   matches "/api/" and "/api/v2/foo". Walked after exact + pattern misses.
+   Conflict and return semantics match switch_web_server_register above. */
 SWITCH_DECLARE(switch_status_t) switch_web_server_register_prefix(const char *module_name,
                                                                   switch_web_method_t method,
                                                                   const char *prefix,
