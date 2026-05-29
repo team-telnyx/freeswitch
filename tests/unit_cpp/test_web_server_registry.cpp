@@ -349,6 +349,152 @@ static void test_same_module_any_reregister_updates()
 	}
 }
 
+/* ----- Semantic (match-set) overlap conflicts ----- */
+
+/* Two patterns with the same shape but different capture names have identical
+   match-sets; they must conflict in both orders, cross- and same-module, and
+   when one side is ANY. */
+static void test_pattern_equivalent_shape_conflict()
+{
+	std::cout << "[test] pattern: /users/{id} vs /users/{name} conflict (same match-set)\n";
+
+	/* cross-module, order A->B */
+	wipe();
+	CHECK_EQ((int)switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/users/{id}",
+	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_SUCCESS);
+	CHECK_EQ((int)switch_web_server_register("modB", SWITCH_WEB_METHOD_GET, "/users/{name}",
+	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_FALSE);
+
+	/* cross-module, order B->A (symmetry) */
+	wipe();
+	CHECK_EQ((int)switch_web_server_register("modB", SWITCH_WEB_METHOD_GET, "/users/{name}",
+	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_SUCCESS);
+	CHECK_EQ((int)switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/users/{id}",
+	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_FALSE);
+
+	/* same-module, different capture name on same shape — still ambiguous */
+	wipe();
+	CHECK_EQ((int)switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/users/{id}",
+	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_SUCCESS);
+	CHECK_EQ((int)switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/users/{name}",
+	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_FALSE);
+
+	/* ANY vs specific on equivalent shape */
+	wipe();
+	CHECK_EQ((int)switch_web_server_register("modA", SWITCH_WEB_METHOD_ANY, "/users/{id}",
+	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_SUCCESS);
+	CHECK_EQ((int)switch_web_server_register("modB", SWITCH_WEB_METHOD_GET, "/users/{name}",
+	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_FALSE);
+}
+
+/* Different capture name but identical raw on a different method must NOT
+   conflict (methods disjoint), and distinct shapes must coexist. */
+static void test_pattern_distinct_shapes_coexist()
+{
+	std::cout << "[test] pattern: distinct shapes / disjoint methods coexist\n";
+	wipe();
+	/* same shape, disjoint methods -> allowed */
+	CHECK_EQ((int)switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/users/{id}",
+	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_SUCCESS);
+	CHECK_EQ((int)switch_web_server_register("modA", SWITCH_WEB_METHOD_POST, "/users/{id}",
+	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_SUCCESS);
+	/* different literal skeleton -> different match-sets -> allowed */
+	CHECK_EQ((int)switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/teams/{id}",
+	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_SUCCESS);
+}
+
+/* /api and /api/v2 segment-overlap; reject in both orders, cross-module,
+   and ANY vs specific. */
+static void test_prefix_overlap_conflict()
+{
+	std::cout << "[test] prefix: /api vs /api/v2 conflict in both orders\n";
+
+	/* /api before /api/v2 */
+	wipe();
+	CHECK_EQ((int)switch_web_server_register_prefix("modA", SWITCH_WEB_METHOD_GET, "/api",
+	                                                SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_SUCCESS);
+	CHECK_EQ((int)switch_web_server_register_prefix("modB", SWITCH_WEB_METHOD_GET, "/api/v2",
+	                                                SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_FALSE);
+
+	/* /api/v2 before /api (symmetry) */
+	wipe();
+	CHECK_EQ((int)switch_web_server_register_prefix("modA", SWITCH_WEB_METHOD_GET, "/api/v2",
+	                                                SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_SUCCESS);
+	CHECK_EQ((int)switch_web_server_register_prefix("modB", SWITCH_WEB_METHOD_GET, "/api",
+	                                                SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_FALSE);
+
+	/* ANY vs specific overlap */
+	wipe();
+	CHECK_EQ((int)switch_web_server_register_prefix("modA", SWITCH_WEB_METHOD_ANY, "/api",
+	                                                SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_SUCCESS);
+	CHECK_EQ((int)switch_web_server_register_prefix("modB", SWITCH_WEB_METHOD_GET, "/api/v2",
+	                                                SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_FALSE);
+}
+
+/* Prefixes that do not segment-contain each other must coexist. */
+static void test_prefix_disjoint_coexist()
+{
+	std::cout << "[test] prefix: /api vs /apiv2 vs /other coexist (no segment overlap)\n";
+	wipe();
+	CHECK_EQ((int)switch_web_server_register_prefix("modA", SWITCH_WEB_METHOD_GET, "/api",
+	                                                SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_SUCCESS);
+	CHECK_EQ((int)switch_web_server_register_prefix("modB", SWITCH_WEB_METHOD_GET, "/apiv2",
+	                                                SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_SUCCESS);
+	CHECK_EQ((int)switch_web_server_register_prefix("modC", SWITCH_WEB_METHOD_GET, "/other",
+	                                                SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_SUCCESS);
+}
+
+/* Different tiers may coexist on overlapping paths; lookup precedence is
+   exact > pattern > prefix and is therefore order-independent. */
+static void test_cross_tier_precedence()
+{
+	std::cout << "[test] cross-tier: exact > pattern > prefix on overlapping paths\n";
+	wipe();
+	/* Register prefix first, then pattern, then exact — reverse of precedence
+	   to prove lookup order does not follow insertion order. */
+	switch_web_server_register_prefix("modA", SWITCH_WEB_METHOD_GET, "/api",
+	                                  SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/api/{id}",
+	                           SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/api/health",
+	                           SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+
+	/* exact wins over both pattern and prefix */
+	auto e = internal::lookup(SWITCH_WEB_METHOD_GET, "/api/health");
+	CHECK_EQ((int)e.outcome, (int)internal::LookupOutcome::Hit);
+	CHECK_EQ(e.route.kind, std::string("exact"));
+
+	/* pattern wins over prefix */
+	auto p = internal::lookup(SWITCH_WEB_METHOD_GET, "/api/42");
+	CHECK_EQ((int)p.outcome, (int)internal::LookupOutcome::Hit);
+	CHECK_EQ(p.route.kind, std::string("pattern"));
+
+	/* prefix catches what neither exact nor pattern match */
+	auto pr = internal::lookup(SWITCH_WEB_METHOD_GET, "/api/v2/users");
+	CHECK_EQ((int)pr.outcome, (int)internal::LookupOutcome::Hit);
+	CHECK_EQ(pr.route.kind, std::string("prefix"));
+}
+
 /* ----- Sweep on module unregister ----- */
 
 static void test_unregister_module_sweep()
@@ -415,6 +561,11 @@ int main()
 	test_prefix_any_blocks_specific_both_orders();
 	test_any_vs_any_cross_module_blocked();
 	test_same_module_any_reregister_updates();
+	test_pattern_equivalent_shape_conflict();
+	test_pattern_distinct_shapes_coexist();
+	test_prefix_overlap_conflict();
+	test_prefix_disjoint_coexist();
+	test_cross_tier_precedence();
 	test_unregister_module_sweep();
 	test_unregister_specific();
 	test_snapshot();
