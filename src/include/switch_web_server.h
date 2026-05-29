@@ -62,16 +62,24 @@ SWITCH_DECLARE(void) switch_web_response_printf(switch_web_response_t *res, cons
  * {name} captures ("/users/{id}"). Captures are read via
  * switch_web_request_param(req, "id").
  *
+ * Contract: a registration is rejected whenever its match-set would
+ * intersect an existing route's under an overlapping method, so dispatch
+ * never depends on registration or module-load order. Overlap is decided
+ * by what a request could match, not by raw string equality:
+ *   - exact paths overlap only when identical;
+ *   - patterns overlap when they have the same segment count and, at every
+ *     position, one side is a {capture} or the literals match — so
+ *     "/users/{id}" conflicts with "/users/{name}" (param names do not
+ *     affect matching);
+ *   - prefixes overlap when one segment-bounded-contains the other — so
+ *     "/api" conflicts with "/api/v2" but not with "/apiv2".
+ * ANY overlaps every specific method (and vice versa). The check is
+ * symmetric, so the outcome is the same in either registration order.
+ *
  * Returns:
  *   SUCCESS  — inserted, or the same module re-registered the identical
- *              (method, path) — handler and mode are updated in place.
- *   FALSE    — route conflict: another registration already exists on this
- *              path whose method overlaps the requested one. ANY overlaps
- *              every specific method (and vice versa), so registering
- *              ANY /foo while GET /foo exists, or GET /foo while ANY /foo
- *              exists, both fail; cross-module identical (method, path)
- *              also fails. Rejected at registration so lookup order does
- *              not silently decide the winner.
+ *              (method, raw path) — handler and mode are updated in place.
+ *   FALSE    — route conflict per the overlap rules above.
  *   GENERR   — invalid arguments: null/empty module_name, null/empty path,
  *              path that does not start with '/', or null handler.
  */
