@@ -15,7 +15,7 @@ mod_sofia_la_SOURCES = prometheus_metrics.cpp prometheus_metrics.h
 mod_sofia_la_LIBADD = $(switch_builddir)/libfreeswitch.la libsofiamod.la
 mod_sofia_la_LDFLAGS = -avoid-version -module -no-undefined -shared -lstdc++ $(SOFIA_SIP_LIBS) $(STIRSHAKEN_LIBS)
 
-noinst_PROGRAMS = test/test_sofia_funcs test/test_nuafail test/sipp-based-tests test/test_string_stream_mem_leak
+noinst_PROGRAMS = test/test_sofia_funcs test/test_nuafail test/sipp-based-tests test/test_string_stream_mem_leak test/test_603plus
 
 test_test_sofia_funcs_SOURCES = test/test_sofia_funcs.c
 test_test_sofia_funcs_CFLAGS = $(AM_CFLAGS) $(SOFIA_SIP_CFLAGS) $(STIRSHAKEN_CFLAGS) -DSWITCH_TEST_BASE_DIR_FOR_CONF=\"${abs_builddir}/test\" -DSWITCH_TEST_BASE_DIR_OVERRIDE=\"${abs_builddir}/test\"
@@ -24,6 +24,11 @@ test_test_sofia_funcs_CFLAGS += -DHAVE_STIRSHAKEN
 endif
 test_test_sofia_funcs_LDFLAGS = $(AM_LDFLAGS) -avoid-version -no-undefined $(freeswitch_LDFLAGS) $(switch_builddir)/libfreeswitch.la $(CORE_LIBS) $(APR_LIBS) $(STIRSHAKEN_LIBS)
 test_test_sofia_funcs_LDADD = libsofiamod.la prometheus_metrics.o $(SOFIA_SIP_LIBS) $(STIRSHAKEN_LIBS)
+
+test_test_603plus_SOURCES = test/test_603plus.c
+test_test_603plus_CFLAGS = $(AM_CFLAGS) $(SOFIA_SIP_CFLAGS) -DSWITCH_TEST_BASE_DIR_FOR_CONF=\"${abs_builddir}/test\" -DSWITCH_TEST_BASE_DIR_OVERRIDE=\"${abs_builddir}/test\"
+test_test_603plus_LDFLAGS = $(AM_LDFLAGS) -avoid-version -no-undefined $(freeswitch_LDFLAGS) $(switch_builddir)/libfreeswitch.la $(CORE_LIBS) $(APR_LIBS)
+test_test_603plus_LDADD = libsofiamod.la $(SOFIA_SIP_LIBS)
 
 test_test_nuafail_SOURCES = test/test_nuafail.c
 test_test_nuafail_CFLAGS = $(AM_CFLAGS) $(SOFIA_SIP_CFLAGS) $(STIRSHAKEN_CFLAGS) -DSWITCH_TEST_BASE_DIR_FOR_CONF=\"${abs_builddir}/test\" -DSWITCH_TEST_BASE_DIR_OVERRIDE=\"${abs_builddir}/test\"
@@ -46,13 +51,14 @@ endif
 test_test_string_stream_mem_leak_LDFLAGS = $(AM_LDFLAGS) -avoid-version -no-undefined $(freeswitch_LDFLAGS) $(switch_builddir)/libfreeswitch.la $(CORE_LIBS) $(APR_LIBS) $(STIRSHAKEN_LIBS)
 test_test_string_stream_mem_leak_LDADD = libsofiamod.la $(SOFIA_SIP_LIBS) $(STIRSHAKEN_LIBS)
 
-TESTS = test/test_sofia_funcs.sh test/test_nuafail test/test_string_stream_mem_leak
+TESTS = test/test_sofia_funcs.sh test/test_nuafail test/test_string_stream_mem_leak test/test_603plus
 #TESTS += test/test_run_sipp.sh
 
 if ISMAC
 mod_sofia_la_LDFLAGS += -framework CoreFoundation -framework SystemConfiguration
 test_test_sofia_funcs_LDFLAGS += -framework CoreFoundation -framework SystemConfiguration
 test_test_nuafail_LDFLAGS += -framework CoreFoundation -framework SystemConfiguration
+test_test_603plus_LDFLAGS += -framework CoreFoundation -framework SystemConfiguration
 test_sipp_based_tests_LDFLAGS += -framework CoreFoundation -framework SystemConfiguration
 test_test_string_stream_mem_leak_LDFLAGS += -framework CoreFoundation -framework SystemConfiguration
 endif

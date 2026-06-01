@@ -230,6 +230,7 @@ static char *EVENT_NAMES[] = {
 	"DEVICE_STATE",
 	"TEXT",
 	"SHUTDOWN_REQUESTED",
+	"CERT_RELOAD",
 	"ALL"
 };
 

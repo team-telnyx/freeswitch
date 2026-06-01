@@ -1219,7 +1219,7 @@ SWITCH_STANDARD_API(event_sink_function)
 		}
 
 		if (listener->format == EVENT_FORMAT_JSON) {
-			char *p = "{}";
+			char *p;
 			cJSON_AddItemToObject(cj, "events", cjevents);
 			p = cJSON_Print(cj);
 			if (cj && p) stream->write_function(stream, p);
