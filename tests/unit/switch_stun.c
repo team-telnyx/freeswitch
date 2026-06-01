@@ -294,6 +294,13 @@ FST_TEARDOWN_END()
 			ice.pass = "pass";
 			ice.type = ICE_VANILLA;
 			ice.addr = switch_rtp_session_get_remote_addr(rtp_session);
+			ice.proto = 0;
+			ice.ice_params->chosen[ice.proto] = 0;
+			ice.ice_params->cand_idx[ice.proto] = 1;
+			ice.ice_params->cands[0][ice.proto].con_addr = (char *) tx_host;
+			ice.ice_params->cands[0][ice.proto].con_port = tx_port;
+			ice.ice_params->cands[0][ice.proto].priority = 197684917;
+			ice.ice_params->cands[0][ice.proto].cand_type = NULL;
 
 			memcpy(ice.last_sent_id, id, 12);
 

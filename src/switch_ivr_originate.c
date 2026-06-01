@@ -2832,7 +2832,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 		
 		for (r = 0; r < or_argc && (!cancel_cause || *cancel_cause == 0); r++) {
 			char *p, *end = NULL;
-			int q = 0, alt = 0;
+			int q = 0, dq = 0, alt = 0;
 
 			check_reject = 1;
 
@@ -2890,15 +2890,20 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 							alt = 0;
 						}
 						q = 0;
+						dq = 0;
 					}
 
-					if (*p == '\'') {
+					if (end && p < end && *p == '"' && !q && (dq || memchr(p + 1, '"', end - p - 1)) && (p == pipe_names[r] || *(p-1) != '\\')) {
+						dq = !dq;
+					}
+
+					if (*p == '\'' && !dq) {
 						q = !q;
 					}
 
 					if (end && p < end && *p == ',' && *(p-1) != '\\') {
 
-						if (q || alt) {
+						if (q || dq || alt) {
 							*p = QUOTED_ESC_COMMA;
 						} else {
 							*p = UNQUOTED_ESC_COMMA;

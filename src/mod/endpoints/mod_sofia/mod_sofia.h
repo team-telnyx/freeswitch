@@ -1144,6 +1144,11 @@ void sofia_reg_unregister(sofia_profile_t *profile);
 
 void sofia_glue_pass_sdp(private_object_t *tech_pvt, char *sdp);
 switch_call_cause_t sofia_glue_sip_cause_to_freeswitch(int status);
+
+/* Sanitize a SIP display-name in place so it is safe to embed in a
+ * quoted-string. Only touches the display-name buffer; URI/identity untouched.
+ * See implementation in sofia_glue.c for the full rules. */
+char *sofia_glue_sanitize_display_name(char *name);
 void sofia_glue_do_xfer_invite(switch_core_session_t *session);
 uint8_t sofia_reg_handle_register_token(nua_t *nua, sofia_profile_t *profile, nua_handle_t *nh, sip_t const *sip,
 								  sofia_dispatch_event_t *de,

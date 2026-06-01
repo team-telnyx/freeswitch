@@ -41,6 +41,59 @@ switch_cache_db_handle_t *_sofia_glue_get_db_handle(sofia_profile_t *profile, co
 #define sofia_glue_get_db_handle(_p) _sofia_glue_get_db_handle(_p, __FILE__, __SWITCH_FUNC__, __LINE__)
 #define SWITCH_RECOVERY_GRACE_PERIOD_SEC 30
 
+/* Sanitize a SIP display-name in place for sofia-sip's strict parser.
+ * Strips a dangling trailing '\\', keeps "\\"/"\"" quoted-pairs, replaces any
+ * stray '\\X' or raw '"' with a space. URI/identity is never touched. */
+char *sofia_glue_sanitize_display_name(char *name)
+{
+	char *p;
+	size_t len;
+	switch_bool_t changed = SWITCH_FALSE;
+
+	if (zstr(name)) {
+		return name;
+	}
+
+	len = strlen(name);
+
+	/* Strip a trailing unescaped backslash (odd-length run of trailing '\\'). */
+	if (len > 0 && name[len - 1] == '\\') {
+		size_t bs_run = 0;
+		size_t i = len;
+		while (i > 0 && name[i - 1] == '\\') {
+			bs_run++;
+			i--;
+		}
+		if ((bs_run % 2) != 0) {
+			name[--len] = '\0';
+			changed = SWITCH_TRUE;
+		}
+	}
+
+	/* Walk: keep "\\"/"\"" pairs, neutralize stray '\\X' and raw '"'. */
+	for (p = name; *p; p++) {
+		if (*p == '\\') {
+			char next = *(p + 1);
+			if (next == '\\' || next == '"') {
+				p++;
+				continue;
+			}
+			*p = ' ';
+			changed = SWITCH_TRUE;
+		} else if (*p == '"') {
+			*p = ' ';
+			changed = SWITCH_TRUE;
+		}
+	}
+
+	if (changed) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
+						  "sofia: sanitized malformed SIP display-name -> [%s]\n", name);
+	}
+
+	return name;
+}
+
 int sofia_glue_check_nat(sofia_profile_t *profile, const char *network_ip)
 {
 	switch_assert(network_ip);
@@ -1378,7 +1431,11 @@ switch_status_t sofia_glue_do_invite(switch_core_session_t *session)
 
 		url_str = sofia_overcome_sip_uri_weakness(session, url, tech_pvt->transport, SWITCH_TRUE, invite_params, invite_tel_params);
 		if (switch_channel_var_true(tech_pvt->channel, "sip_caller_id_name_in_contact")) {
-			invite_contact = switch_core_session_sprintf(session, "\"%s\" %s", tech_pvt->caller_profile->caller_id_name, sofia_overcome_sip_uri_weakness(session, tech_pvt->invite_contact, tech_pvt->transport, SWITCH_FALSE, invite_contact_params, NULL));
+			/* Sanitize Contact display-name. */
+			char *contact_name = !zstr(tech_pvt->caller_profile->caller_id_name) ?
+				sofia_glue_sanitize_display_name(switch_core_session_strdup(session, tech_pvt->caller_profile->caller_id_name)) :
+				(char *)tech_pvt->caller_profile->caller_id_name;
+			invite_contact = switch_core_session_sprintf(session, "\"%s\" %s", contact_name, sofia_overcome_sip_uri_weakness(session, tech_pvt->invite_contact, tech_pvt->transport, SWITCH_FALSE, invite_contact_params, NULL));
 		} else {
 			invite_contact = sofia_overcome_sip_uri_weakness(session, tech_pvt->invite_contact, tech_pvt->transport, SWITCH_FALSE, invite_contact_params, NULL);
 		}
@@ -1402,6 +1459,8 @@ switch_status_t sofia_glue_do_invite(switch_core_session_t *session)
 		} else {
 			char *name = switch_core_session_strdup(session, from_display ? from_display : tech_pvt->caller_profile->caller_id_name);
 			check_decode(name, session);
+			/* Sanitize From display-name. */
+			name = sofia_glue_sanitize_display_name(name);
 			from_str = switch_core_session_sprintf(session, "\"%s\" <%s>", name, use_from_str);
 		}
 
@@ -1533,6 +1592,10 @@ switch_status_t sofia_glue_do_invite(switch_core_session_t *session)
 		}
 
 		check_decode(use_name, session);
+		/* Sanitize PAID/RPID/PPID display-name (dup first; may alias chanvar). */
+		if (!zstr(use_name)) {
+			use_name = sofia_glue_sanitize_display_name(switch_core_session_strdup(session, use_name));
+		}
 
 		switch (cid_type) {
 		case CID_TYPE_PID:
@@ -1549,15 +1612,16 @@ switch_status_t sofia_glue_do_invite(switch_core_session_t *session)
 																		invite_pid_params ? invite_pid_params : "");
 				}
 			} else {
-				if (zstr(tech_pvt->caller_profile->caller_id_name) || !strcasecmp(tech_pvt->caller_profile->caller_id_name, "_undef_")) {
+				/* Use sanitized use_name/use_number for P-Preferred-Identity. */
+				if (zstr(use_name) || !strcasecmp(use_name, "_undef_")) {
 					tech_pvt->preferred_id = switch_core_session_sprintf(tech_pvt->session, "<sip:%s@%s%s%s>",
-																		 tech_pvt->caller_profile->caller_id_number, rpid_domain,
+																		 use_number, rpid_domain,
 																		 invite_pid_params ? ";" : "",
 																		 invite_pid_params ? invite_pid_params : "");
 				} else {
 					tech_pvt->preferred_id = switch_core_session_sprintf(tech_pvt->session, "\"%s\" <sip:%s@%s%s%s>",
-																		 tech_pvt->caller_profile->caller_id_name,
-																		 tech_pvt->caller_profile->caller_id_number, rpid_domain,
+																		 use_name,
+																		 use_number, rpid_domain,
 																		 invite_pid_params ? ";" : "",
 																		 invite_pid_params ? invite_pid_params : "");
 				}
@@ -1889,24 +1953,31 @@ void sofia_glue_do_xfer_invite(switch_core_session_t *session)
 
 	format = strchr(sipip, ':') ? "\"%s\" <sip:%s@[%s]>" : "\"%s\" <sip:%s@%s>";
 
-	if ((tech_pvt->from_str = switch_core_session_sprintf(session, format, caller_profile->caller_id_name, caller_profile->caller_id_number, sipip))) {
+	/* Sanitize xfer From display-name. */
+	{
+		char *xfer_name = !zstr(caller_profile->caller_id_name)
+			? sofia_glue_sanitize_display_name(switch_core_session_strdup(session, caller_profile->caller_id_name))
+			: (char *) caller_profile->caller_id_name;
 
-		const char *rep = switch_channel_get_variable(channel, SOFIA_REPLACES_HEADER);
+		if ((tech_pvt->from_str = switch_core_session_sprintf(session, format, xfer_name, caller_profile->caller_id_number, sipip))) {
 
-		tech_pvt->nh2 = nua_handle(tech_pvt->profile->nua, NULL,
-								   SIPTAG_TO_STR(tech_pvt->dest), SIPTAG_FROM_STR(tech_pvt->from_str), SIPTAG_CONTACT_STR(contact_url), TAG_END());
+			const char *rep = switch_channel_get_variable(channel, SOFIA_REPLACES_HEADER);
 
-		nua_handle_bind(tech_pvt->nh2, tech_pvt->sofia_private);
+			tech_pvt->nh2 = nua_handle(tech_pvt->profile->nua, NULL,
+									   SIPTAG_TO_STR(tech_pvt->dest), SIPTAG_FROM_STR(tech_pvt->from_str), SIPTAG_CONTACT_STR(contact_url), TAG_END());
 
-		nua_invite(tech_pvt->nh2,
-				   SIPTAG_CONTACT_STR(contact_url),
-				   TAG_IF(!zstr(tech_pvt->user_via), SIPTAG_VIA_STR(tech_pvt->user_via)),
-				   SOATAG_ADDRESS(tech_pvt->mparams.adv_sdp_audio_ip),
-				   SOATAG_USER_SDP_STR(tech_pvt->mparams.local_sdp_str),
-				   SOATAG_REUSE_REJECTED(1),
-				   SOATAG_RTP_SORT(SOA_RTP_SORT_REMOTE), SOATAG_RTP_SELECT(SOA_RTP_SELECT_ALL), TAG_IF(rep, SIPTAG_REPLACES_STR(rep)), TAG_END());
-	} else {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(tech_pvt->session), SWITCH_LOG_ERROR, "Memory Error!\n");
+			nua_handle_bind(tech_pvt->nh2, tech_pvt->sofia_private);
+
+			nua_invite(tech_pvt->nh2,
+					   SIPTAG_CONTACT_STR(contact_url),
+					   TAG_IF(!zstr(tech_pvt->user_via), SIPTAG_VIA_STR(tech_pvt->user_via)),
+					   SOATAG_ADDRESS(tech_pvt->mparams.adv_sdp_audio_ip),
+					   SOATAG_USER_SDP_STR(tech_pvt->mparams.local_sdp_str),
+					   SOATAG_REUSE_REJECTED(1),
+					   SOATAG_RTP_SORT(SOA_RTP_SORT_REMOTE), SOATAG_RTP_SELECT(SOA_RTP_SELECT_ALL), TAG_IF(rep, SIPTAG_REPLACES_STR(rep)), TAG_END());
+		} else {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(tech_pvt->session), SWITCH_LOG_ERROR, "Memory Error!\n");
+		}
 	}
 	switch_mutex_unlock(tech_pvt->sofia_mutex);
 }

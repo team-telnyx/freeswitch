@@ -414,6 +414,18 @@ static switch_bool_t scm_should_use_m_port(switch_core_session_t *session, switc
 
 	if (trickle_accept_enabled(session)) {
 		if (engine->ice_in.is_chosen[0]) {
+			/* Never let trickle placeholder 0.0.0.0:9 or :::9 overwrite */
+			/* a valid ICE-selected remote address. */
+			if (engine->cur_payload_map &&
+				engine->cur_payload_map->remote_sdp_port == 9 &&
+				engine->cur_payload_map->remote_sdp_ip &&
+				(!strcmp(engine->cur_payload_map->remote_sdp_ip, "0.0.0.0") ||
+				 !strcmp(engine->cur_payload_map->remote_sdp_ip, "::"))) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+					"Refusing to overwrite ICE-selected address with trickle placeholder %s:%d\n",
+					engine->cur_payload_map->remote_sdp_ip, engine->cur_payload_map->remote_sdp_port);
+				return SWITCH_FALSE;
+			}
 			return SWITCH_TRUE;
 		}
 		return SWITCH_FALSE;
@@ -4980,7 +4992,10 @@ static switch_call_direction_t switch_ice_direction(switch_rtp_engine_t *engine,
 		r = (r == SWITCH_CALL_DIRECTION_INBOUND) ? SWITCH_CALL_DIRECTION_OUTBOUND : SWITCH_CALL_DIRECTION_INBOUND;
 	}
 
-	if (switch_rtp_has_dtls() && dtls_ok(smh->session)) {
+	/* Gate DTLS controller-role on CF_DTLS (set when a=fingerprint is parsed);
+	 * CF_DTLS_OK alone is always-on and misleading for non-DTLS sessions. */
+	if (switch_rtp_has_dtls() && dtls_ok(smh->session)
+	    && switch_channel_test_flag(session->channel, CF_DTLS)) {
 		if (switch_channel_test_flag(session->channel, CF_OBSERVE_INITIATOR)) {
 			r = engine->ice_remote_initiator ? SWITCH_CALL_DIRECTION_INBOUND : SWITCH_CALL_DIRECTION_OUTBOUND;
 		} else {
@@ -4998,6 +5013,7 @@ static switch_call_direction_t switch_ice_direction(switch_rtp_engine_t *engine,
 
 static switch_core_media_ice_type_t switch_determine_ice_type(switch_rtp_engine_t *engine, switch_core_session_t *session) {
 	switch_core_media_ice_type_t ice_type = ICE_VANILLA;
+	const char *role_override = NULL;
 
 	if (switch_channel_var_true(session->channel, "ice_lite")) {
 		ice_type |= ICE_CONTROLLED;
@@ -5009,6 +5025,25 @@ static switch_core_media_ice_type_t switch_determine_ice_type(switch_rtp_engine_
 		if (direction == SWITCH_CALL_DIRECTION_INBOUND) {
 			ice_type |= ICE_CONTROLLED;
 		}
+	}
+
+	/* Dialplan override (rtp_ice_role=controlling|controlled). Skipped for ICE-lite
+	 * peers: a lite peer cannot run checks or nominate, FS must stay controlling. */
+	role_override = switch_channel_get_variable(session->channel, "rtp_ice_role");
+	if (!zstr(role_override) && !(ice_type & (ICE_LITE | ICE_LITE_INBOUND))) {
+		if (!strcasecmp(role_override, "controlled")) {
+			ice_type |= ICE_CONTROLLED;
+		} else if (!strcasecmp(role_override, "controlling")) {
+			ice_type &= ~ICE_CONTROLLED;
+		} else {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+			                  "Ignoring invalid rtp_ice_role=%s (expected 'controlling' or 'controlled')\n",
+			                  role_override);
+		}
+	} else if (!zstr(role_override)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+		                  "Ignoring rtp_ice_role=%s: ICE-lite forces FS to remain controlling\n",
+		                  role_override);
 	}
 
 	return ice_type;
@@ -11128,16 +11163,6 @@ static void gen_ice(switch_core_session_t *session, switch_media_type_t type, co
 
 	engine->ice_out.cands[0][0].ready = 1;
 
-	/* Dynamic ICE role: offerer is controlling unless remote is ice-lite; allow override via var "rtp_ice_role" */
-	{
-		const char *role_override = switch_channel_get_variable(session->channel, "rtp_ice_role");
-		switch_bool_t controlling = SWITCH_TRUE;
-		if (role_override) {
-			controlling = !strcasecmp(role_override, "controlling") ? SWITCH_TRUE : SWITCH_FALSE;
-		}
-		switch_rtp_set_ice_role(engine->rtp_session, controlling);
-	}
-
 	if (engine->rtp_session && switch_core_media_trickle_enabled(session) && switch_rtp_trickle_is_registered(engine->rtp_session)) {
 		switch_rtp_ice_cand_t cand;
 		int mline_index;
@@ -11716,34 +11741,56 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 				}
 			}
 
-			if (a_engine->ice_in.cands[a_engine->ice_in.chosen[1]][1].ready && a_engine->ice_in.cands[a_engine->ice_in.chosen[0]][0].ready &&
-				!zstr(a_engine->ice_in.cands[a_engine->ice_in.chosen[1]][1].con_addr) && 
-				!zstr(a_engine->ice_in.cands[a_engine->ice_in.chosen[0]][0].con_addr)) {
-				if (a_engine->rtcp_mux > 0 && 
-					!strcmp(a_engine->ice_in.cands[a_engine->ice_in.chosen[1]][1].con_addr, a_engine->ice_in.cands[a_engine->ice_in.chosen[0]][0].con_addr)
-					&& a_engine->ice_in.cands[a_engine->ice_in.chosen[1]][1].con_port == a_engine->ice_in.cands[a_engine->ice_in.chosen[0]][0].con_port) {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Skipping RTCP ICE (Same as RTP)\n");
-				} else {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Activating RTCP ICE\n");
+		}
 
-					switch_rtp_activate_ice(a_engine->rtp_session,
-											a_engine->ice_in.ufrag,
-											a_engine->ice_out.ufrag,
-											a_engine->ice_out.pwd,
-											a_engine->ice_in.pwd,
-											IPR_RTCP,
-#ifdef GOOGLE_ICE
-											ICE_GOOGLE_JINGLE,
-											NULL
-#else
-											switch_determine_ice_type(a_engine, session),
-											&a_engine->ice_in
-#endif
-										);
+		/* Activate RTCP ICE independently of rtcp_audio_interval_msec.
+		 * Per RFC 8445, ICE requires connectivity checks on all advertised components.
+		 * The interval variable controls RTCP report send rate, not ICE activation. */
+		if (a_engine->ice_in.cands[a_engine->ice_in.chosen[1]][1].ready && a_engine->ice_in.cands[a_engine->ice_in.chosen[0]][0].ready &&
+			!zstr(a_engine->ice_in.cands[a_engine->ice_in.chosen[1]][1].con_addr) &&
+			!zstr(a_engine->ice_in.cands[a_engine->ice_in.chosen[0]][0].con_addr)) {
+
+			/* Ensure RTCP context is initialized for ICE even without rtcp_audio_interval_msec */
+			if (!switch_rtp_test_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_ENABLE_RTCP)) {
+				switch_port_t rtcp_port = a_engine->remote_rtcp_port;
+				if (!rtcp_port) {
+					const char *rp = switch_channel_get_variable(session->channel, "rtp_remote_audio_rtcp_port");
+					if (rp) rtcp_port = (switch_port_t)atoi(rp);
 				}
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+								  "Activating RTCP for ICE (no send interval) PORT %d\n", rtcp_port);
+				if (switch_rtp_activate_rtcp(a_engine->rtp_session, 0, rtcp_port, a_engine->rtcp_mux > 0) != SWITCH_STATUS_SUCCESS) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+									  "Failed to activate RTCP socket for ICE, skipping RTCP ICE\n");
+					goto skip_audio_rtcp_ice;
+				}
+			}
 
+			if (a_engine->rtcp_mux > 0 &&
+				!strcmp(a_engine->ice_in.cands[a_engine->ice_in.chosen[1]][1].con_addr, a_engine->ice_in.cands[a_engine->ice_in.chosen[0]][0].con_addr)
+				&& a_engine->ice_in.cands[a_engine->ice_in.chosen[1]][1].con_port == a_engine->ice_in.cands[a_engine->ice_in.chosen[0]][0].con_port) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Skipping RTCP ICE (Same as RTP)\n");
+			} else {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Activating RTCP ICE\n");
+
+				switch_rtp_activate_ice(a_engine->rtp_session,
+										a_engine->ice_in.ufrag,
+										a_engine->ice_out.ufrag,
+										a_engine->ice_out.pwd,
+										a_engine->ice_in.pwd,
+										IPR_RTCP,
+#ifdef GOOGLE_ICE
+										ICE_GOOGLE_JINGLE,
+										NULL
+#else
+										switch_determine_ice_type(a_engine, session),
+										&a_engine->ice_in
+#endif
+									);
 			}
 		}
+
+		skip_audio_rtcp_ice:
 
 		if (!zstr(a_engine->local_dtls_fingerprint.str) && switch_rtp_has_dtls() && dtls_ok(smh->session)) {
 			dtls_type_t xtype, dtype = a_engine->dtls_controller ? DTLS_TYPE_CLIENT : DTLS_TYPE_SERVER;
@@ -11753,7 +11800,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 			//}
 
 			xtype = DTLS_TYPE_RTP;
-			if (a_engine->rtcp_mux > 0 && smh->mparams->rtcp_audio_interval_msec) xtype |= DTLS_TYPE_RTCP;
+			if (a_engine->rtcp_mux > 0 && (smh->mparams->rtcp_audio_interval_msec ||
+				switch_rtp_test_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_ENABLE_RTCP))) xtype |= DTLS_TYPE_RTCP;
 
 			if (switch_channel_var_true(session->channel, "legacyDTLS")) {
 				switch_channel_clear_flag(session->channel, CF_WANT_DTLSv1_2);
@@ -11762,7 +11810,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 
 			switch_rtp_add_dtls(a_engine->rtp_session, &a_engine->local_dtls_fingerprint, &a_engine->remote_dtls_fingerprint, dtype | xtype, want_DTLSv1_2);
 
-			if (a_engine->rtcp_mux < 1 && smh->mparams->rtcp_audio_interval_msec) {
+			if (a_engine->rtcp_mux < 1 && (smh->mparams->rtcp_audio_interval_msec ||
+				switch_rtp_test_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_ENABLE_RTCP))) {
 				xtype = DTLS_TYPE_RTCP;
 				switch_rtp_add_dtls(a_engine->rtp_session, &a_engine->local_dtls_fingerprint, &a_engine->remote_dtls_fingerprint, dtype | xtype, want_DTLSv1_2);
 			}
@@ -12084,42 +12133,59 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 					}
 
 
-					if (t_engine->ice_in.cands[t_engine->ice_in.chosen[1]][1].ready && t_engine->ice_in.cands[t_engine->ice_in.chosen[0]][0].ready &&
-						!zstr(t_engine->ice_in.cands[t_engine->ice_in.chosen[1]][1].con_addr) && 
-						!zstr(t_engine->ice_in.cands[t_engine->ice_in.chosen[0]][0].con_addr)) {
-						if (t_engine->rtcp_mux > 0 && !strcmp(t_engine->ice_in.cands[t_engine->ice_in.chosen[1]][1].con_addr,
-															  t_engine->ice_in.cands[t_engine->ice_in.chosen[0]][0].con_addr) &&
-							t_engine->ice_in.cands[t_engine->ice_in.chosen[1]][1].con_port == t_engine->ice_in.cands[t_engine->ice_in.chosen[0]][0].con_port) {
-							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Skipping TEXT RTCP ICE (Same as TEXT RTP)\n");
-						} else {
-							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Activating TEXT RTCP ICE\n");
-							switch_rtp_activate_ice(t_engine->rtp_session,
-													t_engine->ice_in.ufrag,
-													t_engine->ice_out.ufrag,
-													t_engine->ice_out.pwd,
-													t_engine->ice_in.pwd,
-													IPR_RTCP,
-#ifdef GOOGLE_ICE
-													ICE_GOOGLE_JINGLE,
-													NULL
-#else
-													switch_determine_ice_type(t_engine, session),
-													&t_engine->ice_in
-#endif
-													);
+				}
 
+				/* Activate TEXT RTCP ICE independently of rtcp_text_interval_msec */
+				if (t_engine->ice_in.cands[t_engine->ice_in.chosen[1]][1].ready && t_engine->ice_in.cands[t_engine->ice_in.chosen[0]][0].ready &&
+					!zstr(t_engine->ice_in.cands[t_engine->ice_in.chosen[1]][1].con_addr) &&
+					!zstr(t_engine->ice_in.cands[t_engine->ice_in.chosen[0]][0].con_addr)) {
 
-
+					if (!switch_rtp_test_flag(t_engine->rtp_session, SWITCH_RTP_FLAG_ENABLE_RTCP)) {
+						switch_port_t rtcp_port = t_engine->remote_rtcp_port;
+						if (!rtcp_port) {
+							const char *rp = switch_channel_get_variable(session->channel, "rtp_remote_text_rtcp_port");
+							if (rp) rtcp_port = (switch_port_t)atoi(rp);
 						}
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+										  "Activating TEXT RTCP for ICE (no send interval) PORT %d\n", rtcp_port);
+						if (switch_rtp_activate_rtcp(t_engine->rtp_session, 0, rtcp_port, t_engine->rtcp_mux > 0) != SWITCH_STATUS_SUCCESS) {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+										  "Failed to activate TEXT RTCP socket for ICE, skipping TEXT RTCP ICE\n");
+							goto skip_text_rtcp_ice;
+						}
+					}
 
+					if (t_engine->rtcp_mux > 0 && !strcmp(t_engine->ice_in.cands[t_engine->ice_in.chosen[1]][1].con_addr,
+														  t_engine->ice_in.cands[t_engine->ice_in.chosen[0]][0].con_addr) &&
+						t_engine->ice_in.cands[t_engine->ice_in.chosen[1]][1].con_port == t_engine->ice_in.cands[t_engine->ice_in.chosen[0]][0].con_port) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Skipping TEXT RTCP ICE (Same as TEXT RTP)\n");
+					} else {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Activating TEXT RTCP ICE\n");
+						switch_rtp_activate_ice(t_engine->rtp_session,
+												t_engine->ice_in.ufrag,
+												t_engine->ice_out.ufrag,
+												t_engine->ice_out.pwd,
+												t_engine->ice_in.pwd,
+												IPR_RTCP,
+#ifdef GOOGLE_ICE
+												ICE_GOOGLE_JINGLE,
+												NULL
+#else
+												switch_determine_ice_type(t_engine, session),
+												&t_engine->ice_in
+#endif
+												);
 					}
 				}
+
+				skip_text_rtcp_ice:
 
 				if (!zstr(t_engine->local_dtls_fingerprint.str) && switch_rtp_has_dtls() && dtls_ok(smh->session)) {
 					dtls_type_t xtype,
 						dtype = t_engine->dtls_controller ? DTLS_TYPE_CLIENT : DTLS_TYPE_SERVER;
 					xtype = DTLS_TYPE_RTP;
-					if (t_engine->rtcp_mux > 0 && smh->mparams->rtcp_text_interval_msec) xtype |= DTLS_TYPE_RTCP;
+					if (t_engine->rtcp_mux > 0 && (smh->mparams->rtcp_text_interval_msec ||
+						switch_rtp_test_flag(t_engine->rtp_session, SWITCH_RTP_FLAG_ENABLE_RTCP))) xtype |= DTLS_TYPE_RTCP;
 			
 					if (switch_channel_var_true(session->channel, "legacyDTLS")) {
 						switch_channel_clear_flag(session->channel, CF_WANT_DTLSv1_2);
@@ -12128,7 +12194,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 
 					switch_rtp_add_dtls(t_engine->rtp_session, &t_engine->local_dtls_fingerprint, &t_engine->remote_dtls_fingerprint, dtype | xtype, want_DTLSv1_2);
 
-					if (t_engine->rtcp_mux < 1 && smh->mparams->rtcp_text_interval_msec) {
+					if (t_engine->rtcp_mux < 1 && (smh->mparams->rtcp_text_interval_msec ||
+						switch_rtp_test_flag(t_engine->rtp_session, SWITCH_RTP_FLAG_ENABLE_RTCP))) {
 						xtype = DTLS_TYPE_RTCP;
 						switch_rtp_add_dtls(t_engine->rtp_session, &t_engine->local_dtls_fingerprint, &t_engine->remote_dtls_fingerprint, dtype | xtype, want_DTLSv1_2);
 					}
@@ -12423,43 +12490,58 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 					}
 
 
-					if (v_engine->ice_in.cands[v_engine->ice_in.chosen[1]][1].ready && v_engine->ice_in.cands[v_engine->ice_in.chosen[0]][0].ready &&
-						!zstr(v_engine->ice_in.cands[v_engine->ice_in.chosen[1]][1].con_addr) && 
-						!zstr(v_engine->ice_in.cands[v_engine->ice_in.chosen[0]][0].con_addr)) {
+				}
 
-						if (v_engine->rtcp_mux > 0 && !strcmp(v_engine->ice_in.cands[v_engine->ice_in.chosen[1]][1].con_addr, v_engine->ice_in.cands[v_engine->ice_in.chosen[0]][0].con_addr)
-							&& v_engine->ice_in.cands[v_engine->ice_in.chosen[1]][1].con_port == v_engine->ice_in.cands[v_engine->ice_in.chosen[0]][0].con_port) {
-							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Skipping VIDEO RTCP ICE (Same as VIDEO RTP)\n");
-						} else {
+				/* Activate VIDEO RTCP ICE independently of rtcp_video_interval_msec */
+				if (v_engine->ice_in.cands[v_engine->ice_in.chosen[1]][1].ready && v_engine->ice_in.cands[v_engine->ice_in.chosen[0]][0].ready &&
+					!zstr(v_engine->ice_in.cands[v_engine->ice_in.chosen[1]][1].con_addr) &&
+					!zstr(v_engine->ice_in.cands[v_engine->ice_in.chosen[0]][0].con_addr)) {
 
-							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Activating VIDEO RTCP ICE\n");
-							switch_rtp_activate_ice(v_engine->rtp_session,
-													v_engine->ice_in.ufrag,
-													v_engine->ice_out.ufrag,
-													v_engine->ice_out.pwd,
-													v_engine->ice_in.pwd,
-													IPR_RTCP,
-#ifdef GOOGLE_ICE
-													ICE_GOOGLE_JINGLE,
-													NULL
-#else
-													switch_determine_ice_type(v_engine, session),
-													&v_engine->ice_in
-#endif
-													);
-
-
-
+					if (!switch_rtp_test_flag(v_engine->rtp_session, SWITCH_RTP_FLAG_ENABLE_RTCP)) {
+						switch_port_t rtcp_port = v_engine->remote_rtcp_port;
+						if (!rtcp_port) {
+							const char *rp = switch_channel_get_variable(session->channel, "rtp_remote_video_rtcp_port");
+							if (rp) rtcp_port = (switch_port_t)atoi(rp);
 						}
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+										  "Activating VIDEO RTCP for ICE (no send interval) PORT %d\n", rtcp_port);
+						if (switch_rtp_activate_rtcp(v_engine->rtp_session, 0, rtcp_port, v_engine->rtcp_mux > 0) != SWITCH_STATUS_SUCCESS) {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+										  "Failed to activate VIDEO RTCP socket for ICE, skipping VIDEO RTCP ICE\n");
+							goto skip_video_rtcp_ice;
+						}
+					}
 
+					if (v_engine->rtcp_mux > 0 && !strcmp(v_engine->ice_in.cands[v_engine->ice_in.chosen[1]][1].con_addr, v_engine->ice_in.cands[v_engine->ice_in.chosen[0]][0].con_addr)
+						&& v_engine->ice_in.cands[v_engine->ice_in.chosen[1]][1].con_port == v_engine->ice_in.cands[v_engine->ice_in.chosen[0]][0].con_port) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Skipping VIDEO RTCP ICE (Same as VIDEO RTP)\n");
+					} else {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Activating VIDEO RTCP ICE\n");
+						switch_rtp_activate_ice(v_engine->rtp_session,
+												v_engine->ice_in.ufrag,
+												v_engine->ice_out.ufrag,
+												v_engine->ice_out.pwd,
+												v_engine->ice_in.pwd,
+												IPR_RTCP,
+#ifdef GOOGLE_ICE
+												ICE_GOOGLE_JINGLE,
+												NULL
+#else
+												switch_determine_ice_type(v_engine, session),
+												&v_engine->ice_in
+#endif
+												);
 					}
 				}
+
+				skip_video_rtcp_ice:
 
 				if (!zstr(v_engine->local_dtls_fingerprint.str) && switch_rtp_has_dtls() && dtls_ok(smh->session)) {
 					dtls_type_t xtype,
 						dtype = v_engine->dtls_controller ? DTLS_TYPE_CLIENT : DTLS_TYPE_SERVER;
 					xtype = DTLS_TYPE_RTP;
-					if (v_engine->rtcp_mux > 0 && smh->mparams->rtcp_video_interval_msec) xtype |= DTLS_TYPE_RTCP;
+					if (v_engine->rtcp_mux > 0 && (smh->mparams->rtcp_video_interval_msec ||
+						switch_rtp_test_flag(v_engine->rtp_session, SWITCH_RTP_FLAG_ENABLE_RTCP))) xtype |= DTLS_TYPE_RTCP;
 			
 
 					if (switch_channel_var_true(session->channel, "legacyDTLS")) {
@@ -12469,7 +12551,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 
 					switch_rtp_add_dtls(v_engine->rtp_session, &v_engine->local_dtls_fingerprint, &v_engine->remote_dtls_fingerprint, dtype | xtype, want_DTLSv1_2);
 
-					if (v_engine->rtcp_mux < 1 && smh->mparams->rtcp_video_interval_msec) {
+					if (v_engine->rtcp_mux < 1 && (smh->mparams->rtcp_video_interval_msec ||
+						switch_rtp_test_flag(v_engine->rtp_session, SWITCH_RTP_FLAG_ENABLE_RTCP))) {
 						xtype = DTLS_TYPE_RTCP;
 						switch_rtp_add_dtls(v_engine->rtp_session, &v_engine->local_dtls_fingerprint, &v_engine->remote_dtls_fingerprint, dtype | xtype, want_DTLSv1_2);
 					}
