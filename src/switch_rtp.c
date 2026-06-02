@@ -1128,12 +1128,18 @@ static switch_status_t ice_out(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 		&& !rtp_session->dtls
 		&& !ice->promoted_to_controlling && ice->cand_responsive && ice->first_responsive_us) {
 		if (!ice->nomination_fallback_cached) {
-			const char *fb_var = switch_channel_get_variable(rtp_session->session->channel, "rtp_ice_nomination_fallback");
-			ice->nomination_fallback_enabled = zstr(fb_var) || switch_true(fb_var);
-			/* rtp_ice_nomination_fallback_ms=0 disables the fallback for this leg. */
-			ice->nomination_fallback_ms = switch_safe_atoi(
-				switch_channel_get_variable(rtp_session->session->channel, "rtp_ice_nomination_fallback_ms"),
-				DEFAULT_ICE_NOMINATION_FALLBACK_MS);
+			/* rtp_ice_nomination_fallback_ms=0 (or negative) disables the fallback for this leg. */
+			if (rtp_session->session && rtp_session->session->channel) {
+				const char *fb_var = switch_channel_get_variable(rtp_session->session->channel, "rtp_ice_nomination_fallback");
+				int raw = switch_safe_atoi(
+					switch_channel_get_variable(rtp_session->session->channel, "rtp_ice_nomination_fallback_ms"),
+					DEFAULT_ICE_NOMINATION_FALLBACK_MS);
+				ice->nomination_fallback_enabled = zstr(fb_var) || switch_true(fb_var);
+				ice->nomination_fallback_ms = (raw > 0) ? (uint32_t)raw : 0;
+			} else {
+				ice->nomination_fallback_enabled = 1;
+				ice->nomination_fallback_ms = DEFAULT_ICE_NOMINATION_FALLBACK_MS;
+			}
 			ice->nomination_fallback_cached = 1;
 		}
 		if (ice->nomination_fallback_enabled && ice->nomination_fallback_ms > 0
@@ -1368,6 +1374,10 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 								  );
 
 				if ((ice->type & ICE_VANILLA) && code == 487) {
+					/* Three role-conflict cases:
+					 *   1. We self-promoted (fallback) and peer rejects -> revert to CONTROLLED, disable fallback.
+					 *   2. We were CONTROLLED and peer 487s us -> RFC role-conflict flip to CONTROLLING.
+					 *   3. We were CONTROLLING and peer 487s us -> RFC role-conflict flip to CONTROLLED. */
 					if (ice->promoted_to_controlling && !(ice->type & ICE_CONTROLLED)) {
 						/* Peer rejected our self-promotion: it is legitimately controlling. Revert and stand down. */
 						ice->type |= ICE_CONTROLLED;
