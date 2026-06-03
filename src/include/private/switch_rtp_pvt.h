@@ -22,6 +22,11 @@ typedef struct {
 		switch_time_t last_ok;
 		uint8_t cand_responsive;
 		uint8_t dtls_handshake;
+		switch_time_t first_responsive_us;
+		uint8_t promoted_to_controlling;
+		uint8_t nomination_fallback_cached;
+		uint8_t nomination_fallback_enabled;
+		uint32_t nomination_fallback_ms;
 } switch_rtp_ice_t;
 
 SWITCH_DECLARE(void) switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *data, switch_size_t len);
