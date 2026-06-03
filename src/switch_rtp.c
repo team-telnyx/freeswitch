@@ -1129,10 +1129,11 @@ static switch_status_t ice_out(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 		&& !ice->promoted_to_controlling && ice->cand_responsive && ice->first_responsive_us) {
 		if (!ice->nomination_fallback_cached) {
 			/* rtp_ice_nomination_fallback_ms=0 (or negative) disables the fallback for this leg. */
-			if (rtp_session->session && rtp_session->session->channel) {
-				const char *fb_var = switch_channel_get_variable(rtp_session->session->channel, "rtp_ice_nomination_fallback");
+			switch_channel_t *channel = rtp_session->session ? switch_core_session_get_channel(rtp_session->session) : NULL;
+			if (channel) {
+				const char *fb_var = switch_channel_get_variable(channel, "rtp_ice_nomination_fallback");
 				int raw = switch_safe_atoi(
-					switch_channel_get_variable(rtp_session->session->channel, "rtp_ice_nomination_fallback_ms"),
+					switch_channel_get_variable(channel, "rtp_ice_nomination_fallback_ms"),
 					DEFAULT_ICE_NOMINATION_FALLBACK_MS);
 				ice->nomination_fallback_enabled = zstr(fb_var) || switch_true(fb_var);
 				ice->nomination_fallback_ms = (raw > 0) ? (uint32_t)raw : 0;
