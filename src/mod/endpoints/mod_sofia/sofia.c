@@ -1568,6 +1568,22 @@ static void our_sofia_event_callback(nua_event_t event,
 				}
 
 				if (channel && switch_channel_down(channel)) {
+					if (event == nua_i_bye) {
+						/* RFC 3261 15.1.2 glare: channel already torn down, but we still owe a final response to the in-dialog BYE. */
+						const char *session_id_header = sofia_glue_session_id_header(session, profile);
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+										  "Channel is already hungup, responding 200 OK to inbound BYE immediately.\n");
+						sofia_set_flag_locked(tech_pvt, TFLAG_BYE);
+						tech_pvt->got_bye = 1;
+						nua_respond(nh, SIP_200_OK, NUTAG_WITH_THIS_MSG(de->data->e_msg),
+									TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)),
+									TAG_END());
+						if (sofia_private) {
+							sofia_private->destroy_me = 1;
+							sofia_private->destroy_nh = 1;
+						}
+						goto done;
+					}
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Channel is already hungup.\n");
 					goto done;
 				}
