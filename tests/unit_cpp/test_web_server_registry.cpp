@@ -495,6 +495,80 @@ static void test_cross_tier_precedence()
 	CHECK_EQ(pr.route.kind, std::string("prefix"));
 }
 
+/* Cross-tier overlap is allowed (not a conflict) and the more specific tier
+   wins regardless of registration order. Proves each tier pair — exact vs
+   pattern, exact vs prefix, pattern vs prefix — in BOTH insertion orders,
+   so the documented precedence does not secretly depend on load order. */
+static void test_cross_tier_no_conflict_both_orders()
+{
+	std::cout << "[test] cross-tier: overlapping tiers coexist; precedence is order-independent\n";
+
+	/* --- exact vs pattern: exact "/users/me" shadows pattern "/users/{id}" --- */
+	for (int order = 0; order < 2; ++order) {
+		wipe();
+		switch_status_t se, sp;
+		if (order == 0) {
+			sp = switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/users/{id}",
+			                                SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+			se = switch_web_server_register("modB", SWITCH_WEB_METHOD_GET, "/users/me",
+			                                SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+		} else {
+			se = switch_web_server_register("modB", SWITCH_WEB_METHOD_GET, "/users/me",
+			                                SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+			sp = switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/users/{id}",
+			                                SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+		}
+		CHECK_EQ((int)se, (int)SWITCH_STATUS_SUCCESS);
+		CHECK_EQ((int)sp, (int)SWITCH_STATUS_SUCCESS);
+		/* exact match wins, the rest still falls through to the pattern */
+		CHECK_EQ(internal::lookup(SWITCH_WEB_METHOD_GET, "/users/me").route.kind, std::string("exact"));
+		CHECK_EQ(internal::lookup(SWITCH_WEB_METHOD_GET, "/users/42").route.kind, std::string("pattern"));
+	}
+
+	/* --- exact vs prefix: exact "/api/health" shadows prefix "/api" --- */
+	for (int order = 0; order < 2; ++order) {
+		wipe();
+		switch_status_t se, spr;
+		if (order == 0) {
+			spr = switch_web_server_register_prefix("modA", SWITCH_WEB_METHOD_GET, "/api",
+			                                        SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+			se  = switch_web_server_register("modB", SWITCH_WEB_METHOD_GET, "/api/health",
+			                                 SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+		} else {
+			se  = switch_web_server_register("modB", SWITCH_WEB_METHOD_GET, "/api/health",
+			                                 SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+			spr = switch_web_server_register_prefix("modA", SWITCH_WEB_METHOD_GET, "/api",
+			                                        SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+		}
+		CHECK_EQ((int)se,  (int)SWITCH_STATUS_SUCCESS);
+		CHECK_EQ((int)spr, (int)SWITCH_STATUS_SUCCESS);
+		CHECK_EQ(internal::lookup(SWITCH_WEB_METHOD_GET, "/api/health").route.kind, std::string("exact"));
+		CHECK_EQ(internal::lookup(SWITCH_WEB_METHOD_GET, "/api/v2/x").route.kind,   std::string("prefix"));
+	}
+
+	/* --- pattern vs prefix: pattern "/api/{id}" shadows prefix "/api" --- */
+	for (int order = 0; order < 2; ++order) {
+		wipe();
+		switch_status_t sp, spr;
+		if (order == 0) {
+			spr = switch_web_server_register_prefix("modA", SWITCH_WEB_METHOD_GET, "/api",
+			                                        SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+			sp  = switch_web_server_register("modB", SWITCH_WEB_METHOD_GET, "/api/{id}",
+			                                 SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+		} else {
+			sp  = switch_web_server_register("modB", SWITCH_WEB_METHOD_GET, "/api/{id}",
+			                                 SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+			spr = switch_web_server_register_prefix("modA", SWITCH_WEB_METHOD_GET, "/api",
+			                                        SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+		}
+		CHECK_EQ((int)sp,  (int)SWITCH_STATUS_SUCCESS);
+		CHECK_EQ((int)spr, (int)SWITCH_STATUS_SUCCESS);
+		/* single trailing segment hits the pattern; deeper paths fall to prefix */
+		CHECK_EQ(internal::lookup(SWITCH_WEB_METHOD_GET, "/api/42").route.kind,   std::string("pattern"));
+		CHECK_EQ(internal::lookup(SWITCH_WEB_METHOD_GET, "/api/v2/x").route.kind, std::string("prefix"));
+	}
+}
+
 /* ----- Sweep on module unregister ----- */
 
 static void test_unregister_module_sweep()
@@ -526,6 +600,40 @@ static void test_unregister_specific()
 
 	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET,  "/x").outcome, (int)internal::LookupOutcome::MethodNotAllowed);
 	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_POST, "/x").outcome, (int)internal::LookupOutcome::Hit);
+}
+
+/* ----- Response printf ----- */
+
+/* Regression for the long-output path of switch_web_response_printf():
+   formatted output far larger than any common stack/small buffer must land
+   in the body intact, with the exact byte length and no truncation or
+   trailing NUL. Also proves last-call-wins fully replaces a longer body. */
+static void test_response_printf_long_output()
+{
+	std::cout << "[test] response printf: large formatted output is stored intact\n";
+
+	internal::ResponsePtr res(internal::make_response());
+
+	/* 10000 bytes of payload — well past 256/1024/4096 thresholds. */
+	const int n = 10000;
+	std::string filler(static_cast<std::size_t>(n), 'x');
+	switch_web_response_printf(res.get(), "PRE[%s]POST=%d", filler.c_str(), n);
+
+	std::string expected = "PRE[" + filler + "]POST=" + std::to_string(n);
+	{
+		const std::string &body = internal::response_body(res.get());
+		CHECK_EQ(body.size(), expected.size());
+		CHECK(body == expected);
+		/* exactly `needed` bytes — no embedded/trailing NUL from vsnprintf */
+		CHECK(body.find('\0') == std::string::npos);
+	}
+
+	/* last call wins: a short printf must fully replace the long body. */
+	switch_web_response_printf(res.get(), "short:%d", 7);
+	{
+		const std::string &body = internal::response_body(res.get());
+		CHECK_EQ(body, std::string("short:7"));
+	}
 }
 
 /* ----- Snapshot ----- */
@@ -566,8 +674,10 @@ int main()
 	test_prefix_overlap_conflict();
 	test_prefix_disjoint_coexist();
 	test_cross_tier_precedence();
+	test_cross_tier_no_conflict_both_orders();
 	test_unregister_module_sweep();
 	test_unregister_specific();
+	test_response_printf_long_output();
 	test_snapshot();
 
 	wipe();
