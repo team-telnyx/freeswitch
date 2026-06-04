@@ -62,10 +62,19 @@ SWITCH_DECLARE(void) switch_web_response_printf(switch_web_response_t *res, cons
  * {name} captures ("/users/{id}"). Captures are read via
  * switch_web_request_param(req, "id").
  *
- * Contract: a registration is rejected whenever its match-set would
- * intersect an existing route's under an overlapping method, so dispatch
- * never depends on registration or module-load order. Overlap is decided
- * by what a request could match, not by raw string equality:
+ * Routes live in three tiers — exact paths, {capture} patterns, and
+ * segment-bounded prefixes (switch_web_server_register_prefix) — and a
+ * lookup tries them in that fixed order: exact, then pattern, then prefix.
+ * That precedence is structural (decided by tier, never by insertion or
+ * module-load order), so a more specific route intentionally and
+ * deterministically shadows a less specific one. Example: an exact
+ * "/api/health" still wins even if a prefix "/api" is also registered.
+ *
+ * Contract: WITHIN a single tier, a registration is rejected whenever its
+ * match-set would intersect an existing route's under an overlapping
+ * method — so no request can match two routes in the same tier, and the
+ * winner never depends on registration order. Overlap is decided by what a
+ * request could match, not by raw string equality:
  *   - exact paths overlap only when identical;
  *   - patterns overlap when they have the same segment count and, at every
  *     position, one side is a {capture} or the literals match — so
@@ -75,6 +84,9 @@ SWITCH_DECLARE(void) switch_web_response_printf(switch_web_response_t *res, cons
  *     "/api" conflicts with "/api/v2" but not with "/apiv2".
  * ANY overlaps every specific method (and vice versa). The check is
  * symmetric, so the outcome is the same in either registration order.
+ * ACROSS tiers, overlapping match-sets are NOT a conflict: both routes
+ * register and the tier precedence above decides which one a request
+ * reaches. Cross-tier shadowing is allowed and intentional.
  *
  * Returns:
  *   SUCCESS  — inserted, or the same module re-registered the identical
