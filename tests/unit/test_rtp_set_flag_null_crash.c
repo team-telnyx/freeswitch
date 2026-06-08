@@ -57,25 +57,43 @@
 #include <string.h>
 
 /*
- * run_in_child: fork, run `body` in the child, return the wait status.
- * The child exits 0 on success (no crash) or with whatever signal/exit
- * the body produces.
+ * run_in_child: fork, run `body` in the child, and report the child's wait
+ * status via *out_status. Returns 1 on success (child reaped cleanly,
+ * *out_status valid) or 0 on a harness failure (fork or waitpid). On harness
+ * failure *out_status is meaningless and the caller MUST treat it as an error,
+ * never a pass — otherwise an interrupted/failed waitpid() with a zeroed status
+ * would masquerade as a clean child exit and turn a crash test into a false
+ * pass. waitpid() is retried on EINTR; any other failure is reported.
  */
-static int run_in_child(void (*body)(void))
+static int run_in_child(void (*body)(void), int *out_status)
 {
-	pid_t pid = fork();
+	pid_t pid;
 	int status = 0;
+	int rc;
 
+	*out_status = 0;
+
+	pid = fork();
+	if (pid < 0) {
+		fprintf(stderr, "run_in_child: fork failed: %s\n", strerror(errno));
+		return 0;
+	}
 	if (pid == 0) {
 		body();
 		_exit(0);
 	}
-	if (pid < 0) {
-		fprintf(stderr, "fork failed: %s\n", strerror(errno));
-		return -1;
+
+	do {
+		rc = waitpid(pid, &status, 0);
+	} while (rc < 0 && errno == EINTR);
+
+	if (rc < 0) {
+		fprintf(stderr, "run_in_child: waitpid failed: %s\n", strerror(errno));
+		return 0;
 	}
-	waitpid(pid, &status, 0);
-	return status;
+
+	*out_status = status;
+	return 1;
 }
 
 static int child_segfaulted(int status)
@@ -84,29 +102,35 @@ static int child_segfaulted(int status)
 }
 
 /*
- * Translate a child wait status into fst assertions, decoding the exit-code
- * contract documented at the top of the file so a CI failure says *why*
- * (crash vs. unmet precondition vs. harness setup), not just "exited nonzero".
+ * Run `scenario` in a forked child and translate the result into fst
+ * assertions, decoding the exit-code contract documented at the top of the
+ * file so a CI failure says *why* (harness failure vs. crash vs. unmet
+ * precondition vs. setup), not just "exited nonzero". A harness failure
+ * (fork/waitpid) is a hard fail — never silently treated as a clean exit.
  *
  * A macro rather than a function: fst_xcheck/fst_fail expand to fct_* checks
  * that reference the enclosing FST_TEST's context, so they must be used inside
  * a test block.
  */
-#define ASSERT_CHILD_OK(wait_status) \
+#define ASSERT_CHILD_OK(scenario) \
 	do { \
-		int _st = (wait_status); \
-		fst_xcheck(!child_segfaulted(_st), \
-		           "guarded NULL switch_rtp_set_flag/clear_flag path must not segfault"); \
-		if (!WIFEXITED(_st)) { \
-			fst_fail("child did not exit normally"); \
+		int _st = 0; \
+		if (!run_in_child((scenario), &_st)) { \
+			fst_fail("fork/waitpid harness failure — see stderr"); \
 		} else { \
-			fst_xcheck(WEXITSTATUS(_st) != 2, \
-			           "bind-conflict harness setup failed (socket/bind/getsockname)"); \
-			fst_xcheck(WEXITSTATUS(_st) != 3, \
-			           "switch_rtp_new() unexpectedly returned non-NULL — recovery NULL path NOT exercised"); \
-			fst_xcheck(WEXITSTATUS(_st) != 4, \
-			           "switch_rtp_new() failed for a non-bind reason — bind conflict not reproduced"); \
-			fst_xcheck(WEXITSTATUS(_st) == 0, "child exited non-zero"); \
+			fst_xcheck(!child_segfaulted(_st), \
+			           "guarded NULL switch_rtp_set_flag/clear_flag path must not segfault"); \
+			if (!WIFEXITED(_st)) { \
+				fst_fail("child did not exit normally"); \
+			} else { \
+				fst_xcheck(WEXITSTATUS(_st) != 2, \
+				           "bind-conflict harness setup failed (socket/bind/getsockname)"); \
+				fst_xcheck(WEXITSTATUS(_st) != 3, \
+				           "switch_rtp_new() unexpectedly returned non-NULL — recovery NULL path NOT exercised"); \
+				fst_xcheck(WEXITSTATUS(_st) != 4, \
+				           "switch_rtp_new() failed for a non-bind reason — bind conflict not reproduced"); \
+				fst_xcheck(WEXITSTATUS(_st) == 0, "child exited non-zero"); \
+			} \
 		} \
 	} while (0)
 
@@ -241,19 +265,19 @@ FST_TEARDOWN_END()
 
 	FST_TEST_BEGIN(direct_null_set_flag_must_not_segfault)
 	{
-		ASSERT_CHILD_OK(run_in_child(scenario_direct_null_set_flag));
+		ASSERT_CHILD_OK(scenario_direct_null_set_flag);
 	}
 	FST_TEST_END()
 
 	FST_TEST_BEGIN(direct_null_clear_flag_must_not_segfault)
 	{
-		ASSERT_CHILD_OK(run_in_child(scenario_direct_null_clear_flag));
+		ASSERT_CHILD_OK(scenario_direct_null_clear_flag);
 	}
 	FST_TEST_END()
 
 	FST_TEST_BEGIN(bind_conflict_then_set_flag_must_not_segfault)
 	{
-		ASSERT_CHILD_OK(run_in_child(scenario_bind_conflict_then_set_flag));
+		ASSERT_CHILD_OK(scenario_bind_conflict_then_set_flag);
 	}
 	FST_TEST_END()
 }
