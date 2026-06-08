@@ -28,6 +28,19 @@
  * not abort the rest of the suite. After the fix, every child must exit
  * cleanly (status 0). Pre-fix, the children that exercise the unguarded
  * paths exit with WIFSIGNALED / SIGSEGV.
+ *
+ * Child exit-code contract (see ASSERT_CHILD_OK()):
+ *   0            success: no crash, and — for the bind-conflict child — the
+ *                NULL/bind-error precondition was actually reproduced before
+ *                the guarded call was made.
+ *   2            harness setup failure (socket/bind/getsockname) — an
+ *                environment problem, not a pass.
+ *   3            precondition NOT met: switch_rtp_new() returned non-NULL, so
+ *                the recovery NULL path was never exercised — fail loudly
+ *                rather than report a meaningless pass.
+ *   4            precondition NOT met: switch_rtp_new() failed for a reason
+ *                other than the bind conflict we engineered.
+ *   SIGSEGV/BUS  the regression itself — the NULL guard is missing.
  */
 
 #include <switch.h>
@@ -41,6 +54,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <errno.h>
+#include <string.h>
 
 /*
  * run_in_child: fork, run `body` in the child, return the wait status.
@@ -70,6 +84,33 @@ static int child_segfaulted(int status)
 }
 
 /*
+ * Translate a child wait status into fst assertions, decoding the exit-code
+ * contract documented at the top of the file so a CI failure says *why*
+ * (crash vs. unmet precondition vs. harness setup), not just "exited nonzero".
+ *
+ * A macro rather than a function: fst_xcheck/fst_fail expand to fct_* checks
+ * that reference the enclosing FST_TEST's context, so they must be used inside
+ * a test block.
+ */
+#define ASSERT_CHILD_OK(wait_status) \
+	do { \
+		int _st = (wait_status); \
+		fst_xcheck(!child_segfaulted(_st), \
+		           "guarded NULL switch_rtp_set_flag/clear_flag path must not segfault"); \
+		if (!WIFEXITED(_st)) { \
+			fst_fail("child did not exit normally"); \
+		} else { \
+			fst_xcheck(WEXITSTATUS(_st) != 2, \
+			           "bind-conflict harness setup failed (socket/bind/getsockname)"); \
+			fst_xcheck(WEXITSTATUS(_st) != 3, \
+			           "switch_rtp_new() unexpectedly returned non-NULL — recovery NULL path NOT exercised"); \
+			fst_xcheck(WEXITSTATUS(_st) != 4, \
+			           "switch_rtp_new() failed for a non-bind reason — bind conflict not reproduced"); \
+			fst_xcheck(WEXITSTATUS(_st) == 0, "child exited non-zero"); \
+		} \
+	} while (0)
+
+/*
  * Scenario 1 — the proximate bug, isolated.
  *
  * Reproduces the exact instruction that crashed in the trace:
@@ -84,6 +125,19 @@ static void scenario_direct_null_set_flag(void)
 }
 
 /*
+ * Scenario 1b — the clear_flag side of the same guard.
+ *
+ * switch_core_media_activate_rtp() / call recovery can also reach
+ * switch_rtp_clear_flag() with a NULL session, and the production fix guards
+ * both set and clear. Cover the clear path directly too, so a regression in
+ * either guard is caught.
+ */
+static void scenario_direct_null_clear_flag(void)
+{
+	switch_rtp_clear_flag(NULL, SWITCH_RTP_FLAG_IGNORE_RTP_DURING_DTMF);
+}
+
+/*
  * Scenario 2 — realistic upstream failure: switch_rtp_new() fails because
  * the local rx_port is already bound (simulates a recovery-time port
  * collision, the most common cause of the NULL return on this path).
@@ -92,6 +146,12 @@ static void scenario_direct_null_set_flag(void)
  *   a_engine->rtp_session = switch_rtp_new(...);
  *   // (no switch_rtp_ready guard — bug)
  *   switch_rtp_set_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_IGNORE_RTP_DURING_DTMF);
+ *
+ * The bind conflict is the whole point of this scenario, so it is enforced as
+ * a contract: if switch_rtp_new() does NOT return NULL (or fails for some
+ * unrelated reason), the child exits non-zero and the test fails — a "pass"
+ * here would otherwise be meaningless, as it would no longer touch the NULL
+ * recovery path at all.
  */
 static void scenario_bind_conflict_then_set_flag(void)
 {
@@ -133,18 +193,34 @@ static void scenario_bind_conflict_then_set_flag(void)
 	                             /*payload*/ 8, /*samples*/ 8000,
 	                             /*ms*/ 20 * 1000, flags, "soft", &err, pool);
 
-	/* Expectation: rtp_session == NULL because of the bind conflict.
-	 * Do NOT assert here — we want to continue down the buggy path. */
 	fprintf(stderr, "scenario_bind_conflict: switch_rtp_new -> %p, err=%s\n",
 	        (void *)rtp_session, err ? err : "(none)");
 
-	/* Buggy pattern from switch_core_media.c — unguarded set_flag. */
+	/* Contract: the bind conflict MUST drive switch_rtp_new() to fail and
+	 * return NULL. If it did not, this child is not exercising the recovery
+	 * crash path — fail loudly (exit 3) rather than report a hollow pass. */
+	if (rtp_session != NULL) {
+		switch_rtp_destroy(&rtp_session);
+		close(hog);
+		switch_core_destroy_memory_pool(&pool);
+		_exit(3);
+	}
+
+	/* And it must have failed *because of the bind conflict* (switch_rtp.c
+	 * sets "Bind Error! host:port"), not for some unrelated reason that
+	 * happens to also return NULL. */
+	if (!err || !strstr(err, "Bind Error")) {
+		close(hog);
+		switch_core_destroy_memory_pool(&pool);
+		_exit(4);
+	}
+
+	/* The exact buggy pattern from switch_core_media_activate_rtp():
+	 * unguarded switch_rtp_set_flag() on the (NULL) session. Pre-fix this
+	 * dereferences NULL at switch_rtp.c:6373 and the child takes SIGSEGV;
+	 * with the guard in place it must no-op and the child exits 0. */
 	switch_rtp_set_flag(rtp_session, SWITCH_RTP_FLAG_IGNORE_RTP_DURING_DTMF);
 
-	/* If we somehow reach here, clean up and report success. */
-	if (rtp_session) {
-		switch_rtp_destroy(&rtp_session);
-	}
 	close(hog);
 	switch_core_destroy_memory_pool(&pool);
 }
@@ -165,20 +241,19 @@ FST_TEARDOWN_END()
 
 	FST_TEST_BEGIN(direct_null_set_flag_must_not_segfault)
 	{
-		int status = run_in_child(scenario_direct_null_set_flag);
-		fst_xcheck(!child_segfaulted(status),
-		           "switch_rtp_set_flag(NULL, ...) must not segfault");
-		fst_check(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+		ASSERT_CHILD_OK(run_in_child(scenario_direct_null_set_flag));
+	}
+	FST_TEST_END()
+
+	FST_TEST_BEGIN(direct_null_clear_flag_must_not_segfault)
+	{
+		ASSERT_CHILD_OK(run_in_child(scenario_direct_null_clear_flag));
 	}
 	FST_TEST_END()
 
 	FST_TEST_BEGIN(bind_conflict_then_set_flag_must_not_segfault)
 	{
-		int status = run_in_child(scenario_bind_conflict_then_set_flag);
-		fst_xcheck(!child_segfaulted(status),
-		           "activate_rtp pattern (switch_rtp_new fail + unguarded set_flag) "
-		           "must not segfault");
-		fst_check(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+		ASSERT_CHILD_OK(run_in_child(scenario_bind_conflict_then_set_flag));
 	}
 	FST_TEST_END()
 }
