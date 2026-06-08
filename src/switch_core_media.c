@@ -19125,6 +19125,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 	switch_frame_t *enc_frame = NULL, *write_frame = frame;
 	unsigned int flag = 0, need_codec = 0, perfect = 0, do_bugs = 0, do_write = 0, do_resample = 0, ptime_mismatch = 0, pass_cng = 0, resample = 0;
 	int did_write_resample = 0;
+	switch_mutex_t *write_codec_mutex = NULL, *frame_codec_mutex = NULL;
 
 	switch_assert(session != NULL);
 	switch_assert(frame != NULL);
@@ -19192,8 +19193,20 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 		return SWITCH_STATUS_FALSE;
 	}
 
-	switch_mutex_lock(session->write_codec->mutex);
-	switch_mutex_lock(frame->codec->mutex);
+	/* Snapshot the codec mutexes so the same objects are locked and unlocked.
+	 * frame->codec may be a codec owned by another session (e.g. the peer codec
+	 * setup_ringback() passes during originate ringback / bridge_early_media);
+	 * our session->codec_write_mutex does not protect its lifetime, so it can be
+	 * torn down concurrently, leaving its mutex NULL. Bail rather than fault. */
+	write_codec_mutex = session->write_codec->mutex;
+	frame_codec_mutex = frame->codec->mutex;
+	if (!write_codec_mutex || !frame_codec_mutex) {
+		switch_mutex_unlock(session->codec_write_mutex);
+		return SWITCH_STATUS_FALSE;
+	}
+
+	switch_mutex_lock(write_codec_mutex);
+	switch_mutex_lock(frame_codec_mutex);
 
 	if (!(switch_core_codec_ready(session->write_codec) && switch_core_codec_ready(frame->codec))) goto error;
 
@@ -19808,8 +19821,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 
   error:
 
-	switch_mutex_unlock(session->write_codec->mutex);
-	switch_mutex_unlock(frame->codec->mutex);
+	/* Unlock the same mutex objects we locked above (see snapshot rationale). */
+	switch_mutex_unlock(frame_codec_mutex);
+	switch_mutex_unlock(write_codec_mutex);
 	switch_mutex_unlock(session->codec_write_mutex);
 
 	return status;
