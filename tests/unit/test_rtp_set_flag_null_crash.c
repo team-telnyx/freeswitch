@@ -42,9 +42,6 @@
 #include <unistd.h>
 #include <errno.h>
 
-/* Pick a port that is unlikely to clash with anything else in the suite. */
-#define BUSY_PORT 47823
-
 /*
  * run_in_child: fork, run `body` in the child, return the wait status.
  * The child exits 0 on success (no crash) or with whatever signal/exit
@@ -104,10 +101,14 @@ static void scenario_bind_conflict_then_set_flag(void)
 	const char *err = NULL;
 	int hog;
 	struct sockaddr_in sa;
+	socklen_t sa_len = sizeof(sa);
+	unsigned short busy_port;
 
 	switch_core_new_memory_pool(&pool);
 
-	/* Hold the rx port so switch_rtp_set_local_address() bind() will EADDRINUSE. */
+	/* Hold an OS-assigned rx port so switch_rtp_set_local_address() bind()
+	 * will EADDRINUSE. Bind to port 0 and read back the actual port via
+	 * getsockname() so the test never relies on a fixed port being free. */
 	hog = socket(AF_INET, SOCK_DGRAM, 0);
 	if (hog < 0) {
 		fprintf(stderr, "scenario_bind_conflict: socket() failed: %s\n", strerror(errno));
@@ -115,15 +116,20 @@ static void scenario_bind_conflict_then_set_flag(void)
 	}
 	memset(&sa, 0, sizeof(sa));
 	sa.sin_family = AF_INET;
-	sa.sin_port = htons(BUSY_PORT);
+	sa.sin_port = htons(0);
 	sa.sin_addr.s_addr = inet_addr("127.0.0.1");
 	if (bind(hog, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
 		fprintf(stderr, "scenario_bind_conflict: bind() failed: %s\n", strerror(errno));
 		_exit(2);
 	}
+	if (getsockname(hog, (struct sockaddr *)&sa, &sa_len) < 0) {
+		fprintf(stderr, "scenario_bind_conflict: getsockname() failed: %s\n", strerror(errno));
+		_exit(2);
+	}
+	busy_port = ntohs(sa.sin_port);
 
-	rtp_session = switch_rtp_new("127.0.0.1", BUSY_PORT,
-	                             "127.0.0.1", BUSY_PORT + 2,
+	rtp_session = switch_rtp_new("127.0.0.1", busy_port,
+	                             "127.0.0.1", busy_port + 2,
 	                             /*payload*/ 8, /*samples*/ 8000,
 	                             /*ms*/ 20 * 1000, flags, "soft", &err, pool);
 
