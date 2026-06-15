@@ -187,6 +187,7 @@ static void scenario_bind_conflict_then_set_flag(void)
 	struct sockaddr_in sa;
 	socklen_t sa_len = sizeof(sa);
 	unsigned short busy_port;
+	switch_port_t remote_port;
 
 	switch_core_new_memory_pool(&pool);
 
@@ -212,8 +213,15 @@ static void scenario_bind_conflict_then_set_flag(void)
 	}
 	busy_port = ntohs(sa.sin_port);
 
+	/* Pick a nonzero remote tx_port without uint16_t wraparound: tx_port is a
+	 * switch_port_t (uint16_t), so busy_port + 2 would narrow to 0 when the OS
+	 * assigns busy_port == 65534, tripping switch_rtp_new()'s "Missing remote
+	 * port" check before the intended local bind conflict. The remote port is
+	 * irrelevant to the bind conflict; it only must stay nonzero. */
+	remote_port = busy_port >= 65534 ? (switch_port_t)(busy_port - 2) : (switch_port_t)(busy_port + 2);
+
 	rtp_session = switch_rtp_new("127.0.0.1", busy_port,
-	                             "127.0.0.1", busy_port + 2,
+	                             "127.0.0.1", remote_port,
 	                             /*payload*/ 8, /*samples*/ 8000,
 	                             /*ms*/ 20 * 1000, flags, "soft", &err, pool);
 
