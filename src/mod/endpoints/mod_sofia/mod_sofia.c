@@ -1003,10 +1003,18 @@ static switch_status_t sofia_answer_channel(switch_core_session_t *session)
 		/* This if statement check and handles the 3pcc proxy mode */
 
 		if (is_3pcc) {
+			const char *recv_sdp = switch_channel_get_variable(channel, SWITCH_R_SDP_VARIABLE);
 			switch_core_media_prepare_codecs(tech_pvt->session, SWITCH_TRUE);
 			tech_pvt->mparams.local_sdp_str = NULL;
 			switch_core_media_choose_port(tech_pvt->session, SWITCH_MEDIA_TYPE_AUDIO, 0);
-			switch_core_media_gen_local_sdp(session, SDP_ANSWER, NULL, 0, NULL, 0);
+			if (zstr(recv_sdp)) {
+				/* enable-3pcc-early-offer fallback: no SDP was ever received (no-SDP INVITE and no
+				   offer-in-183 was sent), so put OUR offer in the 200 OK -- the answer arrives in
+				   the ACK and is negotiated in the nua_i_ack handler. */
+				switch_core_media_gen_local_sdp(session, SDP_OFFER, NULL, 0, NULL, 1);
+			} else {
+				switch_core_media_gen_local_sdp(session, SDP_ANSWER, NULL, 0, NULL, 0);
+			}
 			switch_channel_set_flag(channel, CF_3PCC);
 		} else if (is_3pcc_proxy) {
 			if (b_sdp && is_proxy && !switch_channel_var_true(channel, "3pcc_always_gen_sdp")) {
@@ -2951,6 +2959,18 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 			is_proxy = (switch_channel_test_flag(channel, CF_PROXY_MODE) || switch_channel_test_flag(channel, CF_PROXY_MEDIA));
 			is_3pcc_proxy = (sofia_test_pflag(tech_pvt->profile, PFLAG_3PCC_PROXY) && sofia_test_flag(tech_pvt, TFLAG_3PCC));
 
+			/* dialplan-mode early-offer: the no-SDP INVITE was deferred (CF_3PCC is set only by
+			   the no-SDP early-offer defer, which distinguishes this from a normal SDP INVITE
+			   that also carries TFLAG_LATE_NEGOTIATION under inbound-late-negotiation) and the
+			   routing dialplan has now opted in by setting enable_3pcc_early_offer=true. Promote
+			   it to the tech flag so the branch below builds our offer for the 183. */
+			if (!sofia_test_flag(tech_pvt, TFLAG_3PCC_EARLY_OFFER) && !is_proxy &&
+				switch_channel_test_flag(channel, CF_3PCC) &&
+				sofia_test_flag(tech_pvt, TFLAG_LATE_NEGOTIATION) &&
+				switch_channel_var_true(channel, "enable_3pcc_early_offer")) {
+				sofia_set_flag(tech_pvt, TFLAG_3PCC_EARLY_OFFER);
+			}
+
 			// send 180 instead of 183 if variable "early_use_180" is "true"
 			if (switch_true(switch_channel_get_variable(channel, "early_use_180"))) {
 				send_sip_code = 180;
@@ -2990,6 +3010,17 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 							goto end_lock;
 						}
 					}
+				} else if (sofia_test_flag(tech_pvt, TFLAG_3PCC_EARLY_OFFER)) {
+					/* Early-offer: build our own SDP offer for the 183. RTP is NOT activated
+					   here -- the PRACK answer (consumed in nua_i_prack) does that, after which
+					   the synchronous wait further below unblocks the dialplan. */
+					sofia_clear_flag_locked(tech_pvt, TFLAG_LATE_NEGOTIATION);
+					switch_core_media_prepare_codecs(tech_pvt->session, SWITCH_TRUE);
+					if ((status = switch_core_media_choose_port(tech_pvt->session, SWITCH_MEDIA_TYPE_AUDIO, 0)) != SWITCH_STATUS_SUCCESS) {
+						switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
+						goto end_lock;
+					}
+					switch_core_media_gen_local_sdp(session, SDP_OFFER, NULL, 0, NULL, 0);
 				} else {
 					if (sofia_test_flag(tech_pvt, TFLAG_LATE_NEGOTIATION) ||
 						switch_core_media_codec_chosen(tech_pvt->session, SWITCH_MEDIA_TYPE_AUDIO) != SWITCH_STATUS_SUCCESS) {
@@ -3022,7 +3053,12 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Ring SDP:\n%s\n", tech_pvt->mparams.local_sdp_str);
 					}
 				}
-				switch_channel_mark_pre_answered(channel);
+				/* Early-offer: defer pre-answer until the PRACK answer activates RTP (done in
+				   nua_i_prack via sofia_media_tech_media). Marking it here would advertise media
+				   that is not yet flowing. */
+				if (!sofia_test_flag(tech_pvt, TFLAG_3PCC_EARLY_OFFER)) {
+					switch_channel_mark_pre_answered(channel);
+				}
 
 
 				if (sofia_test_flag(tech_pvt, TFLAG_NAT) ||
@@ -3063,6 +3099,7 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 									SOATAG_SDP_MEDIA_STRICT_FMT(sofia_test_pflag(tech_pvt->profile, PFLAG_SDP_MEDIA_STRICT_FMT)),
 									SOATAG_ADDRESS(tech_pvt->mparams.adv_sdp_audio_ip),
 									SOATAG_USER_SDP_STR(tech_pvt->mparams.local_sdp_str), SOATAG_AUDIO_AUX("cn telephone-event"),
+									TAG_IF(sofia_test_flag(tech_pvt, TFLAG_3PCC_EARLY_OFFER), SIPTAG_REQUIRE_STR("100rel")),
 									TAG_IF(call_info, SIPTAG_CALL_INFO_STR(call_info)),
 									TAG_IF(!zstr(extra_header), SIPTAG_HEADER_STR(extra_header)),
 									TAG_IF(switch_stristr("update_display", tech_pvt->x_freeswitch_support_remote),
@@ -3087,6 +3124,36 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 									TAG_END());
 					}
 					switch_safe_free(extra_header);
+
+					/* Early-offer: our SDP offer is in the reliable 183 just sent. Block until the
+					   PRACK answer is consumed and RTP is active -- nua_i_prack negotiates the
+					   answer, activates media, then clears TFLAG_3PCC_EARLY_OFFER. Poll the flag
+					   (same idiom as the 3pcc-proxy ACK wait) and release sofia_mutex so the PRACK
+					   handler on the nua thread can proceed. Bounded by timer_t1x64. */
+					if (sofia_test_flag(tech_pvt, TFLAG_3PCC_EARLY_OFFER)) {
+						uint32_t t1x64 = tech_pvt->profile->timer_t1x64 ? tech_pvt->profile->timer_t1x64 : 32000;
+						switch_time_t deadline = switch_micro_time_now() + (switch_time_t)t1x64 * 1000;
+
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+										  "%s early-offer: 183 with offer sent, waiting for PRACK answer\n", switch_channel_get_name(channel));
+						switch_mutex_unlock(tech_pvt->sofia_mutex);
+						while (switch_channel_ready(channel) && sofia_test_flag(tech_pvt, TFLAG_3PCC_EARLY_OFFER) &&
+							   switch_micro_time_now() < deadline) {
+							switch_cond_next();
+						}
+						switch_mutex_lock(tech_pvt->sofia_mutex);
+
+						if (sofia_test_flag(tech_pvt, TFLAG_3PCC_EARLY_OFFER)) {
+							/* still set -> timed out (or channel went down) before the PRACK answer */
+							if (switch_channel_ready(channel)) {
+								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+												  "%s early-offer: timeout waiting for PRACK answer\n", switch_channel_get_name(channel));
+								switch_channel_hangup(channel, SWITCH_CAUSE_NO_USER_RESPONSE);
+							}
+							status = SWITCH_STATUS_FALSE;
+							goto end_lock;
+						}
+					}
 				}
 			}
 		}
