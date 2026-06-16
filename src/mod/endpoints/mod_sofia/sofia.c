@@ -7725,6 +7725,9 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 					msg->from = __FILE__;
 					msg->numeric_arg = status;
 					msg->string_arg = switch_core_session_strdup(other_session, phrase);
+					if (status > 299) {
+						msg->string_array_arg[0] = SOFIA_RESPOND_REINVITE_FAILURE;
+					}
 
 					if (status == 200 && switch_channel_test_flag(tech_pvt->channel, CF_T38_PASSTHRU) && has_t38) {
 						msg->pointer_arg = switch_core_session_strdup(other_session, "t38");

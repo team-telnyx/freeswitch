@@ -64,6 +64,7 @@
 #define MAX_MISMATCH_FRAMES 5
 #define MODNAME "mod_sofia"
 #define SOFIA_DEFAULT_CONTACT_USER MODNAME
+#define SOFIA_RESPOND_REINVITE_FAILURE "reinvite_failure"
 static const switch_state_handler_table_t noop_state_handler = { 0 };
 struct sofia_gateway;
 typedef struct sofia_gateway sofia_gateway_t;

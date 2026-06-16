@@ -2678,6 +2678,7 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 			if (msg->numeric_arg || msg->string_arg) {
 				int code = msg->numeric_arg;
 				const char *reason = NULL;
+				switch_bool_t preserve_reinvite_failure = SWITCH_FALSE;
 
 				if (code > 0) {
 					reason = msg->string_arg;
@@ -2693,6 +2694,13 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 
 				if (!code) {
 					code = 488;
+				}
+
+				if (switch_channel_test_flag(channel, CF_ANSWERED) &&
+					!zstr(msg->string_array_arg[0]) &&
+					!strcmp(msg->string_array_arg[0], SOFIA_RESPOND_REINVITE_FAILURE) &&
+					code >= 300 && code != 408 && code != 481) {
+					preserve_reinvite_failure = SWITCH_TRUE;
 				}
 
 				if (!switch_channel_test_flag(channel, CF_ANSWERED) && code >= 300) {
@@ -2805,7 +2813,9 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 								switch_core_session_pass_indication(session, SWITCH_MESSAGE_INDICATE_ANSWER);
 							}
 						} else {
-							if (msg->numeric_arg && !(switch_channel_test_flag(channel, CF_ANSWERED) && code == 488)) {
+							if (msg->numeric_arg &&
+								!(switch_channel_test_flag(channel, CF_ANSWERED) && code == 488) &&
+								!preserve_reinvite_failure) {
 								if (code > 399) {
 									switch_call_cause_t cause = sofia_glue_sip_cause_to_freeswitch(code);
 									if (code == 401 || cause == 407) cause = SWITCH_CAUSE_USER_CHALLENGE;
@@ -2826,6 +2836,11 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 									switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Cannot respond.\n");
 								}
 							} else {
+								if (preserve_reinvite_failure) {
+									switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+												  "Preserving answered dialog on re-INVITE failure "
+												  "response %d [%s]\n", code, reason);
+								}
 								nua_respond(tech_pvt->nh, code, su_strdup(nua_handle_home(tech_pvt->nh), reason),
 											SIPTAG_CONTACT_STR(tech_pvt->reply_contact),
 											TAG_IF(!zstr(extra_headers), SIPTAG_HEADER_STR(extra_headers)),
