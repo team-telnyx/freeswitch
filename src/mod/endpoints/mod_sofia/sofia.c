@@ -2715,7 +2715,7 @@ void sofia_event_callback(nua_event_t event,
 			if ((session = switch_core_session_locate(sofia_private->uuid))) {
 				switch_channel_t *channel = switch_core_session_get_channel(session);
 				if (switch_channel_var_true(channel, "apply_100rel_sync")) {
-					private_object_t *tech_pvt = switch_core_session_get_private(session);					
+					private_object_t *tech_pvt = switch_core_session_get_private(session);
 					switch_mutex_lock(tech_pvt->prack_mutex);
 					if (sofia_test_flag(tech_pvt, TFLAG_PRACK_LOCK)) {
 						sofia_clear_flag(tech_pvt, TFLAG_PRACK_LOCK);
@@ -2726,6 +2726,46 @@ void sofia_event_callback(nua_event_t event,
 					}
 					switch_mutex_unlock(tech_pvt->prack_mutex);
 				}
+
+				{
+					/* enable-3pcc-early-offer: the PRACK carries the SDP answer to the offer we
+					   put in the reliable 183. Negotiate it and bring media up BEFORE clearing
+					   TFLAG_3PCC_EARLY_OFFER -- the INDICATE_PROGRESS handler is polling that flag
+					   and proceeds (RTP active) the moment it is cleared. Independent of
+					   apply_100rel_sync. */
+					private_object_t *tech_pvt = switch_core_session_get_private(session);
+					if (tech_pvt && sofia_test_flag(tech_pvt, TFLAG_3PCC_EARLY_OFFER)) {
+						if (sip && sip->sip_payload && sip->sip_payload->pl_data &&
+							sip->sip_content_type && sip->sip_content_type->c_type &&
+							!strcasecmp(sip->sip_content_type->c_type, "application/sdp")) {
+							const char *r_sdp = sip->sip_payload->pl_data;
+							switch_core_media_set_sdp_codec_string(session, r_sdp, SDP_ANSWER);
+							if (sofia_media_tech_media(tech_pvt, r_sdp, SDP_ANSWER) != SWITCH_STATUS_SUCCESS) {
+								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+												  "early-offer: failed to negotiate the PRACK answer SDP\n");
+								switch_channel_set_variable(channel, SWITCH_ENDPOINT_DISPOSITION_VARIABLE, "CODEC NEGOTIATION ERROR");
+								switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
+							} else {
+								/* Media is up; the 200 OK to the INVITE must carry no SDP, so drop
+								   the offer-in-200 fallback by clearing TFLAG_3PCC. */
+								sofia_clear_flag_locked(tech_pvt, TFLAG_3PCC);
+								/* Offer/answer is complete (offer in 183, answer in this PRACK).
+								   Mark SDP done so the nua_i_ack handler ignores any SDP body in the
+								   ACK -- the 200 OK carried no offer, so an ACK body is not a valid
+								   answer and must not re-negotiate the codec. */
+								sofia_set_flag_locked(tech_pvt, TFLAG_SDP);
+							}
+						} else {
+							/* We offered in the 183 but the PRACK has no SDP answer -- protocol error. */
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+											  "early-offer: PRACK has no SDP answer, hanging up\n");
+							switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
+						}
+						/* Clearing the flag unblocks the INDICATE_PROGRESS poll (success or not). */
+						sofia_clear_flag_locked(tech_pvt, TFLAG_3PCC_EARLY_OFFER);
+					}
+				}
+
 				switch_core_session_rwunlock(session);
 			}
 		}
@@ -6037,6 +6077,27 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						} else if (!strcasecmp(val, "proxy")) {
 							sofia_set_pflag(profile, PFLAG_3PCC_PROXY);
 						}
+					} else if (!strcasecmp(var, "enable-3pcc-early-offer")) {
+						/* Accept a no-SDP INVITE, emit a reliable 183 carrying our own SDP offer,
+						   and take the answer in the PRACK (RFC 3725 early-offer flow). Requires
+						   100rel; validated after the full profile is parsed. Falls back to the
+						   offer-in-200 / answer-in-ACK behaviour when no 183 is sent.
+						     'true'     - enable per call by default (override per session with the
+						                  enable_3pcc_early_offer channel variable, set before routing).
+						     'dialplan' - defer every no-SDP INVITE to the dialplan instead of 488 so
+						                  the routing dialplan can opt in per call by setting
+						                  enable_3pcc_early_offer=true; calls that do not opt in fall
+						                  back to offer-in-200. */
+						if (switch_true(val)) {
+							sofia_set_pflag(profile, PFLAG_3PCC_EARLY_OFFER);
+							sofia_clear_pflag(profile, PFLAG_3PCC_EARLY_OFFER_DIALPLAN);
+						} else if (!strcasecmp(val, "dialplan")) {
+							sofia_set_pflag(profile, PFLAG_3PCC_EARLY_OFFER_DIALPLAN);
+							sofia_clear_pflag(profile, PFLAG_3PCC_EARLY_OFFER);
+						} else {
+							sofia_clear_pflag(profile, PFLAG_3PCC_EARLY_OFFER);
+							sofia_clear_pflag(profile, PFLAG_3PCC_EARLY_OFFER_DIALPLAN);
+						}
 					} else if (!strcasecmp(var, "accept-blind-auth")) {
 						if (switch_true(val)) {
 							sofia_set_pflag(profile, PFLAG_BLIND_AUTH);
@@ -6677,6 +6738,14 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 
 				if ((!profile->cng_pt) && (!sofia_test_media_flag(profile, SCMF_SUPPRESS_CNG))) {
 					profile->cng_pt = SWITCH_RTP_CNG_PAYLOAD;
+				}
+
+				if ((sofia_test_pflag(profile, PFLAG_3PCC_EARLY_OFFER) || sofia_test_pflag(profile, PFLAG_3PCC_EARLY_OFFER_DIALPLAN))
+					&& sofia_test_pflag(profile, PFLAG_DISABLE_100REL)) {
+					sofia_clear_pflag(profile, PFLAG_3PCC_EARLY_OFFER);
+					sofia_clear_pflag(profile, PFLAG_3PCC_EARLY_OFFER_DIALPLAN);
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+									  "enable-3pcc-early-offer requires reliable provisional responses; disabling it because enable-100rel is off\n");
 				}
 
 				if (!profile->sipip) {
@@ -8713,7 +8782,40 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 					switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
 				}
 			} else {
-				if (sofia_test_pflag(profile, PFLAG_3PCC)) {
+				int eo_var_true = switch_channel_var_true(channel, "enable_3pcc_early_offer");
+				/* 100rel presence is read from the channel var set at i_invite time --
+				   sip->sip_supported is not reliably populated in this state callback. */
+				int eo_dialplan = sofia_test_pflag(profile, PFLAG_3PCC_EARLY_OFFER_DIALPLAN) &&
+					switch_channel_var_true(channel, "sip_remote_supports_100rel");
+				if ((eo_var_true || eo_dialplan) &&
+					!switch_channel_test_flag(channel, CF_PROXY_MODE) && !switch_channel_test_flag(channel, CF_PROXY_MEDIA)) {
+					/* No SDP in INVITE: defer to the dialplan instead of 488. On the first 183
+					   (pre_answer / instant_ringback / relayed early media) we generate our own
+					   SDP offer and take the answer in the PRACK. Media is terminated locally, so
+					   bypass/proxy-media calls fall through to the existing handling below. Flows
+					   that never send a 183 fall back to offer-in-200 / answer-in-ACK via
+					   TFLAG_3PCC.
+
+					   'dialplan' mode defers every such INVITE but leaves TFLAG_3PCC_EARLY_OFFER
+					   clear: the routing dialplan opts in per call by setting
+					   enable_3pcc_early_offer=true before pre_answer (promoted to the flag in the
+					   INDICATE_PROGRESS handler). 'true' mode (or a pre-routing var) commits to
+					   early-offer right here. */
+					switch_channel_set_variable(channel, SWITCH_ENDPOINT_DISPOSITION_VARIABLE, "RECEIVED_NOSDP_EARLY_OFFER");
+					switch_channel_set_flag(channel, CF_3PCC);
+					sofia_set_flag_locked(tech_pvt, TFLAG_3PCC);
+					sofia_set_flag(tech_pvt, TFLAG_LATE_NEGOTIATION);
+					if (eo_var_true) {
+						sofia_set_flag(tech_pvt, TFLAG_3PCC_EARLY_OFFER);
+					}
+					/* Moves into CS_INIT so the call moves forward into the dialplan */
+					if (switch_channel_get_state(channel) == CS_NEW) {
+						switch_channel_set_state(channel, CS_INIT);
+					} else {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Invalid State on handling early-offer (RE)Invite\n");
+						nua_respond(tech_pvt->nh, SIP_488_NOT_ACCEPTABLE, TAG_END());
+					}
+				} else if (sofia_test_pflag(profile, PFLAG_3PCC)) {
 					if (switch_channel_test_flag(channel, CF_PROXY_MODE) || switch_channel_test_flag(channel, CF_PROXY_MEDIA)) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "No SDP in INVITE and 3pcc=yes cannot work with bypass or proxy media, hanging up.\n");
 						switch_channel_set_variable(channel, SWITCH_ENDPOINT_DISPOSITION_VARIABLE, "3PCC DISABLED");
@@ -11871,6 +11973,23 @@ void sofia_handle_sip_i_invite(switch_core_session_t *session, nua_t *nua, sofia
 			} else if (sofia_test_pflag(profile, PFLAG_ENABLE_100REL_SYNC)) {
 				switch_channel_set_variable(channel, "apply_100rel_sync", "true");
 			}
+
+			/* Per-session override for the early-offer flow (offer in a reliable 183, answer in
+			   the PRACK). Explicit channel variable wins; otherwise default from the profile
+			   pflag. Normalized inside the 100rel-supported guard because the flow needs it. */
+			{
+				const char *early_offer = switch_channel_get_variable(channel, "enable_3pcc_early_offer");
+				if (early_offer) {
+					switch_channel_set_variable(channel, "enable_3pcc_early_offer", switch_true(early_offer) ? "true" : "false");
+				} else if (sofia_test_pflag(profile, PFLAG_3PCC_EARLY_OFFER)) {
+					switch_channel_set_variable(channel, "enable_3pcc_early_offer", "true");
+				}
+			}
+
+			/* Record that 100rel was advertised. The no-SDP handler runs in a later state
+			   callback (sofia_handle_sip_i_state) where sip->sip_supported is not reliably
+			   populated, so the early-offer dialplan-mode deferral reads this instead. */
+			switch_channel_set_variable(channel, "sip_remote_supports_100rel", "true");
 		}
 	}
 

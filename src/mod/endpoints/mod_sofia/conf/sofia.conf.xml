@@ -398,6 +398,18 @@
         -->
         <!-- <param name="enable-3pcc" value="true"/> -->
 
+        <!--
+             enable-3pcc-early-offer accepts a no-SDP INVITE, sends our own SDP offer
+             in a reliable 183 Session Progress, and takes the answer in the PRACK.
+             Requires enable-100rel (it is silently disabled otherwise). The offer is
+             emitted on the first 183 (pre_answer / instant_ringback / relayed early
+             media); flows that never send a 183 fall back to offer-in-200 / answer-in-ACK.
+             Override per call with the channel variable enable_3pcc_early_offer, which
+             must be set before routing (profile/gateway variables, inbound header
+             mapping, or the user directory).
+        -->
+        <!-- <param name="enable-3pcc-early-offer" value="true"/> -->
+
         <!-- use at your own risk or if you know what this does. -->
         <!-- <param name="NDLB-force-rport" value="true"/> -->
         <!--
