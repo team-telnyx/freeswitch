@@ -24,16 +24,12 @@ static std::vector<std::string> string_tokenize(const std::string& str, const ch
   return tokens;
 }
 
-static bool is_throttled_api(const std::string& api)
+static std::string first_token(const std::string& s)
 {
-	for (std::set<std::string>::const_iterator iter = throttle_api_calls.begin(); iter != throttle_api_calls.end(); iter++)
-	{
-		if (api.find(*iter) != std::string::npos)
-		{
-			return true;
-		}
-	}
-	return false;
+	const std::string::size_type pos = s.find_first_not_of(" \t\r\n");
+	if (pos == std::string::npos) return std::string();
+	const std::string::size_type end = s.find_first_of(" \t\r\n", pos);
+	return s.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
 }
 
 void set_min_idle_cpu_watermark(const char* idle_cpu)
@@ -43,24 +39,39 @@ void set_min_idle_cpu_watermark(const char* idle_cpu)
 
 switch_bool_t is_resource_available(const char* command, const char* api_str)
 {
-	std::string cmd(zstr(command) ? "" : command);
-	std::string api(zstr(api_str) ? "" : api_str);
-	double idle_cpu = switch_core_idle_cpu();
-	if (api.empty() || throttle_api_calls.empty() || !MIN_IDLE_CPU)
+	if (throttle_api_calls.empty() || MIN_IDLE_CPU <= 0)
 	{
 		return SWITCH_TRUE;
 	}
-	return (cmd == "bgapi" && is_throttled_api(api) && (idle_cpu) < MIN_IDLE_CPU) ? SWITCH_TRUE : SWITCH_FALSE;
+
+	std::string cmd(zstr(command) ? "" : command);
+	std::string api(zstr(api_str) ? "" : api_str);
+
+	bool throttled = throttle_api_calls.count(cmd) > 0;
+	if (!throttled && cmd == "bgapi")
+	{
+		const std::string sub = first_token(api);
+		throttled = !sub.empty() && throttle_api_calls.count(sub) > 0;
+	}
+	if (!throttled)
+	{
+		return SWITCH_TRUE;
+	}
+
+	const double idle_cpu = switch_core_idle_cpu();
+	return (idle_cpu < MIN_IDLE_CPU) ? SWITCH_FALSE : SWITCH_TRUE;
 }
 
 void set_throttled_api_calls(const char* api)
 {
-	assert(!zstr(api));
-	std::vector<std::string> tokens = string_tokenize(api, " ");
+	throttle_api_calls.clear();
+	if (zstr(api)) return;
+	std::vector<std::string> tokens = string_tokenize(api, " \t");
 	for (std::vector<std::string>::const_iterator iter = tokens.begin(); iter != tokens.end(); iter++)
 	{
-		std::ostringstream strm;
-		strm << " " << *iter << " ";
-		throttle_api_calls.insert(strm.str());
+		if (!iter->empty())
+		{
+			throttle_api_calls.insert(*iter);
+		}
 	}
 }

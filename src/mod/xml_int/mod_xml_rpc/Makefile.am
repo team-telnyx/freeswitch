@@ -80,3 +80,13 @@ endif
 
 mod_xml_rpc_la_CFLAGS  += $(AM_CFLAGS) -I. -w
 
+# Standalone unit test for rpc_helper.cpp. Includes rpc_helper.cpp directly
+# with stubs for the FreeSWITCH symbols it depends on, so the test builds
+# and runs without libfreeswitch.
+noinst_PROGRAMS = test/test_rpc_helper
+test_test_rpc_helper_SOURCES = test/test_rpc_helper.cpp
+test_test_rpc_helper_CXXFLAGS = $(AM_CXXFLAGS) -std=c++17
+test_test_rpc_helper_LDADD =
+
+TESTS = test/test_rpc_helper
+
