@@ -7,8 +7,13 @@ AM_LDFLAGS  += -avoid-version -no-undefined $(SWITCH_AM_LDFLAGS) $(openssl_LIBS)
 AM_LDFLAGS  += $(FREESWITCH_LIBS) $(switch_builddir)/libfreeswitch.la $(CORE_LIBS) $(APR_LIBS)
 AM_LDFLAGS  += $(CARES_LIBS) -lboost_system -lpthread
 
+# Regression test for ZMQ wrapper timeouts (always built, no extra deps)
+noinst_PROGRAMS = test_zmqsocket_timeouts
+test_zmqsocket_timeouts_SOURCES = test_zmqsocket_timeouts.cpp
+test_zmqsocket_timeouts_LDADD   = -lzmq -lstdc++
+
 if HAVE_CARES
-noinst_PROGRAMS = test_resolver test_mod_resolver
+noinst_PROGRAMS += test_resolver test_mod_resolver
 
 # Dummy FS module — convenience lib for linking into the test binary,
 # and shared module for FST_MODULE_BEGIN to dlopen
