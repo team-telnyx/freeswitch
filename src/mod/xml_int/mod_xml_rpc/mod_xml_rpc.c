@@ -120,6 +120,9 @@ static switch_status_t do_config(void)
 	globals.virtual_host = SWITCH_TRUE;
 	globals.addr = 0;
 
+	set_throttled_api_calls(NULL);
+	set_min_idle_cpu_watermark("0");
+
 	if ((settings = switch_xml_child(cfg, "settings"))) {
 		for (param = switch_xml_child(settings, "param"); param; param = param->next) {
 			char *var = (char *) switch_xml_attr_soft(param, "name");
