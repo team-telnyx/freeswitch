@@ -6,7 +6,7 @@ noinst_PROGRAMS += switch_core_video switch_core_db switch_vad switch_packetizer
 noinst_PROGRAMS += test_tts_format
 noinst_PROGRAMS += test_mod_verto
 
-noinst_PROGRAMS += switch_hold switch_sip switch_mod_telnyx switch_mod_gstt switch_3pcc test_inuse_race switch_jb_deadlock switch_cjson switch_sockaddr
+noinst_PROGRAMS += switch_hold switch_sip switch_mod_telnyx switch_mod_gstt switch_3pcc test_inuse_race switch_jb_deadlock switch_cjson switch_sockaddr test_rtp_set_flag_null_crash
 
 if HAVE_SOFIA_SIP
 noinst_PROGRAMS += switch_sdp
