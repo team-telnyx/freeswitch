@@ -11545,7 +11545,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 											   a_engine->read_impl.samples_per_second * (a_engine->read_impl.microseconds_per_packet / 1000) / 1000,
 											   codec_ms,
 											   flags, timer_name, &err, switch_core_session_get_pool(session));
-		{
+		if (switch_rtp_ready(a_engine->rtp_session)) {
 			const char *val = NULL;
 			if (((val = switch_channel_get_variable(session->channel, "telnyx_voicemail")) && switch_true(val))) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "Turning SWITCH_RTP_FLAG_AUTOADJ on, as required by telnyx_voicemail\n");
@@ -11563,7 +11563,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 		}
 		
 		/* Enable ignore-rtp-during-dtmf if channel variable or sofia profile sets it */
-		{
+		if (switch_rtp_ready(a_engine->rtp_session)) {
 			const char *val = NULL;
 			int timeout;
 
