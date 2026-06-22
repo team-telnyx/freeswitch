@@ -175,6 +175,19 @@ void *SWITCH_THREAD_FUNC conference_record_thread_run(switch_thread_t *thread, v
 		return NULL;
 	}
 
+	/* TELCORE-193: the conference teardown clears CFLAG_RUNNING, then only
+	 * momentarily takes+releases the write lock to drain readers before it
+	 * destroys conference->variables and frees the conference pool. A record
+	 * thread that grabs its read lock just after that release would otherwise
+	 * march into a half-torn-down conference (e.g. NULL conference->variables in
+	 * conference_event_add_data -> switch_event_merge). Re-check CFLAG_RUNNING
+	 * now that we hold the read lock; the rwlock pairs with the teardown's
+	 * write-lock release so the cleared flag is guaranteed visible here. */
+	if (!conference_utils_test_flag(conference, CFLAG_RUNNING)) {
+		switch_thread_rwlock_unlock(conference->rwlock);
+		return NULL;
+	}
+
 	data_buf_len = samples * sizeof(int16_t) * conference->channels;
 	switch_zmalloc(data_buf, data_buf_len);
 
