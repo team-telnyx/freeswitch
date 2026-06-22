@@ -69,9 +69,23 @@ void conference_record_launch_thread(conference_obj_t *conference, char *path, i
 		rec->canvas_id = canvas_id;
 	}
 
+	/* TELCORE-223: register the thread before spawning it, but only while the
+	 * conference is still running. Serialising this CFLAG_RUNNING check and the
+	 * count bump against the teardown's flag-clear (both under flag_mutex)
+	 * guarantees the teardown either waits for this thread (registered before the
+	 * flag was cleared) or this thread is never launched (flag already cleared) -
+	 * it can never slip in after the teardown has drained. */
 	switch_mutex_lock(conference->flag_mutex);
+	if (!conference_utils_test_flag(conference, CFLAG_RUNNING)) {
+		switch_mutex_unlock(conference->flag_mutex);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+						  "Not launching record thread for %s: conference is shutting down\n", path);
+		switch_core_destroy_memory_pool(&pool);
+		return;
+	}
 	rec->next = conference->rec_node_head;
 	conference->rec_node_head = rec;
+	conference->record_thread_count++;
 	switch_mutex_unlock(conference->flag_mutex);
 
 	switch_threadattr_create(&thd_attr, rec->pool);
@@ -172,8 +186,19 @@ void *SWITCH_THREAD_FUNC conference_record_thread_run(switch_thread_t *thread, v
 
 	if (switch_thread_rwlock_tryrdlock(conference->rwlock) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Read Lock Fail\n");
+		switch_mutex_lock(conference->flag_mutex);
+		conference->record_thread_count--;
+		switch_mutex_unlock(conference->flag_mutex);
 		return NULL;
 	}
+
+	/* TELCORE-223: we now hold the read lock, so the teardown's write-lock drain
+	 * will wait for us; drop the in-flight count that bridged the gap between
+	 * being launched and acquiring this lock. From here the rwlock alone keeps
+	 * the conference alive for the lifetime of this thread. */
+	switch_mutex_lock(conference->flag_mutex);
+	conference->record_thread_count--;
+	switch_mutex_unlock(conference->flag_mutex);
 
 	/* TELCORE-193: the conference teardown clears CFLAG_RUNNING, then only
 	 * momentarily takes+releases the write lock to drain readers before it
