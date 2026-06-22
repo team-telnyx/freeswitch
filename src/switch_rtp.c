@@ -6022,6 +6022,22 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice(switch_rtp_t *rtp_sessio
 
 	switch_mutex_lock(rtp_session->ice_mutex);
 
+	/* VANILLA ICE requires all four creds to sign outbound STUN; refuse and log
+	   loudly rather than emit USERNAME with NULL/empty values. */
+	if ((type & ICE_VANILLA) &&
+		(zstr(login) || zstr(rlogin) || zstr(password) || zstr(rpassword))) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR,
+			"Refusing to activate %s ICE: missing credentials "
+			"(login=%s rlogin=%s password=%s rpassword=%s)\n",
+			proto == IPR_RTP ? "RTP" : "RTCP",
+			zstr(login) ? "EMPTY" : "set",
+			zstr(rlogin) ? "EMPTY" : "set",
+			zstr(password) ? "EMPTY" : "set",
+			zstr(rpassword) ? "EMPTY" : "set");
+		switch_mutex_unlock(rtp_session->ice_mutex);
+		return SWITCH_STATUS_FALSE;
+	}
+
 	if (proto == IPR_RTP) {
 		ice = &rtp_session->ice;
 		rtp_session->flags[SWITCH_RTP_FLAG_PAUSE] = 0;
