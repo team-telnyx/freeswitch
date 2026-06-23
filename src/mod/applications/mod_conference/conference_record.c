@@ -184,6 +184,9 @@ void *SWITCH_THREAD_FUNC conference_record_thread_run(switch_thread_t *thread, v
 	 * now that we hold the read lock; the rwlock pairs with the teardown's
 	 * write-lock release so the cleared flag is guaranteed visible here. */
 	if (!conference_utils_test_flag(conference, CFLAG_RUNNING)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+						  "Conference %s is shutting down; not starting record thread for [%s]\n",
+						  conference->name, rec->path);
 		switch_thread_rwlock_unlock(conference->rwlock);
 		return NULL;
 	}
