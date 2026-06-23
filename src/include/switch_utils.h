@@ -1525,11 +1525,6 @@ SWITCH_DECLARE(void) switch_string_tolower(char *s);
 **/
 SWITCH_DECLARE(int) switch_rand(void);
 
-/**
-/ Compliant random number generator. Returns the value between 0 and 0x7fff (RAND_MAX).
-**/
-SWITCH_DECLARE(int) switch_rand(void);
-
 SWITCH_END_EXTERN_C
 #endif
 /* For Emacs:
