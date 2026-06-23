@@ -4838,6 +4838,18 @@ SWITCH_DECLARE(void) switch_core_media_clear_ice(switch_core_session_t *session)
 	channel = switch_core_session_get_channel(session);
 	if (channel) {
 		switch_channel_set_variable(channel, "sip_trickle_accept", NULL);
+
+		/* Clear stale EOC (End-of-Candidates) and PAC timer variables so that
+		   a subsequent trickle ICE negotiation (e.g. modify/updateMedia) starts
+		   with a clean slate instead of seeing leftover state from the initial
+		   attach.  Without this, check_ice() sees rtp_in_session_eoc=true from
+		   the previous negotiation, falls through the PAC timer, and punts with
+		   "no suitable candidates found" before any trickled candidates arrive. */
+		switch_channel_set_variable(channel, "rtp_in_session_eoc", NULL);
+		switch_channel_set_variable(channel, "rtp_in_audio_eoc", NULL);
+		switch_channel_set_variable(channel, "rtp_in_video_eoc", NULL);
+		switch_channel_set_variable(channel, "rtp_in_text_eoc", NULL);
+		switch_channel_set_variable(channel, "rtp_ice_pac_until_us", NULL);
 	}
 }
 
