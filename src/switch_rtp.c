@@ -9721,7 +9721,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_zerocopy_read_frame(switch_rtp_t *rtp
 	} else {
 
 		frame->packet = &rtp_session->recv_msg;
-		frame->packetlen = bytes + rtp_session->recv_rtp_exts_size;
+		frame->packetlen = rtp_session->last_recv_bytes;
 		frame->source = __FILE__;
 
 		switch_set_flag(frame, SFF_RAW_RTP);
