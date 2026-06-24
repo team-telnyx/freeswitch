@@ -108,6 +108,19 @@ static const uint8_t ind_no_signal[1]    = { (T38_IND_NO_SIGNAL << 1) };
 static t38_gateway_state_t *gw;
 static t38_core_state_t *core;
 
+/* When built with -DSERIALIZE this mutex models the mod_spandsp fix: a single
+ * per-pvt lock taken around every spandsp call that touches t38_gateway_state,
+ * on both the audio leg and the T.38 leg. With it, TSan reports no race and the
+ * program no longer crashes. */
+#ifdef SERIALIZE
+static pthread_mutex_t gw_lock = PTHREAD_MUTEX_INITIALIZER;
+#define GW_LOCK()   pthread_mutex_lock(&gw_lock)
+#define GW_UNLOCK() pthread_mutex_unlock(&gw_lock)
+#else
+#define GW_LOCK()   ((void) 0)
+#define GW_UNLOCK() ((void) 0)
+#endif
+
 /* Audio leg: exactly what t38_gateway_on_consume_media does. */
 static void *audio_thread(void *arg)
 {
@@ -120,9 +133,13 @@ static void *audio_thread(void *arg)
         amp[i] = (int16_t) ((i * 1373) ^ (i << 7));
 
     for (i = 0; i < ITERATIONS; i++) {
-        t38_gateway_rx(gw, amp, 160);
         int16_t out[160];
+        GW_LOCK();
+        t38_gateway_rx(gw, amp, 160);
+        GW_UNLOCK();
+        GW_LOCK();
         t38_gateway_tx(gw, out, 160);
+        GW_UNLOCK();
     }
     return NULL;
 }
@@ -139,9 +156,15 @@ static void *t38_thread(void *arg)
     for (i = 0; i < ITERATIONS; i++) {
         /* Alternate carrier indicators and a CFR control frame; both drive
          * concurrent mutation of the gateway's rx-modem state. */
+        GW_LOCK();
         t38_core_rx_ifp_packet(core, ind_v21_preamble, 1, seq++);
+        GW_UNLOCK();
+        GW_LOCK();
         t38_core_rx_ifp_packet(core, cfr, cfr_len, seq++);
+        GW_UNLOCK();
+        GW_LOCK();
         t38_core_rx_ifp_packet(core, ind_no_signal, 1, seq++);
+        GW_UNLOCK();
     }
     return NULL;
 }

@@ -25,6 +25,7 @@ SIGSEGV in `span_log_test()` reading `s->level`.
 ```sh
 ./run.sh crash   # link the installed libspandsp.so, run -> SIGSEGV (production stack)
 ./run.sh tsan    # build TSan-instrumented libspandsp, run -> data-race report
+./run.sh fixed   # same, but -DSERIALIZE (models the fix) -> no race, clean exit
 ```
 
 `tsan` mode needs the spandsp source tree (default `~/work/fs_docker_deps/spandsp`,
@@ -41,7 +42,10 @@ distinct race sites on the shared state.
 
 ## Fix
 
-Serialize access to the gateway state: take a per-`pvt` mutex around
-`t38_gateway_rx`/`t38_gateway_rx_fillin`/`t38_gateway_tx` (audio leg) and
-`udptl_rx_packet`/`t38_core_rx_ifp_packet` (T.38 leg); or funnel both legs
-through a single thread.
+Serialize access to the gateway state with the existing per-`pvt` mutex
+(`pvt->mutex` in `mod_spandsp_fax.c`): take it around
+`t38_gateway_rx`/`t38_gateway_rx_fillin`/`t38_gateway_tx` (audio leg, in
+`t38_gateway_on_consume_media`) and `udptl_rx_packet` (T.38 leg, in
+`t38_gateway_on_soft_execute`). This mirrors the lock already used for
+terminal mode. `./run.sh fixed` validates the approach: the same workload
+under `-DSERIALIZE` runs to completion with zero TSan reports.
