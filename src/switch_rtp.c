@@ -9721,7 +9721,9 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_zerocopy_read_frame(switch_rtp_t *rtp
 	} else {
 
 		frame->packet = &rtp_session->recv_msg;
-		frame->packetlen = rtp_session->last_recv_bytes;
+		/* Full datagram length of the returned packet (payload offset + payload), derived from
+		 * the frame itself so JB reordering / fork rx/tx can't desync it like last_recv_bytes. */
+		frame->packetlen = (uint32_t)((char *)frame->data - (char *)&rtp_session->recv_msg) + (bytes - rtp_header_len);
 		frame->source = __FILE__;
 
 		switch_set_flag(frame, SFF_RAW_RTP);

@@ -574,61 +574,6 @@ FST_TEARDOWN_END()
 	}
 	FST_TEST_END()
 
-	FST_TEST_BEGIN(test_rtp_header_extension_passthrough_length)
-	{
-		switch_core_session_t *session = NULL;
-		switch_status_t status;
-		switch_socket_t *sock_rtp = NULL;
-		switch_sockaddr_t *sock_addr = NULL;
-		const char *str_err = NULL;
-		switch_frame_t rframe = { 0 };
-		const int payload_len = 20;
-		const int full_len = 12 + 8 + 20;
-		unsigned char pkt[12 + 8 + 20] = { 0x90,0x00,0xcd,0x16, 0x00,0x01,0x00,0x00, 0x61,0x5a,0xe1,0x37, 0xbe,0xde,0x00,0x01, 0x10,0x64,0x00,0x00 };
-		switch_size_t tmp_len;
-		int x, got = 0;
-
-		status = rtp_test_start_call(&session);
-		fst_requires(status == SWITCH_STATUS_SUCCESS);
-		fst_requires(session);
-
-		rtp_session = switch_core_media_get_rtp_session(session, SWITCH_MEDIA_TYPE_AUDIO);
-		fst_requires(rtp_session);
-		switch_rtp_clear_flag(rtp_session, SWITCH_RTP_FLAG_PAUSE);
-
-		if (switch_socket_create(&sock_rtp, AF_INET, SOCK_DGRAM, 0, switch_core_session_get_pool(session)) != SWITCH_STATUS_SUCCESS) {
-			fst_requires(0);
-		}
-		switch_sockaddr_new(&sock_addr, rx_host, audio_rx_port, switch_core_session_get_pool(session));
-		fst_requires(sock_addr);
-		switch_rtp_set_remote_address(rtp_session, tx_host, switch_sockaddr_get_port(sock_addr), 0, SWITCH_FALSE, &str_err);
-		switch_rtp_reset(rtp_session);
-
-		for (x = 0; x < payload_len; x++) pkt[20 + x] = (unsigned char)(x + 1);
-
-		for (x = 0; x < 100 && !got; x++) {
-			tmp_len = full_len;
-			if (switch_socket_sendto(sock_rtp, sock_addr, MSG_CONFIRM, (const char *)pkt, &tmp_len) != SWITCH_STATUS_SUCCESS) {
-				fst_requires(0);
-			}
-			memset(&rframe, 0, sizeof(rframe));
-			if (switch_rtp_zerocopy_read_frame(rtp_session, &rframe, io_flags) == SWITCH_STATUS_SUCCESS
-				&& rframe.datalen == (uint32_t)payload_len) {
-				got = 1;
-			} else {
-				switch_yield(20000);
-			}
-		}
-
-		fst_xcheck(got == 1, "received the injected RTP-with-extension packet");
-		fst_xcheck(rframe.datalen == (uint32_t)payload_len, "datalen is the payload length (extension excluded)");
-		fst_xcheck(rframe.packetlen == (uint32_t)full_len,
-			"frame->packetlen must include the RTP header extension; a short value truncates the payload on raw forward");
-
-		rtp_test_end_call(&session);
-	}
-	FST_TEST_END()
-
 	FST_TEST_BEGIN(test_rtp_header_extension_passthrough_length_edge_cases)
 	{
 		switch_core_session_t *session = NULL;
@@ -638,7 +583,7 @@ FST_TEARDOWN_END()
 		const char *str_err = NULL;
 		switch_frame_t rframe = { 0 };
 		const int payload_len = 20;
-		int cases[] = { 1, 0, 3, 0, 2, 0 };   /* 1->0 and 3->0 exercise stale recv_rtp_exts_size */
+		int cases[] = { 1, 0, 3, 0, 2, 0 };   /* mixed extension sizes; 1->0 and 3->0 catch a length derived from stale per-session state */
 		int ncases = (int)(sizeof(cases) / sizeof(cases[0]));
 		uint16_t seq = 0x200;
 		uint32_t tsv = 960;
