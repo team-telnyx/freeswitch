@@ -104,6 +104,73 @@ FST_TEST_BEGIN(benchmark)
 }
 FST_TEST_END()
 
+/*
+ * Regression test for TELCORE-193: assertion failure in switch_event_merge().
+ *
+ * Production stack (release build):
+ *   __assert_fail()
+ *   switch_event_merge()                       switch_event.c:1322
+ *   conference_event_add_data_with_member()    conference_event.c:776
+ *   conference_event_add_data()                conference_event.c
+ *   conference_record_thread_run()             conference_record.c:320
+ *
+ * Root cause
+ * ----------
+ * conference_event_add_data_with_member() finishes with:
+ *
+ *     switch_event_merge(event, conference->variables);
+ *
+ * switch_event_merge() opens with switch_assert(tomerge && event). The record
+ * thread reads conference->variables WITHOUT re-checking CFLAG_RUNNING after it
+ * takes the conference rwlock (conference_record.c:173). The conference teardown
+ * thread clears CFLAG_RUNNING, momentarily takes+releases the write lock to
+ * "drain readers", then destroys conference->variables (mod_conference.c:891),
+ * which NULLs the pointer. A record thread that grabs its read lock just after
+ * the write lock is released sails straight into a half-torn-down conference and
+ * passes that now-NULL pointer as `tomerge` -> the assert fires -> abort().
+ *
+ * What this test does
+ * -------------------
+ * conference internals are not exported from mod_conference, so a tests/unit
+ * binary cannot drive conference_record_thread_run() directly. Instead it
+ * reproduces the exact faulting condition switch_event_merge() actually sees:
+ * a fully populated destination `event` (the CONF maintenance event the record
+ * thread has already filled in) and a NULL `tomerge` (conference->variables
+ * after the teardown destroyed it).
+ *
+ * Expected:
+ *   - BUGGY tree : switch_assert(tomerge && event) fires -> SIGABRT here.
+ *   - FIXED tree : switch_event_merge() tolerates the NULL source, returns
+ *                  without touching `event`, and the test passes.
+ */
+FST_TEST_BEGIN(merge_null_variables_after_teardown)
+{
+  switch_event_t *event = NULL;
+  switch_status_t status = SWITCH_STATUS_SUCCESS;
+
+  /* The CONF maintenance event the record thread has already populated before
+   * reaching switch_event_merge(event, conference->variables). */
+  status = switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, "conference::maintenance");
+  fst_xcheck(status == SWITCH_STATUS_SUCCESS, "Failed to create event");
+
+  switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Conference-Name", "3001");
+  switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Action", "start-recording");
+
+  /* conference->variables after the teardown thread destroyed it: NULL. On a
+   * buggy tree switch_assert(tomerge && event) aborts the process right here;
+   * on a fixed tree switch_event_merge() bails and leaves `event` untouched. */
+  switch_event_merge(event, NULL);
+
+  /* Only reached on a fixed tree: the destination event must be untouched. */
+  fst_xcheck(!zstr(switch_event_get_header(event, "Conference-Name")),
+             "Destination event headers must survive a NULL-source merge");
+  fst_xcheck(!zstr(switch_event_get_header(event, "Action")),
+             "Destination event headers must survive a NULL-source merge");
+
+  switch_event_destroy(&event);
+}
+FST_TEST_END()
+
 FST_SUITE_END()
 
 FST_MINCORE_END()
