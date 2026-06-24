@@ -845,6 +845,21 @@ void *SWITCH_THREAD_FUNC conference_thread_run(switch_thread_t *thread, void *ob
 
 	/* Wait till everybody is out */
 	conference_utils_clear_flag_locked(conference, CFLAG_RUNNING);
+
+	/* TELCORE-223: drain record threads that were launched but have not yet taken
+	 * their read lock. The momentary write-lock drain below only catches readers
+	 * that already hold the lock; a record thread still in the gap between launch
+	 * and tryrdlock would otherwise acquire its read lock after the drain and
+	 * touch conference state we are about to free. CFLAG_RUNNING is cleared above,
+	 * so no new record thread can register (see conference_record_launch_thread). */
+	switch_mutex_lock(conference->flag_mutex);
+	while (conference->record_thread_count > 0) {
+		switch_mutex_unlock(conference->flag_mutex);
+		switch_yield(20000);
+		switch_mutex_lock(conference->flag_mutex);
+	}
+	switch_mutex_unlock(conference->flag_mutex);
+
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Write Lock ON\n");
 	switch_thread_rwlock_wrlock(conference->rwlock);
 	switch_thread_rwlock_unlock(conference->rwlock);
