@@ -125,5 +125,18 @@
       </params>
 
     </profile>
+
+    <!-- Fetch-only profile for S3 presigned media URLs. Matched by url-pattern when no explicit
+         (profile_name=) is given. S3 SigV4 presigned URLs are signed for GET only, so a HEAD
+         pre-flight returns 403; nohead skips it and the extension is recovered from the GET
+         response Content-Type. No gateway-url is needed since this profile only fetches files. -->
+    <profile name="s3">
+      <params>
+        <param name="url-pattern" value="(s3[.-].*amazonaws\.com|amazonaws\.com/.*X-Amz-)"/>
+        <param name="nohead" value="true"/>
+        <param name="timeout" value="10"/>
+        <param name="connect-timeout" value="3"/>
+      </params>
+    </profile>
   </profiles>
 </configuration>

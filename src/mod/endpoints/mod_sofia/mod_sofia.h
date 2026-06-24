@@ -241,6 +241,8 @@ typedef enum {
 	PFLAG_RECIEVED_IN_NAT_REG_CONTACT,
 	PFLAG_3PCC,
 	PFLAG_3PCC_PROXY,
+	PFLAG_3PCC_EARLY_OFFER,
+	PFLAG_3PCC_EARLY_OFFER_DIALPLAN,
 	PFLAG_3PCC_REINVITE_BRIDGED_ON_ACK,
 	PFLAG_CALLID_AS_UUID,
 	PFLAG_UUID_AS_CALLID,
@@ -351,6 +353,7 @@ typedef enum {
 	TFLAG_ANS,
 	TFLAG_EARLY_MEDIA,
 	TFLAG_3PCC,
+	TFLAG_3PCC_EARLY_OFFER,
 	TFLAG_READY,
 	TFLAG_REFER,
 	TFLAG_NOHUP,
@@ -1145,6 +1148,11 @@ void sofia_reg_unregister(sofia_profile_t *profile);
 
 void sofia_glue_pass_sdp(private_object_t *tech_pvt, char *sdp);
 switch_call_cause_t sofia_glue_sip_cause_to_freeswitch(int status);
+
+/* Sanitize a SIP display-name in place so it is safe to embed in a
+ * quoted-string. Only touches the display-name buffer; URI/identity untouched.
+ * See implementation in sofia_glue.c for the full rules. */
+char *sofia_glue_sanitize_display_name(char *name);
 void sofia_glue_do_xfer_invite(switch_core_session_t *session);
 uint8_t sofia_reg_handle_register_token(nua_t *nua, sofia_profile_t *profile, nua_handle_t *nh, sip_t const *sip,
 								  sofia_dispatch_event_t *de,

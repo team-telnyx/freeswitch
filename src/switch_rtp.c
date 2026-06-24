@@ -77,6 +77,7 @@
 #define WRITE_DEC(rtp_session) rtp_session->writing--; switch_mutex_unlock(rtp_session->write_mutex)
 
 #define RTP_STUN_FREQ 1000000
+#define DEFAULT_ICE_NOMINATION_FALLBACK_MS 10000
 #define rtp_header_len 12
 #define RTP_START_PORT 16384
 #define RTP_END_PORT 32768
@@ -785,22 +786,47 @@ static void trickle_eoc_cleanup(const void *rtp)
 	}
 }
 
+static switch_bool_t ice_candidate_matches_addr(const icand_t *cand, const char *host, switch_port_t port)
+{
+	return cand && cand->con_addr && host && !strcmp(cand->con_addr, host) && cand->con_port == port;
+}
+
+static switch_bool_t ice_candidate_matches_host(const icand_t *cand, const char *host)
+{
+	return cand && cand->con_addr && host && !strcmp(cand->con_addr, host);
+}
+
+static switch_bool_t ice_candidate_is_relay(const icand_t *cand)
+{
+	return cand && cand->cand_type && !strcasecmp(cand->cand_type, "relay");
+}
+
+static const char *ice_candidate_addr_safe(const icand_t *cand)
+{
+	return (cand && cand->con_addr) ? cand->con_addr : "(null)";
+}
+
+static const char *ice_candidate_type_safe(const icand_t *cand)
+{
+	return (cand && cand->cand_type) ? cand->cand_type : "(unknown)";
+}
+
 static void switch_rtp_change_ice_dest(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, const char *host, switch_port_t port)
 {
 	int is_rtcp = ice == &rtp_session->rtcp_ice;
 	const char *err = "";
 	int i;
-	uint8_t ice_cand_found_idx = 0;
+	int ice_cand_found_idx = -1;
 
 	for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; ++i) {
-		if (!strcmp(host, ice->ice_params->cands[i][ice->proto].con_addr) && port == ice->ice_params->cands[i][ice->proto].con_port) {
+		if (ice_candidate_matches_addr(&ice->ice_params->cands[i][ice->proto], host, port)) {
 			ice_cand_found_idx = i;
 		}
 	}
 
-	if (!ice_cand_found_idx) {
+	if (ice_cand_found_idx < 0) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "ICE candidate [%s:%d] replaced with [%s:%d]\n",
-			ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, host, port);
+			ice_candidate_addr_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]), ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, host, port);
 		ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr = switch_core_strdup(rtp_session->pool, host);
 		ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port = port;
 	} else {
@@ -1131,6 +1157,51 @@ static switch_status_t ice_out(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 
 	ice->next_run = now + RTP_STUN_FREQ;
 
+	/* Non-DTLS ICE-CONTROLLED peers that never send USE-CANDIDATE hang media
+	 * forever. After the fallback window since first responsive STUN,
+	 * self-promote to controlling and nominate. */
+	if ((ice->type & ICE_VANILLA) && (ice->type & ICE_CONTROLLED)
+		&& !(ice->type & (ICE_LITE | ICE_LITE_INBOUND))
+		&& !rtp_session->dtls
+		&& !ice->promoted_to_controlling && ice->cand_responsive && ice->first_responsive_us) {
+		if (!ice->nomination_fallback_cached) {
+			/* rtp_ice_nomination_fallback_ms=0 (or negative) disables the fallback for this leg. */
+			switch_channel_t *channel = rtp_session->session ? switch_core_session_get_channel(rtp_session->session) : NULL;
+			if (channel) {
+				const char *fb_var = switch_channel_get_variable(channel, "rtp_ice_nomination_fallback");
+				int raw = switch_safe_atoi(
+					switch_channel_get_variable(channel, "rtp_ice_nomination_fallback_ms"),
+					DEFAULT_ICE_NOMINATION_FALLBACK_MS);
+				ice->nomination_fallback_enabled = zstr(fb_var) || switch_true(fb_var);
+				ice->nomination_fallback_ms = (raw > 0) ? (uint32_t)raw : 0;
+			} else {
+				ice->nomination_fallback_enabled = 1;
+				ice->nomination_fallback_ms = DEFAULT_ICE_NOMINATION_FALLBACK_MS;
+			}
+			ice->nomination_fallback_cached = 1;
+		}
+		if (ice->nomination_fallback_enabled && ice->nomination_fallback_ms > 0
+			&& (now - ice->first_responsive_us) >= ((switch_time_t)ice->nomination_fallback_ms * 1000)) {
+			uint32_t i;
+			int peer_use_candidate = 0;
+			if (ice->ice_params && ice->ice_params->cand_idx[ice->proto] > 0) {
+				for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; i++) {
+					if (ice->ice_params->cands[i][ice->proto].use_candidate) {
+						peer_use_candidate = 1;
+						break;
+					}
+				}
+			}
+			if (!peer_use_candidate) {
+				ice->type &= ~ICE_CONTROLLED;
+				ice->promoted_to_controlling = 1;
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
+					"%s ICE peer never nominated in %u ms; promoting to CONTROLLING\n",
+					rtp_type(rtp_session), ice->nomination_fallback_ms);
+			}
+		}
+	}
+
 	if (ice == &rtp_session->rtcp_ice && rtp_session->rtcp_sock_output) {
 		sock_output = rtp_session->rtcp_sock_output;
 	}
@@ -1287,10 +1358,19 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 			{
 				ice->rready = 1;
 				for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; ++i) {
-					if (!strcmp(ice->ice_params->cands[i][ice->proto].con_addr, from_host) && ice->ice_params->cands[i][ice->proto].con_port == from_port) {
+					if (ice_candidate_matches_addr(&ice->ice_params->cands[i][ice->proto], from_host, from_port)) {
 						ice->ice_params->cands[i][ice->proto].use_candidate = 1;
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG6, "Got USE-CANDIDATE on %s cand %s:%d\n", rtp_type(rtp_session), ice->ice_params->cands[i][ice->proto].con_addr, ice->ice_params->cands[i][ice->proto].con_port);
 					}
+				}
+
+				/* Peer nominated after we self-promoted: yield, peer wins. */
+				if (ice->promoted_to_controlling) {
+					ice->type |= ICE_CONTROLLED;
+					ice->promoted_to_controlling = 0;
+					ice->nomination_fallback_enabled = 0;
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
+						"%s late peer USE-CANDIDATE after fallback promotion; reverting to CONTROLLED\n", rtp_type(rtp_session));
 				}
 
 				/* RFC 8445: controlled agent must accept the nominated pair. */
@@ -1332,7 +1412,17 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 								  );
 
 				if ((ice->type & ICE_VANILLA) && code == 487) {
-					if ((ice->type & ICE_CONTROLLED)) {
+					/* Three role-conflict cases:
+					 *   1. We self-promoted (fallback) and peer rejects -> revert to CONTROLLED, disable fallback.
+					 *   2. We were CONTROLLED and peer 487s us -> RFC role-conflict flip to CONTROLLING.
+					 *   3. We were CONTROLLING and peer 487s us -> RFC role-conflict flip to CONTROLLED. */
+					if (ice->promoted_to_controlling && !(ice->type & ICE_CONTROLLED)) {
+						/* Peer rejected our self-promotion: it is legitimately controlling. Revert and stand down. */
+						ice->type |= ICE_CONTROLLED;
+						ice->promoted_to_controlling = 0;
+						ice->nomination_fallback_enabled = 0;
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "%s STUN got role-conflict 487 after fallback promotion; reverting to CONTROLLED\n", rtp_type(rtp_session));
+					} else if ((ice->type & ICE_CONTROLLED)) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "%s STUN Changing role to CONTROLLING\n", rtp_type(rtp_session));
 						ice->type &= ~ICE_CONTROLLED;
 					} else {
@@ -1411,11 +1501,11 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 
 			if (ice->ice_params) {
 				for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; i++) {
-					if (!strcmp(ice->ice_params->cands[i][ice->proto].con_addr, from_host) && ice->ice_params->cands[i][ice->proto].con_port == from_port) {
+					if (ice_candidate_matches_addr(&ice->ice_params->cands[i][ice->proto], from_host, from_port)) {
 						int is_relay = 0;
 
 						ice->ice_params->cands[i][ice->proto].responsive = 1;
-						if (!strcasecmp(ice->ice_params->cands[i][ice->proto].cand_type, "relay")) {
+						if (ice_candidate_is_relay(&ice->ice_params->cands[i][ice->proto])) {
 							is_relay = 1;
 						}
 
@@ -1450,9 +1540,12 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 							ice->last_ok = switch_micro_time_now();
 						}
 
-						if (!strcmp(ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr, from_host) && ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port == from_port) {
+						if (ice_candidate_matches_addr(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto], from_host, from_port)) {
 							ice->cand_responsive = 1;
 							ice->initializing = 0;
+							if (!ice->first_responsive_us) {
+								ice->first_responsive_us = switch_micro_time_now();
+							}
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "Chosen %s ICE candidate %s:%d is responsive (is_relay: %d)\n", rtp_type(rtp_session), ice->ice_params->cands[i][ice->proto].con_addr, ice->ice_params->cands[i][ice->proto].con_port, is_relay);
 						}
 					}
@@ -1623,8 +1716,8 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 			cmp = switch_cmp_addr(from_addr, ice->addr, SWITCH_FALSE);
 
 			for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; i++) {
-				if (!strcmp(ice->ice_params->cands[i][ice->proto].con_addr, from_host) && ice->ice_params->cands[i][ice->proto].con_port == from_port) {
-					if (!strcasecmp(ice->ice_params->cands[i][ice->proto].cand_type, "relay")) {
+				if (ice_candidate_matches_addr(&ice->ice_params->cands[i][ice->proto], from_host, from_port)) {
+					if (ice_candidate_is_relay(&ice->ice_params->cands[i][ice->proto])) {
 						is_relay = 1;
 					}
 
@@ -1645,7 +1738,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 				if (!rtp_session->adj_window && (!ice->ready || !ice->rready || (!rtp_session->dtls || rtp_session->dtls->state != DS_READY))) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s %s %s ICE set ADJUST window to 10 seconds on binding request from %s:%d (is_relay: %d, is_responsivie: %d, use_candidate: %d) Current cand: %s:%d typ: %s\n",
 									switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp", from_host, from_port, is_relay, is_responsive, use_candidate,
-									ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].cand_type);
+									ice_candidate_addr_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]), ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice_candidate_type_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]));
 
 					rtp_session->adj_window = now + 10000000;
 				}
@@ -1654,12 +1747,12 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 					if (rtp_session->adj_window > now) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s %s %s ICE check: %d >= 3000 or window closed and not from relay on binding request from %s:%d (is_relay: %d, is_responsive: %d, use_candidate: %d) Current cand: %s:%d typ: %s\n",
 										switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp", rtp_session->elapsed_stun, from_host, from_port, is_relay, is_responsive, use_candidate,
-										ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].cand_type);
+										ice_candidate_addr_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]), ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice_candidate_type_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]));
 
 						if (!is_relay && (rtp_session->elapsed_stun >= 3000 || rtp_session->adj_window == (now + 10000000))) {
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s %s %s ICE ADJUST HIT 1 on binding request from %s:%d (is_relay: %d, is_responsive: %d, use_candidate: %d) Current cand: %s:%d typ: %s\n",
 											switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp", from_host, from_port, is_relay, is_responsive, use_candidate,
-											ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].cand_type);
+											ice_candidate_addr_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]), ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice_candidate_type_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]));
 
 							do_adj++;
 							rtp_session->last_adj = now;
@@ -1671,7 +1764,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s %s %s ICE CHECK SAME IP DIFFT PORT %d %d on binding request from %s:%d (is_relay: %d, is_responsive: %d, use_candidate: %d) Current cand: %s:%d typ: %s\n",
 								switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp",ice->initializing, switch_cmp_addr(from_addr, ice->addr, SWITCH_TRUE), from_host, from_port, is_relay, is_responsive, use_candidate,
-								ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].cand_type);
+								ice_candidate_addr_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]), ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice_candidate_type_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]));
 
 				if (!do_adj && (switch_cmp_addr(from_addr, ice->addr, SWITCH_TRUE) || (use_candidate && !is_relay))) {
 					do_adj++;
@@ -1679,7 +1772,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s %s %s ICE ADJUST HIT 2 on binding request from %s:%d (is_relay: %d, is_responsive: %d, use_candidate: %d) Current cand: %s:%d typ: %s\n",
 									switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp", from_host, from_port, is_relay, is_responsive, use_candidate,
-									ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].cand_type);
+									ice_candidate_addr_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]), ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice_candidate_type_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]));
 				}
 			}
 
@@ -1690,20 +1783,20 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s %s %s ICE ADJUST ELAPSED vs 1000 %d on binding request from %s:%d (is_relay: %d, is_responsive: %d, use_candidate: %d) Current cand: %s:%d typ: %s\n",
 								switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp" ,rtp_session->elapsed_adj, from_host, from_port, is_relay, is_responsive, use_candidate,
-								ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].cand_type);
+								ice_candidate_addr_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]), ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice_candidate_type_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]));
 
 				if (rtp_session->elapsed_adj > 1000) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s %s %s ICE IF DTLS NOT READY or %d >= 3000 or media too long %d or stun too long %d on binding request from %s:%d (is_relay: %d, is_responsive: %d, use_candidate: %d) Current cand: %s:%d typ: %s\n",
 									switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp", rtp_session->elapsed_stun, rtp_session->elapsed_media >= MEDIA_TOO_LONG,
 									rtp_session->elapsed_stun >= STUN_TOO_LONG, from_host, from_port, is_relay, is_responsive, use_candidate,
-									ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].cand_type);
+									ice_candidate_addr_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]), ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice_candidate_type_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]));
 
 					if (!is_relay && ((rtp_session->dtls && rtp_session->dtls->state != DS_READY) ||
 						((!ice->ready || !ice->rready) && (rtp_session->elapsed_stun >= 3000 || switch_cmp_addr(from_addr, ice->addr, SWITCH_TRUE))))) {
 
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s %s %s ICE ADJUST HIT 3 on binding request from %s:%d (is_relay: %d, is_responsive: %d, use_candidate: %d) Current cand: %s:%d typ: %s\n",
 										switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp", from_host, from_port, is_relay, is_responsive, use_candidate,
-										ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].cand_type);
+										ice_candidate_addr_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]), ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice_candidate_type_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]));
 
 						do_adj++;
 						rtp_session->last_adj = now;
@@ -1711,7 +1804,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s %s %s ICE ADJUST HIT 4 (FLIP TO TURN) on binding request from %s:%d (is_relay: %d, is_responsive: %d, use_candidate: %d) Current cand: %s:%d typ: %s\n",
 										switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp", from_host, from_port, is_relay, is_responsive, use_candidate,
-										ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].cand_type);
+										ice_candidate_addr_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]), ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice_candidate_type_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]));
 
 						do_adj++;
 						rtp_session->last_adj = now;
@@ -1720,14 +1813,14 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s %s %s ICE ADJUST HIT 5 on binding request from %s:%d (is_relay: %d, is_responsive: %d, use_candidate: %d) Current cand: %s:%d typ: %s\n",
 										switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp", from_host, from_port, is_relay, is_responsive, use_candidate,
-										ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].cand_type);
+										ice_candidate_addr_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]), ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice_candidate_type_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]));
 
 						do_adj++;
 						rtp_session->last_adj = now;
 					}
 
 					for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; i++) {
-						if (!strcmp(ice->ice_params->cands[i][ice->proto].con_addr, from_host)) {
+						if (ice_candidate_matches_host(&ice->ice_params->cands[i][ice->proto], from_host)) {
 							cur_idx = i;
 						}
 					}
@@ -1761,6 +1854,9 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 				ice->cand_responsive = is_responsive;
 				if (ice->cand_responsive) {
 					ice->initializing = 0;
+					if (!ice->first_responsive_us) {
+						ice->first_responsive_us = switch_micro_time_now();
+					}
 				}
 
 				ice->last_ok = now;
@@ -2694,7 +2790,8 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 
 	//switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR, "WTF %d %d %d %d\n", rate, rtp_session->rtcp_sent_packets, rtcp_ok, nack_ttl);
 
-	if (rtp_session->rtcp_sock_output && rtp_session->flags[SWITCH_RTP_FLAG_ENABLE_RTCP] && !rtp_session->flags[SWITCH_RTP_FLAG_RTCP_PASSTHRU] && rtcp_ok) {
+	/* Skip RTCP report sending when rtcp_interval is 0 (ICE-only activation) */
+	if (rtp_session->rtcp_sock_output && rtp_session->flags[SWITCH_RTP_FLAG_ENABLE_RTCP] && !rtp_session->flags[SWITCH_RTP_FLAG_RTCP_PASSTHRU] && rtp_session->rtcp_interval && rtcp_ok) {
 		switch_rtcp_numbers_t * stats = &rtp_session->stats.rtcp;
 		struct switch_rtcp_receiver_report *rr;
 		struct switch_rtcp_sender_report *sr;
@@ -5593,9 +5690,12 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_create(switch_rtp_t **new_rtp_session
 	}
 
 
-	if (channel) {
-		switch_channel_set_private(channel, "__rtcp_audio_rtp_session", rtp_session);
-	}
+	/* The "__rtcp_audio_rtp_session" private pointer is published by
+	 * switch_rtp_new once setup completes successfully. Doing it here
+	 * would leave a dangling pointer in the channel if any subsequent
+	 * step in switch_rtp_new (set_local_address / set_remote_address)
+	 * fails, since the rtp_session lives in the session pool that the
+	 * caller will then tear down. */
 
 
 	/* Jitter */
@@ -5657,12 +5757,62 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_create(switch_rtp_t **new_rtp_session
 
 	rtp_session->ready = 1;
 	*new_rtp_session = rtp_session;
-	
-	if (create_probe){
-		create_probe(rtp_session, channel);
-	}
+
+	/* The homer RTCP probe (if registered) is created by switch_rtp_new
+	 * once setup completes successfully, not here. Creating it before
+	 * set_local_address / set_remote_address would register a probe on a
+	 * session that switch_rtp_new abandons on a failed bind/retry. */
 
 	return SWITCH_STATUS_SUCCESS;
+}
+
+/* Synchronously close any RTP/RTCP sockets owned by an rtp_session that is
+ * about to be abandoned mid-setup. Mirrors the close sequence at the end of
+ * switch_rtp_destroy: handles sock_input == sock_output aliasing (used when
+ * the local and remote ends share an address family) and rtcp_sock_*
+ * aliasing onto sock_*.
+ *
+ * Used by switch_rtp_new's failure paths. The session pool is destroyed
+ * asynchronously by the pool_thread (~1s sleep cycle), but the port is
+ * returned to the allocator immediately on failure. Without an explicit
+ * close here the kernel bind outlives the port release, and the next caller
+ * that picks the same port hits EADDRINUSE. The session has not been
+ * published to other threads at this point, so no shutdown/ping is needed --
+ * a plain close is enough to drop the kernel bind.
+ */
+static void close_rtp_sockets(switch_rtp_t *rtp_session)
+{
+	switch_socket_t *sock;
+
+	if (rtp_session->rtcp_sock_input == rtp_session->sock_input) {
+		rtp_session->rtcp_sock_input = NULL;
+	}
+	if (rtp_session->rtcp_sock_output == rtp_session->sock_output) {
+		rtp_session->rtcp_sock_output = NULL;
+	}
+
+	sock = rtp_session->sock_input;
+	rtp_session->sock_input = NULL;
+	if (sock) {
+		switch_socket_close(sock);
+	}
+
+	if (rtp_session->sock_output && rtp_session->sock_output != sock) {
+		sock = rtp_session->sock_output;
+		rtp_session->sock_output = NULL;
+		switch_socket_close(sock);
+	}
+
+	if ((sock = rtp_session->rtcp_sock_input)) {
+		rtp_session->rtcp_sock_input = NULL;
+		switch_socket_close(sock);
+	}
+
+	if (rtp_session->rtcp_sock_output && rtp_session->rtcp_sock_output != sock) {
+		sock = rtp_session->rtcp_sock_output;
+		rtp_session->rtcp_sock_output = NULL;
+		switch_socket_close(sock);
+	}
 }
 
 SWITCH_DECLARE(switch_rtp_t *) switch_rtp_new(const char *rx_host,
@@ -5717,12 +5867,14 @@ SWITCH_DECLARE(switch_rtp_t *) switch_rtp_new(const char *rx_host,
 	switch_mutex_lock(rtp_session->flag_mutex);
 
 	if (switch_rtp_set_local_address(rtp_session, rx_host, rx_port, err) != SWITCH_STATUS_SUCCESS) {
+		close_rtp_sockets(rtp_session);
 		switch_mutex_unlock(rtp_session->flag_mutex);
 		rtp_session = NULL;
 		goto end;
 	}
 
 	if (switch_rtp_set_remote_address(rtp_session, tx_host, tx_port, 0, SWITCH_TRUE, err) != SWITCH_STATUS_SUCCESS) {
+		close_rtp_sockets(rtp_session);
 		switch_mutex_unlock(rtp_session->flag_mutex);
 		rtp_session = NULL;
 		goto end;
@@ -5740,6 +5892,24 @@ SWITCH_DECLARE(switch_rtp_t *) switch_rtp_new(const char *rx_host,
 		rtp_session->rx_port = rx_port;
 		switch_rtp_set_flag(rtp_session, SWITCH_RTP_FLAG_FLUSH);
 		switch_rtp_set_flag(rtp_session, SWITCH_RTP_FLAG_DETECT_SSRC);
+
+		/* Publish on the channel only once setup has fully succeeded.
+		 * Readers (e.g. RTCP relay on the partner leg) rely on this key
+		 * pointing to a live rtp_session whose pool is still owned. */
+		if (rtp_session->session) {
+			switch_channel_t *channel = switch_core_session_get_channel(rtp_session->session);
+			if (channel) {
+				switch_channel_set_private(channel, "__rtcp_audio_rtp_session", rtp_session);
+
+				/* Register the homer RTCP probe (if any) now that setup has
+				 * succeeded, rather than in switch_rtp_create before the
+				 * bind: keeps probe registration off sessions abandoned on a
+				 * failed bind/retry, symmetric with the publish above. */
+				if (create_probe) {
+					create_probe(rtp_session, channel);
+				}
+			}
+		}
 	} else {
 		switch_rtp_release_port(rx_host, rx_port);
 	}
@@ -6002,6 +6172,22 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice(switch_rtp_t *rtp_sessio
 
 	switch_mutex_lock(rtp_session->ice_mutex);
 
+	/* VANILLA ICE requires all four creds to sign outbound STUN; refuse and log
+	   loudly rather than emit USERNAME with NULL/empty values. */
+	if ((type & ICE_VANILLA) &&
+		(zstr(login) || zstr(rlogin) || zstr(password) || zstr(rpassword))) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR,
+			"Refusing to activate %s ICE: missing credentials "
+			"(login=%s rlogin=%s password=%s rpassword=%s)\n",
+			proto == IPR_RTP ? "RTP" : "RTCP",
+			zstr(login) ? "EMPTY" : "set",
+			zstr(rlogin) ? "EMPTY" : "set",
+			zstr(password) ? "EMPTY" : "set",
+			zstr(rpassword) ? "EMPTY" : "set");
+		switch_mutex_unlock(rtp_session->ice_mutex);
+		return SWITCH_STATUS_FALSE;
+	}
+
 	if (proto == IPR_RTP) {
 		ice = &rtp_session->ice;
 		rtp_session->flags[SWITCH_RTP_FLAG_PAUSE] = 0;
@@ -6025,6 +6211,11 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice(switch_rtp_t *rtp_sessio
 		ice->ready = ice->rready = 1;
 		ice->cand_responsive = 0;
 	}
+	ice->first_responsive_us = 0;
+	ice->promoted_to_controlling = 0;
+	ice->nomination_fallback_cached = 0;
+	ice->nomination_fallback_enabled = 0;
+	ice->nomination_fallback_ms = 0;
 
 	ice->ice_user = switch_core_strdup(rtp_session->pool, ice_user);
 	ice->user_ice = switch_core_strdup(rtp_session->pool, user_ice);
@@ -6524,7 +6715,13 @@ SWITCH_DECLARE(void) switch_rtp_set_bundle_video_ssrcs(switch_rtp_t *rtp_session
 
 SWITCH_DECLARE(void) switch_rtp_set_flag(switch_rtp_t *rtp_session, switch_rtp_flag_t flag)
 {
-	int old_flag = rtp_session->flags[flag];
+	int old_flag;
+
+	if (!rtp_session) {
+		return;
+	}
+
+	old_flag = rtp_session->flags[flag];
 
 	switch_mutex_lock(rtp_session->flag_mutex);
 	rtp_session->flags[flag] = 1;
@@ -6583,7 +6780,13 @@ SWITCH_DECLARE(uint32_t) switch_rtp_test_flag(switch_rtp_t *rtp_session, switch_
 
 SWITCH_DECLARE(void) switch_rtp_clear_flag(switch_rtp_t *rtp_session, switch_rtp_flag_t flag)
 {
-	int old_flag = rtp_session->flags[flag];
+	int old_flag;
+
+	if (!rtp_session) {
+		return;
+	}
+
+	old_flag = rtp_session->flags[flag];
 
 	switch_mutex_lock(rtp_session->flag_mutex);
 	rtp_session->flags[flag] = 0;
@@ -12528,21 +12731,6 @@ SWITCH_DECLARE(void) switch_rtp_trickle_emit_local_candidate(switch_rtp_t *rtp_s
 			trickle_eoc_seal(rtp_session, mid ? mid : "", mline_index);
 		}
 	}
-}
-
-SWITCH_DECLARE(void) switch_rtp_set_ice_role(switch_rtp_t *rtp_session, switch_bool_t controlling)
-{
-#ifdef SWITCH_HAVE_ICE
-	if (!rtp_session || !rtp_session->ice.ice_params) return;
-	rtp_session->ice.ice_params->controlling = controlling ? 1 : 0;
-	if (!rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX] && rtp_session->rtcp_ice.ice_params) {
-		rtp_session->rtcp_ice.ice_params->controlling = controlling ? 1 : 0;
-	}
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-	                  "ICE role set to %s\n", controlling ? "controlling" : "controlled");
-#else
-	(void)rtp_session; (void)controlling;
-#endif
 }
 
 SWITCH_DECLARE(switch_status_t) switch_rtp_extmap_register(switch_rtp_t *rtp_session, uint8_t id, const char *uri)
