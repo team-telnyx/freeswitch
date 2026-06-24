@@ -77,6 +77,7 @@
 #define WRITE_DEC(rtp_session) rtp_session->writing--; switch_mutex_unlock(rtp_session->write_mutex)
 
 #define RTP_STUN_FREQ 1000000
+#define DEFAULT_ICE_NOMINATION_FALLBACK_MS 10000
 #define rtp_header_len 12
 #define RTP_START_PORT 16384
 #define RTP_END_PORT 32768
@@ -1119,6 +1120,51 @@ static switch_status_t ice_out(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 
 	ice->next_run = now + RTP_STUN_FREQ;
 
+	/* Non-DTLS ICE-CONTROLLED peers that never send USE-CANDIDATE hang media
+	 * forever. After the fallback window since first responsive STUN,
+	 * self-promote to controlling and nominate. */
+	if ((ice->type & ICE_VANILLA) && (ice->type & ICE_CONTROLLED)
+		&& !(ice->type & (ICE_LITE | ICE_LITE_INBOUND))
+		&& !rtp_session->dtls
+		&& !ice->promoted_to_controlling && ice->cand_responsive && ice->first_responsive_us) {
+		if (!ice->nomination_fallback_cached) {
+			/* rtp_ice_nomination_fallback_ms=0 (or negative) disables the fallback for this leg. */
+			switch_channel_t *channel = rtp_session->session ? switch_core_session_get_channel(rtp_session->session) : NULL;
+			if (channel) {
+				const char *fb_var = switch_channel_get_variable(channel, "rtp_ice_nomination_fallback");
+				int raw = switch_safe_atoi(
+					switch_channel_get_variable(channel, "rtp_ice_nomination_fallback_ms"),
+					DEFAULT_ICE_NOMINATION_FALLBACK_MS);
+				ice->nomination_fallback_enabled = zstr(fb_var) || switch_true(fb_var);
+				ice->nomination_fallback_ms = (raw > 0) ? (uint32_t)raw : 0;
+			} else {
+				ice->nomination_fallback_enabled = 1;
+				ice->nomination_fallback_ms = DEFAULT_ICE_NOMINATION_FALLBACK_MS;
+			}
+			ice->nomination_fallback_cached = 1;
+		}
+		if (ice->nomination_fallback_enabled && ice->nomination_fallback_ms > 0
+			&& (now - ice->first_responsive_us) >= ((switch_time_t)ice->nomination_fallback_ms * 1000)) {
+			uint32_t i;
+			int peer_use_candidate = 0;
+			if (ice->ice_params && ice->ice_params->cand_idx[ice->proto] > 0) {
+				for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; i++) {
+					if (ice->ice_params->cands[i][ice->proto].use_candidate) {
+						peer_use_candidate = 1;
+						break;
+					}
+				}
+			}
+			if (!peer_use_candidate) {
+				ice->type &= ~ICE_CONTROLLED;
+				ice->promoted_to_controlling = 1;
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
+					"%s ICE peer never nominated in %u ms; promoting to CONTROLLING\n",
+					rtp_type(rtp_session), ice->nomination_fallback_ms);
+			}
+		}
+	}
+
 	if (ice == &rtp_session->rtcp_ice && rtp_session->rtcp_sock_output) {
 		sock_output = rtp_session->rtcp_sock_output;
 	}
@@ -1281,6 +1327,15 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 					}
 				}
 
+				/* Peer nominated after we self-promoted: yield, peer wins. */
+				if (ice->promoted_to_controlling) {
+					ice->type |= ICE_CONTROLLED;
+					ice->promoted_to_controlling = 0;
+					ice->nomination_fallback_enabled = 0;
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
+						"%s late peer USE-CANDIDATE after fallback promotion; reverting to CONTROLLED\n", rtp_type(rtp_session));
+				}
+
 				/* RFC 8445: controlled agent must accept the nominated pair. */
 				if (ice->addr && !switch_cmp_addr(from_addr, ice->addr, SWITCH_TRUE)) {
 					/* Once DTLS is established, don't switch addresses from competing nominations. */
@@ -1320,7 +1375,17 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 								  );
 
 				if ((ice->type & ICE_VANILLA) && code == 487) {
-					if ((ice->type & ICE_CONTROLLED)) {
+					/* Three role-conflict cases:
+					 *   1. We self-promoted (fallback) and peer rejects -> revert to CONTROLLED, disable fallback.
+					 *   2. We were CONTROLLED and peer 487s us -> RFC role-conflict flip to CONTROLLING.
+					 *   3. We were CONTROLLING and peer 487s us -> RFC role-conflict flip to CONTROLLED. */
+					if (ice->promoted_to_controlling && !(ice->type & ICE_CONTROLLED)) {
+						/* Peer rejected our self-promotion: it is legitimately controlling. Revert and stand down. */
+						ice->type |= ICE_CONTROLLED;
+						ice->promoted_to_controlling = 0;
+						ice->nomination_fallback_enabled = 0;
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "%s STUN got role-conflict 487 after fallback promotion; reverting to CONTROLLED\n", rtp_type(rtp_session));
+					} else if ((ice->type & ICE_CONTROLLED)) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "%s STUN Changing role to CONTROLLING\n", rtp_type(rtp_session));
 						ice->type &= ~ICE_CONTROLLED;
 					} else {
@@ -1441,6 +1506,9 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 						if (ice_candidate_matches_addr(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto], from_host, from_port)) {
 							ice->cand_responsive = 1;
 							ice->initializing = 0;
+							if (!ice->first_responsive_us) {
+								ice->first_responsive_us = switch_micro_time_now();
+							}
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "Chosen %s ICE candidate %s:%d is responsive (is_relay: %d)\n", rtp_type(rtp_session), ice->ice_params->cands[i][ice->proto].con_addr, ice->ice_params->cands[i][ice->proto].con_port, is_relay);
 						}
 					}
@@ -1749,6 +1817,9 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 				ice->cand_responsive = is_responsive;
 				if (ice->cand_responsive) {
 					ice->initializing = 0;
+					if (!ice->first_responsive_us) {
+						ice->first_responsive_us = switch_micro_time_now();
+					}
 				}
 
 				ice->last_ok = now;
@@ -6050,6 +6121,11 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice(switch_rtp_t *rtp_sessio
 		ice->ready = ice->rready = 1;
 		ice->cand_responsive = 0;
 	}
+	ice->first_responsive_us = 0;
+	ice->promoted_to_controlling = 0;
+	ice->nomination_fallback_cached = 0;
+	ice->nomination_fallback_enabled = 0;
+	ice->nomination_fallback_ms = 0;
 
 	ice->ice_user = switch_core_strdup(rtp_session->pool, ice_user);
 	ice->user_ice = switch_core_strdup(rtp_session->pool, user_ice);
