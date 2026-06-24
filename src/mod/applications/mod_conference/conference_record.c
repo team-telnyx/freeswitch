@@ -69,12 +69,17 @@ void conference_record_launch_thread(conference_obj_t *conference, char *path, i
 		rec->canvas_id = canvas_id;
 	}
 
+	switch_threadattr_create(&thd_attr, rec->pool);
+	switch_threadattr_detach_set(thd_attr, 1);
+	switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
+
 	/* TELCORE-223: register the thread before spawning it, but only while the
-	 * conference is still running. Serialising this CFLAG_RUNNING check and the
-	 * count bump against the teardown's flag-clear (both under flag_mutex)
-	 * guarantees the teardown either waits for this thread (registered before the
-	 * flag was cleared) or this thread is never launched (flag already cleared) -
-	 * it can never slip in after the teardown has drained. */
+	 * conference is still running, and keep flag_mutex held across the spawn.
+	 * Serialising this CFLAG_RUNNING check and the count bump against the
+	 * teardown's flag-clear (both under flag_mutex) guarantees the teardown
+	 * either waits for this thread (registered before the flag was cleared) or
+	 * this thread is never launched (flag already cleared) - it can never slip in
+	 * after the teardown has drained. */
 	switch_mutex_lock(conference->flag_mutex);
 	if (!conference_utils_test_flag(conference, CFLAG_RUNNING)) {
 		switch_mutex_unlock(conference->flag_mutex);
@@ -86,12 +91,19 @@ void conference_record_launch_thread(conference_obj_t *conference, char *path, i
 	rec->next = conference->rec_node_head;
 	conference->rec_node_head = rec;
 	conference->record_thread_count++;
-	switch_mutex_unlock(conference->flag_mutex);
 
-	switch_threadattr_create(&thd_attr, rec->pool);
-	switch_threadattr_detach_set(thd_attr, 1);
-	switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
-	switch_thread_create(&thread, thd_attr, conference_record_thread_run, rec, rec->pool);
+	if (switch_thread_create(&thread, thd_attr, conference_record_thread_run, rec, rec->pool) != SWITCH_STATUS_SUCCESS) {
+		/* No thread will run to drop the count or unlink the node, so teardown
+		 * would spin forever on record_thread_count - undo the registration here.
+		 * rec is still at the list head since flag_mutex was never released. */
+		conference->rec_node_head = rec->next;
+		conference->record_thread_count--;
+		switch_mutex_unlock(conference->flag_mutex);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Failed to launch record thread for %s\n", path);
+		switch_core_destroy_memory_pool(&pool);
+		return;
+	}
+	switch_mutex_unlock(conference->flag_mutex);
 }
 
 
