@@ -1319,7 +1319,16 @@ SWITCH_DECLARE(void) switch_event_merge(switch_event_t *event, switch_event_t *t
 {
 	switch_event_header_t *hp;
 
-	switch_assert(tomerge && event);
+	/* The destination must exist - a NULL `event` is a caller bug worth catching. */
+	switch_assert(event);
+
+	/* `tomerge`, on the other hand, can legitimately be NULL when the caller's
+	 * source event was destroyed concurrently (e.g. mod_conference tears down
+	 * conference->variables while a record thread is still merging it -
+	 * TELCORE-193). Bail safely; there is simply nothing to merge in. */
+	if (!tomerge) {
+		return;
+	}
 
 	for (hp = tomerge->headers; hp; hp = hp->next) {
 		if (hp->idx) {
