@@ -92,6 +92,8 @@ typedef struct client_profile_s {
 	int connect_timeout;
 	profile_perms_t perms;
 	char *ua;
+	int nohead;
+	char *url_pattern;
 
 	struct {
 		char *use_profile;
@@ -182,6 +184,7 @@ struct http_file_context {
 	char *dest_url;
 	char *ua;
 	switch_event_t *url_params;
+	client_profile_t *profile;
 
 	struct {
 		char *ext;
@@ -1773,6 +1776,8 @@ static switch_status_t do_config(void)
 		uint32_t enable_ssl_verifyhost = 0;
 		char *cookie_file = NULL;
 		char *ua = "mod_httapi/1.0";
+		int nohead = 0;
+		char *url_pattern = NULL;
 		hash_node_t *hash_node;
 		long auth_scheme = CURLAUTH_BASIC;
 		need_vars_map = 0;
@@ -1869,11 +1874,15 @@ static switch_status_t do_config(void)
 					}
 				} else if (!strcasecmp(var, "bind-local")) {
 					bind_local = val;
+				} else if (!strcasecmp(var, "nohead")) {
+					nohead = switch_true(val);
+				} else if (!strcasecmp(var, "url-pattern")) {
+					url_pattern = val;
 				}
 			}
 		}
 
-		if (!url) {
+		if (!url && zstr(url_pattern)) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Profile has no url!\n");
 			if (vars_map)
 				switch_core_hash_destroy(&vars_map);
@@ -2104,7 +2113,13 @@ static switch_status_t do_config(void)
 		profile->auth_scheme = auth_scheme;
 		profile->timeout = timeout;
 		profile->connect_timeout = connect_timeout;
-		profile->url = switch_core_strdup(globals.pool, url);
+		profile->nohead = nohead;
+		if (url_pattern != NULL) {
+			profile->url_pattern = switch_core_strdup(globals.pool, url_pattern);
+		}
+		/* url is optional for fetch-only (url-pattern) profiles, but keep it non-NULL so every
+		   profile in the hash has a valid url string and existing deref sites stay crash-safe. */
+		profile->url = switch_core_strdup(globals.pool, url ? url : "");
 		switch_assert(profile->url);
 
 		if (bind_local != NULL) {
@@ -2384,15 +2399,14 @@ static char *load_cache_data(http_file_context_t *context, const char *url)
 	}
 
 	if (zstr(ext)) {
-		ext = find_ext(url);
-	}
-
-	if (ext && strchr(ext, '?')) {
-		dext = strdup(ext);
+		/* Derive the extension from the URL path only. Strip any query string first so a dotted
+		   value in the query (e.g. a domain like "link.com", or a response-content-disposition
+		   filename) is never mistaken for the file extension. */
+		dext = strdup(url);
 		if ((p = strchr(dext, '?'))) {
 			*p = '\0';
-			ext = dext;
-		} else switch_safe_free(dext);
+		}
+		ext = find_ext(dext);
 	}
 
 	context->cache_file_base = switch_core_sprintf(context->pool, "%s%s%s", globals.cache_path, SWITCH_PATH_SEPARATOR, digest);
@@ -2480,6 +2494,13 @@ static switch_status_t fetch_cache_data(http_file_context_t *context, const char
 
 	if (context->url_params) {
 		profile_name = switch_event_get_header(context->url_params, "profile_name");
+	}
+
+	/* Honor the profile matched by url-pattern (see match_url_profile) so its timeout, SSL and
+	   credential settings apply to the fetch -- not just its nohead flag. An explicit
+	   (profile_name=) url param still takes precedence. */
+	if (zstr(profile_name) && context->profile) {
+		profile_name = context->profile->name;
 	}
 
 	if (zstr(profile_name)) {
@@ -2786,10 +2807,42 @@ static void lock_file(http_file_context_t *context, switch_bool_t lock)
 }
 
 
+/* Match a fetch URL against each profile's url-pattern and return the first matching profile, if any.
+   Iterates the full hash so the iterator is freed normally; the first match wins. */
+static client_profile_t *match_url_profile(const char *url)
+{
+	switch_hash_index_t *hi;
+	const void *var;
+	void *val;
+	client_profile_t *profile = NULL, *matched = NULL;
+
+	if (zstr(url)) {
+		return NULL;
+	}
+
+	for (hi = switch_core_hash_first(globals.profile_hash); hi; hi = switch_core_hash_next(&hi)) {
+		switch_core_hash_this(hi, &var, NULL, &val);
+		profile = (client_profile_t *) val;
+
+		if (!matched && profile && !zstr(profile->url_pattern)) {
+			switch_regex_t *re = NULL;
+			int ovector[30] = {0};
+
+			if (switch_regex_perform(url, profile->url_pattern, &re, ovector, sizeof(ovector) / sizeof(ovector[0])) > 0) {
+				matched = profile;
+			}
+			switch_regex_safe_free(re);
+		}
+	}
+
+	return matched;
+}
+
 static switch_status_t locate_url_file(http_file_context_t *context, const char *url)
 {
 	switch_event_t *headers = NULL;
 	int unreachable = 0;
+	int do_head;
 	switch_status_t status = SWITCH_STATUS_FALSE;
 	time_t now = switch_epoch_time_now(NULL);
 	char *metadata;
@@ -2810,9 +2863,24 @@ static switch_status_t locate_url_file(http_file_context_t *context, const char 
 		ext = find_ext(context->cache_file);
 	}
 
-	if (!context->url_params || !switch_true(switch_event_get_header(context->url_params, "nohead"))) {
+	/* Decide whether to issue the HEAD pre-flight. Precedence: URL (nohead=) param overrides a
+	   matched profile's nohead, which overrides the default (HEAD on). The HEAD is skipped for
+	   URLs whose signature is method-bound (e.g. S3 presigned GET) and would 403 on HEAD. */
+	do_head = 1;
+	if (context->profile && context->profile->nohead) {
+		do_head = 0;
+	}
+	if (context->url_params) {
+		const char *nohead_param = switch_event_get_header(context->url_params, "nohead");
+		if (!zstr(nohead_param)) {
+			do_head = !switch_true(nohead_param);
+		}
+	}
+
+	if (do_head) {
 		const char *ct = NULL;
 		const char *newext = NULL;
+		int head_client_reject = 0;
 
 		if ((status = fetch_cache_data(context, url, &headers, NULL, NULL)) != SWITCH_STATUS_SUCCESS) {
 			if (status == SWITCH_STATUS_NOTFOUND) {
@@ -2821,38 +2889,53 @@ static switch_status_t locate_url_file(http_file_context_t *context, const char 
 					switch_goto_status(SWITCH_STATUS_SUCCESS, end);
 				}
 			} else {
-				unreachable = 1;
+				const char *code = headers ? switch_event_get_header(headers, "http-response-code") : NULL;
+				int http_code = code ? atoi(code) : 0;
+
+				/* A 4xx on HEAD (e.g. 403 on a method-bound S3 presigned GET, or 405/501 where the
+				   server rejects HEAD) is a client-side rejection of HEAD, not proof the resource is
+				   gone. Don't trust the error response's headers or declare the file unreachable:
+				   fall through to the GET and let it, plus the GET-path Content-Type recovery below,
+				   resolve the file and extension. 5xx and transport failures keep the immediate
+				   abort below, since the GET would likely fail the same way against a down origin. */
+				if (http_code >= 400 && http_code < 500) {
+					head_client_reject = 1;
+				} else {
+					unreachable = 1;
+				}
 			}
 		}
 
-		if (zstr(ext) && headers && (ct = switch_event_get_header(headers, "content-type"))) {
-			newext = switch_core_mime_type2ext(ct);
-		}
+		if (!head_client_reject) {
+			if (zstr(ext) && headers && (ct = switch_event_get_header(headers, "content-type"))) {
+				newext = switch_core_mime_type2ext(ct);
+			}
 
-		if (newext) {
-			ext = newext;
-			context->cache_file = switch_core_sprintf(context->pool, "%s.%s", context->cache_file, newext);
-		}
+			if (newext) {
+				ext = newext;
+				context->cache_file = switch_core_sprintf(context->pool, "%s.%s", context->cache_file, newext);
+			}
 
 
-		if (switch_file_exists(context->cache_file, context->pool) != SWITCH_STATUS_SUCCESS && unreachable) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "File at url [%s] is unreachable!\n", url);
-			status = SWITCH_STATUS_NOTFOUND;
-			goto end;
-		}
+			if (switch_file_exists(context->cache_file, context->pool) != SWITCH_STATUS_SUCCESS && unreachable) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "File at url [%s] is unreachable!\n", url);
+				status = SWITCH_STATUS_NOTFOUND;
+				goto end;
+			}
 
-		if (!unreachable && !zstr(context->metadata)) {
-			metadata = switch_core_sprintf(context->pool, "%s:%s:%s:%s:%s",
-										   url,
-										   switch_event_get_header_nil(headers, "last-modified"),
-										   switch_event_get_header_nil(headers, "etag"),
-										   switch_event_get_header_nil(headers, "content-length"),
-										   ext
-										   );
+			if (!unreachable && !zstr(context->metadata)) {
+				metadata = switch_core_sprintf(context->pool, "%s:%s:%s:%s:%s",
+											   url,
+											   switch_event_get_header_nil(headers, "last-modified"),
+											   switch_event_get_header_nil(headers, "etag"),
+											   switch_event_get_header_nil(headers, "content-length"),
+											   ext
+											   );
 
-			if (!strcmp(metadata, context->metadata)) {
-				write_meta_file(context, metadata, headers);
-				switch_goto_status(SWITCH_STATUS_SUCCESS, end);
+				if (!strcmp(metadata, context->metadata)) {
+					write_meta_file(context, metadata, headers);
+					switch_goto_status(SWITCH_STATUS_SUCCESS, end);
+				}
 			}
 		}
 
@@ -2863,6 +2946,26 @@ static switch_status_t locate_url_file(http_file_context_t *context, const char 
 	if ((status = fetch_cache_data(context, url, &headers, context->cache_file, &err_msg)) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Error fetching file at URL \"%s\" (%s)\n", url, err_msg ? err_msg : "");
 		goto end;
+	}
+
+	/* When the HEAD pre-flight was skipped, the extension was never resolved and the cache file
+	   was saved without one (the core picks a decoder by extension only). Recover the extension
+	   from the GET response Content-Type and rename the cache file accordingly. */
+	if (zstr(ext)) {
+		const char *ct = NULL;
+		const char *newext = NULL;
+
+		if (headers && (ct = switch_event_get_header(headers, "content-type")) && (newext = switch_core_mime_type2ext(ct))) {
+			char *newpath = switch_core_sprintf(context->pool, "%s.%s", context->cache_file, newext);
+
+			if (rename(context->cache_file, newpath) == 0) {
+				context->cache_file = newpath;
+				ext = newext;
+			} else {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+								  "Failed to rename cache file [%s] to [%s]: %s\n", context->cache_file, newpath, strerror(errno));
+			}
+		}
 	}
 
 
@@ -2917,7 +3020,7 @@ static switch_status_t file_open(switch_file_handle_t *handle, const char *path,
 {
 	http_file_context_t *context;
 	char *parsed = NULL, *pdup = NULL;
-	const char *pa = NULL;
+	const char *pa = NULL, *profile_name = NULL;
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
 
 	if (!strncmp(path, "http://", 7)) {
@@ -2951,6 +3054,14 @@ static switch_status_t file_open(switch_file_handle_t *handle, const char *path,
 		context->dest_url = switch_core_sprintf(context->pool, "https://%s", pa);
 	} else {
 		context->dest_url = switch_core_sprintf(context->pool, "http://%s", pa);
+	}
+
+	/* Resolve the effective read profile once so HEAD policy and GET/fetch options use the
+	   same profile. Explicit (profile_name=) still wins over url-pattern matching. */
+	if (context->url_params && !zstr((profile_name = switch_event_get_header(context->url_params, "profile_name")))) {
+		context->profile = (client_profile_t *) switch_core_hash_find(globals.profile_hash, profile_name);
+	} else {
+		context->profile = match_url_profile(context->dest_url);
 	}
 
 	if (switch_test_flag(handle, SWITCH_FILE_FLAG_WRITE)) {
