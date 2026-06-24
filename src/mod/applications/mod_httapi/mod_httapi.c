@@ -3014,7 +3014,7 @@ static switch_status_t file_open(switch_file_handle_t *handle, const char *path,
 {
 	http_file_context_t *context;
 	char *parsed = NULL, *pdup = NULL;
-	const char *pa = NULL;
+	const char *pa = NULL, *profile_name = NULL;
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
 
 	if (!strncmp(path, "http://", 7)) {
@@ -3050,10 +3050,11 @@ static switch_status_t file_open(switch_file_handle_t *handle, const char *path,
 		context->dest_url = switch_core_sprintf(context->pool, "http://%s", pa);
 	}
 
-	/* When no explicit profile is requested via (profile_name=), route the fetch URL to a
-	   profile by its url-pattern. Leaves context->profile NULL when nothing matches, so the
-	   default profile and standard HEAD behavior still apply. */
-	if (!context->url_params || zstr(switch_event_get_header(context->url_params, "profile_name"))) {
+	/* Resolve the effective read profile once so HEAD policy and GET/fetch options use the
+	   same profile. Explicit (profile_name=) still wins over url-pattern matching. */
+	if (context->url_params && !zstr((profile_name = switch_event_get_header(context->url_params, "profile_name")))) {
+		context->profile = (client_profile_t *) switch_core_hash_find(globals.profile_hash, profile_name);
+	} else {
 		context->profile = match_url_profile(context->dest_url);
 	}
 
