@@ -5,8 +5,11 @@
 #   sudo bash run_under_fdtrace.sh fix    # FIXED  -> detector stays silent
 set -u
 
-BT=/home/damir/work/fdsentry/fdtrace-comm.bt
-DIR=/home/damir/work/freeswitch/tests/test_event_socket_kill_listener_fd_reuse
+# Path to fdsentry's fdtrace-comm.bt (lives in the separate fdsentry repo).
+# Override with: FDSENTRY_BT=/path/to/fdtrace-comm.bt sudo -E bash run_under_fdtrace.sh
+BT="${FDSENTRY_BT:-<foobar>/fdsentry/fdtrace-comm.bt}"
+# This test directory, auto-detected from the script's own location.
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT=/tmp/eslfdrace-bt.out
 MODE="${1:-}"
 
