@@ -488,6 +488,14 @@ struct switch_rtp {
 	switch_mutex_t *read_mutex;
 	switch_mutex_t *write_mutex;
 	switch_mutex_t *bundle_video_frame_lock;  /* TEL-6738: serializes video frame burst vs audio */
+	/* Drain-open-frame-first: the video writer signals that a VP8 frame is
+	   mid-emission so the audio writer can briefly defer, keeping fragments
+	   contiguous on the shared BUNDLE 5-tuple.  All reads/writes of these
+	   two fields are protected by bundle_video_frame_lock. */
+	uint8_t bundle_video_frame_in_progress;
+	switch_time_t bundle_video_frame_open_us;
+	uint32_t bundle_audio_deferred_total;
+	uint32_t bundle_audio_stale_log_count;
 	switch_mutex_t *ice_mutex;
 	switch_timer_t timer;
 	switch_timer_t write_timer;
@@ -6699,6 +6707,17 @@ SWITCH_DECLARE(void) switch_rtp_set_bundle_has_video(switch_rtp_t *rtp_session, 
 		rtp_session->rtcp_fb_remote_ssrc = 0;
 	}
 	switch_mutex_unlock(rtp_session->flag_mutex);
+
+	/* Clear drain-open-frame state when BUNDLE video is disabled.  Taken
+	   AFTER releasing flag_mutex: the audio write path acquires
+	   bundle_video_frame_lock and then flag_mutex, so nesting them in the
+	   reverse order here would risk an AB-BA deadlock. */
+	if (!enabled && rtp_session->bundle_video_frame_lock) {
+		switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+		rtp_session->bundle_video_frame_in_progress = 0;
+		rtp_session->bundle_video_frame_open_us = 0;
+		switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+	}
 }
 
 SWITCH_DECLARE(void) switch_rtp_set_bundle_video_ssrcs(switch_rtp_t *rtp_session, uint32_t local_ssrc, uint32_t remote_ssrc)
@@ -10468,6 +10487,14 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 				*video_frame_src_ts = src_ts;
 				*video_frame_out_ts = out_ts;
 				*video_frame_open = 1;
+
+				/* Signal audio writer that a video frame is being emitted. */
+				if (rtp_session->bundle_has_video) {
+					switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+					rtp_session->bundle_video_frame_open_us = frame_now;
+					rtp_session->bundle_video_frame_in_progress = 1;
+					switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+				}
 			}
 
 			send_msg->header.ts = htonl(*video_frame_out_ts);
@@ -10995,6 +11022,12 @@ fork_done:
 			*video_frame_last_timestamp = video_frame_commit_timestamp;
 			*video_frame_last_set = 1;
 			*video_frame_open = 0;
+			/* Frame fully emitted -- release deferred audio. */
+			if (rtp_session->bundle_has_video) {
+				switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+				rtp_session->bundle_video_frame_in_progress = 0;
+				switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+			}
 		}
 
 		*last_write_ts = this_ts;
@@ -11034,6 +11067,15 @@ fork_done:
 	ret = (int) bytes;
 
  end:
+
+	/* Error path: if a video frame was opened but send failed before
+	   marker-commit, clear the in-progress flag so it cannot get stuck. */
+	if (ret < 0 && video_frame_open && *video_frame_open && rtp_session->bundle_has_video) {
+		switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+		rtp_session->bundle_video_frame_in_progress = 0;
+		rtp_session->bundle_video_frame_open_us = 0;
+		switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+	}
 
 	WRITE_DEC(rtp_session);
 
@@ -11190,6 +11232,112 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_offer_audio_level_extension(switch_co
 SWITCH_DECLARE(int) switch_rtp_write_frame(switch_rtp_t *rtp_session, switch_frame_t *frame)
 {
 	return switch_rtp_write_frame_ex(rtp_session, frame, 0, 0, NULL);
+}
+
+/* Bounded defer: let an in-progress BUNDLE video frame finish draining
+   before this audio/CNG/DTMF packet is sent, so VP8 fragments stay
+   contiguous on the shared socket.  All flag reads are under
+   bundle_video_frame_lock (brief lock/copy/unlock per poll).  The
+   mutex is NEVER held across switch_yield -- deadlock-safe.  The
+   absolute deadline lets the caller share one ~10ms budget across the
+   pre-lock call and the per-packet re-check loop so worst-case audio
+   latency cannot accumulate beyond a single deadline. */
+static void tel6738_bundle_audio_defer_until(switch_rtp_t *rtp_session, switch_time_t deadline_us)
+{
+	switch_time_t defer_start;
+	switch_time_t frame_open_us;
+	uint8_t in_progress;
+	switch_time_t age_us = 0;
+	switch_time_t waited_us = 0;
+	switch_bool_t hit_cap = SWITCH_FALSE;
+	switch_bool_t hit_stale = SWITCH_FALSE;
+
+	if (!rtp_session->bundle_has_video) return;
+
+	/* Snapshot the flag under lock. */
+	switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+	in_progress = rtp_session->bundle_video_frame_in_progress;
+	frame_open_us = rtp_session->bundle_video_frame_open_us;
+	switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+
+	if (!in_progress) return;
+
+	defer_start = switch_micro_time_now();
+	age_us = (frame_open_us && defer_start > frame_open_us) ? (defer_start - frame_open_us) : 0;
+
+	if (age_us > 12000) {
+		hit_stale = SWITCH_TRUE;
+		/* Stale frame -- clear so every subsequent packet does not re-trigger. */
+		switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+		if (rtp_session->bundle_video_frame_in_progress) {
+			rtp_session->bundle_video_frame_in_progress = 0;
+			rtp_session->bundle_video_frame_open_us = 0;
+		}
+		switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+	} else if (defer_start >= deadline_us) {
+		/* Caller already burned the shared budget; do not wait further. */
+		hit_cap = SWITCH_TRUE;
+	} else {
+		while (1) {
+			switch_time_t now_us;
+			switch_time_t open_us;
+
+			switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+			in_progress = rtp_session->bundle_video_frame_in_progress;
+			open_us = rtp_session->bundle_video_frame_open_us;
+			switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+
+			if (!in_progress) break;
+
+			now_us = switch_micro_time_now();
+			waited_us = (now_us > defer_start) ? (now_us - defer_start) : 0;
+			if (now_us >= deadline_us) { hit_cap = SWITCH_TRUE; break; }
+			if (open_us && now_us > open_us && (now_us - open_us) > 12000) {
+				hit_stale = SWITCH_TRUE;
+				switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+				if (rtp_session->bundle_video_frame_in_progress) {
+					rtp_session->bundle_video_frame_in_progress = 0;
+					rtp_session->bundle_video_frame_open_us = 0;
+				}
+				switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+				break;
+			}
+			switch_yield(500);
+		}
+	}
+
+	if (waited_us > 0 || hit_stale || hit_cap) {
+		uint32_t deferred;
+		uint32_t stale_count = 0;
+
+		/* Counters live on the shared struct -- bump them under the lock,
+		   copy out locals, then drop the lock before logging. */
+		switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+		deferred = ++rtp_session->bundle_audio_deferred_total;
+		if (hit_stale) {
+			stale_count = ++rtp_session->bundle_audio_stale_log_count;
+		}
+		switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+
+		if (hit_stale) {
+			if (stale_count <= 5 || (stale_count % 500) == 0) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+					"BUNDLE audio defer stale_clear waited_us=%lld age_us=%lld stale_count=%u deferred_total=%u\n",
+					(long long) waited_us, (long long) age_us, stale_count, deferred);
+			}
+		} else if (deferred <= 10 || (deferred % 500) == 0 || hit_cap) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+				"BUNDLE audio defer waited_us=%lld age_us=%lld hit_cap=%d deferred_total=%u\n",
+				(long long) waited_us, (long long) age_us, hit_cap ? 1 : 0, deferred);
+		}
+	}
+}
+
+/* Thin wrapper: callers without a shared deadline (CNG/DTMF) get their
+   own fresh ~10ms budget. */
+static void tel6738_bundle_audio_defer(switch_rtp_t *rtp_session)
+{
+	tel6738_bundle_audio_defer_until(rtp_session, switch_micro_time_now() + 10000);
 }
 
 SWITCH_DECLARE(int) switch_rtp_write_frame_ex(switch_rtp_t *rtp_session, switch_frame_t *frame, uint32_t ssrc, uint8_t mid_ext_id, const char *mid)
@@ -11368,6 +11516,17 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 
 //after:
 
+	/* Drain-open-frame-first: audio packets on BUNDLE defer briefly while a
+	   video frame is mid-emission, keeping VP8 fragments contiguous.  One
+	   shared ~10ms deadline is threaded into the pre-lock helper AND the
+	   re-check-loop helper below, so the cumulative wait for a single
+	   audio packet is hard-capped (not 10ms per call). */
+	switch_time_t audio_defer_deadline = 0;
+	if (!force_video) {
+		audio_defer_deadline = switch_micro_time_now() + 10000;
+		tel6738_bundle_audio_defer_until(rtp_session, audio_defer_deadline);
+	}
+
 	/* TEL-6738: BUNDLE audio/video packet serialization (per-packet).
 	   Serialize each individual packet write against the shared UDP socket to prevent
 	   kernel-level reordering between audio and video on the BUNDLE transport.
@@ -11376,7 +11535,17 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 	   forever, audio thread blocked permanently -> SIP caller stuck in CS_EXCHANGE_MEDIA).
 	   Per-packet is safe: the browser demuxes by SSRC regardless of interleave order. */
 	if (rtp_session->bundle_has_video) {
+		int recheck_count = 0;
 		switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+		/* Re-check: a video frame may have opened while we waited for the
+		   per-packet lock.  Re-defer if so, bounded by recheck_count AND by
+		   the shared audio_defer_deadline so total wait stays <= 10ms. */
+		while (!force_video && rtp_session->bundle_video_frame_in_progress && recheck_count < 2) {
+			recheck_count++;
+			switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+			tel6738_bundle_audio_defer_until(rtp_session, audio_defer_deadline);
+			switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+		}
 	}
 
 	if (switch_test_flag(frame, SFF_RTP_HEADER) || rtp_session->flags[SWITCH_RTP_FLAG_TEXT]) {
@@ -11512,6 +11681,9 @@ SWITCH_DECLARE(int) switch_rtp_write_manual(switch_rtp_t *rtp_session,
 	if (payload == INVALID_PT) {
 		return 0;
 	}
+
+	/* Drain-open-frame-first: defer CNG/DTMF while a video frame is mid-emission. */
+	tel6738_bundle_audio_defer(rtp_session);
 
 	/* TEL-6738: Block audio/DTMF while BUNDLE video frame burst in progress */
 	if (rtp_session->bundle_has_video) {
@@ -11667,6 +11839,14 @@ static int rtp_write_manual_state(switch_rtp_t *rtp_session, switch_rtp_write_st
 			*video_frame_src_ts = src_ts;
 			*video_frame_out_ts = out_ts;
 			*video_frame_open = 1;
+
+			/* Signal audio writer that a video frame is being emitted. */
+			if (rtp_session->bundle_has_video) {
+				switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+				rtp_session->bundle_video_frame_open_us = frame_now;
+				rtp_session->bundle_video_frame_in_progress = 1;
+				switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+			}
 		}
 
 		ts = *video_frame_out_ts;
@@ -11725,6 +11905,12 @@ static int rtp_write_manual_state(switch_rtp_t *rtp_session, switch_rtp_write_st
 		*video_frame_last_timestamp = video_frame_commit_timestamp;
 		*video_frame_last_set = 1;
 		*video_frame_open = 0;
+		/* Frame fully emitted -- release deferred audio. */
+		if (rtp_session->bundle_has_video) {
+			switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+			rtp_session->bundle_video_frame_in_progress = 0;
+			switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+		}
 	}
 
 	if (flags && ((*flags) & SFF_RTP_HEADER)) {
@@ -11735,6 +11921,15 @@ static int rtp_write_manual_state(switch_rtp_t *rtp_session, switch_rtp_write_st
 	ret = (int) bytes;
 
  end:
+
+	/* Error path: if a video frame was opened but send failed before
+	   marker-commit, clear the in-progress flag so it cannot get stuck. */
+	if (ret < 0 && video_frame_open && *video_frame_open && rtp_session->bundle_has_video) {
+		switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+		rtp_session->bundle_video_frame_in_progress = 0;
+		rtp_session->bundle_video_frame_open_us = 0;
+		switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+	}
 
 	WRITE_DEC(rtp_session);
 
