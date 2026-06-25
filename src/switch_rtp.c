@@ -11355,6 +11355,7 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 	srtp_hdr_t local_header;
 	int r = 0;
 	switch_status_t status;
+	switch_time_t audio_defer_deadline = 0;
 
 #if DEBUG_RTP
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "RTP: write frame %s %p/%p\n", rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName", (void*)rtp_session->session, (void*)rtp_session);
@@ -11521,7 +11522,6 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 	   shared ~10ms deadline is threaded into the pre-lock helper AND the
 	   re-check-loop helper below, so the cumulative wait for a single
 	   audio packet is hard-capped (not 10ms per call). */
-	switch_time_t audio_defer_deadline = 0;
 	if (!force_video) {
 		audio_defer_deadline = switch_micro_time_now() + 10000;
 		tel6738_bundle_audio_defer_until(rtp_session, audio_defer_deadline);
