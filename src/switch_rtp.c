@@ -11234,14 +11234,33 @@ SWITCH_DECLARE(int) switch_rtp_write_frame(switch_rtp_t *rtp_session, switch_fra
 	return switch_rtp_write_frame_ex(rtp_session, frame, 0, 0, NULL);
 }
 
-/* Bounded defer: let an in-progress BUNDLE video frame finish draining
-   before this audio/CNG/DTMF packet is sent, so VP8 fragments stay
-   contiguous on the shared socket.  All flag reads are under
-   bundle_video_frame_lock (brief lock/copy/unlock per poll).  The
-   mutex is NEVER held across switch_yield -- deadlock-safe.  The
-   absolute deadline lets the caller share one ~10ms budget across the
-   pre-lock call and the per-packet re-check loop so worst-case audio
-   latency cannot accumulate beyond a single deadline. */
+/* Hard upper bound for how long a single audio packet may defer waiting
+   for an open BUNDLE video frame to drain.  Real video frames span up
+   to ~205ms (mean ~33ms) of fragments on the wire, so the primary exit
+   is "frame closed (in_progress == 0)"; this bound is only a starvation
+   guard for the case where the video thread stalls or the marker is
+   lost.
+
+   Deliberate tradeoff: 150ms is below the observed ~205ms worst-case
+   frame, so a rare frame longer than 150ms (typically a bootstrap
+   keyframe, ~1 per call) can still see audio released into its tail.
+   Accepted: the visible blockiness was driven by steady-state 50-150ms
+   frames, which this fully covers; capping audio one-way delay at 150ms
+   is preferred over fully protecting outlier frames. Raise toward
+   ~250ms if a retest shows residual blockiness on the long-frame tail. */
+#define TEL6738_BUNDLE_AUDIO_DEFER_MAX_US 150000
+
+/* Frame-boundary defer: hold an audio/CNG/DTMF packet on a BUNDLE
+   transport until the open video frame closes (marker emitted) so VP8
+   fragments stay contiguous on the shared socket.  Primary exit is
+   bundle_video_frame_in_progress == 0; the deadline is only a safety
+   bound (TEL6738_BUNDLE_AUDIO_DEFER_MAX_US) that releases the audio if
+   the frame never closes.  All flag reads are under
+   bundle_video_frame_lock (brief lock/copy/unlock per poll); the mutex
+   is NEVER held across switch_yield -- deadlock-safe.  The absolute
+   deadline lets the caller share one safety budget across the pre-lock
+   call and the per-packet re-check loop so worst-case audio latency
+   cannot accumulate beyond a single deadline. */
 static void tel6738_bundle_audio_defer_until(switch_rtp_t *rtp_session, switch_time_t deadline_us)
 {
 	switch_time_t defer_start;
@@ -11265,9 +11284,10 @@ static void tel6738_bundle_audio_defer_until(switch_rtp_t *rtp_session, switch_t
 	defer_start = switch_micro_time_now();
 	age_us = (frame_open_us && defer_start > frame_open_us) ? (defer_start - frame_open_us) : 0;
 
-	if (age_us > 12000) {
+	if (age_us > TEL6738_BUNDLE_AUDIO_DEFER_MAX_US) {
 		hit_stale = SWITCH_TRUE;
-		/* Stale frame -- clear so every subsequent packet does not re-trigger. */
+		/* Stale frame: open longer than the safety bound, presumed stuck
+		   (encoder stall or lost marker) -- force-clear so audio cannot starve. */
 		switch_mutex_lock(rtp_session->bundle_video_frame_lock);
 		if (rtp_session->bundle_video_frame_in_progress) {
 			rtp_session->bundle_video_frame_in_progress = 0;
@@ -11292,7 +11312,7 @@ static void tel6738_bundle_audio_defer_until(switch_rtp_t *rtp_session, switch_t
 			now_us = switch_micro_time_now();
 			waited_us = (now_us > defer_start) ? (now_us - defer_start) : 0;
 			if (now_us >= deadline_us) { hit_cap = SWITCH_TRUE; break; }
-			if (open_us && now_us > open_us && (now_us - open_us) > 12000) {
+			if (open_us && now_us > open_us && (now_us - open_us) > TEL6738_BUNDLE_AUDIO_DEFER_MAX_US) {
 				hit_stale = SWITCH_TRUE;
 				switch_mutex_lock(rtp_session->bundle_video_frame_lock);
 				if (rtp_session->bundle_video_frame_in_progress) {
@@ -11334,10 +11354,10 @@ static void tel6738_bundle_audio_defer_until(switch_rtp_t *rtp_session, switch_t
 }
 
 /* Thin wrapper: callers without a shared deadline (CNG/DTMF) get their
-   own fresh ~10ms budget. */
+   own fresh safety budget; primary exit is still frame close. */
 static void tel6738_bundle_audio_defer(switch_rtp_t *rtp_session)
 {
-	tel6738_bundle_audio_defer_until(rtp_session, switch_micro_time_now() + 10000);
+	tel6738_bundle_audio_defer_until(rtp_session, switch_micro_time_now() + TEL6738_BUNDLE_AUDIO_DEFER_MAX_US);
 }
 
 SWITCH_DECLARE(int) switch_rtp_write_frame_ex(switch_rtp_t *rtp_session, switch_frame_t *frame, uint32_t ssrc, uint8_t mid_ext_id, const char *mid)
@@ -11517,13 +11537,15 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 
 //after:
 
-	/* Drain-open-frame-first: audio packets on BUNDLE defer briefly while a
-	   video frame is mid-emission, keeping VP8 fragments contiguous.  One
-	   shared ~10ms deadline is threaded into the pre-lock helper AND the
-	   re-check-loop helper below, so the cumulative wait for a single
-	   audio packet is hard-capped (not 10ms per call). */
+	/* Frame-boundary defer: audio packets on BUNDLE wait for the open
+	   video frame to close (marker emitted) so VP8 fragments stay
+	   contiguous on the shared socket.  One shared safety deadline
+	   (TEL6738_BUNDLE_AUDIO_DEFER_MAX_US) is threaded into the pre-lock
+	   helper AND the re-check-loop helper below, so the cumulative wait
+	   for a single audio packet is hard-capped at the safety bound
+	   (not per-call). */
 	if (!force_video) {
-		audio_defer_deadline = switch_micro_time_now() + 10000;
+		audio_defer_deadline = switch_micro_time_now() + TEL6738_BUNDLE_AUDIO_DEFER_MAX_US;
 		tel6738_bundle_audio_defer_until(rtp_session, audio_defer_deadline);
 	}
 
@@ -11539,7 +11561,8 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 		switch_mutex_lock(rtp_session->bundle_video_frame_lock);
 		/* Re-check: a video frame may have opened while we waited for the
 		   per-packet lock.  Re-defer if so, bounded by recheck_count AND by
-		   the shared audio_defer_deadline so total wait stays <= 10ms. */
+		   the shared audio_defer_deadline so total wait stays within the
+		   safety bound (TEL6738_BUNDLE_AUDIO_DEFER_MAX_US). */
 		while (!force_video && rtp_session->bundle_video_frame_in_progress && recheck_count < 2) {
 			recheck_count++;
 			switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
