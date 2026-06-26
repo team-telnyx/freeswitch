@@ -5125,7 +5125,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 				memset(&pf, 0, sizeof(pf));
 				pf.data = pe->data;
 				pf.datalen = pe->datalen;
-				pf.flags = pe->flags;
+				pf.flags = pe->flags & ~(SFF_RAW_RTP | SFF_RAW_RTP_PARSE_FRAME); /* TEL-6738: synthetic frame has no wire packet; prevent fwd path NULL deref */
 				pf.m = pe->m;
 				pf.payload = pe->payload;
 				pf.timestamp = pe->timestamp;
@@ -5149,7 +5149,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 						memset(&ff, 0, sizeof(ff));
 						ff.data = fe->data;
 						ff.datalen = fe->datalen;
-						ff.flags = fe->flags;
+						ff.flags = fe->flags & ~(SFF_RAW_RTP | SFF_RAW_RTP_PARSE_FRAME); /* TEL-6738: synthetic frame has no wire packet; prevent fwd path NULL deref */
 						ff.m = fe->m;
 						ff.payload = fe->payload;
 						ff.timestamp = fe->timestamp;

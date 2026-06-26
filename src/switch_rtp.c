@@ -11486,6 +11486,7 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 
 	fwd = (rtp_session->flags[SWITCH_RTP_FLAG_RAW_WRITE] &&
 		   (switch_test_flag(frame, SFF_RAW_RTP) || switch_test_flag(frame, SFF_RAW_RTP_PARSE_FRAME))) ? 1 : 0;
+	if (fwd && !frame->packet) { fwd = 0; }   /* TEL-6738: never raw-forward without a packet */
 #if DEBUG_RTP
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "RTP: write frame fwd: %s %u (%u %u %u / %u %u %u) %p/%p\n", rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName",fwd, rtp_session->flags[SWITCH_RTP_FLAG_RAW_WRITE], switch_test_flag(frame, SFF_RAW_RTP), switch_test_flag(frame, SFF_RAW_RTP_PARSE_FRAME), rtp_session->sending_dtmf, rtp_session->queue_delay, (rtp_session->rtp_bugs & RTP_BUG_GEN_ONE_GEN_ALL), (void*)rtp_session->session, (void*)rtp_session);
 #endif
