@@ -10893,6 +10893,21 @@ fork_done:
 			this_ts = norm_ts;
 		}
 
+		/* Defensive pre-SRTP re-stamp: on a BUNDLE shared session the video
+		   write path can leave a stale video PT in the shared send_msg buffer.
+		   Force the correct audio PT right before SRTP so the auth tag covers
+		   the right value.  No-op for non-BUNDLE or video writes. */
+		if (rtp_session->bundle_has_video && !force_video && payload != INVALID_PT && send_msg->header.pt != payload) {
+			uint32_t restamped = ++rtp_session->bundle_audio_pt_restamped_total;
+			uint8_t stale_pt = send_msg->header.pt;
+			send_msg->header.pt = payload;
+			if (restamped <= 5 || (restamped % 500) == 0) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
+					"TEL6738 BUNDLE audio PT contamination pre-SRTP: had=%u expected=%u ssrc=%u seq=%u total=%u -- restamping\n",
+					stale_pt, payload, ntohl(send_msg->header.ssrc), ntohs(send_msg->header.seq), restamped);
+			}
+		}
+
 #ifdef ENABLE_SRTP
 		switch_mutex_lock(rtp_session->ice_mutex);
 		if (rtp_session->flags[SWITCH_RTP_FLAG_SECURE_SEND]) {
@@ -11440,7 +11455,7 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 			if (force_video && payload_override != INVALID_PT) {
 				send_msg->header.pt = payload_override;
 			} else if (!force_video && rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] && rtp_session->payload > 0) {
-				send_msg->header.pt = rtp_session->payload;
+				send_msg->header.pt = (rtp_session->bundle_has_video && frame->payload != INVALID_PT) ? frame->payload : rtp_session->payload;
 			}
 
 			send_msg->header.seq = htons(write_state ? ++write_state->seq : ++rtp_session->seq);
@@ -11537,6 +11552,12 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 		}
 	} else {
 		payload = payload_override != INVALID_PT ? payload_override : rtp_session->payload;
+		/* TEL-6738: On a BUNDLE session, rtp_session->payload holds the video PT (e.g. 107)
+		 * because audio and video share the same RTP session object. For audio writes
+		 * (force_video=FALSE), use the frame's codec-assigned PT (e.g. 111 for Opus). */
+		if (!force_video && rtp_session->bundle_has_video && frame->payload != INVALID_PT) {
+			payload = frame->payload;
+		}
 #if DEBUG_RTP
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "RTP: write frame fwd: %s %u pt: %u %p/%p\n", rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName", fwd, payload, (void*)rtp_session->session, (void*)rtp_session); 
 #endif
