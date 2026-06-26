@@ -496,6 +496,7 @@ struct switch_rtp {
 	switch_time_t bundle_video_frame_open_us;
 	uint32_t bundle_audio_deferred_total;
 	uint32_t bundle_audio_stale_log_count;
+	uint32_t bundle_audio_pt_restamped_total;
 	switch_mutex_t *ice_mutex;
 	switch_timer_t timer;
 	switch_timer_t write_timer;
@@ -10326,6 +10327,21 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 				goto end;
 			}
 			send_msg->header.pt = rtp_session->te;
+		}
+		/* TEL-6738: BUNDLE shared send_msg buffer can carry a stale video PT into an audio
+		 * write because the audio defer clusters audio packets at video frame boundaries
+		 * (where header.pt was just stamped 107). Re-stamp PT defensively on BUNDLE audio
+		 * writes — guarded by bundle_has_video and !force_video so this is a no-op for
+		 * video writes and non-BUNDLE sessions. payload is the correct PT from the caller. */
+		if (rtp_session->bundle_has_video && !force_video && payload != INVALID_PT && send_msg->header.pt != payload) {
+			uint32_t restamped = ++rtp_session->bundle_audio_pt_restamped_total;
+			uint8_t stale_pt = send_msg->header.pt;
+			send_msg->header.pt = payload;
+			if (restamped <= 5 || (restamped % 500) == 0) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
+					"TEL6738 BUNDLE audio PT contamination: had=%u expected=%u ssrc=%u seq=%u total=%u — restamping\n",
+					stale_pt, payload, ntohl(send_msg->header.ssrc), ntohs(send_msg->header.seq), restamped);
+			}
 		}
 		data = send_msg->body;
 		if (datalen > rtp_header_len) {
