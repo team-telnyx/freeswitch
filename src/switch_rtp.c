@@ -497,6 +497,7 @@ struct switch_rtp {
 	uint32_t bundle_audio_deferred_total;
 	uint32_t bundle_audio_stale_log_count;
 	uint32_t bundle_audio_pt_restamped_total;
+	switch_payload_t bundle_audio_pt;  /* TEL-6738: local egress audio PT, immune to video set_default_payload on shared BUNDLE session */
 	switch_mutex_t *ice_mutex;
 	switch_timer_t timer;
 	switch_timer_t write_timer;
@@ -5570,6 +5571,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_create(switch_rtp_t **new_rtp_session
 	rtp_session->te = INVALID_PT;
 	rtp_session->recv_te = INVALID_PT;
 	rtp_session->cng_pt = INVALID_PT;
+	rtp_session->bundle_audio_pt = INVALID_PT;  /* TEL-6738: until BUNDLE setup captures the local audio PT */
 	rtp_session->session = session;
 	rtp_session->rtcp_probe = 0;
 	rtp_session->ignore_rtp_during_dtmf_timeout = SWITCH_RTP_DEFAULT_IGNORE_DTMF_TIMEOUT_MS;
@@ -6719,6 +6721,16 @@ SWITCH_DECLARE(void) switch_rtp_set_bundle_has_video(switch_rtp_t *rtp_session, 
 		rtp_session->bundle_video_frame_open_us = 0;
 		switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
 	}
+}
+
+SWITCH_DECLARE(void) switch_rtp_set_bundle_audio_pt(switch_rtp_t *rtp_session, switch_payload_t pt)
+{
+	if (!rtp_session) {
+		return;
+	}
+	switch_mutex_lock(rtp_session->flag_mutex);
+	rtp_session->bundle_audio_pt = pt;
+	switch_mutex_unlock(rtp_session->flag_mutex);
 }
 
 SWITCH_DECLARE(void) switch_rtp_set_bundle_video_ssrcs(switch_rtp_t *rtp_session, uint32_t local_ssrc, uint32_t remote_ssrc)
@@ -11455,7 +11467,17 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 			if (force_video && payload_override != INVALID_PT) {
 				send_msg->header.pt = payload_override;
 			} else if (!force_video && rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] && rtp_session->payload > 0) {
-				send_msg->header.pt = (rtp_session->bundle_has_video && frame->payload != INVALID_PT) ? frame->payload : rtp_session->payload;
+				/* TEL-6738: On a shared BUNDLE session rtp_session->payload holds the VIDEO PT
+				 * (set_default_payload overwrote it when the video engine reused the audio
+				 * session). frame->payload carries the bridge PEER's audio PT on a bridged
+				 * leg, not the local egress PT. Prefer the captured local audio PT. */
+				if (rtp_session->bundle_has_video && rtp_session->bundle_audio_pt != INVALID_PT) {
+					send_msg->header.pt = rtp_session->bundle_audio_pt;
+				} else if (rtp_session->bundle_has_video && frame->payload != INVALID_PT) {
+					send_msg->header.pt = frame->payload;
+				} else {
+					send_msg->header.pt = rtp_session->payload;
+				}
 			}
 
 			send_msg->header.seq = htons(write_state ? ++write_state->seq : ++rtp_session->seq);
@@ -11552,11 +11574,17 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 		}
 	} else {
 		payload = payload_override != INVALID_PT ? payload_override : rtp_session->payload;
-		/* TEL-6738: On a BUNDLE session, rtp_session->payload holds the video PT (e.g. 107)
-		 * because audio and video share the same RTP session object. For audio writes
-		 * (force_video=FALSE), use the frame's codec-assigned PT (e.g. 111 for Opus). */
-		if (!force_video && rtp_session->bundle_has_video && frame->payload != INVALID_PT) {
-			payload = frame->payload;
+		/* TEL-6738: On a shared BUNDLE session rtp_session->payload holds the VIDEO PT
+		 * (e.g. 107) because the video engine reused the audio RTP session and
+		 * set_default_payload overwrote it. frame->payload carries the bridge PEER's
+		 * audio PT (e.g. 102) on a bridged leg, NOT the local egress audio PT. Prefer
+		 * the captured local audio PT (e.g. 111 from the WebRTC answer). */
+		if (!force_video && rtp_session->bundle_has_video) {
+			if (rtp_session->bundle_audio_pt != INVALID_PT) {
+				payload = rtp_session->bundle_audio_pt;
+			} else if (frame->payload != INVALID_PT) {
+				payload = frame->payload;
+			}
 		}
 #if DEBUG_RTP
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "RTP: write frame fwd: %s %u pt: %u %p/%p\n", rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName", fwd, payload, (void*)rtp_session->session, (void*)rtp_session); 

@@ -13568,6 +13568,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 				v_engine->rtp_session = a_engine->rtp_session;
 				v_engine->bundled_with_audio = 1;
 				switch_rtp_set_bundle_has_video(a_engine->rtp_session, SWITCH_TRUE);
+				if (a_engine->cur_payload_map) {
+					/* TEL-6738: capture local audio PT before video set_default_payload overwrites
+					 * the shared session's payload with the video PT (107). */
+					switch_rtp_set_bundle_audio_pt(a_engine->rtp_session, a_engine->cur_payload_map->pt);
+				}
 				switch_rtp_set_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_BUNDLE_ACCEPT_ANY_PT);
 
 				if ((video_ssrc = switch_channel_get_variable(session->channel, "rtp_use_video_ssrc"))) {
