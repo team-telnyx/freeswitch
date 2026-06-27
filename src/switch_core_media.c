@@ -5293,8 +5293,142 @@ tel6738_enqueue_pkt:
 				}
 			}
 		}
-	} else if (switch_rtp_write_frame(engine->rtp_session, frame) < 0) {
-		status = SWITCH_STATUS_FALSE;
+	} else {
+		/* Non-BUNDLE path: buffer early video frames until DTLS/SRTP is ready. */
+		if (type == SWITCH_MEDIA_TYPE_VIDEO && !switch_test_flag(frame, SFF_CNG)) {
+			int nbw = 0;           /* write result for current frame */
+			int nb_do_enqueue = 0; /* set if current frame must be buffered */
+			int pw = 0;            /* probe write result */
+			int fw = 0;            /* flush drain write result */
+
+			if (engine->pre_dtls_buf && engine->pre_dtls_buf->count > 0) {
+				/* Probe transport readiness with the oldest buffered packet. */
+				{
+					tel6738_pre_dtls_entry_t *pe;
+					switch_frame_t pf;
+					pe = &engine->pre_dtls_buf->entries[engine->pre_dtls_buf->head];
+					memset(&pf, 0, sizeof(pf));
+					pf.data      = pe->data;
+					pf.datalen   = pe->datalen;
+					pf.flags     = pe->flags & ~(SFF_RAW_RTP | SFF_RAW_RTP_PARSE_FRAME);
+					pf.m         = pe->m;
+					pf.payload   = pe->payload;
+					pf.timestamp = pe->timestamp;
+					pf.seq       = pe->seq;
+					pf.ssrc      = pe->ssrc;
+					pw = switch_rtp_write_frame(engine->rtp_session, &pf);
+				}
+				if (pw > 0) {
+					/* Transport ready: dequeue probe, drain remaining FIFO. */
+					engine->pre_dtls_buf->head = (engine->pre_dtls_buf->head + 1) % TEL6738_PRE_DTLS_CAPACITY;
+					engine->pre_dtls_buf->count--;
+					engine->pre_dtls_buf->stat_flushed++;
+					while (engine->pre_dtls_buf->count > 0) {
+						{
+							tel6738_pre_dtls_entry_t *fe;
+							switch_frame_t ff;
+							fe = &engine->pre_dtls_buf->entries[engine->pre_dtls_buf->head];
+							memset(&ff, 0, sizeof(ff));
+							ff.data      = fe->data;
+							ff.datalen   = fe->datalen;
+							ff.flags     = fe->flags & ~(SFF_RAW_RTP | SFF_RAW_RTP_PARSE_FRAME);
+							ff.m         = fe->m;
+							ff.payload   = fe->payload;
+							ff.timestamp = fe->timestamp;
+							ff.seq       = fe->seq;
+							ff.ssrc      = fe->ssrc;
+							fw = switch_rtp_write_frame(engine->rtp_session, &ff);
+						}
+						if (fw <= 0) {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+								"TEL6738 pre-DTLS (non-bundle) flush stalled: wrote=%d remaining=%u flushed=%u\n",
+								fw, engine->pre_dtls_buf->count, engine->pre_dtls_buf->stat_flushed);
+							break;
+						}
+						engine->pre_dtls_buf->head = (engine->pre_dtls_buf->head + 1) % TEL6738_PRE_DTLS_CAPACITY;
+						engine->pre_dtls_buf->count--;
+						engine->pre_dtls_buf->stat_flushed++;
+					}
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
+						"TEL6738 pre-DTLS (non-bundle) buffer flushed: flushed=%u remaining=%u dropped=%u queued=%u\n",
+						engine->pre_dtls_buf->stat_flushed, engine->pre_dtls_buf->count,
+						engine->pre_dtls_buf->stat_dropped, engine->pre_dtls_buf->stat_queued);
+					engine->pre_dtls_buf->active = SWITCH_FALSE;
+					nbw = switch_rtp_write_frame(engine->rtp_session, frame);
+					if (nbw < 0) {
+						status = SWITCH_STATUS_FALSE;
+					} else if (nbw == 0) {
+						nb_do_enqueue = 1;
+					}
+				} else {
+					/* Transport still not ready; buffer current frame. */
+					nb_do_enqueue = 1;
+				}
+			} else {
+				/* No buffered packets: direct write. */
+				nbw = switch_rtp_write_frame(engine->rtp_session, frame);
+				if (nbw < 0) {
+					status = SWITCH_STATUS_FALSE;
+				} else if (nbw == 0) {
+					nb_do_enqueue = 1;
+				}
+			}
+
+			if (nb_do_enqueue) {
+				if (!engine->pre_dtls_buf) {
+					engine->pre_dtls_buf = switch_core_session_alloc(session, sizeof(tel6738_pre_dtls_buf_t));
+					memset(engine->pre_dtls_buf, 0, sizeof(tel6738_pre_dtls_buf_t));
+					engine->pre_dtls_buf->entries = switch_core_session_alloc(session,
+						TEL6738_PRE_DTLS_CAPACITY * sizeof(tel6738_pre_dtls_entry_t));
+					memset(engine->pre_dtls_buf->entries, 0,
+						TEL6738_PRE_DTLS_CAPACITY * sizeof(tel6738_pre_dtls_entry_t));
+					engine->pre_dtls_buf->active = SWITCH_TRUE;
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
+						"TEL6738 pre-DTLS (non-bundle) buffer allocated: capacity=%d pkt_size=%d\n",
+						TEL6738_PRE_DTLS_CAPACITY, TEL6738_PRE_DTLS_PKT_SIZE);
+				}
+				if (frame->datalen > 0 && frame->datalen <= TEL6738_PRE_DTLS_PKT_SIZE && frame->data) {
+					if (engine->pre_dtls_buf->count >= TEL6738_PRE_DTLS_CAPACITY) {
+						/* Buffer full: evict oldest to make room. */
+						engine->pre_dtls_buf->head = (engine->pre_dtls_buf->head + 1) % TEL6738_PRE_DTLS_CAPACITY;
+						engine->pre_dtls_buf->count--;
+						engine->pre_dtls_buf->stat_dropped++;
+					}
+					{
+						uint32_t idx;
+						tel6738_pre_dtls_entry_t *e;
+						idx = (engine->pre_dtls_buf->head + engine->pre_dtls_buf->count) % TEL6738_PRE_DTLS_CAPACITY;
+						e = &engine->pre_dtls_buf->entries[idx];
+						memcpy(e->data, frame->data, frame->datalen);
+						e->datalen   = frame->datalen;
+						e->flags     = frame->flags;
+						e->m         = frame->m;
+						e->payload   = frame->payload;
+						e->timestamp = frame->timestamp;
+						e->seq       = frame->seq;
+						e->ssrc      = frame->ssrc;
+						engine->pre_dtls_buf->count++;
+						engine->pre_dtls_buf->stat_queued++;
+					}
+					if (engine->pre_dtls_buf->stat_queued <= 10 || !(engine->pre_dtls_buf->stat_queued % 50)) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+							"TEL6738 pre-DTLS (non-bundle) enqueue: queued=%u buffered=%u dropped=%u seq=%u ts=%u m=%d len=%u\n",
+							engine->pre_dtls_buf->stat_queued, engine->pre_dtls_buf->count,
+							engine->pre_dtls_buf->stat_dropped, frame->seq, frame->timestamp,
+							frame->m, frame->datalen);
+					}
+				} else {
+					/* Oversized or empty frame: non-fatal drop. */
+					engine->pre_dtls_buf->stat_dropped++;
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+						"TEL6738 pre-DTLS (non-bundle) cannot buffer (dropped non-fatal): datalen=%u max=%d dropped_total=%u\n",
+						frame->datalen, TEL6738_PRE_DTLS_PKT_SIZE, engine->pre_dtls_buf->stat_dropped);
+					status = SWITCH_STATUS_BREAK;
+				}
+			}
+		} else if (switch_rtp_write_frame(engine->rtp_session, frame) < 0) {
+			status = SWITCH_STATUS_FALSE;
+		}
 	}
 	if (status == SWITCH_STATUS_SUCCESS && fire_writable)
 	{
