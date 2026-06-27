@@ -5360,18 +5360,17 @@ tel6738_enqueue_pkt:
 					} else if (nbw == 0) {
 						nb_do_enqueue = 1;
 					}
-					/* One-shot at the buffering->live transition (count>0 only
-					 * here, then active is cleared and the FIFO is drained): the
-					 * flushed frames are pre-keyframe P-frames referencing an IDR
-					 * the caller never received, so ask the bridge source leg for a
-					 * fresh keyframe to give the caller a decodable anchor. */
+					/* One-shot at the buffering->live transition: flushed frames
+					 * reference an IDR the caller never received; force-bypass the
+					 * 1s video-refresh throttle so the keyframe request reaches the
+					 * source immediately. */
 					{
 						switch_core_session_t *other_session = NULL;
 						if (switch_core_session_get_partner(session, &other_session) == SWITCH_STATUS_SUCCESS) {
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
 								"TEL6738 pre-DTLS (non-bundle) flush complete - requesting source keyframe for caller leg\n");
 							switch_core_media_gen_key_frame(other_session);
-							switch_core_session_request_video_refresh(other_session);
+							switch_core_session_force_request_video_refresh(other_session);
 							switch_core_session_rwunlock(other_session);
 						}
 					}

@@ -328,7 +328,8 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 
 			if (refresh_timer) {
 				if (refresh_timer > 0 && (refresh_timer % 100) == 0) {
-					switch_status_t refresh_status = switch_core_session_request_video_refresh(vh->session_a);
+					/* Force-bypass throttle for the bounded early retry (fires at most 3 times post-connect). */
+					switch_status_t refresh_status = switch_core_session_force_request_video_refresh(vh->session_a);
 
 					tel6738_bridge_source_refreshes++;
 					if (tel6738_bridge_source_refreshes <= 5) {
