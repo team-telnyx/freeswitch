@@ -2764,12 +2764,13 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 
 	if (rtp_session->rtcp_sent_packets < 4) {
 		rate = 4000;
-	} else  {
-		if (rtp_session->pli_count || rtp_session->fir_count || rtp_session->tmmbr || rtp_session->tmmbn) {
-			//switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR, "MARK BW/FIR ETC %d %d\n", rtp_session->pli_count, rtp_session->fir_count);
-			rtcp_ok = 1;
-			rtcp_fb = 1;
-		}
+	}
+
+	/* Video feedback (PLI/FIR/TMMBR/TMMBN) is latency-critical and must not be gated by RTCP warmup;
+	 * the warmup rate only throttles cyclic SR/RR. */
+	if (rtp_session->pli_count || rtp_session->fir_count || rtp_session->tmmbr || rtp_session->tmmbn) {
+		rtcp_ok = 1;
+		rtcp_fb = 1;
 	}
 
 	if (rtp_session->send_rr) {
