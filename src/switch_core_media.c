@@ -249,6 +249,7 @@ struct switch_rtp_engine_s {
 	uint32_t bundle_video_write_success;
 	uint32_t bundle_video_write_zero;
 	uint32_t bundle_video_write_fail;
+	uint32_t tel6738_eg_crc_logs; /* TEL6738: egress payload-integrity probe log throttle */
 	tel6738_pre_dtls_buf_t *pre_dtls_buf; /* TEL-6738: lazily allocated pre-DTLS video buffer */
 	uint32_t bundle_demux_method_counts[4];
 
@@ -5092,6 +5093,21 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 	}
 
 	engine->timestamp_send += samples;
+
+	/* TEL6738 egress payload-integrity probe: CRC32 of the VP8 payload about to be handed to the
+	   RTP/SRTP write path. Compared by seq/ts against the bridge-read ingress plcrc to prove
+	   byte-level passthrough through the b2bua forward path. Forced on keyframes. */
+	if (type == SWITCH_MEDIA_TYPE_VIDEO && frame && !switch_test_flag(frame, SFF_CNG)) {
+		uint32_t tel6738_pl_crc = (frame->data && frame->datalen) ? switch_crc32_8bytes(frame->data, frame->datalen) : 0;
+		if (engine->tel6738_eg_crc_logs < 60 || switch_test_flag(frame, SFF_IS_KEYFRAME) || (engine->tel6738_eg_crc_logs % 500) == 0) {
+			engine->tel6738_eg_crc_logs++;
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+						  "TEL6738 video media-write %s bundled=%d pt=%u seq=%u ts=%u len=%u marker=%d key=%d flags=0x%x ssrc=%u plcrc=0x%08x\n",
+						  switch_channel_get_name(session->channel), engine->bundled_with_audio, frame->payload,
+						  frame->seq, frame->timestamp, frame->datalen, frame->m, switch_test_flag(frame, SFF_IS_KEYFRAME),
+						  frame->flags, engine->ssrc, tel6738_pl_crc);
+		}
+	}
 
 	fire_writable = !switch_channel_test_flag(session->channel, CF_MEDIA_WRITABLE_FIRED);
 	if (type == SWITCH_MEDIA_TYPE_VIDEO && engine->bundled_with_audio) {

@@ -30,6 +30,7 @@
  */
 
 #include <switch.h>
+#include <switch_stun.h> /* TEL6738: switch_crc32_8bytes for video payload-integrity probe */
 #define DEFAULT_LEAD_FRAMES 10
 #define DEBUG_RTP 0
 
@@ -383,12 +384,13 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 				(tel6738_video_debug_reads < 20 || switch_test_flag(read_frame, SFF_IS_KEYFRAME) || !switch_channel_test_flag(channel, CF_VIDEO_READY))) {
 				tel6738_video_debug_reads++;
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
-							  "TEL6738 video bridge read %s -> %s status=%d seq=%u ts=%u len=%u marker=%d img=%d key=%d src_ready=%d dst_ready=%d src_decoded=%d dst_decoded=%d\n",
+							  "TEL6738 video bridge read %s -> %s status=%d seq=%u ts=%u len=%u marker=%d img=%d key=%d src_ready=%d dst_ready=%d src_decoded=%d dst_decoded=%d plcrc=0x%08x\n",
 							  switch_channel_get_name(channel), switch_channel_get_name(b_channel), status, read_frame->seq,
 							  read_frame->timestamp, read_frame->datalen, read_frame->m, read_frame->img ? 1 : 0,
 							  switch_test_flag(read_frame, SFF_IS_KEYFRAME), switch_channel_test_flag(channel, CF_VIDEO_READY),
 							  switch_channel_test_flag(b_channel, CF_VIDEO_READY), switch_channel_test_flag(channel, CF_VIDEO_DECODED_READ),
-							  switch_channel_test_flag(b_channel, CF_VIDEO_DECODED_READ));
+							  switch_channel_test_flag(b_channel, CF_VIDEO_DECODED_READ),
+							  (read_frame->data && read_frame->datalen) ? switch_crc32_8bytes(read_frame->data, read_frame->datalen) : 0);
 			}
 		}
 
