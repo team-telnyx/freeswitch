@@ -5444,7 +5444,7 @@ tel6738_enqueue_pkt:
 					status = SWITCH_STATUS_BREAK;
 				}
 			}
-tel6738_enqueue_done: ;
+
 		} else if (switch_rtp_write_frame(engine->rtp_session, frame) < 0) {
 			status = SWITCH_STATUS_FALSE;
 		}
