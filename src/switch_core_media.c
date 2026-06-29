@@ -5385,14 +5385,6 @@ tel6738_enqueue_pkt:
 				}
 			}
 
-			/* Drop -- DTLS already established, zero write is a transient failure. */
-			if (engine->pre_dtls_buf && !engine->pre_dtls_buf->active) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-					"TEL6738 pre-DTLS (non-bundle) write 0 post-flush, dropping frame seq=%u\n",
-					frame->seq);
-				goto tel6738_enqueue_done;
-			}
-
 			if (nb_do_enqueue) {
 				if (!engine->pre_dtls_buf) {
 					engine->pre_dtls_buf = switch_core_session_alloc(session, sizeof(tel6738_pre_dtls_buf_t));
@@ -5405,6 +5397,16 @@ tel6738_enqueue_pkt:
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
 						"TEL6738 pre-DTLS (non-bundle) buffer allocated: capacity=%d pkt_size=%d\n",
 						TEL6738_PRE_DTLS_CAPACITY, TEL6738_PRE_DTLS_PKT_SIZE);
+				} else if (!engine->pre_dtls_buf->active) {
+					/* Re-arm: write failed after previous flush — DTLS lost readiness
+					 * (ICE candidate switch / DTLS re-handshake). Reset and buffer
+					 * until DTLS is ready again. */
+					engine->pre_dtls_buf->head  = 0;
+					engine->pre_dtls_buf->count = 0;
+					engine->pre_dtls_buf->active = SWITCH_TRUE;
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
+						"TEL6738 pre-DTLS (non-bundle) buffer re-armed after post-flush write 0 seq=%u\n",
+						frame->seq);
 				}
 				if (frame->datalen > 0 && frame->datalen <= TEL6738_PRE_DTLS_PKT_SIZE && frame->data) {
 					if (engine->pre_dtls_buf->count >= TEL6738_PRE_DTLS_CAPACITY) {
