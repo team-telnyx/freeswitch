@@ -5301,7 +5301,7 @@ tel6738_enqueue_pkt:
 			int pw = 0;            /* probe write result */
 			int fw = 0;            /* flush drain write result */
 
-			if (engine->pre_dtls_buf && engine->pre_dtls_buf->count > 0) {
+			if (engine->pre_dtls_buf && engine->pre_dtls_buf->active && engine->pre_dtls_buf->count > 0) {
 				/* Probe transport readiness with the oldest buffered packet. */
 				{
 					tel6738_pre_dtls_entry_t *pe;
@@ -5388,6 +5388,14 @@ tel6738_enqueue_pkt:
 				}
 			}
 
+			/* Drop -- DTLS already established, zero write is a transient failure. */
+			if (engine->pre_dtls_buf && !engine->pre_dtls_buf->active) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+					"TEL6738 pre-DTLS (non-bundle) write 0 post-flush, dropping frame seq=%u\n",
+					frame->seq);
+				goto tel6738_enqueue_done;
+			}
+
 			if (nb_do_enqueue) {
 				if (!engine->pre_dtls_buf) {
 					engine->pre_dtls_buf = switch_core_session_alloc(session, sizeof(tel6738_pre_dtls_buf_t));
@@ -5440,6 +5448,7 @@ tel6738_enqueue_pkt:
 					status = SWITCH_STATUS_BREAK;
 				}
 			}
+tel6738_enqueue_done: ;
 		} else if (switch_rtp_write_frame(engine->rtp_session, frame) < 0) {
 			status = SWITCH_STATUS_FALSE;
 		}
