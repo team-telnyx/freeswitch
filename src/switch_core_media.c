@@ -5237,12 +5237,9 @@ tel6738_enqueue_pkt:
 				}
 				if (frame->datalen > 0 && frame->datalen <= TEL6738_PRE_DTLS_PKT_SIZE && frame->data) {
 					if (engine->pre_dtls_buf->count >= TEL6738_PRE_DTLS_CAPACITY) {
-						/* Buffer full: drop oldest */
-						engine->pre_dtls_buf->head = (engine->pre_dtls_buf->head + 1) % TEL6738_PRE_DTLS_CAPACITY;
-						engine->pre_dtls_buf->count--;
+						/* Buffer full: drop newest (preserve head = initial IDR) */
 						engine->pre_dtls_buf->stat_dropped++;
-					}
-					{
+					} else {
 						uint32_t idx = (engine->pre_dtls_buf->head + engine->pre_dtls_buf->count) % TEL6738_PRE_DTLS_CAPACITY;
 						tel6738_pre_dtls_entry_t *e = &engine->pre_dtls_buf->entries[idx];
 						memcpy(e->data, frame->data, frame->datalen);
@@ -5255,15 +5252,15 @@ tel6738_enqueue_pkt:
 						e->ssrc = frame->ssrc;
 						engine->pre_dtls_buf->count++;
 						engine->pre_dtls_buf->stat_queued++;
+						if (engine->pre_dtls_buf->stat_queued <= 10 || !(engine->pre_dtls_buf->stat_queued % 50)) {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+								"TEL6738 pre-DTLS enqueue: queued=%u buffered=%u dropped=%u seq=%u ts=%u m=%d len=%u\n",
+								engine->pre_dtls_buf->stat_queued, engine->pre_dtls_buf->count,
+								engine->pre_dtls_buf->stat_dropped, frame->seq, frame->timestamp,
+								frame->m, frame->datalen);
+						}
+						/* Packet buffered successfully - return SUCCESS (will be sent later) */
 					}
-					if (engine->pre_dtls_buf->stat_queued <= 10 || !(engine->pre_dtls_buf->stat_queued % 50)) {
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-							"TEL6738 pre-DTLS enqueue: queued=%u buffered=%u dropped=%u seq=%u ts=%u m=%d len=%u\n",
-							engine->pre_dtls_buf->stat_queued, engine->pre_dtls_buf->count,
-							engine->pre_dtls_buf->stat_dropped, frame->seq, frame->timestamp,
-							frame->m, frame->datalen);
-					}
-					/* Packet buffered successfully - return SUCCESS (will be sent later) */
 				} else {
 					/* Packet too large or empty - signal non-fatal drop and bump the
 					 * dropped counter so flush logs surface that data was lost. */
@@ -5411,12 +5408,9 @@ tel6738_enqueue_pkt:
 				}
 				if (frame->datalen > 0 && frame->datalen <= TEL6738_PRE_DTLS_PKT_SIZE && frame->data) {
 					if (engine->pre_dtls_buf->count >= TEL6738_PRE_DTLS_CAPACITY) {
-						/* Buffer full: evict oldest to make room. */
-						engine->pre_dtls_buf->head = (engine->pre_dtls_buf->head + 1) % TEL6738_PRE_DTLS_CAPACITY;
-						engine->pre_dtls_buf->count--;
+						/* Buffer full: drop newest (preserve head = initial IDR) */
 						engine->pre_dtls_buf->stat_dropped++;
-					}
-					{
+					} else {
 						uint32_t idx;
 						tel6738_pre_dtls_entry_t *e;
 						idx = (engine->pre_dtls_buf->head + engine->pre_dtls_buf->count) % TEL6738_PRE_DTLS_CAPACITY;
@@ -5431,13 +5425,13 @@ tel6738_enqueue_pkt:
 						e->ssrc      = frame->ssrc;
 						engine->pre_dtls_buf->count++;
 						engine->pre_dtls_buf->stat_queued++;
-					}
-					if (engine->pre_dtls_buf->stat_queued <= 10 || !(engine->pre_dtls_buf->stat_queued % 50)) {
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-							"TEL6738 pre-DTLS (non-bundle) enqueue: queued=%u buffered=%u dropped=%u seq=%u ts=%u m=%d len=%u\n",
-							engine->pre_dtls_buf->stat_queued, engine->pre_dtls_buf->count,
-							engine->pre_dtls_buf->stat_dropped, frame->seq, frame->timestamp,
-							frame->m, frame->datalen);
+						if (engine->pre_dtls_buf->stat_queued <= 10 || !(engine->pre_dtls_buf->stat_queued % 50)) {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+								"TEL6738 pre-DTLS (non-bundle) enqueue: queued=%u buffered=%u dropped=%u seq=%u ts=%u m=%d len=%u\n",
+								engine->pre_dtls_buf->stat_queued, engine->pre_dtls_buf->count,
+								engine->pre_dtls_buf->stat_dropped, frame->seq, frame->timestamp,
+								frame->m, frame->datalen);
+						}
 					}
 				} else {
 					/* Oversized or empty frame: non-fatal drop. */
