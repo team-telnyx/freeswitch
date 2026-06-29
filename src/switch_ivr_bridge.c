@@ -276,7 +276,12 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 				switch_status_t refresh_status;
 
 				switch_channel_clear_flag(b_channel, CF_VIDEO_REFRESH_REQ);
-				refresh_status = switch_core_session_force_request_video_refresh(vh->session_a);
+				/* Use throttled (non-force) request so the existing 1s
+				 * VIDEO_REFRESH_FREQ gate is respected. Force is reserved
+				 * for the one-shot bootstrap paths (pre-DTLS flush, RTCP
+				 * warmup). Without this, concurrent bridge/warmup/timer
+				 * paths pile up to 17-20+ FIRs/s causing encoder stalls. */
+				refresh_status = switch_core_session_request_video_refresh(vh->session_a);
 				tel6738_bridge_source_refreshes++;
 				refresh_timer = refresh_cnt;
 
@@ -287,8 +292,23 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 			}
 
 			if (switch_channel_test_flag(channel, CF_VIDEO_REFRESH_REQ)) {
+				switch_status_t refresh_status;
+
 				switch_channel_clear_flag(channel, CF_VIDEO_REFRESH_REQ);
+				/* Propagate in reverse: session_a's channel received a refresh
+				 * request (remote end needs a keyframe from the other leg's
+				 * source). Forward to session_b so its remote is asked for an
+				 * IDR. Previously only set refresh_timer which called
+				 * force_request_video_refresh(session_a) again -- wrong
+				 * direction, looping the request back to the same side. */
+				refresh_status = switch_core_session_request_video_refresh(vh->session_b);
+				tel6738_bridge_source_refreshes++;
 				refresh_timer = refresh_cnt;
+
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
+							  "TEL6738 video bridge propagated reverse refresh %s -> %s source_refresh=%u refresh_status=%d\n",
+							  switch_channel_get_name(channel), switch_channel_get_name(b_channel),
+							  tel6738_bridge_source_refreshes, refresh_status);
 			}
 
 			if (!switch_channel_test_flag(channel, CF_PROXY_MEDIA)) {
@@ -465,7 +485,7 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 				 * the underlying transport is already up via audio ICE/DTLS. Pass
 				 * SWITCH_IO_FLAG_FORCE so the CF_VIDEO_READY gate in
 				 * switch_core_session_write_video_frame() does not silently drop the
-				 * callee->Safari video for the 10-20s before Safari's own video flips
+				 * callee video for the 10-20s before the destination video flips
 				 * CF_VIDEO_READY. Non-BUNDLE destinations keep the original gating. */
 				switch_io_flag_t write_flags = tel6738_dst_is_bundle ? SWITCH_IO_FLAG_FORCE : SWITCH_IO_FLAG_NONE;
 				write_status = switch_core_session_write_video_frame(vh->session_b, read_frame, write_flags, 0);
@@ -474,9 +494,9 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 				if (!switch_test_flag(read_frame, SFF_CNG)) {
 					tel6738_bridge_write_ok++;
 					/* TEL-6738: On the FIRST real video write to a BUNDLE destination, request a
-					 * keyframe from the source so Safari's first decodable frame is an IDR rather
-					 * than an inter-frame. Without this Safari sees the slice mid-stream and
-					 * renders nothing until the next periodic keyframe. */
+					 * keyframe from the source so the destination's first decodable frame is an
+					 * IDR rather than an inter-frame. Without this the decoder sees mid-stream
+					 * slices and renders nothing until the next periodic keyframe. */
 					if (tel6738_dst_is_bundle && tel6738_bundle_kf_kick == 0) {
 						switch_status_t kf_status = switch_core_session_force_request_video_refresh(vh->session_a);
 						tel6738_bundle_kf_kick++;
