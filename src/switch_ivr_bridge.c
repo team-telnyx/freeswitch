@@ -283,7 +283,6 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 				 * paths pile up to 17-20+ FIRs/s causing encoder stalls. */
 				refresh_status = switch_core_session_request_video_refresh(vh->session_a);
 				tel6738_bridge_source_refreshes++;
-				refresh_timer = refresh_cnt;
 
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
 							  "TEL6738 video bridge propagated refresh %s -> %s source_refresh=%u refresh_status=%d\n",
@@ -303,7 +302,6 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 				 * direction, looping the request back to the same side. */
 				refresh_status = switch_core_session_request_video_refresh(vh->session_b);
 				tel6738_bridge_source_refreshes++;
-				refresh_timer = refresh_cnt;
 
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
 							  "TEL6738 video bridge propagated reverse refresh %s -> %s source_refresh=%u refresh_status=%d\n",
@@ -348,7 +346,9 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 
 			if (refresh_timer) {
 				if (refresh_timer > 0 && (refresh_timer % 100) == 0) {
-					/* Force-bypass throttle for the bounded early retry (fires at most 3 times post-connect). */
+					/* Force-bypass throttle only for bridge startup / codec-transition retry.
+						 * CF_VIDEO_REFRESH_REQ propagation must not arm this timer because it
+						 * is source-side only (session_a) and bypasses VIDEO_REFRESH_FREQ. */
 					switch_status_t refresh_status = switch_core_session_force_request_video_refresh(vh->session_a);
 
 					tel6738_bridge_source_refreshes++;

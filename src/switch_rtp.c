@@ -8472,17 +8472,16 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 				/* BUNDLE shared audio session received FIR/PLI from the far end (e.g. Safari).
 				 * The video refresh must propagate to the bridged partner (SIP caller) whose
 				 * video engine can forward it to the actual video source (SIP callee).
-				 * We cannot rely on CF_VIDEO_REFRESH_REQ alone because there is a race:
-				 * the BUNDLE->partner video bridge thread checks channel (BUNDLE) and
-				 * clears the flag before the partner->BUNDLE thread sees it on b_channel.
-				 * Bypass the race by calling force_request_video_refresh on the partner directly.
+				 * Do it directly to avoid the CF_VIDEO_REFRESH_REQ race between the two
+				 * bridge threads, but keep it throttled through VIDEO_REFRESH_FREQ. A forced
+				 * request here runs once per inbound FIR/PLI and has been observed to flood
+				 * browsers at 10+ FIR/s, stalling the encoder during call setup.
 				 *
 				 * TEL-6738 hangup-race guard: a stray RTCP packet can be drained after the
-				 * local BUNDLE channel has begun teardown. Calling
-				 * switch_core_session_force_request_video_refresh() on the partner during
-				 * that window has been observed to delay the partner's CS_HANGUP transition
-				 * (partner stuck in CS_EXCHANGE_MEDIA until the far-end timeout fires).
-				 * Skip the partner propagation entirely once either side is no longer up. */
+				 * local BUNDLE channel has begun teardown. Calling refresh propagation on the
+				 * partner during that window has been observed to delay the partner's
+				 * CS_HANGUP transition (partner stuck in CS_EXCHANGE_MEDIA until the far-end
+				 * timeout fires). Skip partner propagation once either side is no longer up. */
 				switch_channel_t *local_channel = switch_core_session_get_channel(rtp_session->session);
 
 				if (!switch_channel_up_nosig(local_channel)) {
@@ -8494,16 +8493,17 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 
 					if (switch_core_session_get_partner(rtp_session->session, &partner_session) == SWITCH_STATUS_SUCCESS) {
 						switch_channel_t *partner_channel = switch_core_session_get_channel(partner_session);
+						switch_status_t refresh_status = SWITCH_STATUS_FALSE;
 
 						if (switch_channel_up_nosig(partner_channel)) {
 							switch_core_media_gen_key_frame(partner_session);
-							switch_core_session_force_request_video_refresh(partner_session);
+							refresh_status = switch_core_session_request_video_refresh(partner_session);
 							switch_channel_set_flag(partner_channel, CF_VIDEO_REFRESH_REQ);
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-											  "TEL6738 RTCP recv BUNDLE FIR/PLI %s -> partner %s type=%u fmt=%u send_ssrc=%u recv_ssrc=%u\n",
+											  "TEL6738 RTCP recv BUNDLE FIR/PLI %s -> partner %s type=%u fmt=%u send_ssrc=%u recv_ssrc=%u refresh_status=%d\n",
 											  switch_core_session_get_name(rtp_session->session), switch_core_session_get_name(partner_session),
 											  msg->header.type, extp->header.fmt,
-											  ntohl(extp->header.send_ssrc), ntohl(extp->header.recv_ssrc));
+											  ntohl(extp->header.send_ssrc), ntohl(extp->header.recv_ssrc), refresh_status);
 						} else {
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
 											  "TEL6738 RTCP recv BUNDLE FIR/PLI %s partner %s not up, skipping refresh\n",
