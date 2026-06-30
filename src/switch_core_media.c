@@ -158,8 +158,7 @@ typedef struct {
 	uint32_t head;          /* index of oldest entry */
 	uint32_t count;         /* number of valid entries */
 	uint32_t stat_queued;   /* total packets ever queued */
-	uint32_t stat_flushed;  /* total packets successfully flushed */
-	uint32_t stat_dropped;  /* total packets dropped (buffer full) */
+	uint32_t stat_dropped;  /* total packets dropped (buffer full, oversize, or readiness purge) */
 	switch_bool_t active;   /* SWITCH_TRUE while buffering (DTLS not ready) */
 } tel6738_pre_dtls_buf_t;
 
@@ -5152,14 +5151,22 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 					engine->pre_dtls_buf->count = 0;
 					engine->pre_dtls_buf->active = SWITCH_FALSE;
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
-						"TEL6738 pre-DTLS video buffer dropped after transport ready: dropped_now=%u dropped_total=%u queued=%u wrote_current=%d - requesting source keyframe\n",
+						"TEL6738 pre-DTLS video buffer dropped after transport ready: dropped_now=%u dropped_total=%u queued=%u wrote_current=%d - checking source keyframe request\n",
 						tel6738_dropped_pre_dtls, engine->pre_dtls_buf->stat_dropped,
 						engine->pre_dtls_buf->stat_queued, bundle_video_wrote);
 					{
 						switch_core_session_t *other_session = NULL;
 						if (switch_core_session_get_partner(session, &other_session) == SWITCH_STATUS_SUCCESS) {
-							switch_core_media_gen_key_frame(other_session);
-							switch_core_session_force_request_video_refresh(other_session);
+							switch_channel_t *other_channel;
+							other_channel = switch_core_session_get_channel(other_session);
+							if (switch_channel_up_nosig(session->channel) && other_channel && switch_channel_up_nosig(other_channel)) {
+								switch_core_media_gen_key_frame(other_session);
+								switch_core_session_force_request_video_refresh(other_session);
+							} else {
+								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+									"TEL6738 pre-DTLS video buffer drop skipped source keyframe request: local_up=%d other_up=%d\n",
+									switch_channel_up_nosig(session->channel), other_channel ? switch_channel_up_nosig(other_channel) : 0);
+							}
 							switch_core_session_rwunlock(other_session);
 						}
 					}
@@ -5189,8 +5196,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 			} else if (bundle_video_wrote == 0) {
 				engine->bundle_video_write_zero++;
 tel6738_enqueue_pkt:
-				/* TEL-6738: Buffer the packet for later flush.
-				 * Allocate lazily on first use from the session pool. */
+				/* TEL-6738: Buffer the packet until transport is writable; queued
+				 * video is dropped on readiness. Allocate lazily on first use
+				 * from the session pool. */
 				if (!engine->pre_dtls_buf) {
 					engine->pre_dtls_buf = switch_core_session_alloc(session, sizeof(tel6738_pre_dtls_buf_t));
 					memset(engine->pre_dtls_buf, 0, sizeof(tel6738_pre_dtls_buf_t));
@@ -5205,7 +5213,7 @@ tel6738_enqueue_pkt:
 				}
 				if (frame->datalen > 0 && frame->datalen <= TEL6738_PRE_DTLS_PKT_SIZE && frame->data) {
 					if (engine->pre_dtls_buf->count >= TEL6738_PRE_DTLS_CAPACITY) {
-						/* Buffer full: drop newest (preserve head = initial IDR) */
+						/* Buffer full: drop newest. */
 						engine->pre_dtls_buf->stat_dropped++;
 					} else {
 						uint32_t idx = (engine->pre_dtls_buf->head + engine->pre_dtls_buf->count) % TEL6738_PRE_DTLS_CAPACITY;
@@ -5227,11 +5235,11 @@ tel6738_enqueue_pkt:
 								engine->pre_dtls_buf->stat_dropped, frame->seq, frame->timestamp,
 								frame->m, frame->datalen);
 						}
-						/* Packet buffered successfully - return SUCCESS (will be sent later) */
+						/* Packet buffered successfully; it will be dropped if transport becomes writable. */
 					}
 				} else {
 					/* Packet too large or empty - signal non-fatal drop and bump the
-					 * dropped counter so flush logs surface that data was lost. */
+					 * dropped counter so diagnostics surface that data was lost. */
 					engine->pre_dtls_buf->stat_dropped++;
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
 						"TEL6738 pre-DTLS cannot buffer (dropped non-fatal): datalen=%u max=%d dropped_total=%u\n",
@@ -5240,14 +5248,6 @@ tel6738_enqueue_pkt:
 				}
 			} else {
 				engine->bundle_video_write_success++;
-				/* TEL-6738: Log when first write succeeds after flush */
-				if (engine->pre_dtls_buf && engine->pre_dtls_buf->stat_flushed > 0
-					&& !engine->pre_dtls_buf->active
-					&& engine->bundle_video_write_success == engine->pre_dtls_buf->stat_flushed + 1) {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
-						"TEL6738 pre-DTLS flush complete, first live write ok: flushed=%u dropped=%u\n",
-						engine->pre_dtls_buf->stat_flushed, engine->pre_dtls_buf->stat_dropped);
-				}
 				if (engine->bundle_video_write_success <= 10 || !(engine->bundle_video_write_success % 500)) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 						"BUNDLE video RTP write success diag wrote=%d attempts=%u ok=%u zero=%u fail=%u enq=%u deq=%u flags=0x%x pt=%u seq=%u ts=%u m=%d packetlen=%u datalen=%u\n",
@@ -5279,14 +5279,22 @@ tel6738_enqueue_pkt:
 					engine->pre_dtls_buf->count = 0;
 					engine->pre_dtls_buf->active = SWITCH_FALSE;
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
-						"TEL6738 pre-DTLS (non-bundle) video buffer dropped after transport ready: dropped_now=%u dropped_total=%u queued=%u wrote_current=%d - requesting source keyframe\n",
+						"TEL6738 pre-DTLS (non-bundle) video buffer dropped after transport ready: dropped_now=%u dropped_total=%u queued=%u wrote_current=%d - checking source keyframe request\n",
 						tel6738_dropped_pre_dtls, engine->pre_dtls_buf->stat_dropped,
 						engine->pre_dtls_buf->stat_queued, nbw);
 					{
 						switch_core_session_t *other_session = NULL;
 						if (switch_core_session_get_partner(session, &other_session) == SWITCH_STATUS_SUCCESS) {
-							switch_core_media_gen_key_frame(other_session);
-							switch_core_session_force_request_video_refresh(other_session);
+							switch_channel_t *other_channel;
+							other_channel = switch_core_session_get_channel(other_session);
+							if (switch_channel_up_nosig(session->channel) && other_channel && switch_channel_up_nosig(other_channel)) {
+								switch_core_media_gen_key_frame(other_session);
+								switch_core_session_force_request_video_refresh(other_session);
+							} else {
+								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+									"TEL6738 pre-DTLS video buffer drop skipped source keyframe request: local_up=%d other_up=%d\n",
+									switch_channel_up_nosig(session->channel), other_channel ? switch_channel_up_nosig(other_channel) : 0);
+							}
 							switch_core_session_rwunlock(other_session);
 						}
 					}
@@ -5319,9 +5327,9 @@ tel6738_enqueue_pkt:
 						"TEL6738 pre-DTLS (non-bundle) buffer allocated: capacity=%d pkt_size=%d\n",
 						TEL6738_PRE_DTLS_CAPACITY, TEL6738_PRE_DTLS_PKT_SIZE);
 				} else if (!engine->pre_dtls_buf->active) {
-					/* Re-arm: write failed after previous flush — DTLS lost readiness
-					 * (ICE candidate switch / DTLS re-handshake). Reset and buffer
-					 * until DTLS is ready again. */
+					/* Re-arm: write failed after a previous readiness transition,
+					 * e.g. ICE candidate switch / DTLS re-handshake. Reset and
+					 * buffer until DTLS is ready again. */
 					engine->pre_dtls_buf->head  = 0;
 					engine->pre_dtls_buf->count = 0;
 					engine->pre_dtls_buf->active = SWITCH_TRUE;
@@ -5331,7 +5339,7 @@ tel6738_enqueue_pkt:
 				}
 				if (frame->datalen > 0 && frame->datalen <= TEL6738_PRE_DTLS_PKT_SIZE && frame->data) {
 					if (engine->pre_dtls_buf->count >= TEL6738_PRE_DTLS_CAPACITY) {
-						/* Buffer full: drop newest (preserve head = initial IDR) */
+						/* Buffer full: drop newest. */
 						engine->pre_dtls_buf->stat_dropped++;
 					} else {
 						uint32_t idx;
