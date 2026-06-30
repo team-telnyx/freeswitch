@@ -1690,6 +1690,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 			char ipbuf[50];
 			switch_socket_t *sock_output = rtp_session->sock_output;
 			uint8_t do_adj = 0;
+			uint8_t suppress_video_init_adj = 0;
 			switch_time_t now = switch_micro_time_now();
 			int cmp = 0;
 			int cur_idx = -1, is_relay = 0, is_responsive = 0, use_candidate = 0;
@@ -1837,7 +1838,16 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 				}
 			}
 
-			if ((ice->type & ICE_VANILLA) && ice->ice_params && do_adj) {
+			if (do_adj && !is_rtcp && ice == &rtp_session->ice && rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] &&
+				ice->initializing && !use_candidate && rtp_session->dtls && rtp_session->dtls->state < DS_READY) {
+				suppress_video_init_adj = 1;
+				/* Preserve the nominated video tuple while DTLS is still coming up; still respond to the STUN check below. */
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
+							  "Suppressing video ICE auto-change on non-USE-CANDIDATE STUN while DTLS is initializing from %s:%u to %s:%u idx:%d\n",
+							  host2, port2, from_host, from_port, cur_idx);
+			}
+
+			if ((ice->type & ICE_VANILLA) && ice->ice_params && do_adj && !suppress_video_init_adj) {
 				switch_channel_t *channel = NULL;
 
 				if (rtp_session->session) {
