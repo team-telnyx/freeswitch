@@ -252,6 +252,8 @@ struct switch_rtp_engine_s {
 	uint32_t bundle_video_write_fail;
 	uint32_t tel6738_eg_crc_logs; /* TEL6738: egress payload-integrity probe log throttle */
 	tel6738_pre_dtls_buf_t *pre_dtls_buf; /* TEL-6738: lazily allocated pre-DTLS video buffer */
+	switch_bool_t tel6738_pre_dtls_wait_keyframe; /* suppress startup video until a fresh VP8 keyframe follows pre-DTLS drop */
+	uint32_t tel6738_pre_dtls_wait_keyframe_drops;
 	uint32_t bundle_demux_method_counts[4];
 
 	/* TEL-6738: BUNDLE drain thread state and fields */
@@ -296,6 +298,127 @@ struct switch_rtp_engine_s {
 	rtp_extension_t rtp_recv_extensions[MAX_RTP_EXTENSIONS];
 	rtp_extension_t rtp_send_extensions[MAX_RTP_EXTENSIONS];
 };
+
+static switch_bool_t tel6738_vp8_frame_is_keyframe(switch_frame_t *frame)
+{
+	const uint8_t *payload;
+	switch_size_t payload_len;
+	switch_size_t off;
+	uint8_t b0;
+	uint8_t ext;
+	uint8_t has_i;
+	uint8_t has_l;
+	uint8_t has_t;
+	uint8_t has_k;
+
+	if (!frame || !frame->data || frame->datalen < 1) {
+		return SWITCH_FALSE;
+	}
+
+	payload = (const uint8_t *)frame->data;
+	payload_len = frame->datalen;
+	off = 0;
+	b0 = payload[off++];
+
+	if (b0 & 0x80) {
+		if (payload_len < off + 1) {
+			return SWITCH_FALSE;
+		}
+		ext = payload[off++];
+		has_i = (uint8_t)((ext & 0x80) ? 1 : 0);
+		has_l = (uint8_t)((ext & 0x40) ? 1 : 0);
+		has_t = (uint8_t)((ext & 0x20) ? 1 : 0);
+		has_k = (uint8_t)((ext & 0x10) ? 1 : 0);
+
+		if (has_i) {
+			if (payload_len < off + 1) {
+				return SWITCH_FALSE;
+			}
+			off += (payload[off] & 0x80) ? 2 : 1;
+		}
+		if (has_l) {
+			off += 1;
+		}
+		if (has_t || has_k) {
+			off += 1;
+		}
+	}
+
+	if (payload_len <= off) {
+		return SWITCH_FALSE;
+	}
+
+	return (switch_bool_t)(((b0 & 0x10) && !(b0 & 0x0f) && !(payload[off] & 0x01) &&
+		payload_len >= off + 6 && payload[off + 3] == 0x9d && payload[off + 4] == 0x01 && payload[off + 5] == 0x2a) ? SWITCH_TRUE : SWITCH_FALSE);
+}
+
+static switch_bool_t tel6738_engine_uses_vp8(switch_rtp_engine_t *engine)
+{
+	return (switch_bool_t)(engine && engine->cur_payload_map && engine->cur_payload_map->rm_encoding &&
+		!strcasecmp(engine->cur_payload_map->rm_encoding, "VP8"));
+}
+
+static void tel6738_request_partner_keyframe(switch_core_session_t *session, const char *reason)
+{
+	switch_core_session_t *other_session = NULL;
+
+	if (switch_core_session_get_partner(session, &other_session) == SWITCH_STATUS_SUCCESS) {
+		switch_channel_t *other_channel;
+		other_channel = switch_core_session_get_channel(other_session);
+		if (switch_channel_up_nosig(session->channel) && other_channel && switch_channel_up_nosig(other_channel)) {
+			switch_core_media_gen_key_frame(other_session);
+			switch_core_session_force_request_video_refresh(other_session);
+		} else {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+				"TEL6738 pre-DTLS video buffer drop skipped source keyframe request: reason=%s local_up=%d other_up=%d\n",
+				switch_str_nil(reason), switch_channel_up_nosig(session->channel), other_channel ? switch_channel_up_nosig(other_channel) : 0);
+		}
+		switch_core_session_rwunlock(other_session);
+	} else {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+			"TEL6738 pre-DTLS video buffer drop skipped source keyframe request: reason=%s no partner session\n",
+			switch_str_nil(reason));
+	}
+}
+
+static switch_bool_t tel6738_pre_dtls_keyframe_gate(switch_core_session_t *session, switch_rtp_engine_t *engine, switch_frame_t *frame, const char *path)
+{
+	switch_bool_t is_keyframe;
+
+	if (!engine || !engine->tel6738_pre_dtls_wait_keyframe) {
+		return SWITCH_TRUE;
+	}
+
+	if (!tel6738_engine_uses_vp8(engine)) {
+		engine->tel6738_pre_dtls_wait_keyframe = SWITCH_FALSE;
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
+			"TEL6738 pre-DTLS %s keyframe gate bypassed for non-VP8 codec=%s\n",
+			switch_str_nil(path), engine->cur_payload_map && engine->cur_payload_map->rm_encoding ? engine->cur_payload_map->rm_encoding : "unknown");
+		return SWITCH_TRUE;
+	}
+
+	is_keyframe = tel6738_vp8_frame_is_keyframe(frame);
+	if (is_keyframe) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
+			"TEL6738 pre-DTLS %s keyframe gate opened: suppressed=%u seq=%u ts=%u len=%u\n",
+			switch_str_nil(path), engine->tel6738_pre_dtls_wait_keyframe_drops, frame->seq, frame->timestamp, frame->datalen);
+		engine->tel6738_pre_dtls_wait_keyframe = SWITCH_FALSE;
+		engine->tel6738_pre_dtls_wait_keyframe_drops = 0;
+		return SWITCH_TRUE;
+	}
+
+	engine->tel6738_pre_dtls_wait_keyframe_drops++;
+	if (engine->tel6738_pre_dtls_wait_keyframe_drops <= 10 || !(engine->tel6738_pre_dtls_wait_keyframe_drops % 50)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+			"TEL6738 pre-DTLS %s suppressing delta while waiting for VP8 keyframe: dropped=%u seq=%u ts=%u m=%d len=%u\n",
+			switch_str_nil(path), engine->tel6738_pre_dtls_wait_keyframe_drops, frame->seq, frame->timestamp, frame->m, frame->datalen);
+	}
+	if (!(engine->tel6738_pre_dtls_wait_keyframe_drops % 50)) {
+		tel6738_request_partner_keyframe(session, "gate-still-waiting");
+	}
+
+	return SWITCH_FALSE;
+}
 
 #define MAX_REJ_STREAMS 10
 
@@ -5025,6 +5148,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 	switch_rtp_engine_t *engine;
 	switch_media_handle_t *smh;
 	int bundle_video_wrote = 0;
+	int tel6738_video_suppressed = 0;
 	int fire_writable = 0;
 
 	switch_assert(session);
@@ -5139,52 +5263,44 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 			if (engine->pre_dtls_buf && engine->pre_dtls_buf->count > 0) {
 				uint32_t tel6738_dropped_pre_dtls;
 
-				/* Probe transport readiness with the current live frame. */
-				engine->bundle_video_write_attempts++;
-				bundle_video_wrote = switch_rtp_write_frame_ex_state(engine->rtp_session, frame,
-						engine->bundle_write_state, engine->ssrc, mid_ext_id, mid,
-						SWITCH_TRUE, engine->cur_payload_map->pt);
-				if (bundle_video_wrote > 0) {
+				if (switch_rtp_dtls_state(engine->rtp_session, DTLS_TYPE_RTP) == DS_READY) {
 					tel6738_dropped_pre_dtls = engine->pre_dtls_buf->count;
 					engine->pre_dtls_buf->stat_dropped += tel6738_dropped_pre_dtls;
 					engine->pre_dtls_buf->head = 0;
 					engine->pre_dtls_buf->count = 0;
 					engine->pre_dtls_buf->active = SWITCH_FALSE;
+					engine->tel6738_pre_dtls_wait_keyframe = (switch_bool_t)tel6738_engine_uses_vp8(engine);
+					engine->tel6738_pre_dtls_wait_keyframe_drops = 0;
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
-						"TEL6738 pre-DTLS video buffer dropped after transport ready: dropped_now=%u dropped_total=%u queued=%u wrote_current=%d - checking source keyframe request\n",
+						"TEL6738 pre-DTLS video buffer dropped after transport ready: dropped_now=%u dropped_total=%u queued=%u gate_vp8_keyframe=%d - requesting source keyframe\n",
 						tel6738_dropped_pre_dtls, engine->pre_dtls_buf->stat_dropped,
-						engine->pre_dtls_buf->stat_queued, bundle_video_wrote);
-					{
-						switch_core_session_t *other_session = NULL;
-						if (switch_core_session_get_partner(session, &other_session) == SWITCH_STATUS_SUCCESS) {
-							switch_channel_t *other_channel;
-							other_channel = switch_core_session_get_channel(other_session);
-							if (switch_channel_up_nosig(session->channel) && other_channel && switch_channel_up_nosig(other_channel)) {
-								switch_core_media_gen_key_frame(other_session);
-								switch_core_session_force_request_video_refresh(other_session);
-							} else {
-								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-									"TEL6738 pre-DTLS video buffer drop skipped source keyframe request: local_up=%d other_up=%d\n",
-									switch_channel_up_nosig(session->channel), other_channel ? switch_channel_up_nosig(other_channel) : 0);
-							}
-							switch_core_session_rwunlock(other_session);
-						}
+						engine->pre_dtls_buf->stat_queued, engine->tel6738_pre_dtls_wait_keyframe);
+					tel6738_request_partner_keyframe(session, "bundle-ready-drop");
+					if (!tel6738_pre_dtls_keyframe_gate(session, engine, frame, "bundle")) {
+						tel6738_video_suppressed = 1;
+					} else {
+						engine->bundle_video_write_attempts++;
+						bundle_video_wrote = switch_rtp_write_frame_ex_state(engine->rtp_session, frame,
+								engine->bundle_write_state, engine->ssrc, mid_ext_id, mid,
+								SWITCH_TRUE, engine->cur_payload_map->pt);
 					}
 				} else {
-					/* Transport still not ready - buffer current frame too */
-					if (bundle_video_wrote == 0) {
-						engine->bundle_video_write_zero++;
-						goto tel6738_enqueue_pkt;
-					}
+					/* Transport still not ready - buffer current frame too. */
+					engine->bundle_video_write_zero++;
+					goto tel6738_enqueue_pkt;
 				}
+			} else if (engine->tel6738_pre_dtls_wait_keyframe && !tel6738_pre_dtls_keyframe_gate(session, engine, frame, "bundle")) {
+				tel6738_video_suppressed = 1;
 			} else {
-				/* No buffered packets - normal write */
+				/* No buffered packets and no keyframe gate - normal write. */
 				engine->bundle_video_write_attempts++;
 				bundle_video_wrote = switch_rtp_write_frame_ex_state(engine->rtp_session, frame,
 						engine->bundle_write_state, engine->ssrc, mid_ext_id, mid,
 						SWITCH_TRUE, engine->cur_payload_map->pt);
 			}
-			if (bundle_video_wrote < 0) {
+			if (tel6738_video_suppressed) {
+				status = SWITCH_STATUS_SUCCESS;
+			} else if (bundle_video_wrote < 0) {
 				engine->bundle_video_write_fail++;
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
 					"BUNDLE video RTP write failed: wrote=%d attempts=%u ok=%u zero=%u fail=%u enq=%u deq=%u flags=0x%x pt=%u seq=%u ts=%u m=%d packetlen=%u datalen=%u\n",
@@ -5207,6 +5323,8 @@ tel6738_enqueue_pkt:
 					memset(engine->pre_dtls_buf->entries, 0,
 						TEL6738_PRE_DTLS_CAPACITY * sizeof(tel6738_pre_dtls_entry_t));
 					engine->pre_dtls_buf->active = SWITCH_TRUE;
+					engine->tel6738_pre_dtls_wait_keyframe = SWITCH_FALSE;
+					engine->tel6738_pre_dtls_wait_keyframe_drops = 0;
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
 						"TEL6738 pre-DTLS buffer allocated: capacity=%d pkt_size=%d\n",
 						TEL6738_PRE_DTLS_CAPACITY, TEL6738_PRE_DTLS_PKT_SIZE);
@@ -5267,45 +5385,35 @@ tel6738_enqueue_pkt:
 			if (engine->pre_dtls_buf && engine->pre_dtls_buf->active && engine->pre_dtls_buf->count > 0) {
 				uint32_t tel6738_dropped_pre_dtls;
 
-				/* Probe transport readiness with the current live frame.  Do not
-				 * replay queued pre-DTLS video: diagnostics showed the flush can
-				 * collapse multiple VP8 frame starts/keyframes onto one outgoing
-				 * RTP timestamp and poison Chrome's startup decoder state. */
-				nbw = switch_rtp_write_frame(engine->rtp_session, frame);
-				if (nbw > 0) {
+				if (switch_rtp_dtls_state(engine->rtp_session, DTLS_TYPE_RTP) == DS_READY) {
 					tel6738_dropped_pre_dtls = engine->pre_dtls_buf->count;
 					engine->pre_dtls_buf->stat_dropped += tel6738_dropped_pre_dtls;
 					engine->pre_dtls_buf->head = 0;
 					engine->pre_dtls_buf->count = 0;
 					engine->pre_dtls_buf->active = SWITCH_FALSE;
+					engine->tel6738_pre_dtls_wait_keyframe = (switch_bool_t)tel6738_engine_uses_vp8(engine);
+					engine->tel6738_pre_dtls_wait_keyframe_drops = 0;
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
-						"TEL6738 pre-DTLS (non-bundle) video buffer dropped after transport ready: dropped_now=%u dropped_total=%u queued=%u wrote_current=%d - checking source keyframe request\n",
+						"TEL6738 pre-DTLS (non-bundle) video buffer dropped after transport ready: dropped_now=%u dropped_total=%u queued=%u gate_vp8_keyframe=%d - requesting source keyframe\n",
 						tel6738_dropped_pre_dtls, engine->pre_dtls_buf->stat_dropped,
-						engine->pre_dtls_buf->stat_queued, nbw);
-					{
-						switch_core_session_t *other_session = NULL;
-						if (switch_core_session_get_partner(session, &other_session) == SWITCH_STATUS_SUCCESS) {
-							switch_channel_t *other_channel;
-							other_channel = switch_core_session_get_channel(other_session);
-							if (switch_channel_up_nosig(session->channel) && other_channel && switch_channel_up_nosig(other_channel)) {
-								switch_core_media_gen_key_frame(other_session);
-								switch_core_session_force_request_video_refresh(other_session);
-							} else {
-								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-									"TEL6738 pre-DTLS video buffer drop skipped source keyframe request: local_up=%d other_up=%d\n",
-									switch_channel_up_nosig(session->channel), other_channel ? switch_channel_up_nosig(other_channel) : 0);
-							}
-							switch_core_session_rwunlock(other_session);
+						engine->pre_dtls_buf->stat_queued, engine->tel6738_pre_dtls_wait_keyframe);
+					tel6738_request_partner_keyframe(session, "non-bundle-ready-drop");
+					if (tel6738_pre_dtls_keyframe_gate(session, engine, frame, "non-bundle")) {
+						nbw = switch_rtp_write_frame(engine->rtp_session, frame);
+						if (nbw < 0) {
+							status = SWITCH_STATUS_FALSE;
+						} else if (nbw == 0) {
+							nb_do_enqueue = 1;
 						}
 					}
-				} else if (nbw == 0) {
+				} else {
 					/* Transport still not ready; buffer current frame. */
 					nb_do_enqueue = 1;
-				} else {
-					status = SWITCH_STATUS_FALSE;
 				}
+			} else if (engine->tel6738_pre_dtls_wait_keyframe && !tel6738_pre_dtls_keyframe_gate(session, engine, frame, "non-bundle")) {
+				status = SWITCH_STATUS_SUCCESS;
 			} else {
-				/* No buffered packets: direct write. */
+				/* No buffered packets and no keyframe gate: direct write. */
 				nbw = switch_rtp_write_frame(engine->rtp_session, frame);
 				if (nbw < 0) {
 					status = SWITCH_STATUS_FALSE;
@@ -5323,6 +5431,8 @@ tel6738_enqueue_pkt:
 					memset(engine->pre_dtls_buf->entries, 0,
 						TEL6738_PRE_DTLS_CAPACITY * sizeof(tel6738_pre_dtls_entry_t));
 					engine->pre_dtls_buf->active = SWITCH_TRUE;
+					engine->tel6738_pre_dtls_wait_keyframe = SWITCH_FALSE;
+					engine->tel6738_pre_dtls_wait_keyframe_drops = 0;
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
 						"TEL6738 pre-DTLS (non-bundle) buffer allocated: capacity=%d pkt_size=%d\n",
 						TEL6738_PRE_DTLS_CAPACITY, TEL6738_PRE_DTLS_PKT_SIZE);
@@ -5333,8 +5443,10 @@ tel6738_enqueue_pkt:
 					engine->pre_dtls_buf->head  = 0;
 					engine->pre_dtls_buf->count = 0;
 					engine->pre_dtls_buf->active = SWITCH_TRUE;
+					engine->tel6738_pre_dtls_wait_keyframe = SWITCH_FALSE;
+					engine->tel6738_pre_dtls_wait_keyframe_drops = 0;
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
-						"TEL6738 pre-DTLS (non-bundle) buffer re-armed after post-flush write 0 seq=%u\n",
+						"TEL6738 pre-DTLS (non-bundle) buffer re-armed after post-readiness-drop write 0 seq=%u\n",
 						frame->seq);
 				}
 				if (frame->datalen > 0 && frame->datalen <= TEL6738_PRE_DTLS_PKT_SIZE && frame->data) {
