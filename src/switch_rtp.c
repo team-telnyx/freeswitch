@@ -497,6 +497,7 @@ struct switch_rtp {
 	uint32_t bundle_audio_deferred_total;
 	uint32_t bundle_audio_stale_log_count;
 	uint32_t bundle_audio_pt_restamped_total;
+	uint32_t tel6738_vp8_presrtp_logs;
 	switch_payload_t bundle_audio_pt;  /* TEL-6738: local egress audio PT, immune to video set_default_payload on shared BUNDLE session */
 	switch_mutex_t *ice_mutex;
 	switch_timer_t timer;
@@ -10223,6 +10224,107 @@ static int rtp_add_extension_header(switch_rtp_t *rtp_session, rtp_msg_t *send_m
 	return finallen;
 }
 
+/* TEL-6738 diagnostic helpers: inspect the RTP payload exactly as it will enter SRTP. */
+static switch_status_t tel6738_rtp_payload_view(rtp_msg_t *send_msg, switch_size_t bytes, const uint8_t **payload, switch_size_t *payload_len)
+{
+	size_t csrc_bytes;
+	size_t ext_total = 0;
+	size_t off;
+
+	if (!send_msg || !payload || !payload_len || bytes < rtp_header_len) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	csrc_bytes = (size_t)send_msg->header.cc * sizeof(uint32_t);
+	off = rtp_header_len + csrc_bytes;
+
+	if (bytes < off) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	if (send_msg->header.x) {
+		switch_rtp_hdr_ext_t *ext;
+		uint16_t words;
+
+		if (bytes < off + 4) {
+			return SWITCH_STATUS_FALSE;
+		}
+
+		ext = (switch_rtp_hdr_ext_t *)(send_msg->body + csrc_bytes);
+		words = ntohs(ext->length);
+		ext_total = 4 + ((size_t)words * 4);
+		if (bytes < off + ext_total) {
+			return SWITCH_STATUS_FALSE;
+		}
+		off += ext_total;
+	}
+
+	*payload = ((const uint8_t *)&send_msg->header) + off;
+	*payload_len = bytes - off;
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static switch_bool_t tel6738_vp8_probe(const uint8_t *payload, switch_size_t payload_len, uint8_t *vp8_start, uint8_t *vp8_pid, uint8_t *vp8_key, uint8_t *vp8_sync)
+{
+	size_t off = 0;
+	uint8_t b0;
+	uint8_t ext;
+	uint8_t has_i;
+	uint8_t has_l;
+	uint8_t has_t;
+	uint8_t has_k;
+
+	if (vp8_start) *vp8_start = 0;
+	if (vp8_pid) *vp8_pid = 0;
+	if (vp8_key) *vp8_key = 0;
+	if (vp8_sync) *vp8_sync = 0;
+
+	if (!payload || payload_len < 1) {
+		return SWITCH_FALSE;
+	}
+
+	b0 = payload[off++];
+	if (vp8_start) *vp8_start = (uint8_t)((b0 & 0x10) ? 1 : 0);
+	if (vp8_pid) *vp8_pid = (uint8_t)(b0 & 0x0f);
+
+	if (b0 & 0x80) {
+		if (payload_len < off + 1) {
+			return SWITCH_FALSE;
+		}
+		ext = payload[off++];
+		has_i = (uint8_t)((ext & 0x80) ? 1 : 0);
+		has_l = (uint8_t)((ext & 0x40) ? 1 : 0);
+		has_t = (uint8_t)((ext & 0x20) ? 1 : 0);
+		has_k = (uint8_t)((ext & 0x10) ? 1 : 0);
+
+		if (has_i) {
+			if (payload_len < off + 1) {
+				return SWITCH_FALSE;
+			}
+			off += (payload[off] & 0x80) ? 2 : 1;
+		}
+		if (has_l) {
+			off += 1;
+		}
+		if (has_t || has_k) {
+			off += 1;
+		}
+	}
+
+	if (payload_len <= off) {
+		return SWITCH_FALSE;
+	}
+
+	if (vp8_start && vp8_pid && *vp8_start && *vp8_pid == 0 && !(payload[off] & 0x01)) {
+		if (vp8_key) *vp8_key = 1;
+		if (vp8_sync && payload_len >= off + 6 && payload[off + 3] == 0x9d && payload[off + 4] == 0x01 && payload[off + 5] == 0x2a) {
+			*vp8_sync = 1;
+		}
+	}
+
+	return SWITCH_TRUE;
+}
+
 static int rtp_common_write(switch_rtp_t *rtp_session,
 							rtp_msg_t *send_msg, void *data, uint32_t datalen, switch_payload_t payload, uint32_t timestamp, switch_frame_flag_t *flags, switch_rtp_write_state_t *write_state, uint32_t ssrc, uint8_t mid_ext_id, const char *mid, switch_bool_t force_video)
 {
@@ -10928,6 +11030,47 @@ fork_done:
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
 					"TEL6738 BUNDLE audio PT contamination pre-SRTP: had=%u expected=%u ssrc=%u seq=%u total=%u -- restamping\n",
 					stale_pt, payload, ntohl(send_msg->header.ssrc), ntohs(send_msg->header.seq), restamped);
+			}
+		}
+
+		/* TEL-6738: prove what the WebRTC/SRTP leg receives before encryption.
+		   SIP pcaps show valid VP8 keyframes before this point; this log tells
+		   us whether the RTP header, RTP extensions, payload bytes, and VP8
+		   keyframe markers are still sane immediately before SRTP protection. */
+		if ((force_video || rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) &&
+			(flags && (*flags & SFF_EXTERNAL)) && rtp_session->flags[SWITCH_RTP_FLAG_SECURE_SEND]) {
+			const uint8_t *tel6738_payload = NULL;
+			switch_size_t tel6738_payload_len = 0;
+			uint8_t tel6738_vp8_start = 0;
+			uint8_t tel6738_vp8_pid = 0;
+			uint8_t tel6738_vp8_key = 0;
+			uint8_t tel6738_vp8_sync = 0;
+			uint8_t tel6738_vp8_ok = 0;
+			uint32_t tel6738_log_count;
+			uint32_t tel6738_plcrc = 0;
+			uint16_t tel6738_ext_profile = 0;
+			uint16_t tel6738_ext_words = 0;
+
+			if (send_msg->header.x && send_msg->ext) {
+				tel6738_ext_profile = ntohs(send_msg->ext->profile);
+				tel6738_ext_words = ntohs(send_msg->ext->length);
+			}
+
+			if (tel6738_rtp_payload_view(send_msg, bytes, &tel6738_payload, &tel6738_payload_len) == SWITCH_STATUS_SUCCESS) {
+				tel6738_plcrc = tel6738_payload_len ? switch_crc32_8bytes(tel6738_payload, tel6738_payload_len) : 0;
+				tel6738_vp8_ok = tel6738_vp8_probe(tel6738_payload, tel6738_payload_len, &tel6738_vp8_start, &tel6738_vp8_pid, &tel6738_vp8_key, &tel6738_vp8_sync) ? 1 : 0;
+			}
+
+			tel6738_log_count = ++rtp_session->tel6738_vp8_presrtp_logs;
+			if (tel6738_log_count <= 120 || tel6738_vp8_key || (tel6738_log_count % 500) == 0) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+					"TEL6738 VP8 pre-SRTP %s count=%u force_video=%d pt=%u seq=%u ts=%u ssrc=%u marker=%d bytes=%" SWITCH_SIZE_T_FMT " payload_len=%" SWITCH_SIZE_T_FMT " vp8_ok=%u vp8_start=%u vp8_pid=%u vp8_key=%u vp8_sync=%u plcrc=0x%08x flags=0x%x header_x=%u ext_profile=0x%04x ext_words=%u mid_ext_id=%u mid=%s\n",
+					rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName",
+					tel6738_log_count, force_video ? 1 : 0, send_msg->header.pt, ntohs(send_msg->header.seq),
+					ntohl(send_msg->header.ts), ntohl(send_msg->header.ssrc), send_msg->header.m, bytes, tel6738_payload_len,
+					tel6738_vp8_ok, tel6738_vp8_start, tel6738_vp8_pid, tel6738_vp8_key, tel6738_vp8_sync,
+					tel6738_plcrc, flags ? *flags : 0, send_msg->header.x, tel6738_ext_profile, tel6738_ext_words,
+					mid_ext_id, switch_str_nil(mid));
 			}
 		}
 
