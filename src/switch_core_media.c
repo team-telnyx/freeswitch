@@ -6390,13 +6390,6 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 	dtls_state_t check_ice_dtls_state = engine->rtp_session ? switch_rtp_dtls_state(engine->rtp_session, DTLS_TYPE_RTP) : DS_OFF;
 	int check_ice_is_reinvite = switch_channel_test_flag(smh->session->channel, CF_REINVITE) ? 1 : 0;
 	int is_trickle_recheck = (check_ice_dtls_state != DS_OFF) && !check_ice_is_reinvite;
-	const char *dtls_setup_override = switch_channel_get_variable(smh->session->channel, "rtp_dtls_setup");
-	int force_dtls_setup_passive = 0;
-
-	if (zstr(dtls_setup_override)) {
-		dtls_setup_override = switch_core_get_variable("rtp_dtls_setup");
-	}
-	force_dtls_setup_passive = (!zstr(dtls_setup_override) && !strcasecmp(dtls_setup_override, "passive"));
 
 	if (switch_true(switch_channel_get_variable_dup(smh->session->channel, "ignore_sdp_ice", SWITCH_FALSE, -1))) {
 		return SWITCH_STATUS_BREAK;
@@ -6519,20 +6512,6 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 				if (is_trickle_recheck) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_INFO,
 						"a=setup: skipping dtls_controller update during trickle recheck (DTLS state=%d)\n", check_ice_dtls_state);
-				} else if (force_dtls_setup_passive && !strcasecmp(attr->a_value, "actpass") && !check_ice_is_reinvite) {
-					{
-						const char *ice_role_override = switch_channel_get_variable(smh->session->channel, "rtp_ice_role");
-
-						if (zstr(ice_role_override)) {
-							switch_channel_set_variable(smh->session->channel, "rtp_ice_role", "controlled");
-						}
-					}
-					engine->new_dtls = 1;
-					engine->new_ice = 1;
-					engine->dtls_controller = 0;
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_INFO,
-						"a=setup: forcing passive DTLS answer for %s due to rtp_dtls_setup=passive; ICE role pinned controlled unless explicitly overridden\n",
-						type2str(type));
 				} else if (!strcasecmp(attr->a_value, "passive") ||
 					(!strcasecmp(attr->a_value, "actpass") && !check_ice_is_reinvite)) {
 					if (!engine->dtls_controller) {
