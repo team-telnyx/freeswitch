@@ -769,8 +769,22 @@ static void kill_listener(listener_t *l, const char *message)
 
 	switch_clear_flag(l, LFLAG_RUNNING);
 	if (l->sock) {
+		/*
+		 * Only shut the socket down here -- do NOT close() it.
+		 *
+		 * kill_listener() runs on threads that do not own the socket
+		 * (socket_logger / event_handler, on queue overflow), while the
+		 * owning listener thread is still reading/sending on l->sock and is
+		 * the one that closes it via close_socket() at teardown. Closing
+		 * here would (a) leave l->sock non-NULL so the owner closes the same
+		 * fd a second time, and (b) free the fd number so the kernel can
+		 * recycle it to another subsystem in between -- a double-close /
+		 * use-of-recycled-fd that silently corrupts an unrelated fd
+		 * (libzmq/libcurl/c-ares/...). shutdown() wakes the listener's
+		 * poll/recv without freeing the fd; the owner then performs the
+		 * single, mutex-guarded, NULL-setting close in close_socket().
+		 */
 		switch_socket_shutdown(l->sock, SWITCH_SHUTDOWN_READWRITE);
-		switch_socket_close(l->sock);
 	}
 
 }

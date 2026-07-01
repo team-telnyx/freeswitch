@@ -1,0 +1,136 @@
+TELCORE-226 ThreadSanitizer evidence
+Generated from tests/test_t38_gateway_race/t38_gateway_race.c
+spandsp built with -fsanitize=thread; run under 'setarch -R'.
+
+===== Race on hdlc_rx.frame_user_data (the crash field) =====
+WARNING: ThreadSanitizer: data race (pid=3041989)
+  Write of size 8 at 0x72c800000328 by thread T2:
+    #0 hdlc_rx_init /home/damir/work/fs_docker_deps/spandsp/src/hdlc.c:389 (gwrace_tsan+0x1664d) (BuildId: fce97da4b38950c6ba7824ef22bef2ceefb1d408)
+    #1 restart_rx_modem /home/damir/work/fs_docker_deps/spandsp/src/t38_gateway.c:2077 (gwrace_tsan+0x733b) (BuildId: fce97da4b38950c6ba7824ef22bef2ceefb1d408)
+    #2 monitor_control_messages /home/damir/work/fs_docker_deps/spandsp/src/t38_gateway.c:644 (gwrace_tsan+0x762b) (BuildId: fce97da4b38950c6ba7824ef22bef2ceefb1d408)
+    #3 process_rx_data /home/damir/work/fs_docker_deps/spandsp/src/t38_gateway.c:1110 (gwrace_tsan+0x7ee7) (BuildId: fce97da4b38950c6ba7824ef22bef2ceefb1d408)
+    #4 t38_core_rx_ifp_stream /home/damir/work/fs_docker_deps/spandsp/src/t38_core.c:652 (gwrace_tsan+0x4687) (BuildId: fce97da4b38950c6ba7824ef22bef2ceefb1d408)
+    #5 t38_core_rx_ifp_packet /home/damir/work/fs_docker_deps/spandsp/src/t38_core.c:750 (gwrace_tsan+0x490f) (BuildId: fce97da4b38950c6ba7824ef22bef2ceefb1d408)
+    #6 t38_thread tests/test_t38_gateway_race/t38_gateway_race.c:143 (gwrace_tsan+0x2653) (BuildId: fce97da4b38950c6ba7824ef22bef2ceefb1d408)
+
+  Previous read of size 8 at 0x72c800000328 by thread T1:
+    #0 hdlc_rx_status /home/damir/work/fs_docker_deps/spandsp/src/t38_gateway.c:1722 (gwrace_tsan+0x917f) (BuildId: fce97da4b38950c6ba7824ef22bef2ceefb1d408)
+    #1 t38_hdlc_rx_put_bit /home/damir/work/fs_docker_deps/spandsp/src/t38_gateway.c:1945 (gwrace_tsan+0x917f)
+    #2 report_status_change /home/damir/work/fs_docker_deps/spandsp/src/fsk.c:380 (gwrace_tsan+0x14599) (BuildId: fce97da4b38950c6ba7824ef22bef2ceefb1d408)
+    #3 fsk_rx /home/damir/work/fs_docker_deps/spandsp/src/fsk.c:467 (gwrace_tsan+0x14fe2) (BuildId: fce97da4b38950c6ba7824ef22bef2ceefb1d408)
+    #4 t38_gateway_rx /home/damir/work/fs_docker_deps/spandsp/src/t38_gateway.c:2169 (gwrace_tsan+0xa614) (BuildId: fce97da4b38950c6ba7824ef22bef2ceefb1d408)
+    #5 audio_thread tests/test_t38_gateway_race/t38_gateway_race.c:123 (gwrace_tsan+0x2740) (BuildId: fce97da4b38950c6ba7824ef22bef2ceefb1d408)
+
+  Location is heap block of size 98288 at 0x72c800000000 allocated by main thread:
+    #0 malloc ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:665 (libtsan.so.2+0x54b3f) (BuildId: 2a13a7710e361d06f7babbea53065ca2be93f738)
+    #1 span_alloc /home/damir/work/fs_docker_deps/spandsp/src/alloc.c:114 (gwrace_tsan+0x1169f) (BuildId: fce97da4b38950c6ba7824ef22bef2ceefb1d408)
+    #2 t38_gateway_init /home/damir/work/fs_docker_deps/spandsp/src/t38_gateway.c:2384 (gwrace_tsan+0xad53) (BuildId: fce97da4b38950c6ba7824ef22bef2ceefb1d408)
+    #3 main tests/test_t38_gateway_race/t38_gateway_race.c:153 (gwrace_tsan+0x2834) (BuildId: fce97da4b38950c6ba7824ef22bef2ceefb1d408)
+
+  Thread T2 (tid=3041992, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022 (libtsan.so.2+0x5ac1a) (BuildId: 2a13a7710e361d06f7babbea53065ca2be93f738)
+    #1 main tests/test_t38_gateway_race/t38_gateway_race.c:174 (gwrace_tsan+0x29d8) (BuildId: fce97da4b38950c6ba7824ef22bef2ceefb1d408)
+
+  Thread T1 (tid=3041991, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022 (libtsan.so.2+0x5ac1a) (BuildId: 2a13a7710e361d06f7babbea53065ca2be93f738)
+    #1 main tests/test_t38_gateway_race/t38_gateway_race.c:173 (gwrace_tsan+0x29bb) (BuildId: fce97da4b38950c6ba7824ef22bef2ceefb1d408)
+
+SUMMARY: ThreadSanitizer: data race /home/damir/work/fs_docker_deps/spandsp/src/hdlc.c:389 in hdlc_rx_init
+
+===== TSan-caught SEGV at the production crash line =====
+==3041989==ERROR: ThreadSanitizer: SEGV on unknown address 0x000000000018 (pc 0x55555555d180 bp 0x7ffff2ffd2b0 sp 0x7ffff2ffd260 T3041991)
+==3041989==The signal is caused by a READ memory access.
+==3041989==Hint: address points to the zero page.
+    #0 hdlc_rx_status /home/damir/work/fs_docker_deps/spandsp/src/t38_gateway.c:1722 (gwrace_tsan+0x9180) (BuildId: fce97da4b38950c6ba7824ef22bef2ceefb1d408)
+    #1 t38_hdlc_rx_put_bit /home/damir/work/fs_docker_deps/spandsp/src/t38_gateway.c:1945 (gwrace_tsan+0x9180)
+    #2 report_status_change /home/damir/work/fs_docker_deps/spandsp/src/fsk.c:380 (gwrace_tsan+0x14599) (BuildId: fce97da4b38950c6ba7824ef22bef2ceefb1d408)
+    #3 fsk_rx /home/damir/work/fs_docker_deps/spandsp/src/fsk.c:467 (gwrace_tsan+0x14fe2) (BuildId: fce97da4b38950c6ba7824ef22bef2ceefb1d408)
+    #4 t38_gateway_rx /home/damir/work/fs_docker_deps/spandsp/src/t38_gateway.c:2169 (gwrace_tsan+0xa614) (BuildId: fce97da4b38950c6ba7824ef22bef2ceefb1d408)
+    #5 audio_thread tests/test_t38_gateway_race/t38_gateway_race.c:123 (gwrace_tsan+0x2740) (BuildId: fce97da4b38950c6ba7824ef22bef2ceefb1d408)
+    #6 __tsan_thread_start_func ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1012 (libtsan.so.2+0x4edee) (BuildId: 2a13a7710e361d06f7babbea53065ca2be93f738)
+    #7 start_thread nptl/pthread_create.c:447 (libc.so.6+0x9caa3) (BuildId: 8e9fd827446c24067541ac5390e6f527fb5947bb)
+    #8 clone3 ../sysdeps/unix/sysv/linux/x86_64/clone3.S:78 (libc.so.6+0x129c6b) (BuildId: 8e9fd827446c24067541ac5390e6f527fb5947bb)
+
+ThreadSanitizer can not provide additional info.
+SUMMARY: ThreadSanitizer: SEGV /home/damir/work/fs_docker_deps/spandsp/src/t38_gateway.c:1722 in hdlc_rx_status
+==3041989==ABORTING
+
+===== Distinct race sites (122 reports total) =====
+      6 SUMMARY: ThreadSanitizer: data race src/fsk.c:328 in fsk_rx_restart
+      4 SUMMARY: ThreadSanitizer: data race src/t38_gateway.c:290 in set_next_tx_type
+      4 SUMMARY: ThreadSanitizer: data race src/fsk.c:310 in fsk_rx_restart
+      3 SUMMARY: ThreadSanitizer: data race src/fsk.c:318 in fsk_rx_restart
+      3 SUMMARY: ThreadSanitizer: data race src/fax_modems.c:536 in fax_modems_set_rx_handler
+      2 SUMMARY: ThreadSanitizer: data race src/t38_gateway.c:966 in process_hdlc_data
+      2 SUMMARY: ThreadSanitizer: data race src/t38_gateway.c:960 in process_hdlc_data
+      2 SUMMARY: ThreadSanitizer: data race src/t38_gateway.c:911 in process_rx_indicator
+      2 SUMMARY: ThreadSanitizer: data race src/t38_gateway.c:476 in finalise_hdlc_frame
+      2 SUMMARY: ThreadSanitizer: data race src/t38_gateway.c:475 in finalise_hdlc_frame
+      2 SUMMARY: ThreadSanitizer: data race src/t38_gateway.c:343 in set_next_tx_type
+      2 SUMMARY: ThreadSanitizer: data race src/t38_gateway.c:222 in hdlc_underflow_handler
+      2 SUMMARY: ThreadSanitizer: data race src/t38_gateway.c:2052 in restart_rx_modem
+      2 SUMMARY: ThreadSanitizer: data race src/t38_gateway.c:1597 in to_t38_buffer_init
+      2 SUMMARY: ThreadSanitizer: data race src/t38_gateway.c:1596 in to_t38_buffer_init
+      2 SUMMARY: ThreadSanitizer: data race src/t38_gateway.c:1594 in to_t38_buffer_init
+      2 SUMMARY: ThreadSanitizer: data race src/t38_gateway.c:1593 in to_t38_buffer_init
+      2 SUMMARY: ThreadSanitizer: data race src/t38_gateway.c:1592 in to_t38_buffer_init
+      2 SUMMARY: ThreadSanitizer: data race src/power_meter.c:65 in power_meter_init
+      2 SUMMARY: ThreadSanitizer: data race src/hdlc.c:392 in hdlc_rx_init
+      2 SUMMARY: ThreadSanitizer: data race src/hdlc.c:389 in hdlc_rx_init
+      2 SUMMARY: ThreadSanitizer: data race src/fsk.c:356 in fsk_rx_init
+      2 SUMMARY: ThreadSanitizer: data race src/fsk.c:355 in fsk_rx_init
+      2 SUMMARY: ThreadSanitizer: data race src/fsk.c:335 in fsk_rx_restart
+      2 SUMMARY: ThreadSanitizer: data race src/fsk.c:330 in fsk_rx_restart
+      2 SUMMARY: ThreadSanitizer: data race src/fsk.c:329 in fsk_rx_restart
+      2 SUMMARY: ThreadSanitizer: data race src/fsk.c:307 in fsk_rx_restart
+      2 SUMMARY: ThreadSanitizer: data race src/fsk.c:305 in fsk_rx_restart
+      2 SUMMARY: ThreadSanitizer: data race src/fsk.c:303 in fsk_rx_restart
+      2 SUMMARY: ThreadSanitizer: data race src/fsk.c:294 in fsk_rx_restart
+      2 SUMMARY: ThreadSanitizer: data race src/fsk.c:265 in fsk_rx_signal_cutoff
+      2 SUMMARY: ThreadSanitizer: data race src/fax_modems.c:559 in fax_modems_set_rx_active
+      2 SUMMARY: ThreadSanitizer: data race src/fax_modems.c:558 in fax_modems_set_rx_active
+      2 SUMMARY: ThreadSanitizer: data race src/fax_modems.c:551 in fax_modems_set_rx_handler
+      2 SUMMARY: ThreadSanitizer: data race src/fax_modems.c:541 in fax_modems_set_rx_handler
+      1 SUMMARY: ThreadSanitizer: SEGV src/t38_gateway.c:1722 in hdlc_rx_status
+      1 SUMMARY: ThreadSanitizer: data race tests/test_t38_gateway_race/t38_gateway_race.c:54 in log_message
+      1 SUMMARY: ThreadSanitizer: data race src/t38_gateway.c:912 in process_rx_indicator
+      1 SUMMARY: ThreadSanitizer: data race src/t38_gateway.c:634 in monitor_control_messages
+      1 SUMMARY: ThreadSanitizer: data race src/t38_gateway.c:301 in set_next_tx_type
+      1 SUMMARY: ThreadSanitizer: data race src/t38_gateway.c:297 in set_next_tx_type
+      1 SUMMARY: ThreadSanitizer: data race src/t38_gateway.c:294 in set_next_tx_type
+      1 SUMMARY: ThreadSanitizer: data race src/t38_gateway.c:229 in hdlc_underflow_handler
+      1 SUMMARY: ThreadSanitizer: data race src/t38_gateway.c:224 in hdlc_underflow_handler
+      1 SUMMARY: ThreadSanitizer: data race src/t38_gateway.c:2103 in restart_rx_modem
+      1 SUMMARY: ThreadSanitizer: data race src/t38_gateway.c:2096 in restart_rx_modem
+      1 SUMMARY: ThreadSanitizer: data race src/t38_gateway.c:2095 in restart_rx_modem
+      1 SUMMARY: ThreadSanitizer: data race src/t38_gateway.c:2074 in restart_rx_modem
+      1 SUMMARY: ThreadSanitizer: data race src/t38_gateway.c:2072 in restart_rx_modem
+      1 SUMMARY: ThreadSanitizer: data race src/t38_gateway.c:2071 in restart_rx_modem
+      1 SUMMARY: ThreadSanitizer: data race src/silence_gen.c:107 in silence_gen_remainder
+      1 SUMMARY: ThreadSanitizer: data race src/power_meter.c:94 in power_meter_update
+      1 SUMMARY: ThreadSanitizer: data race src/power_meter.c:66 in power_meter_init
+      1 SUMMARY: ThreadSanitizer: data race src/hdlc.c:474 in hdlc_tx_frame
+      1 SUMMARY: ThreadSanitizer: data race src/hdlc.c:470 in hdlc_tx_frame
+      1 SUMMARY: ThreadSanitizer: data race src/hdlc.c:465 in hdlc_tx_frame
+      1 SUMMARY: ThreadSanitizer: data race src/hdlc.c:464 in hdlc_tx_frame
+      1 SUMMARY: ThreadSanitizer: data race src/hdlc.c:448 in hdlc_tx_frame
+      1 SUMMARY: ThreadSanitizer: data race src/hdlc.c:445 in hdlc_tx_frame
+      1 SUMMARY: ThreadSanitizer: data race src/hdlc.c:441 in hdlc_tx_frame
+      1 SUMMARY: ThreadSanitizer: data race src/hdlc.c:393 in hdlc_rx_init
+      1 SUMMARY: ThreadSanitizer: data race src/hdlc.c:391 in hdlc_rx_init
+      1 SUMMARY: ThreadSanitizer: data race src/hdlc.c:390 in hdlc_rx_init
+      1 SUMMARY: ThreadSanitizer: data race src/hdlc.c:388 in hdlc_rx_init
+      1 SUMMARY: ThreadSanitizer: data race src/fsk.c:487 in fsk_rx
+      1 SUMMARY: ThreadSanitizer: data race src/fsk.c:466 in fsk_rx
+      1 SUMMARY: ThreadSanitizer: data race src/fsk.c:463 in fsk_rx
+      1 SUMMARY: ThreadSanitizer: data race src/fsk.c:331 in fsk_rx_restart
+      1 SUMMARY: ThreadSanitizer: data race src/fsk.c:306 in fsk_rx_restart
+      1 SUMMARY: ThreadSanitizer: data race src/fsk.c:304 in fsk_rx_restart
+      1 SUMMARY: ThreadSanitizer: data race src/fsk.c:295 in fsk_rx_restart
+      1 SUMMARY: ThreadSanitizer: data race src/fsk.c:266 in fsk_rx_signal_cutoff
+      1 SUMMARY: ThreadSanitizer: data race src/fax_modems.c:552 in fax_modems_set_rx_handler
+      1 SUMMARY: ThreadSanitizer: data race src/fax_modems.c:543 in fax_modems_set_rx_handler
+      1 SUMMARY: ThreadSanitizer: data race src/fax_modems.c:538 in fax_modems_set_rx_handler
+      1 SUMMARY: ThreadSanitizer: data race src/fax_modems.c:515 in fax_modems_set_put_bit
+      1 SUMMARY: ThreadSanitizer: data race src/fax_modems.c:514 in fax_modems_set_put_bit
+      1 SUMMARY: ThreadSanitizer: data race src/dds_int.c:399 in dds_complexi
