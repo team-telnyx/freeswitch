@@ -9721,9 +9721,18 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_zerocopy_read_frame(switch_rtp_t *rtp
 	} else {
 
 		frame->packet = &rtp_session->recv_msg;
-		/* Full datagram length of the returned packet (payload offset + payload), derived from
-		 * the frame itself so JB reordering / fork rx/tx can't desync it like last_recv_bytes. */
-		frame->packetlen = (uint32_t)((char *)frame->data - (char *)&rtp_session->recv_msg) + (bytes - rtp_header_len);
+		/* read_rtp_packet strips only the RTP header extension from `bytes` (which still
+		 * includes header + CSRC + payload). Add just the extension back, derived from the
+		 * returned frame's payload offset, so packetlen is the full datagram length: correct
+		 * for any extension size, does not double-count CSRC, and -- being taken from the
+		 * returned frame rather than session state -- stays correct under jitter-buffer
+		 * reordering / fork rx/tx. */
+		{
+			uint32_t csrc_len = rtp_session->recv_msg.header.cc * 4;
+			uint32_t payload_offset = (uint32_t)((char *)frame->data - (char *)&rtp_session->recv_msg);
+			uint32_t ext_len = payload_offset >= (uint32_t)(rtp_header_len + csrc_len) ? payload_offset - rtp_header_len - csrc_len : 0;
+			frame->packetlen = bytes + ext_len;
+		}
 		frame->source = __FILE__;
 
 		switch_set_flag(frame, SFF_RAW_RTP);
@@ -11303,9 +11312,10 @@ SWITCH_DECLARE(void) switch_rtp_handle_extensions(switch_rtp_t *rtp_session)
 {
 	if (!rtp_session->has_rtp) return;
 
-	if (rtp_session->recv_msg.header.cc > 0) {
-		rtp_session->recv_msg.ebody = RTP_BODY(rtp_session) + (rtp_session->recv_msg.header.cc * 4);
-	}
+	/* Do not advance recv_msg.ebody past the CSRC list here; read_rtp_packet() does that
+	 * once. Advancing it in both places double-counted CSRC, mislocating the extension so
+	 * it was never reliably stripped when cc > 0. This function only needs to *read* the
+	 * extension, so it locates it at body + CSRC locally below. */
 
 	if (rtp_session->recv_rtp_exts_size && !rtp_session->recv_msg.header.x) {
 		rtp_session->recv_rtp_exts_size = 0;
@@ -11324,7 +11334,7 @@ SWITCH_DECLARE(void) switch_rtp_handle_extensions(switch_rtp_t *rtp_session)
 		uint16_t ext_payload_len = 0;
 		uint32_t ssrc_recv = ntohl(rtp_session->recv_msg.header.ssrc);
 
-		rtp_session->recv_msg.ext = (switch_rtp_hdr_ext_t *) RTP_BODY(rtp_session);
+		rtp_session->recv_msg.ext = (switch_rtp_hdr_ext_t *) (RTP_BODY(rtp_session) + (rtp_session->recv_msg.header.cc * 4));
 		ext_len_field = ntohs(rtp_session->recv_msg.ext->length);
 
 		if (ext_len_field > 0) {
