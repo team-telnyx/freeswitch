@@ -299,6 +299,11 @@ struct switch_rtp_engine_s {
 	rtp_extension_t rtp_send_extensions[MAX_RTP_EXTENSIONS];
 };
 
+/* TEL-6738: This gate keys on the first VP8 payload descriptor start packet
+ * carrying the uncompressed keyframe sync bytes. The target WebRTC/SIP
+ * packetizer places the VP8 uncompressed header in the first keyframe packet;
+ * if a future packetizer fragments those first bytes away, this deliberately
+ * keeps waiting rather than opening on an ambiguous frame. */
 static switch_bool_t tel6738_vp8_frame_is_keyframe(switch_frame_t *frame)
 {
 	const uint8_t *payload;
@@ -5263,7 +5268,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 			if (engine->pre_dtls_buf && engine->pre_dtls_buf->count > 0) {
 				uint32_t tel6738_dropped_pre_dtls;
 
-				if (switch_rtp_dtls_state(engine->rtp_session, DTLS_TYPE_RTP) == DS_READY) {
+				if (switch_rtp_write_ready(engine->rtp_session, frame->datalen)) {
 					tel6738_dropped_pre_dtls = engine->pre_dtls_buf->count;
 					engine->pre_dtls_buf->stat_dropped += tel6738_dropped_pre_dtls;
 					engine->pre_dtls_buf->head = 0;
@@ -5328,6 +5333,15 @@ tel6738_enqueue_pkt:
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
 						"TEL6738 pre-DTLS buffer allocated: capacity=%d pkt_size=%d\n",
 						TEL6738_PRE_DTLS_CAPACITY, TEL6738_PRE_DTLS_PKT_SIZE);
+				} else if (!engine->pre_dtls_buf->active) {
+					engine->pre_dtls_buf->head = 0;
+					engine->pre_dtls_buf->count = 0;
+					engine->pre_dtls_buf->active = SWITCH_TRUE;
+					engine->tel6738_pre_dtls_wait_keyframe = SWITCH_FALSE;
+					engine->tel6738_pre_dtls_wait_keyframe_drops = 0;
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
+						"TEL6738 pre-DTLS buffer re-armed after post-readiness-drop write 0 seq=%u\n",
+						frame->seq);
 				}
 				if (frame->datalen > 0 && frame->datalen <= TEL6738_PRE_DTLS_PKT_SIZE && frame->data) {
 					if (engine->pre_dtls_buf->count >= TEL6738_PRE_DTLS_CAPACITY) {
@@ -5385,7 +5399,7 @@ tel6738_enqueue_pkt:
 			if (engine->pre_dtls_buf && engine->pre_dtls_buf->active && engine->pre_dtls_buf->count > 0) {
 				uint32_t tel6738_dropped_pre_dtls;
 
-				if (switch_rtp_dtls_state(engine->rtp_session, DTLS_TYPE_RTP) == DS_READY) {
+				if (switch_rtp_write_ready(engine->rtp_session, frame->datalen)) {
 					tel6738_dropped_pre_dtls = engine->pre_dtls_buf->count;
 					engine->pre_dtls_buf->stat_dropped += tel6738_dropped_pre_dtls;
 					engine->pre_dtls_buf->head = 0;

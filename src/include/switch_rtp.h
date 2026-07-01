@@ -824,6 +824,7 @@ SWITCH_DECLARE(void) switch_rtp_set_ignore_rtp_during_dtmf_timeout(switch_rtp_t 
 SWITCH_DECLARE(switch_status_t) switch_rtp_add_dtls(switch_rtp_t *rtp_session, dtls_fingerprint_t *local_fp, dtls_fingerprint_t *remote_fp, dtls_type_t type, uint8_t want_DTLSv1_2);
 SWITCH_DECLARE(switch_status_t) switch_rtp_del_dtls(switch_rtp_t *rtp_session, dtls_type_t type);
 SWITCH_DECLARE(dtls_state_t) switch_rtp_dtls_state(switch_rtp_t *rtp_session, dtls_type_t type);
+SWITCH_DECLARE(int) switch_rtp_write_ready(switch_rtp_t *rtp_session, uint32_t bytes);
 
 SWITCH_DECLARE(int) switch_rtp_has_dtls(void);
 

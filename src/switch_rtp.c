@@ -10156,6 +10156,11 @@ static int rtp_write_ready(switch_rtp_t *rtp_session, uint32_t bytes, int line)
 	return 1;
 }
 
+SWITCH_DECLARE(int) switch_rtp_write_ready(switch_rtp_t *rtp_session, uint32_t bytes)
+{
+	return rtp_write_ready(rtp_session, bytes, __LINE__);
+}
+
 #define RTP_EXT_MIN_AUDIO_LEVEL -127
 #define RTP_EXT_MAX_AUDIO_LEVEL 0
 
