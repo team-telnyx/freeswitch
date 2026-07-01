@@ -5872,6 +5872,17 @@ SWITCH_DECLARE(switch_jb_t *) switch_rtp_get_jitter_buffer(switch_rtp_t *rtp_ses
 	return rtp_session->jb ? rtp_session->jb : rtp_session->vb;
 }
 
+SWITCH_DECLARE(switch_jb_t *) switch_rtp_get_jitter_buffer_for_stats(switch_rtp_t *rtp_session)
+{
+	/* Bypass ready check - used for stats export during shutdown
+	 * when rtp_session may not be "ready" but JB still exists */
+	if (!rtp_session) {
+		return NULL;
+	}
+
+	return rtp_session->jb ? rtp_session->jb : rtp_session->vb;
+}
+
 SWITCH_DECLARE(switch_status_t) switch_rtp_pause_jitter_buffer(switch_rtp_t *rtp_session, switch_bool_t pause)
 {
 	int new_val;
@@ -6399,15 +6410,19 @@ SWITCH_DECLARE(void) switch_rtp_destroy(switch_rtp_t **rtp_session)
 		switch_safe_free(pop);
 	}
 
+	/* Export jitter buffer stats before destroying them */
 	if ((*rtp_session)->jb) {
+		switch_jb_export_stats((*rtp_session)->jb);
 		switch_jb_destroy(&(*rtp_session)->jb);
 	}
 
 	if ((*rtp_session)->vb) {
+		switch_jb_export_stats((*rtp_session)->vb);
 		switch_jb_destroy(&(*rtp_session)->vb);
 	}
 
 	if ((*rtp_session)->vbw) {
+		switch_jb_export_stats((*rtp_session)->vbw);
 		switch_jb_destroy(&(*rtp_session)->vbw);
 	}
 
@@ -7865,15 +7880,19 @@ fork_end:
 	if (rtp_session->flags[SWITCH_RTP_FLAG_KILL_JB]) {
 		rtp_session->flags[SWITCH_RTP_FLAG_KILL_JB] = 0;
 
+		/* Export jitter buffer stats before destroying them */
 		if (rtp_session->jb) {
+			switch_jb_export_stats(rtp_session->jb);
 			switch_jb_destroy(&rtp_session->jb);
 		}
 
 		if (rtp_session->vb) {
+			switch_jb_export_stats(rtp_session->vb);
 			switch_jb_destroy(&rtp_session->vb);
 		}
 
 		if (rtp_session->vbw) {
+			switch_jb_export_stats(rtp_session->vbw);
 			switch_jb_destroy(&rtp_session->vbw);
 		}
 
