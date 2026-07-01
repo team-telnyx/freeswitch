@@ -1781,15 +1781,20 @@ SWITCH_DECLARE(switch_status_t) switch_jb_get_packet(switch_jb_t *jb, switch_rtp
 							jb->jitter.stats.expand_frame_len = 0;
 							switch_jb_reset(jb);
 							switch_goto_status(SWITCH_STATUS_RESTART, end);
-						} else if (jb->jitter.stats.buffer_size_ms < (3 * jb->jitter.stats.estimate_ms)) {
-							/* When playing PLC, expand the buffer if smaller than 3x the estimated jitter. */
-							jb_debug(jb, SWITCH_LOG_INFO, "JITTER estimation %dms buffersize %d/%d %dms EXPAND [plc] target_seq[%u] expand[%d]\n",
-									 jb->jitter.stats.estimate_ms, jb->complete_frames, jb->frame_len, jb->jitter.stats.buffer_size_ms,
-									 ntohs(jb->target_seq), jb->jitter.stats.expand_frame_len);
-							jb->jitter.stats.expand++;
-							jb->jitter.stats.expand_frame_len++;
-							decrement_seq(jb);
-						} else {
+					} else if (jb->jitter.stats.buffer_size_ms < (3 * jb->jitter.stats.estimate_ms)) {
+						/* When playing PLC, expand the buffer if smaller than 3x the estimated jitter. */
+						jb_debug(jb, SWITCH_LOG_INFO, "JITTER estimation %dms buffersize %d/%d %dms EXPAND [plc] target_seq[%u] expand[%d]\n",
+								 jb->jitter.stats.estimate_ms, jb->complete_frames, jb->frame_len, jb->jitter.stats.buffer_size_ms,
+								 ntohs(jb->target_seq), jb->jitter.stats.expand_frame_len);
+						jb->jitter.stats.expand++;
+						jb->jitter.stats.expand_frame_len++;
+						decrement_seq(jb);
+					} else if (jb->jitter.stats.expand_frame_len >= jb->max_frame_len) {
+						jb->jitter.stats.reset_error++;
+						jb->jitter.stats.expand_frame_len = 0;
+						switch_jb_reset(jb);
+						switch_goto_status(SWITCH_STATUS_RESTART, end);
+					} else {
 							jb_debug(jb, 2, "%s", "Frame not found suggest PLC\n");
 						}
 					} else {
@@ -1798,13 +1803,16 @@ SWITCH_DECLARE(switch_status_t) switch_jb_get_packet(switch_jb_t *jb, switch_rtp
 
 					if (jb->elastic) {
 						jb->jitter.stats.consecutive_miss++;
-						if (jb->jitter.stats.consecutive_miss > MAX_CONSECUTIVE_MISS) {
-							jb->jitter.stats.reset_missing_frames++;
-							jb->jitter.stats.consecutive_miss = 0;
-							jb->elastic = SWITCH_FALSE;
-							switch_jb_reset(jb);
-							switch_goto_status(SWITCH_STATUS_RESTART, end);
-						}
+					if (jb->jitter.stats.consecutive_miss > MAX_CONSECUTIVE_MISS) {
+						jb_debug(jb, SWITCH_LOG_ALERT, "JITTER elastic DISABLED after %u consecutive misses, reset_missing_frames=%u target_seq[%u]\n",
+								 jb->jitter.stats.consecutive_miss, jb->jitter.stats.reset_missing_frames + 1, ntohs(jb->target_seq));
+						jb->jitter.stats.reset_missing_frames++;
+						jb->jitter.stats.consecutive_miss = 0;
+						jb->elastic = SWITCH_FALSE;
+						jb->frame_len = jb->min_frame_len;
+						switch_jb_reset(jb);
+						switch_goto_status(SWITCH_STATUS_RESTART, end);
+					}
 					}
 					plc = 1;
 					switch_goto_status(SWITCH_STATUS_NOTFOUND, end);
