@@ -2826,11 +2826,12 @@ static client_profile_t *match_url_profile(const char *url)
 
 		if (!matched && profile && !zstr(profile->url_pattern)) {
 			switch_regex_t *re = NULL;
-			int ovector[30] = {0};
+			switch_regex_match_t *match_data = NULL;
 
-			if (switch_regex_perform(url, profile->url_pattern, &re, ovector, sizeof(ovector) / sizeof(ovector[0])) > 0) {
+			if (switch_regex_perform(url, profile->url_pattern, &re, &match_data) > 0) {
 				matched = profile;
 			}
+			switch_regex_match_safe_free(match_data);
 			switch_regex_safe_free(re);
 		}
 	}
