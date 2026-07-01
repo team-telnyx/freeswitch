@@ -32,6 +32,7 @@ static inline double switch_core_idle_cpu(void) { return g_idle_cpu; }
 #define RPC_HELPER_H
 extern "C" {
 	switch_bool_t is_resource_available(const char *command, const char *api_str);
+	switch_bool_t is_api_response_error(const char *response);
 	void set_min_idle_cpu_watermark(const char *idle_cpu);
 	void set_throttled_api_calls(const char *api);
 }
@@ -262,6 +263,26 @@ static void test_null_or_empty_cmd(void)
 		"empty cmd: not throttled");
 }
 
+static void test_api_response_error_detection(void)
+{
+	CHECK(is_api_response_error("-ERR: Not Completed") == SWITCH_TRUE,
+		"api_response: -ERR marks failure");
+	CHECK(is_api_response_error("  \r\n-ERR invalid argument") == SWITCH_TRUE,
+		"api_response: leading whitespace before -ERR marks failure");
+	CHECK(is_api_response_error("-USAGE: uuid_media <uuid> [off|on]") == SWITCH_TRUE,
+		"api_response: -USAGE marks failure");
+	CHECK(is_api_response_error("ERROR!") == SWITCH_TRUE,
+		"api_response: switch_api_execute failure marks failure");
+	CHECK(is_api_response_error("UNAUTHORIZED!") == SWITCH_TRUE,
+		"api_response: authorization failure marks failure");
+	CHECK(is_api_response_error("+OK queued") == SWITCH_FALSE,
+		"api_response: +OK is success");
+	CHECK(is_api_response_error("OK") == SWITCH_FALSE,
+		"api_response: plain OK is success");
+	CHECK(is_api_response_error(NULL) == SWITCH_FALSE,
+		"api_response: NULL response is not classified as API failure");
+}
+
 int main(void)
 {
 	struct { const char *name; void (*fn)(void); } tests[] = {
@@ -277,6 +298,7 @@ int main(void)
 		{"whitespace_tokenization",                    test_whitespace_tokenization},
 		{"idle_exactly_at_watermark_allowed",          test_idle_exactly_at_watermark_allowed},
 		{"null_or_empty_cmd",                          test_null_or_empty_cmd},
+		{"api_response_error_detection",               test_api_response_error_detection},
 	};
 	for (size_t i = 0; i < sizeof(tests) / sizeof(tests[0]); ++i) {
 		printf("[%s]\n", tests[i].name);

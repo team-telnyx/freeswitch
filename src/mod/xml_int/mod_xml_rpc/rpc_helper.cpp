@@ -1,3 +1,5 @@
+#include <cctype>
+#include <cstring>
 #include <string>
 #include <set>
 #include <vector>
@@ -30,6 +32,25 @@ static std::string first_token(const std::string& s)
 	if (pos == std::string::npos) return std::string();
 	const std::string::size_type end = s.find_first_of(" \t\r\n", pos);
 	return s.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+}
+
+switch_bool_t is_api_response_error(const char* response)
+{
+	if (zstr(response)) return SWITCH_FALSE;
+
+	while (*response && std::isspace(static_cast<unsigned char>(*response))) {
+		++response;
+	}
+
+	if (!std::strncmp(response, "-ERR", 4) || !std::strncmp(response, "-USAGE", 6)) {
+		return SWITCH_TRUE;
+	}
+
+	if (!std::strcmp(response, "ERROR!") || !std::strcmp(response, "UNAUTHORIZED!")) {
+		return SWITCH_TRUE;
+	}
+
+	return SWITCH_FALSE;
 }
 
 void set_min_idle_cpu_watermark(const char* idle_cpu)
