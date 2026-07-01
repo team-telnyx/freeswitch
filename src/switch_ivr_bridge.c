@@ -195,6 +195,8 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 	switch_time_t tel6738_last_periodic_refresh = 0;
 	switch_time_t tel6738_periodic_refresh_interval = 10000000;
 	switch_time_t tel6738_periodic_refresh_initial_delay = 20000000;
+	switch_time_t tel6738_last_relay_refresh_a = 0; /* 200ms PLI-relay throttle toward session_a */
+	switch_time_t tel6738_last_relay_refresh_b = 0; /* 200ms PLI-relay throttle toward session_b */
 
 	vh->up = 1;
 
@@ -273,15 +275,17 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 			}
 			
 			if (switch_channel_test_flag(b_channel, CF_VIDEO_REFRESH_REQ)) {
-				switch_status_t refresh_status;
+				switch_status_t refresh_status = SWITCH_STATUS_BREAK;
+				switch_time_t relay_now = switch_micro_time_now();
 
 				switch_channel_clear_flag(b_channel, CF_VIDEO_REFRESH_REQ);
-				/* Use throttled (non-force) request so the existing 1s
-				 * VIDEO_REFRESH_FREQ gate is respected. Force is reserved
-				 * for the one-shot bootstrap paths (pre-DTLS flush, RTCP
-				 * warmup). Without this, concurrent bridge/warmup/timer
-				 * paths pile up to 17-20+ FIRs/s causing encoder stalls. */
-				refresh_status = switch_core_session_request_video_refresh(vh->session_a);
+				/* Relay PLI/FIR from the SIP leg to Chrome using a per-bridge 200ms throttle
+				 * + force, bypassing the global 1s VIDEO_REFRESH_FREQ gate. Capped at 5/s
+				 * — well below encoder stall threshold, and much faster than 1s for PLI relay. */
+				if (!tel6738_last_relay_refresh_a || (relay_now - tel6738_last_relay_refresh_a) >= 200000) {
+					tel6738_last_relay_refresh_a = relay_now;
+					refresh_status = switch_core_session_force_request_video_refresh(vh->session_a);
+				}
 				tel6738_bridge_source_refreshes++;
 
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
@@ -291,16 +295,18 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 			}
 
 			if (switch_channel_test_flag(channel, CF_VIDEO_REFRESH_REQ)) {
-				switch_status_t refresh_status;
+				switch_status_t refresh_status = SWITCH_STATUS_BREAK;
+				switch_time_t relay_now = switch_micro_time_now();
 
 				switch_channel_clear_flag(channel, CF_VIDEO_REFRESH_REQ);
-				/* Propagate in reverse: session_a's channel received a refresh
-				 * request (remote end needs a keyframe from the other leg's
-				 * source). Forward to session_b so its remote is asked for an
-				 * IDR. Previously only set refresh_timer which called
-				 * force_request_video_refresh(session_a) again -- wrong
-				 * direction, looping the request back to the same side. */
-				refresh_status = switch_core_session_request_video_refresh(vh->session_b);
+				/* Relay Chrome's incoming PLI/FIR to the SIP source (NJ1/Safari) using a
+				 * per-bridge 200ms throttle + force, bypassing the global 1s VIDEO_REFRESH_FREQ
+				 * gate. This is the critical path: Chrome PLIs requesting a keyframe from Safari
+				 * must reach the source quickly or blocky video persists for ~1-1.5s per event. */
+				if (!tel6738_last_relay_refresh_b || (relay_now - tel6738_last_relay_refresh_b) >= 200000) {
+					tel6738_last_relay_refresh_b = relay_now;
+					refresh_status = switch_core_session_force_request_video_refresh(vh->session_b);
+				}
 				tel6738_bridge_source_refreshes++;
 
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
