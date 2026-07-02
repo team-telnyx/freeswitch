@@ -2770,6 +2770,8 @@ SWITCH_DECLARE(void) switch_core_media_set_stats(switch_core_session_t *session)
 
 
 
+static void tel6738_bundle_audio_queue_flush(switch_frame_buffer_t *audio_fb);
+
 SWITCH_DECLARE(void) switch_media_handle_destroy(switch_core_session_t *session)
 {
 	switch_media_handle_t *smh;
@@ -2831,10 +2833,11 @@ SWITCH_DECLARE(void) switch_media_handle_destroy(switch_core_session_t *session)
 	while (v_engine->bundle_audio_read_consumers && v_engine->bundle_audio_read_cond) {
 		switch_thread_cond_timedwait(v_engine->bundle_audio_read_cond, smh->bundle_drain_mutex, 20000);
 	}
-	if (v_engine->bundle_audio_read_fb_frame && v_engine->bundle_audio_read_fb) {
-		switch_frame_buffer_free(v_engine->bundle_audio_read_fb, &v_engine->bundle_audio_read_fb_frame);
+	if (v_engine->bundle_audio_read_fb_frame) {
+		switch_frame_free(&v_engine->bundle_audio_read_fb_frame);
 		v_engine->bundle_audio_read_fb_frame = NULL;
 	}
+	tel6738_bundle_audio_queue_flush(v_engine->bundle_audio_read_fb);
 	if (v_engine->bundle_audio_read_fb) switch_frame_buffer_destroy(&v_engine->bundle_audio_read_fb);
 	switch_mutex_unlock(smh->bundle_drain_mutex);
 
@@ -3988,6 +3991,105 @@ static const char *bundle_drain_state_str(int state) {
 	}
 }
 
+/* BUNDLE audio frames must preserve the raw RTP data offset. switch_frame_dup()
+ * resets RTP data to packet + 12, which corrupts packets with CSRC/header
+ * extensions; keep this clone packet-oriented instead. */
+static switch_status_t tel6738_bundle_frame_dup(switch_frame_t *orig, switch_frame_t **clone)
+{
+	switch_frame_t *new_frame;
+
+	if (clone) {
+		*clone = NULL;
+	}
+
+	if (!orig || !clone) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	if (orig->packet) {
+		switch_size_t packetlen = orig->packetlen;
+		switch_size_t data_offset;
+		switch_size_t datalen;
+		uintptr_t packet_addr = (uintptr_t)(void *)orig->packet;
+		uintptr_t data_addr = (uintptr_t)(void *)orig->data;
+		uint8_t *packet;
+
+		if (!packetlen || packetlen > SWITCH_RTP_MAX_BUF_LEN || !orig->data || data_addr < packet_addr || data_addr - packet_addr > packetlen) {
+			return SWITCH_STATUS_FALSE;
+		}
+
+		data_offset = (switch_size_t)(data_addr - packet_addr);
+		datalen = packetlen - data_offset;
+
+		new_frame = malloc(sizeof(*new_frame));
+		if (!new_frame) {
+			return SWITCH_STATUS_FALSE;
+		}
+		*new_frame = *orig;
+		switch_set_flag(new_frame, SFF_DYNAMIC);
+		new_frame->img = NULL;
+		new_frame->extra_data = NULL;
+
+		packet = malloc(SWITCH_RTP_MAX_BUF_LEN);
+		if (!packet) {
+			free(new_frame);
+			return SWITCH_STATUS_FALSE;
+		}
+		memcpy(packet, orig->packet, packetlen);
+
+		new_frame->packet = packet;
+		new_frame->packetlen = packetlen;
+		new_frame->data = packet + data_offset;
+		new_frame->datalen = datalen;
+		new_frame->buflen = SWITCH_RTP_MAX_BUF_LEN;
+	} else {
+		if (!orig->data || !orig->buflen || orig->datalen > orig->buflen) {
+			return SWITCH_STATUS_FALSE;
+		}
+
+		new_frame = malloc(sizeof(*new_frame));
+		if (!new_frame) {
+			return SWITCH_STATUS_FALSE;
+		}
+		*new_frame = *orig;
+		switch_set_flag(new_frame, SFF_DYNAMIC);
+		new_frame->img = NULL;
+		new_frame->extra_data = NULL;
+		new_frame->packet = NULL;
+		new_frame->packetlen = 0;
+		new_frame->data = malloc(new_frame->buflen);
+		if (!new_frame->data) {
+			free(new_frame);
+			return SWITCH_STATUS_FALSE;
+		}
+		memcpy(new_frame->data, orig->data, orig->datalen);
+	}
+
+	if (orig->img && !switch_test_flag(orig, SFF_ENCODED)) {
+		switch_img_copy(orig->img, &new_frame->img);
+	}
+
+	*clone = new_frame;
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static void tel6738_bundle_audio_queue_flush(switch_frame_buffer_t *audio_fb)
+{
+	void *pop = NULL;
+
+	if (!audio_fb) {
+		return;
+	}
+
+	while (switch_frame_buffer_trypop(audio_fb, &pop) == SWITCH_STATUS_SUCCESS && pop) {
+		if (pop != (void *)1) {
+			switch_frame_t *frame = (switch_frame_t *) pop;
+			switch_frame_free(&frame);
+		}
+		pop = NULL;
+	}
+}
+
 /* TEL-6738: Continuous drain thread for BUNDLE socket.
  * This is the ONLY reader of a_engine->rtp_session while active.
  * Audio packets are cloned and queued to v_engine->bundle_audio_read_fb.
@@ -4138,7 +4240,7 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 			}
 
 			if (audio_fb) {
-				if (switch_frame_buffer_dup(audio_fb, &drain_frame, &dupframe) == SWITCH_STATUS_SUCCESS) {
+				if (tel6738_bundle_frame_dup(&drain_frame, &dupframe) == SWITCH_STATUS_SUCCESS) {
 					if (switch_frame_buffer_trypush(audio_fb, dupframe) != SWITCH_STATUS_SUCCESS) {
 						v_engine->bundle_drain_thread_audio_qfail++;
 						if (v_engine->bundle_drain_thread_audio_qfail <= 10 || !(v_engine->bundle_drain_thread_audio_qfail % 1000)) {
@@ -4146,7 +4248,7 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 								"TEL-6738 drain thread audio queue full count=%u\n",
 								v_engine->bundle_drain_thread_audio_qfail);
 						}
-						switch_frame_buffer_free(audio_fb, &dupframe);
+						switch_frame_free(&dupframe);
 					}
 				}
 			}
@@ -4595,7 +4697,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 				switch_frame_t *audio_fb_frame = (switch_frame_t *) apop;
 				/* Release previous frame if any */
 				if (veng->bundle_audio_read_fb_frame) {
-					switch_frame_buffer_free(audio_fb, &veng->bundle_audio_read_fb_frame);
+					switch_frame_free(&veng->bundle_audio_read_fb_frame);
 				}
 				veng->bundle_audio_read_fb_frame = audio_fb_frame;
 				engine->read_frame = *audio_fb_frame;
