@@ -86,7 +86,7 @@ FST_TEARDOWN_END()
 		switch_memory_pool_t *test_pool = NULL;
 		switch_rtp_t *mid_rtp = NULL;
 		switch_socket_t *send_sock = NULL;
-		switch_sockaddr_t *send_bind_addr = NULL, *rtp_addr = NULL;
+		switch_sockaddr_t *send_bind_addr = NULL, *rtp_addr = NULL, *local_sa = NULL;
 		switch_rtp_flag_t mid_flags[SWITCH_RTP_FLAG_INVALID] = {0};
 		const char *mid_err = NULL;
 		const char *mid = NULL;
@@ -138,9 +138,16 @@ FST_TEARDOWN_END()
 
 		fst_requires(switch_core_new_memory_pool(&test_pool) == SWITCH_STATUS_SUCCESS);
 		local_port = switch_rtp_request_port(rx_host);
-		remote_port = switch_rtp_request_port(rx_host);
 		fst_requires(local_port > 0);
+
+		/* The unit-test conf exposes a single RTP port, so derive the sender port from an OS-assigned ephemeral bind rather than the shared allocator. */
+		fst_requires(switch_sockaddr_info_get(&send_bind_addr, rx_host, SWITCH_UNSPEC, 0, 0, test_pool) == SWITCH_STATUS_SUCCESS);
+		fst_requires(switch_socket_create(&send_sock, switch_sockaddr_get_family(send_bind_addr), SOCK_DGRAM, 0, test_pool) == SWITCH_STATUS_SUCCESS);
+		fst_requires(switch_socket_bind(send_sock, send_bind_addr) == SWITCH_STATUS_SUCCESS);
+		fst_requires(switch_socket_addr_get(&local_sa, SWITCH_FALSE, send_sock) == SWITCH_STATUS_SUCCESS);
+		remote_port = switch_sockaddr_get_port(local_sa);
 		fst_requires(remote_port > 0);
+
 		mid_rtp = switch_rtp_new(rx_host, local_port, tx_host, remote_port, TEST_PT, 8000, 20 * 1000, mid_flags, "soft", &mid_err, test_pool);
 		fst_requires(mid_rtp != NULL);
 		fst_requires(switch_rtp_ready(mid_rtp));
@@ -148,10 +155,7 @@ FST_TEARDOWN_END()
 		fst_check(switch_rtp_get_received_mid(mid_rtp) == NULL);
 		switch_rtp_clear_flag(mid_rtp, SWITCH_RTP_FLAG_PAUSE);
 
-		fst_requires(switch_sockaddr_info_get(&send_bind_addr, rx_host, SWITCH_UNSPEC, remote_port, 0, test_pool) == SWITCH_STATUS_SUCCESS);
 		fst_requires(switch_sockaddr_info_get(&rtp_addr, rx_host, SWITCH_UNSPEC, local_port, 0, test_pool) == SWITCH_STATUS_SUCCESS);
-		fst_requires(switch_socket_create(&send_sock, switch_sockaddr_get_family(send_bind_addr), SOCK_DGRAM, 0, test_pool) == SWITCH_STATUS_SUCCESS);
-		fst_requires(switch_socket_bind(send_sock, send_bind_addr) == SWITCH_STATUS_SUCCESS);
 
 		packet_len = sizeof(packet_with_mid);
 		fst_requires(switch_socket_sendto(send_sock, rtp_addr, 0, (const char *) packet_with_mid, &packet_len) == SWITCH_STATUS_SUCCESS);
@@ -187,9 +191,6 @@ FST_TEARDOWN_END()
 			switch_socket_close(send_sock);
 		}
 		switch_rtp_destroy(&mid_rtp);
-		if (remote_port) {
-			switch_rtp_release_port(rx_host, remote_port);
-		}
 		switch_core_destroy_memory_pool(&test_pool);
 	}
 	FST_TEST_END()
