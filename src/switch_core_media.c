@@ -4265,11 +4265,13 @@ static void bundle_drain_thread_stop(switch_core_session_t *session)
 		switch_rtp_break(a_engine->rtp_session);
 	}
 
-	/* Also interrupt the audio drain queue in case audio reader is blocked on pop */
+	/* Also interrupt the audio drain queue in case audio reader is blocked on pop. */
+	switch_mutex_lock(smh->bundle_drain_mutex);
 	if (v_engine->bundle_audio_read_fb) {
-		/* Push a sentinel to unblock any waiting pop */
+		/* Push a sentinel to unblock any waiting pop. */
 		switch_frame_buffer_trypush(v_engine->bundle_audio_read_fb, (void *) 1);
 	}
+	switch_mutex_unlock(smh->bundle_drain_mutex);
 
 	/* Join outside all locks */
 	{
@@ -4560,18 +4562,30 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 			/* TEL-6738: Drain thread is the sole socket reader.
 			 * Audio path pops from the drain thread's audio queue. */
 			switch_rtp_engine_t *veng = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
+			switch_frame_buffer_t *audio_fb = NULL;
 			void *apop = NULL;
 			switch_status_t qst;
 
+			switch_mutex_lock(smh->bundle_drain_mutex);
+			if (veng->bundle_drain_state == BUNDLE_DRAIN_RUNNING) {
+				audio_fb = veng->bundle_audio_read_fb;
+			}
+			switch_mutex_unlock(smh->bundle_drain_mutex);
+
+			if (!audio_fb) {
+				status = SWITCH_STATUS_BREAK;
+				goto end;
+			}
+
 			/* Timed pop: wait up to ~20ms (one audio frame interval) for data.
 			 * This prevents busy-spinning while giving reasonable latency. */
-			qst = switch_frame_buffer_pop_timeout(veng->bundle_audio_read_fb, &apop, 20000);
+			qst = switch_frame_buffer_pop_timeout(audio_fb, &apop, 20000);
 
 			if (qst == SWITCH_STATUS_SUCCESS && apop && apop != (void *)1) {
 				switch_frame_t *audio_fb_frame = (switch_frame_t *) apop;
 				/* Release previous frame if any */
 				if (veng->bundle_audio_read_fb_frame) {
-					switch_frame_buffer_free(veng->bundle_audio_read_fb, &veng->bundle_audio_read_fb_frame);
+					switch_frame_buffer_free(audio_fb, &veng->bundle_audio_read_fb_frame);
 				}
 				veng->bundle_audio_read_fb_frame = audio_fb_frame;
 				engine->read_frame = *audio_fb_frame;
@@ -14733,8 +14747,10 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 	int is_outbound = switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_OUTBOUND;
 	const char *vbw;
 	int bw = 256, i = 0;
-	uint8_t fir = 0, nack = 0, pli = 0, tmmbr = 0, has_vid = 0;
+	uint8_t fir = 0, nack = 0, pli = 0, tmmbr = 0, has_vid = 0, bundle_has_vid = 0;
 	const char *use_rtcp_mux = NULL;
+	const char *bundle_audio_mid = NULL, *bundle_video_mid = NULL;
+	int bundle_no_attr_mid = 0, bundle_no_audio_mid = 0, bundle_no_video_mid = 0;
 	int include_external;
 	const char* audio_mid = switch_channel_get_variable_dup(session->channel, "rtp_audio_mid", SWITCH_FALSE, -1);
 	const char* video_mid = switch_channel_get_variable_dup(session->channel, "rtp_video_mid", SWITCH_FALSE, -1);
@@ -15131,14 +15147,29 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 	
 	family = strchr(ip, ':') ? "IP6" : "IP4";
 
-	/* Optional Unified Plan BUNDLE grouping */
-	if (switch_core_media_bundle_should_offer(smh)) {
-		const char *am = audio_mid ? audio_mid : "0";
-		const char *vm = has_vid ? (video_mid ? video_mid : "1") : NULL;
-		if (vm) {
-			switch_snprintf(groupbuf, sizeof(groupbuf), "a=group:BUNDLE %s %s\r\n", am, vm);
-		} else {
-			switch_snprintf(groupbuf, sizeof(groupbuf), "a=group:BUNDLE %s\r\n", am);
+	if (has_vid && !v_engine->local_sdp_port) {
+		switch_core_media_choose_port(session, SWITCH_MEDIA_TYPE_VIDEO, 0);
+	}
+
+	bundle_has_vid = (uint8_t)(has_vid && v_engine->adv_sdp_port);
+	bundle_no_attr_mid = switch_channel_var_true(session->channel, "rtp_no_attr_mid");
+	bundle_no_audio_mid = switch_channel_var_true(session->channel, "rtp_no_audio_mid");
+	bundle_no_video_mid = switch_channel_var_true(session->channel, "rtp_no_video_mid");
+
+	/* Optional Unified Plan BUNDLE grouping. Only reference MIDs that will be
+	 * emitted below; SDP BUNDLE group values must exactly match a=mid lines. */
+	if (switch_core_media_bundle_should_offer(smh) && !bundle_no_attr_mid && !bundle_no_audio_mid) {
+		bundle_audio_mid = audio_mid ? audio_mid : "audio";
+		if (bundle_has_vid && !bundle_no_video_mid) {
+			bundle_video_mid = video_mid ? video_mid : "video";
+		}
+
+		if (!bundle_has_vid || bundle_video_mid) {
+			if (bundle_video_mid) {
+				switch_snprintf(groupbuf, sizeof(groupbuf), "a=group:BUNDLE %s %s\r\n", bundle_audio_mid, bundle_video_mid);
+			} else {
+				switch_snprintf(groupbuf, sizeof(groupbuf), "a=group:BUNDLE %s\r\n", bundle_audio_mid);
+			}
 		}
 	}
 
