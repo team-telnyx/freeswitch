@@ -3988,9 +3988,10 @@ static const char *bundle_drain_state_str(int state) {
 	}
 }
 
-/* BUNDLE audio frames must preserve the raw RTP data offset. switch_frame_dup()
+/* BUNDLE raw RTP frames must preserve the exact payload offset. switch_frame_dup()
  * resets RTP data to packet + 12, which corrupts packets with CSRC/header
- * extensions; keep this clone packet-oriented instead. */
+ * extensions. Allocate the public RTP packet layout so downstream raw-forward
+ * code has valid zero-initialized ext/ebody metadata for MID rewrite. */
 static switch_status_t tel6738_bundle_frame_dup(switch_frame_t *orig, switch_frame_t **clone)
 {
 	switch_frame_t *new_frame;
@@ -4009,9 +4010,9 @@ static switch_status_t tel6738_bundle_frame_dup(switch_frame_t *orig, switch_fra
 		switch_size_t datalen;
 		uintptr_t packet_addr = (uintptr_t)(void *)orig->packet;
 		uintptr_t data_addr = (uintptr_t)(void *)orig->data;
-		uint8_t *packet;
+		switch_rtp_packet_t *packet;
 
-		if (!packetlen || packetlen > SWITCH_RTP_MAX_BUF_LEN || !orig->data || data_addr < packet_addr || data_addr - packet_addr > packetlen) {
+		if (!packetlen || packetlen > offsetof(switch_rtp_packet_t, ext) || !orig->data || data_addr < packet_addr || data_addr - packet_addr > packetlen) {
 			return SWITCH_STATUS_FALSE;
 		}
 
@@ -4027,7 +4028,7 @@ static switch_status_t tel6738_bundle_frame_dup(switch_frame_t *orig, switch_fra
 		new_frame->img = NULL;
 		new_frame->extra_data = NULL;
 
-		packet = malloc(SWITCH_RTP_MAX_BUF_LEN);
+		packet = calloc(1, sizeof(*packet));
 		if (!packet) {
 			free(new_frame);
 			return SWITCH_STATUS_FALSE;
@@ -4036,9 +4037,9 @@ static switch_status_t tel6738_bundle_frame_dup(switch_frame_t *orig, switch_fra
 
 		new_frame->packet = packet;
 		new_frame->packetlen = packetlen;
-		new_frame->data = packet + data_offset;
+		new_frame->data = ((uint8_t *)packet) + data_offset;
 		new_frame->datalen = datalen;
-		new_frame->buflen = SWITCH_RTP_MAX_BUF_LEN;
+		new_frame->buflen = (uint32_t)sizeof(*packet);
 	} else {
 		if (!orig->data || !orig->buflen || orig->datalen > orig->buflen) {
 			return SWITCH_STATUS_FALSE;
