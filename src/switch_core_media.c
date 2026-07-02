@@ -268,6 +268,8 @@ struct switch_rtp_engine_s {
 	uint32_t bundle_drain_thread_audio_qfail;
 	switch_frame_buffer_t *bundle_audio_read_fb;
 	switch_frame_t *bundle_audio_read_fb_frame;
+	switch_thread_cond_t *bundle_audio_read_cond;
+	uint32_t bundle_audio_read_consumers;
 
 	uint8_t no_crypto;
 	uint8_t dtls_controller;
@@ -2826,6 +2828,9 @@ SWITCH_DECLARE(void) switch_media_handle_destroy(switch_core_session_t *session)
 	 * drain thread is stopped by switch_core_media_deactivate_rtp() above before
 	 * this buffer is freed. */
 	switch_mutex_lock(smh->bundle_drain_mutex);
+	while (v_engine->bundle_audio_read_consumers && v_engine->bundle_audio_read_cond) {
+		switch_thread_cond_timedwait(v_engine->bundle_audio_read_cond, smh->bundle_drain_mutex, 20000);
+	}
 	if (v_engine->bundle_audio_read_fb_frame && v_engine->bundle_audio_read_fb) {
 		switch_frame_buffer_free(v_engine->bundle_audio_read_fb, &v_engine->bundle_audio_read_fb_frame);
 		v_engine->bundle_audio_read_fb_frame = NULL;
@@ -2914,6 +2919,7 @@ SWITCH_DECLARE(switch_status_t) switch_media_handle_create(switch_media_handle_t
 		switch_mutex_init(&session->media_handle->sdp_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 		switch_mutex_init(&session->media_handle->control_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 		switch_mutex_init(&session->media_handle->bundle_drain_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
+		switch_thread_cond_create(&session->media_handle->engines[SWITCH_MEDIA_TYPE_VIDEO].bundle_audio_read_cond, switch_core_session_get_pool(session));
 
 		session->media_handle->engines[SWITCH_MEDIA_TYPE_AUDIO].ssrc =
 			(uint32_t) ((intptr_t) &session->media_handle->engines[SWITCH_MEDIA_TYPE_AUDIO] + (switch_time_t) time(NULL));
@@ -4569,6 +4575,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 			switch_mutex_lock(smh->bundle_drain_mutex);
 			if (veng->bundle_drain_state == BUNDLE_DRAIN_RUNNING) {
 				audio_fb = veng->bundle_audio_read_fb;
+				if (audio_fb) {
+					veng->bundle_audio_read_consumers++;
+				}
 			}
 			switch_mutex_unlock(smh->bundle_drain_mutex);
 
@@ -4581,6 +4590,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 			 * This prevents busy-spinning while giving reasonable latency. */
 			qst = switch_frame_buffer_pop_timeout(audio_fb, &apop, 20000);
 
+			switch_mutex_lock(smh->bundle_drain_mutex);
 			if (qst == SWITCH_STATUS_SUCCESS && apop && apop != (void *)1) {
 				switch_frame_t *audio_fb_frame = (switch_frame_t *) apop;
 				/* Release previous frame if any */
@@ -4595,10 +4605,23 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 			} else if (apop == (void *)1) {
 				/* Sentinel from drain thread stop; treat as break */
 				status = SWITCH_STATUS_BREAK;
-				goto end;
 			} else {
 				/* Timeout or empty; CNG-like behavior for audio */
 				engine->read_frame.datalen = 0;
+			}
+			if (veng->bundle_audio_read_consumers) {
+				veng->bundle_audio_read_consumers--;
+			}
+			if (!veng->bundle_audio_read_consumers && veng->bundle_audio_read_cond) {
+				switch_thread_cond_signal(veng->bundle_audio_read_cond);
+			}
+			switch_mutex_unlock(smh->bundle_drain_mutex);
+
+			if (qst == SWITCH_STATUS_SUCCESS && apop && apop != (void *)1) {
+				/* Frame copied above. */
+			} else if (apop == (void *)1) {
+				goto end;
+			} else {
 				continue;
 			}
 		} else {
