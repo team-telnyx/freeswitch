@@ -19125,6 +19125,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 	switch_frame_t *enc_frame = NULL, *write_frame = frame;
 	unsigned int flag = 0, need_codec = 0, perfect = 0, do_bugs = 0, do_write = 0, do_resample = 0, ptime_mismatch = 0, pass_cng = 0, resample = 0;
 	int did_write_resample = 0;
+	int16_t *resample_tmp = NULL;
 	switch_mutex_t *write_codec_mutex = NULL, *frame_codec_mutex = NULL;
 
 	switch_assert(session != NULL);
@@ -19406,20 +19407,37 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 		switch_mutex_lock(session->resample_mutex);
 		if (session->write_resampler) {
 
-			if (switch_resample_calc_buffer_size(session->write_resampler->to_rate, session->write_resampler->from_rate,
-												 write_frame->datalen / 2 / session->write_resampler->channels) > SWITCH_RECOMMENDED_BUFFER_SIZE) {
+			uint32_t out_bytes = switch_resample_calc_buffer_size(
+				session->write_resampler->to_rate,
+				session->write_resampler->from_rate,
+				write_frame->datalen / 2 / session->write_resampler->channels)
+				* session->write_resampler->channels;
 
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT, "%s not enough buffer space for required resample operation!\n",
-								  switch_channel_get_name(session->channel));
-				switch_channel_hangup(session->channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
-				switch_mutex_unlock(session->resample_mutex);
-				goto error;
+			switch_resample_process(session->write_resampler, data,
+				write_frame->datalen / 2 / session->write_resampler->channels);
+
+			if (out_bytes > write_frame->buflen) {
+				/* Resampled output exceeds the fixed write buffer. Use a temp buffer
+				 * to avoid losing the frame — the ptime mismatch path downstream will
+				 * chunk it into properly-sized encode passes. */
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+					"%s resample output %u exceeds buffer %u (to=%d from=%d datalen=%d ch=%d)\n",
+					switch_channel_get_name(session->channel),
+					out_bytes, write_frame->buflen,
+					session->write_resampler->to_rate,
+					session->write_resampler->from_rate,
+					write_frame->datalen,
+					session->write_resampler->channels);
+
+				switch_malloc(resample_tmp, out_bytes);
+				memcpy(resample_tmp, session->write_resampler->to,
+					session->write_resampler->to_len * 2 * session->write_resampler->channels);
+				write_frame->data = (uint8_t *)resample_tmp;
+				write_frame->buflen = out_bytes;
+			} else {
+				memcpy(data, session->write_resampler->to,
+					session->write_resampler->to_len * 2 * session->write_resampler->channels);
 			}
-
-
-			switch_resample_process(session->write_resampler, data, write_frame->datalen / 2 / session->write_resampler->channels);
-
-			memcpy(data, session->write_resampler->to, session->write_resampler->to_len * 2 * session->write_resampler->channels);
 
 			write_frame->samples = session->write_resampler->to_len;
 			write_frame->channels = session->write_resampler->channels;
@@ -19776,8 +19794,38 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 					short *data = write_frame->data;
 					switch_mutex_lock(session->resample_mutex);
 					if (session->read_resampler) {
-						switch_resample_process(session->read_resampler, data, write_frame->datalen / 2 / session->read_resampler->channels);
-						memcpy(data, session->read_resampler->to, session->read_resampler->to_len * 2 * session->read_resampler->channels);
+						uint32_t out_bytes = switch_resample_calc_buffer_size(
+							session->read_resampler->to_rate,
+							session->read_resampler->from_rate,
+							write_frame->datalen / 2 / session->read_resampler->channels)
+							* session->read_resampler->channels;
+
+						switch_resample_process(session->read_resampler, data,
+							write_frame->datalen / 2 / session->read_resampler->channels);
+
+						if (out_bytes > write_frame->buflen) {
+							/* Resampled output exceeds the fixed write buffer. Use a temp buffer
+							 * to avoid losing the frame — the ptime mismatch path downstream will
+							 * chunk it into properly-sized encode passes. */
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+								"%s read resample output %u exceeds buffer %u (to=%d from=%d datalen=%d ch=%d)\n",
+								switch_channel_get_name(session->channel),
+								out_bytes, write_frame->buflen,
+								session->read_resampler->to_rate,
+								session->read_resampler->from_rate,
+								write_frame->datalen,
+								session->read_resampler->channels);
+
+							switch_malloc(resample_tmp, out_bytes);
+							memcpy(resample_tmp, session->read_resampler->to,
+								session->read_resampler->to_len * 2 * session->read_resampler->channels);
+							write_frame->data = (uint8_t *)resample_tmp;
+							write_frame->buflen = out_bytes;
+						} else {
+							memcpy(data, session->read_resampler->to,
+								session->read_resampler->to_len * 2 * session->read_resampler->channels);
+						}
+
 						write_frame->samples = session->read_resampler->to_len;
 						write_frame->channels = session->read_resampler->channels;
 						write_frame->datalen = session->read_resampler->to_len * 2 * session->read_resampler->channels;
@@ -19820,6 +19868,17 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 	}
 
   error:
+
+	/* Free temp buffer if the resampler overflowed the fixed write buffer.
+	 * Restore both raw_write_frame and enc_write_frame since the read resampler
+	 * may have redirected either one's data pointer to the temp allocation. */
+	if (resample_tmp) {
+		free(resample_tmp);
+		session->raw_write_frame.data = session->raw_write_buf;
+		session->raw_write_frame.buflen = sizeof(session->raw_write_buf);
+		session->enc_write_frame.data = session->enc_write_buf;
+		session->enc_write_frame.buflen = sizeof(session->enc_write_buf);
+	}
 
 	/* Unlock the same mutex objects we locked above (see snapshot rationale). */
 	switch_mutex_unlock(frame_codec_mutex);
