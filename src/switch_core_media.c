@@ -2821,12 +2821,17 @@ SWITCH_DECLARE(void) switch_media_handle_destroy(switch_core_session_t *session)
 
 	if (v_engine->read_fb) switch_frame_buffer_destroy(&v_engine->read_fb);
 
-	/* TEL-6738: cleanup audio drain frame buffer */
+	/* TEL-6738: cleanup audio drain frame buffer.
+	 * bundle_audio_read_fb lifetime is protected by bundle_drain_mutex; the
+	 * drain thread is stopped by switch_core_media_deactivate_rtp() above before
+	 * this buffer is freed. */
+	switch_mutex_lock(smh->bundle_drain_mutex);
 	if (v_engine->bundle_audio_read_fb_frame && v_engine->bundle_audio_read_fb) {
 		switch_frame_buffer_free(v_engine->bundle_audio_read_fb, &v_engine->bundle_audio_read_fb_frame);
 		v_engine->bundle_audio_read_fb_frame = NULL;
 	}
 	if (v_engine->bundle_audio_read_fb) switch_frame_buffer_destroy(&v_engine->bundle_audio_read_fb);
+	switch_mutex_unlock(smh->bundle_drain_mutex);
 
 	if (smh->msrp_session) switch_msrp_session_destroy(&smh->msrp_session);
 }
@@ -4112,25 +4117,34 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 				v_engine->bundle_video_dup_fail_drops++;
 			}
 		} else if (mline->media_type == SWITCH_MEDIA_TYPE_AUDIO) {
-			/* Clone and queue to audio read_fb for the audio read path */
+			/* Clone and queue to audio read_fb for the audio read path.
+			 * Serialize fb access with stop/teardown so the drain thread cannot
+			 * duplicate into a buffer while another thread is disabling BUNDLE. */
 			switch_frame_t *dupframe = NULL;
+			switch_frame_buffer_t *audio_fb = NULL;
 
 			v_engine->bundle_audio_demux_packets++;
 			v_engine->bundle_drain_thread_audio_routed++;
 
-			if (v_engine->bundle_audio_read_fb) {
-				if (switch_frame_buffer_dup(v_engine->bundle_audio_read_fb, &drain_frame, &dupframe) == SWITCH_STATUS_SUCCESS) {
-					if (switch_frame_buffer_trypush(v_engine->bundle_audio_read_fb, dupframe) != SWITCH_STATUS_SUCCESS) {
+			switch_mutex_lock(smh->bundle_drain_mutex);
+			if (v_engine->bundle_drain_state == BUNDLE_DRAIN_RUNNING) {
+				audio_fb = v_engine->bundle_audio_read_fb;
+			}
+
+			if (audio_fb) {
+				if (switch_frame_buffer_dup(audio_fb, &drain_frame, &dupframe) == SWITCH_STATUS_SUCCESS) {
+					if (switch_frame_buffer_trypush(audio_fb, dupframe) != SWITCH_STATUS_SUCCESS) {
 						v_engine->bundle_drain_thread_audio_qfail++;
 						if (v_engine->bundle_drain_thread_audio_qfail <= 10 || !(v_engine->bundle_drain_thread_audio_qfail % 1000)) {
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 								"TEL-6738 drain thread audio queue full count=%u\n",
 								v_engine->bundle_drain_thread_audio_qfail);
 						}
-						switch_frame_buffer_free(v_engine->bundle_audio_read_fb, &dupframe);
+						switch_frame_buffer_free(audio_fb, &dupframe);
 					}
 				}
 			}
+			switch_mutex_unlock(smh->bundle_drain_mutex);
 		}
 	}
 
@@ -15120,7 +15134,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 	/* Optional Unified Plan BUNDLE grouping */
 	if (switch_core_media_bundle_should_offer(smh)) {
 		const char *am = audio_mid ? audio_mid : "0";
-		const char *vm = (v_engine && (v_engine->codec_negotiated || switch_channel_test_flag(session->channel, CF_VIDEO))) ? (video_mid ? video_mid : "1") : NULL;
+		const char *vm = has_vid ? (video_mid ? video_mid : "1") : NULL;
 		if (vm) {
 			switch_snprintf(groupbuf, sizeof(groupbuf), "a=group:BUNDLE %s %s\r\n", am, vm);
 		} else {
