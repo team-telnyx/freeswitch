@@ -771,22 +771,6 @@ SWITCH_DECLARE(uint32_t) switch_core_media_get_video_fps(switch_core_session_t *
 	return fps;
 }
 
-SWITCH_DECLARE(switch_bool_t) switch_core_media_has_video_refresh_rtcp_fb(switch_core_session_t *session)
-{
-	switch_media_handle_t *smh;
-	switch_rtp_engine_t *v_engine;
-
-	switch_assert(session);
-
-	if (!(smh = session->media_handle)) {
-		return SWITCH_FALSE;
-	}
-
-	v_engine = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
-
-	return (v_engine->fir || v_engine->pli) ? SWITCH_TRUE : SWITCH_FALSE;
-}
-
 static switch_t38_options_t * switch_core_media_process_udptl(switch_core_session_t *session, sdp_session_t *sdp, sdp_media_t *m)
 {
 	switch_t38_options_t *t38_options = switch_channel_get_private(session->channel, "t38_options");
@@ -9909,8 +9893,6 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 			const switch_codec_implementation_t *mimp = NULL;
 			int i;
 			const char *inherit_video_fmtp = NULL;
-			int rtcp_fb_fir = 0, rtcp_fb_pli = 0, rtcp_fb_nack = 0, rtcp_fb_tmmbr = 0;
-			uint8_t prev_fir = 0, prev_pli = 0, prev_nack = 0, prev_tmmbr = 0;
 			
 			switch_core_media_set_rmode(smh->session, SWITCH_MEDIA_TYPE_VIDEO, sdp_media_flow(m->m_mode), sdp_type);
 			
@@ -10019,19 +10001,19 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 				} else if (!strcasecmp(attr->a_name, "rtcp-fb")) {
 					if (!zstr(attr->a_value)) {
 						if (switch_stristr("fir", attr->a_value)) {
-							rtcp_fb_fir++;
+							v_engine->fir++;
 						}
 
 						if (switch_stristr("pli", attr->a_value)) {
-							rtcp_fb_pli++;
+							v_engine->pli++;
 						}
 
 						if (switch_stristr("nack", attr->a_value)) {
-							rtcp_fb_nack++;
+							v_engine->nack++;
 						}
 
 						if (switch_stristr("tmmbr", attr->a_value)) {
-							rtcp_fb_tmmbr++;
+							v_engine->tmmbr++;
 						}
 
 						rtcp_auto_video = 1;
@@ -10239,27 +10221,10 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 					v_engine->reset_codec = 1;
 				}
 
-				prev_fir = v_engine->fir;
-				prev_pli = v_engine->pli;
-				prev_nack = v_engine->nack;
-				prev_tmmbr = v_engine->tmmbr;
-
-				v_engine->fir = rtcp_fb_fir;
-				v_engine->pli = rtcp_fb_pli;
-				v_engine->nack = rtcp_fb_nack;
-				v_engine->tmmbr = rtcp_fb_tmmbr;
-
-				if (switch_core_media_set_video_codec(session, 0) != SWITCH_STATUS_SUCCESS) {
-					vmatch = 0;
-				} else if (check_ice(smh, SWITCH_MEDIA_TYPE_VIDEO, sdp, m, sdp_type) == SWITCH_STATUS_FALSE) {
-					vmatch = 0;
-				}
-
-				if (!vmatch) {
-					v_engine->fir = prev_fir;
-					v_engine->pli = prev_pli;
-					v_engine->nack = prev_nack;
-					v_engine->tmmbr = prev_tmmbr;
+				if (switch_core_media_set_video_codec(session, 0) == SWITCH_STATUS_SUCCESS) {
+					if (check_ice(smh, SWITCH_MEDIA_TYPE_VIDEO, sdp, m, sdp_type) == SWITCH_STATUS_FALSE) {
+						vmatch = 0;
+					}
 				}
 			}
 

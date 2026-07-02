@@ -259,7 +259,6 @@ SWITCH_DECLARE(int) switch_core_media_pre_validate_offer(switch_core_session_t *
 
 
 SWITCH_DECLARE(uint32_t) switch_core_media_get_video_fps(switch_core_session_t *session);
-SWITCH_DECLARE(switch_bool_t) switch_core_media_has_video_refresh_rtcp_fb(switch_core_session_t *session);
 SWITCH_DECLARE(void) switch_core_media_set_rtp_session(switch_core_session_t *session, switch_media_type_t type, switch_rtp_t *rtp_session);
 SWITCH_DECLARE(switch_rtp_t *) switch_core_media_get_rtp_session(switch_core_session_t *session, switch_media_type_t type);
 
