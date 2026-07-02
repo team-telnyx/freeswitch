@@ -2770,6 +2770,7 @@ SWITCH_DECLARE(void) switch_core_media_set_stats(switch_core_session_t *session)
 
 
 
+static void switch_core_media_flush_queued_read_frames(switch_rtp_engine_t *engine);
 static void tel6738_bundle_audio_queue_flush(switch_frame_buffer_t *audio_fb);
 
 SWITCH_DECLARE(void) switch_media_handle_destroy(switch_core_session_t *session)
@@ -2818,11 +2819,7 @@ SWITCH_DECLARE(void) switch_media_handle_destroy(switch_core_session_t *session)
 
 	if (a_engine->write_fb) switch_frame_buffer_destroy(&a_engine->write_fb);
 
-	if (v_engine->read_fb_frame && v_engine->read_fb) {
-		switch_frame_buffer_free(v_engine->read_fb, &v_engine->read_fb_frame);
-		v_engine->read_fb_frame = NULL;
-	}
-
+	switch_core_media_flush_queued_read_frames(v_engine);
 	if (v_engine->read_fb) switch_frame_buffer_destroy(&v_engine->read_fb);
 
 	/* TEL-6738: cleanup audio drain frame buffer.
@@ -3936,8 +3933,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_refresh_media_timer(switch_cor
 
 static void switch_core_media_release_queued_read_frame(switch_rtp_engine_t *engine)
 {
-	if (engine && engine->read_fb && engine->read_fb_frame) {
-		switch_frame_buffer_free(engine->read_fb, &engine->read_fb_frame);
+	if (engine && engine->read_fb_frame) {
+		switch_frame_free(&engine->read_fb_frame);
 		engine->read_fb_frame = NULL;
 	}
 }
@@ -3954,7 +3951,7 @@ static void switch_core_media_flush_queued_read_frames(switch_rtp_engine_t *engi
 
 	while (switch_frame_buffer_trypop(engine->read_fb, &pop) == SWITCH_STATUS_SUCCESS && pop) {
 		switch_frame_t *frame = (switch_frame_t *) pop;
-		switch_frame_buffer_free(engine->read_fb, &frame);
+		switch_frame_free(&frame);
 		pop = NULL;
 	}
 }
@@ -4201,13 +4198,14 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 		}
 
 		if (mline->media_type == SWITCH_MEDIA_TYPE_VIDEO) {
-			/* Clone and queue to video read_fb */
+			/* Clone and queue to video read_fb. BUNDLE video read_fb stores
+			 * malloc-backed frame clones, not frame-buffer-owned clones. */
 			switch_frame_t *dupframe = NULL;
 
 			v_engine->bundle_video_demux_packets++;
 			v_engine->bundle_drain_thread_video_routed++;
 
-			if (switch_frame_buffer_dup(v_engine->read_fb, &drain_frame, &dupframe) == SWITCH_STATUS_SUCCESS) {
+			if (tel6738_bundle_frame_dup(&drain_frame, &dupframe) == SWITCH_STATUS_SUCCESS) {
 				if (switch_frame_buffer_trypush(v_engine->read_fb, dupframe) != SWITCH_STATUS_SUCCESS) {
 					v_engine->bundle_queue_full_drops++;
 					v_engine->bundle_drain_thread_qfail++;
@@ -4217,7 +4215,7 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 							v_engine->bundle_queue_full_drops,
 							v_engine->bundle_video_enqueued, v_engine->bundle_video_dequeued);
 					}
-					switch_frame_buffer_free(v_engine->read_fb, &dupframe);
+					switch_frame_free(&dupframe);
 				} else {
 					v_engine->bundle_video_enqueued++;
 				}
@@ -4451,7 +4449,7 @@ static switch_bool_t switch_core_media_route_bundled_rtp(switch_media_handle_t *
 		}
 
 		v_engine->bundle_video_demux_packets++;
-		if (switch_frame_buffer_dup(v_engine->read_fb, &engine->read_frame, &dupframe) == SWITCH_STATUS_SUCCESS) {
+		if (tel6738_bundle_frame_dup(&engine->read_frame, &dupframe) == SWITCH_STATUS_SUCCESS) {
 			if (switch_frame_buffer_trypush(v_engine->read_fb, dupframe) != SWITCH_STATUS_SUCCESS) {
 				v_engine->bundle_queue_full_drops++;
 				if (v_engine->bundle_queue_full_drops <= 10 || !(v_engine->bundle_queue_full_drops % 1000)) {
@@ -4461,7 +4459,7 @@ static switch_bool_t switch_core_media_route_bundled_rtp(switch_media_handle_t *
 						v_engine->bundle_video_enqueued, v_engine->bundle_video_dequeued, switch_str_nil(mid), engine->read_frame.ssrc,
 						engine->read_frame.payload, engine->read_frame.seq, engine->read_frame.timestamp, engine->read_frame.m, engine->read_frame.datalen);
 				}
-				switch_frame_buffer_free(v_engine->read_fb, &dupframe);
+				switch_frame_free(&dupframe);
 			} else {
 				v_engine->bundle_video_enqueued++;
 				if (v_engine->bundle_video_enqueued <= 10 || !(v_engine->bundle_video_enqueued % 500)) {
@@ -13980,6 +13978,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 				if (v_engine->bundle_write_state) {
 					switch_rtp_write_state_reset(v_engine->bundle_write_state);
 				}
+				/* BUNDLE video read_fb stores malloc-backed frames cloned by
+				 * tel6738_bundle_frame_dup(). Do not use switch_frame_buffer_dup/free()
+				 * with this queue; the frame-buffer free-list is not the owner. */
 				if (!v_engine->read_fb && switch_frame_buffer_create(&v_engine->read_fb, 500) != SWITCH_STATUS_SUCCESS) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
 						"BUNDLE video failed to create queued RTP read buffer\n");
