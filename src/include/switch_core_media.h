@@ -429,7 +429,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_unlock_video_file(switch_core_
 SWITCH_DECLARE(switch_status_t) switch_core_media_set_video_file(switch_core_session_t *session, switch_file_handle_t *fh, switch_rw_t rw);
 SWITCH_DECLARE(switch_file_handle_t *) switch_core_media_get_video_file(switch_core_session_t *session, switch_rw_t rw);
 SWITCH_DECLARE(switch_bool_t) switch_core_session_in_video_thread(switch_core_session_t *session);
-/* TEL-6738: Returns SWITCH_TRUE when this session's video engine shares the BUNDLE
+/* Returns SWITCH_TRUE when this session's video engine shares the BUNDLE
  * transport with audio (bundled_with_audio) and that shared audio RTP session is ready.
  * Used by writers/bridge to bypass video-specific gates (e.g. CF_VIDEO_READY) on
  * a BUNDLE leg whose underlying transport (ICE+DTLS) is already up via audio. */

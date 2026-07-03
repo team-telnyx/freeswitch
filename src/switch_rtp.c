@@ -346,7 +346,6 @@ struct switch_rtp_write_state {
 	uint8_t video_delta_mode;
 	uint8_t video_frame_open;
 	uint8_t video_frame_last_set;
-	uint32_t debug_bundle_write_count;
 	uint32_t video_frame_src_ts;
 	uint32_t video_frame_out_ts;
 	uint32_t video_frame_last_src_ts;
@@ -487,7 +486,7 @@ struct switch_rtp {
 	switch_mutex_t *flag_mutex;
 	switch_mutex_t *read_mutex;
 	switch_mutex_t *write_mutex;
-	switch_mutex_t *bundle_video_frame_lock;  /* TEL-6738: serializes video frame burst vs audio */
+	switch_mutex_t *bundle_video_frame_lock;  /* serializes video frame burst vs audio */
 	/* Drain-open-frame-first: the video writer signals that a VP8 frame is
 	   mid-emission so the audio writer can briefly defer, keeping fragments
 	   contiguous on the shared BUNDLE 5-tuple.  All reads/writes of these
@@ -497,8 +496,7 @@ struct switch_rtp {
 	uint32_t bundle_audio_deferred_total;
 	uint32_t bundle_audio_stale_log_count;
 	uint32_t bundle_audio_pt_restamped_total;
-	uint32_t tel6738_vp8_presrtp_logs;
-	switch_payload_t bundle_audio_pt;  /* TEL-6738: local egress audio PT, immune to video set_default_payload on shared BUNDLE session */
+	switch_payload_t bundle_audio_pt;  /* local egress audio PT, immune to video set_default_payload on shared BUNDLE session */
 	switch_mutex_t *ice_mutex;
 	switch_timer_t timer;
 	switch_timer_t write_timer;
@@ -2540,7 +2538,7 @@ static int rtcp_stats(switch_rtp_t *rtp_session)
 	if(!rtp_session->rtcp_sock_output || !rtp_session->flags[SWITCH_RTP_FLAG_ENABLE_RTCP] || rtp_session->flags[SWITCH_RTP_FLAG_RTCP_PASSTHRU] || !rtp_session->rtcp_interval)
 		return 0; /* do not process RTCP in current state */
 
-	/* TEL6738: In BUNDLE mode the shared audio RTP session receives both audio
+	/* In BUNDLE mode the shared audio RTP session receives both audio
 	 * and video packets with different SSRCs and independent seq number spaces.
 	 * Running rtcp_stats on video packets corrupts audio RTCP stats (seq tracking,
 	 * jitter, loss) and triggers rtcp_stats_init on every SSRC flip (~2000+/call).
@@ -2827,7 +2825,7 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 		struct switch_rtcp_sender_info *rtcp_sender_info = 0;
 		switch_bool_t is_only_receiver = FALSE;
 		switch_bool_t report_sent = FALSE;
-		int tel6738_fb_pli = 0, tel6738_fb_fir = 0, tel6738_fb_nack = 0;
+		int fb_pli = 0, fb_fir = 0, fb_nack = 0;
 
 		if (!rtcp_fb) {
 			rtp_session->rtcp_last_sent = now;
@@ -2919,7 +2917,7 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 
 		rtp_session->rtcp_send_msg.header.length = htons((uint16_t)(rtcp_bytes / 4) - 1);
 
-		/* TEL6738: tel6738_fb_{pli,fir,nack} declared at block top above */
+		/* fb_{pli,fir,nack} declared at block top above */
 		if (rtp_has_video_feedback(rtp_session)) {
 			if (rtp_session->pli_count) {
 				switch_rtcp_ext_hdr_t *ext_hdr;
@@ -2936,11 +2934,11 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 				ext_hdr->recv_ssrc = htonl(rtp_feedback_remote_ssrc(rtp_session));
 				rtp_session->rtcp_vstats.video_in.pli_count++;
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-								  "TEL6738 RTCP send PLI %s local_ssrc=%u remote_ssrc=%u fb_local_ssrc=%u fb_remote_ssrc=%u count=%u\n",
+								  "BUNDLE RTCP send PLI %s local_ssrc=%u remote_ssrc=%u fb_local_ssrc=%u fb_remote_ssrc=%u count=%u\n",
 								  switch_core_session_get_name(rtp_session->session), rtp_session->ssrc, rtp_session->remote_ssrc,
 								  rtp_feedback_local_ssrc(rtp_session), rtp_feedback_remote_ssrc(rtp_session),
 								  rtp_session->rtcp_vstats.video_in.pli_count);
-				tel6738_fb_pli = 1;
+				fb_pli = 1;
 
 				ext_hdr->length = htons((uint8_t)(sizeof(switch_rtcp_ext_hdr_t) / 4) - 1);
 				rtcp_bytes += sizeof(switch_rtcp_ext_hdr_t);
@@ -2969,10 +2967,10 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 					*nack = cur_nack[n];
 
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-								  "TEL6738 RTCP send NACK %s seq=%u local_ssrc=%u remote_ssrc=%u count=%d\n",
+								  "BUNDLE RTCP send NACK %s seq=%u local_ssrc=%u remote_ssrc=%u count=%d\n",
 								  switch_core_session_get_name(rtp_session->session), ntohs(*nack & 0xFFFF),
 								  rtp_feedback_local_ssrc(rtp_session), rtp_feedback_remote_ssrc(rtp_session), rtp_session->rtcp_vstats.video_in.nack_count);
-					tel6738_fb_nack = 1;
+					fb_nack = 1;
 
 					rtcp_bytes += sizeof(switch_rtcp_ext_hdr_t) + sizeof(cur_nack[n]);
 					cur_nack[n] = 0;
@@ -3014,10 +3012,10 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 
 				rtp_session->rtcp_vstats.video_in.fir_count++;
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-								  "TEL6738 RTCP send FIR %s fir_seq=%d local_ssrc=%u remote_ssrc=%u count=%u\n",
+								  "BUNDLE RTCP send FIR %s fir_seq=%d local_ssrc=%u remote_ssrc=%u count=%u\n",
 								  switch_core_session_get_name(rtp_session->session), rtp_session->fir_seq,
 								  rtp_feedback_local_ssrc(rtp_session), rtp_feedback_remote_ssrc(rtp_session), rtp_session->rtcp_vstats.video_in.fir_count);
-				tel6738_fb_fir = 1;
+				fb_fir = 1;
 
 				rtp_session->fir_seq++;
 
@@ -3152,10 +3150,10 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,"RTCP packet not written\n");
 		} else {
 			rtp_session->stats.inbound.period_packet_count = 0;
-			if (rtp_session->bundle_has_video && (tel6738_fb_pli || tel6738_fb_fir || tel6738_fb_nack)) {
+			if (rtp_session->bundle_has_video && (fb_pli || fb_fir || fb_nack)) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-								  "TEL6738 RTCP BUNDLE fb sent bytes=%" SWITCH_SIZE_T_FMT " pli=%d fir=%d nack=%d fb_local=%u fb_remote=%u\n",
-								  rtcp_bytes, tel6738_fb_pli, tel6738_fb_fir, tel6738_fb_nack,
+								  "BUNDLE RTCP feedback sent bytes=%" SWITCH_SIZE_T_FMT " pli=%d fir=%d nack=%d fb_local=%u fb_remote=%u\n",
+								  rtcp_bytes, fb_pli, fb_fir, fb_nack,
 								  rtp_feedback_local_ssrc(rtp_session), rtp_feedback_remote_ssrc(rtp_session));
 			}
 		}
@@ -5583,7 +5581,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_create(switch_rtp_t **new_rtp_session
 	rtp_session->te = INVALID_PT;
 	rtp_session->recv_te = INVALID_PT;
 	rtp_session->cng_pt = INVALID_PT;
-	rtp_session->bundle_audio_pt = INVALID_PT;  /* TEL-6738: until BUNDLE setup captures the local audio PT */
+	rtp_session->bundle_audio_pt = INVALID_PT;  /* until BUNDLE setup captures the local audio PT */
 	rtp_session->session = session;
 	rtp_session->rtcp_probe = 0;
 	rtp_session->ignore_rtp_during_dtmf_timeout = SWITCH_RTP_DEFAULT_IGNORE_DTMF_TIMEOUT_MS;
@@ -6337,7 +6335,7 @@ SWITCH_DECLARE(void) switch_rtp_video_refresh(switch_rtp_t *rtp_session)
 	if (!rtp_write_ready(rtp_session, 0, __LINE__)) {
 		if (rtp_session && rtp_session->bundle_has_video && rtp_session->session) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-							  "TEL6738 RTCP queue FIR DROPPED: rtp_write_ready=0 ice_user=%s ice_rready=%d dtls=%p dtls_state=%d\n",
+							  "BUNDLE RTCP queue FIR DROPPED: rtp_write_ready=0 ice_user=%s ice_rready=%d dtls=%p dtls_state=%d\n",
 							  rtp_session->ice.ice_user ? rtp_session->ice.ice_user : "(null)",
 							  (int)(rtp_session->ice.rready || rtp_session->ice.ready),
 							  (void *)rtp_session->dtls,
@@ -6349,12 +6347,12 @@ SWITCH_DECLARE(void) switch_rtp_video_refresh(switch_rtp_t *rtp_session)
 	if (rtp_has_video_feedback(rtp_session) && (rtp_session->ice.ice_user || rtp_session->flags[SWITCH_RTP_FLAG_FIR] || rtp_session->flags[SWITCH_RTP_FLAG_OLD_FIR])) {
 		rtp_session->fir_count = 1;
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-						  "TEL6738 RTCP queue FIR %s local_ssrc=%u remote_ssrc=%u fb_local_ssrc=%u fb_remote_ssrc=%u\n",
+						  "BUNDLE RTCP queue FIR %s local_ssrc=%u remote_ssrc=%u fb_local_ssrc=%u fb_remote_ssrc=%u\n",
 						  switch_core_session_get_name(rtp_session->session), rtp_session->ssrc, rtp_session->remote_ssrc,
 						  rtp_feedback_local_ssrc(rtp_session), rtp_feedback_remote_ssrc(rtp_session));
 	} else if (rtp_session->bundle_has_video) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-						  "TEL6738 RTCP queue FIR DROPPED: has_video_fb=%d ice_user=%s fir=%d old_fir=%d\n",
+						  "BUNDLE RTCP queue FIR DROPPED: has_video_fb=%d ice_user=%s fir=%d old_fir=%d\n",
 						  rtp_has_video_feedback(rtp_session) ? 1 : 0,
 						  rtp_session->ice.ice_user ? rtp_session->ice.ice_user : "(null)",
 						  (int)rtp_session->flags[SWITCH_RTP_FLAG_FIR],
@@ -6368,7 +6366,7 @@ SWITCH_DECLARE(void) switch_rtp_video_loss(switch_rtp_t *rtp_session)
 	if (!rtp_write_ready(rtp_session, 0, __LINE__)) {
 		if (rtp_session && rtp_session->bundle_has_video && rtp_session->session) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-							  "TEL6738 RTCP queue PLI DROPPED: rtp_write_ready=0 ice_user=%s ice_rready=%d dtls=%p dtls_state=%d\n",
+							  "BUNDLE RTCP queue PLI DROPPED: rtp_write_ready=0 ice_user=%s ice_rready=%d dtls=%p dtls_state=%d\n",
 							  rtp_session->ice.ice_user ? rtp_session->ice.ice_user : "(null)",
 							  (int)(rtp_session->ice.rready || rtp_session->ice.ready),
 							  (void *)rtp_session->dtls,
@@ -6380,12 +6378,12 @@ SWITCH_DECLARE(void) switch_rtp_video_loss(switch_rtp_t *rtp_session)
 	if (rtp_has_video_feedback(rtp_session) && (rtp_session->ice.ice_user || rtp_session->flags[SWITCH_RTP_FLAG_PLI])) {
 		rtp_session->pli_count = 1;
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-						  "TEL6738 RTCP queue PLI %s local_ssrc=%u remote_ssrc=%u fb_local_ssrc=%u fb_remote_ssrc=%u\n",
+						  "BUNDLE RTCP queue PLI %s local_ssrc=%u remote_ssrc=%u fb_local_ssrc=%u fb_remote_ssrc=%u\n",
 						  switch_core_session_get_name(rtp_session->session), rtp_session->ssrc, rtp_session->remote_ssrc,
 						  rtp_feedback_local_ssrc(rtp_session), rtp_feedback_remote_ssrc(rtp_session));
 	} else if (rtp_session->bundle_has_video) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-						  "TEL6738 RTCP queue PLI DROPPED: has_video_fb=%d ice_user=%s pli=%d\n",
+						  "BUNDLE RTCP queue PLI DROPPED: has_video_fb=%d ice_user=%s pli=%d\n",
 						  rtp_has_video_feedback(rtp_session) ? 1 : 0,
 						  rtp_session->ice.ice_user ? rtp_session->ice.ice_user : "(null)",
 						  (int)rtp_session->flags[SWITCH_RTP_FLAG_PLI]);
@@ -8065,7 +8063,7 @@ fork_end:
 
 
 		}
-		/* BUNDLE: skip stats/JB for video packets on audio session */
+		/* skip stats/JB for video packets on audio session */
 		if (*bytes && rtp_should_bypass_audio_jb(rtp_session)) {
 			rtp_session->debug_bundle_raw_read_count++;
 			if (rtp_session->debug_bundle_raw_read_count <= 10 || !(rtp_session->debug_bundle_raw_read_count % 500)) {
@@ -8488,7 +8486,7 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 				 * request here runs once per inbound FIR/PLI and has been observed to flood
 				 * browsers at 10+ FIR/s, stalling the encoder during call setup.
 				 *
-				 * TEL-6738 hangup-race guard: a stray RTCP packet can be drained after the
+				 * BUNDLE hangup-race guard: a stray RTCP packet can be drained after the
 				 * local BUNDLE channel has begun teardown. Calling refresh propagation on the
 				 * partner during that window has been observed to delay the partner's
 				 * CS_HANGUP transition (partner stuck in CS_EXCHANGE_MEDIA until the far-end
@@ -8497,7 +8495,7 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 
 				if (!switch_channel_up_nosig(local_channel)) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-									  "TEL6738 RTCP recv BUNDLE FIR/PLI %s local channel down, skipping partner propagation\n",
+									  "BUNDLE RTCP recv FIR/PLI %s local channel down, skipping partner propagation\n",
 									  switch_core_session_get_name(rtp_session->session));
 				} else {
 					switch_core_session_t *partner_session = NULL;
@@ -8511,19 +8509,19 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 							refresh_status = switch_core_session_request_video_refresh(partner_session);
 							switch_channel_set_flag(partner_channel, CF_VIDEO_REFRESH_REQ);
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-											  "TEL6738 RTCP recv BUNDLE FIR/PLI %s -> partner %s type=%u fmt=%u send_ssrc=%u recv_ssrc=%u refresh_status=%d\n",
+											  "BUNDLE RTCP recv FIR/PLI %s -> partner %s type=%u fmt=%u send_ssrc=%u recv_ssrc=%u refresh_status=%d\n",
 											  switch_core_session_get_name(rtp_session->session), switch_core_session_get_name(partner_session),
 											  msg->header.type, extp->header.fmt,
 											  ntohl(extp->header.send_ssrc), ntohl(extp->header.recv_ssrc), refresh_status);
 						} else {
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-											  "TEL6738 RTCP recv BUNDLE FIR/PLI %s partner %s not up, skipping refresh\n",
+											  "BUNDLE RTCP recv FIR/PLI %s partner %s not up, skipping refresh\n",
 											  switch_core_session_get_name(rtp_session->session), switch_core_session_get_name(partner_session));
 						}
 						switch_core_session_rwunlock(partner_session);
 					} else {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
-										  "TEL6738 RTCP recv BUNDLE FIR/PLI %s but no bridged partner found\n",
+										  "BUNDLE RTCP recv FIR/PLI %s but no bridged partner found\n",
 										  switch_core_session_get_name(rtp_session->session));
 					}
 					/* Also flag local channel for bridge thread b_channel visibility (belt-and-suspenders) */
@@ -8533,7 +8531,7 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 				switch_core_media_gen_key_frame(rtp_session->session);
 				switch_core_session_request_video_refresh(rtp_session->session);
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-								  "TEL6738 RTCP recv FIR/PLI %s type=%u fmt=%u send_ssrc=%u recv_ssrc=%u\n",
+								  "BUNDLE RTCP recv FIR/PLI %s type=%u fmt=%u send_ssrc=%u recv_ssrc=%u\n",
 								  switch_core_session_get_name(rtp_session->session), msg->header.type, extp->header.fmt,
 								  ntohl(extp->header.send_ssrc), ntohl(extp->header.recv_ssrc));
 				switch_channel_set_flag(switch_core_session_get_channel(rtp_session->session), CF_VIDEO_REFRESH_REQ);
@@ -8545,8 +8543,8 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 			int i;
 
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-							  "TEL6738 RTCP recv %sNACK %s count=%d send_ssrc=%u recv_ssrc=%u local_ssrc=%u remote_ssrc=%u bundle_has_video=%u\n",
-							  rtp_session->bundle_has_video ? "BUNDLE " : "",
+							  "BUNDLE RTCP recv %sNACK %s count=%d send_ssrc=%u recv_ssrc=%u local_ssrc=%u remote_ssrc=%u bundle_has_video=%u\n",
+							  rtp_session->bundle_has_video ? "bundled " : "",
 							  switch_core_session_get_name(rtp_session->session), ntohs(extp->header.length) - 2,
 							  ntohl(extp->header.send_ssrc), ntohl(extp->header.recv_ssrc), rtp_session->ssrc, rtp_session->remote_ssrc,
 							  rtp_session->bundle_has_video);
@@ -9820,7 +9818,7 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 			*flags |= SFF_CNG;
 			*payload_type = (switch_payload_t) rtp_session->last_rtp_hdr.pt;
 			ret = 2 + rtp_header_len;
-			/* TEL6738: BUNDLE drain thread poll-timeouts produce CNG returns at ~1ms
+			/* BUNDLE drain thread poll-timeouts produce CNG returns at ~1ms
 			 * intervals. These are not real packet skips -- do not inflate the counter
 			 * which is shared with the video engine stats via BUNDLE RTP session. */
 			if (!(io_flags & SWITCH_IO_FLAG_BUNDLE_DRAIN)) {
@@ -10240,107 +10238,6 @@ static int rtp_add_extension_header(switch_rtp_t *rtp_session, rtp_msg_t *send_m
 	return finallen;
 }
 
-/* TEL-6738 diagnostic helpers: inspect the RTP payload exactly as it will enter SRTP. */
-static switch_status_t tel6738_rtp_payload_view(rtp_msg_t *send_msg, switch_size_t bytes, const uint8_t **payload, switch_size_t *payload_len)
-{
-	size_t csrc_bytes;
-	size_t ext_total = 0;
-	size_t off;
-
-	if (!send_msg || !payload || !payload_len || bytes < rtp_header_len) {
-		return SWITCH_STATUS_FALSE;
-	}
-
-	csrc_bytes = (size_t)send_msg->header.cc * sizeof(uint32_t);
-	off = rtp_header_len + csrc_bytes;
-
-	if (bytes < off) {
-		return SWITCH_STATUS_FALSE;
-	}
-
-	if (send_msg->header.x) {
-		switch_rtp_hdr_ext_t *ext;
-		uint16_t words;
-
-		if (bytes < off + 4) {
-			return SWITCH_STATUS_FALSE;
-		}
-
-		ext = (switch_rtp_hdr_ext_t *)(send_msg->body + csrc_bytes);
-		words = ntohs(ext->length);
-		ext_total = 4 + ((size_t)words * 4);
-		if (bytes < off + ext_total) {
-			return SWITCH_STATUS_FALSE;
-		}
-		off += ext_total;
-	}
-
-	*payload = ((const uint8_t *)&send_msg->header) + off;
-	*payload_len = bytes - off;
-	return SWITCH_STATUS_SUCCESS;
-}
-
-static switch_bool_t tel6738_vp8_probe(const uint8_t *payload, switch_size_t payload_len, uint8_t *vp8_start, uint8_t *vp8_pid, uint8_t *vp8_key, uint8_t *vp8_sync)
-{
-	size_t off = 0;
-	uint8_t b0;
-	uint8_t ext;
-	uint8_t has_i;
-	uint8_t has_l;
-	uint8_t has_t;
-	uint8_t has_k;
-
-	if (vp8_start) *vp8_start = 0;
-	if (vp8_pid) *vp8_pid = 0;
-	if (vp8_key) *vp8_key = 0;
-	if (vp8_sync) *vp8_sync = 0;
-
-	if (!payload || payload_len < 1) {
-		return SWITCH_FALSE;
-	}
-
-	b0 = payload[off++];
-	if (vp8_start) *vp8_start = (uint8_t)((b0 & 0x10) ? 1 : 0);
-	if (vp8_pid) *vp8_pid = (uint8_t)(b0 & 0x0f);
-
-	if (b0 & 0x80) {
-		if (payload_len < off + 1) {
-			return SWITCH_FALSE;
-		}
-		ext = payload[off++];
-		has_i = (uint8_t)((ext & 0x80) ? 1 : 0);
-		has_l = (uint8_t)((ext & 0x40) ? 1 : 0);
-		has_t = (uint8_t)((ext & 0x20) ? 1 : 0);
-		has_k = (uint8_t)((ext & 0x10) ? 1 : 0);
-
-		if (has_i) {
-			if (payload_len < off + 1) {
-				return SWITCH_FALSE;
-			}
-			off += (payload[off] & 0x80) ? 2 : 1;
-		}
-		if (has_l) {
-			off += 1;
-		}
-		if (has_t || has_k) {
-			off += 1;
-		}
-	}
-
-	if (payload_len <= off) {
-		return SWITCH_FALSE;
-	}
-
-	if (vp8_start && vp8_pid && *vp8_start && *vp8_pid == 0 && !(payload[off] & 0x01)) {
-		if (vp8_key) *vp8_key = 1;
-		if (vp8_sync && payload_len >= off + 6 && payload[off + 3] == 0x9d && payload[off + 4] == 0x01 && payload[off + 5] == 0x2a) {
-			*vp8_sync = 1;
-		}
-	}
-
-	return SWITCH_TRUE;
-}
-
 static int rtp_common_write(switch_rtp_t *rtp_session,
 							rtp_msg_t *send_msg, void *data, uint32_t datalen, switch_payload_t payload, uint32_t timestamp, switch_frame_flag_t *flags, switch_rtp_write_state_t *write_state, uint32_t ssrc, uint8_t mid_ext_id, const char *mid, switch_bool_t force_video)
 {
@@ -10469,7 +10366,7 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 			}
 			send_msg->header.pt = rtp_session->te;
 		}
-		/* TEL-6738: BUNDLE shared send_msg buffer can carry a stale video PT into an audio
+		/* BUNDLE shared send_msg buffer can carry a stale video PT into an audio
 		 * write because the audio defer clusters audio packets at video frame boundaries
 		 * (where header.pt was just stamped 107). Re-stamp PT defensively on BUNDLE audio
 		 * writes — guarded by bundle_has_video and !force_video so this is a no-op for
@@ -10480,7 +10377,7 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 			send_msg->header.pt = payload;
 			if (restamped <= 5 || (restamped % 500) == 0) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
-					"TEL6738 BUNDLE audio PT contamination: had=%u expected=%u ssrc=%u seq=%u total=%u — restamping\n",
+					"BUNDLE audio PT contamination: had=%u expected=%u ssrc=%u seq=%u total=%u — restamping\n",
 					stale_pt, payload, ntohl(send_msg->header.ssrc), ntohs(send_msg->header.seq), restamped);
 			}
 		}
@@ -10964,7 +10861,7 @@ fork_done:
 			}
 		}
 			if ((mid_ext_id > 0 && mid && *mid) || (rtp_session->ext_mid.enabled && rtp_session->ext_mid.ext_id > 0)) {
-				/* TEL-6738: Stamp MID on all outbound packets including BUNDLE audio.
+				/* Stamp MID on all outbound packets including BUNDLE audio.
 				   On a BUNDLE shared session, the session-level ext_mid contains the
 				   AUDIO MID value (local_mid is set by the audio m-line in
 				   gen_local_sdp / activate_rtp; the video m-line path guards against
@@ -10987,13 +10884,13 @@ fork_done:
 							goto end;
 						}
 
-						/* TEL-6738 Guard 3: For session-level MID (not explicit override), strip
+						/* BUNDLE Guard 3: For session-level MID (not explicit override), strip
 						   the extension header and send the packet without MID rather than dropping.
 						   A packet without MID is better than no packet. This prevents audio drops
 						   on bridge legs where the inbound BEDE header has elements the MID parser
 						   cannot handle. Clear header.x so libsrtp sees a clean packet. */
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-							"TEL6738 MID strip: session MID failed, sending without extension media=%s pt=%u seq=%u ts=%u ssrc=%u bundle_has_video=%u header_x=%d ext_profile=0x%04x ext_len=%u\n",
+							"BUNDLE MID strip: session MID failed, sending without extension media=%s pt=%u seq=%u ts=%u ssrc=%u bundle_has_video=%u header_x=%d ext_profile=0x%04x ext_len=%u\n",
 							rtp_type(rtp_session), send_msg->header.pt, ntohs(send_msg->header.seq), ntohl(send_msg->header.ts),
 							ntohl(send_msg->header.ssrc), rtp_session->bundle_has_video, send_msg->header.x,
 							send_msg->ext ? ntohs(send_msg->ext->profile) : 0, send_msg->ext ? ntohs(send_msg->ext->length) : 0);
@@ -11044,49 +10941,8 @@ fork_done:
 			send_msg->header.pt = payload;
 			if (restamped <= 5 || (restamped % 500) == 0) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
-					"TEL6738 BUNDLE audio PT contamination pre-SRTP: had=%u expected=%u ssrc=%u seq=%u total=%u -- restamping\n",
+					"BUNDLE audio PT contamination pre-SRTP: had=%u expected=%u ssrc=%u seq=%u total=%u -- restamping\n",
 					stale_pt, payload, ntohl(send_msg->header.ssrc), ntohs(send_msg->header.seq), restamped);
-			}
-		}
-
-		/* TEL-6738: prove what the WebRTC/SRTP leg receives before encryption.
-		   SIP pcaps show valid VP8 keyframes before this point; this log tells
-		   us whether the RTP header, RTP extensions, payload bytes, and VP8
-		   keyframe markers are still sane immediately before SRTP protection. */
-		if ((force_video || rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) &&
-			(flags && (*flags & SFF_EXTERNAL)) && rtp_session->flags[SWITCH_RTP_FLAG_SECURE_SEND]) {
-			const uint8_t *tel6738_payload = NULL;
-			switch_size_t tel6738_payload_len = 0;
-			uint8_t tel6738_vp8_start = 0;
-			uint8_t tel6738_vp8_pid = 0;
-			uint8_t tel6738_vp8_key = 0;
-			uint8_t tel6738_vp8_sync = 0;
-			uint8_t tel6738_vp8_ok = 0;
-			uint32_t tel6738_log_count;
-			uint32_t tel6738_plcrc = 0;
-			uint16_t tel6738_ext_profile = 0;
-			uint16_t tel6738_ext_words = 0;
-
-			if (send_msg->header.x && send_msg->ext) {
-				tel6738_ext_profile = ntohs(send_msg->ext->profile);
-				tel6738_ext_words = ntohs(send_msg->ext->length);
-			}
-
-			if (tel6738_rtp_payload_view(send_msg, bytes, &tel6738_payload, &tel6738_payload_len) == SWITCH_STATUS_SUCCESS) {
-				tel6738_plcrc = tel6738_payload_len ? switch_crc32_8bytes(tel6738_payload, tel6738_payload_len) : 0;
-				tel6738_vp8_ok = tel6738_vp8_probe(tel6738_payload, tel6738_payload_len, &tel6738_vp8_start, &tel6738_vp8_pid, &tel6738_vp8_key, &tel6738_vp8_sync) ? 1 : 0;
-			}
-
-			tel6738_log_count = ++rtp_session->tel6738_vp8_presrtp_logs;
-			if (tel6738_log_count <= 120 || tel6738_vp8_key || (tel6738_log_count % 500) == 0) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-					"TEL6738 VP8 pre-SRTP %s count=%u force_video=%d pt=%u seq=%u ts=%u ssrc=%u marker=%d bytes=%" SWITCH_SIZE_T_FMT " payload_len=%" SWITCH_SIZE_T_FMT " vp8_ok=%u vp8_start=%u vp8_pid=%u vp8_key=%u vp8_sync=%u plcrc=0x%08x flags=0x%x header_x=%u ext_profile=0x%04x ext_words=%u mid_ext_id=%u mid=%s\n",
-					rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName",
-					tel6738_log_count, force_video ? 1 : 0, send_msg->header.pt, ntohs(send_msg->header.seq),
-					ntohl(send_msg->header.ts), ntohl(send_msg->header.ssrc), send_msg->header.m, bytes, tel6738_payload_len,
-					tel6738_vp8_ok, tel6738_vp8_start, tel6738_vp8_pid, tel6738_vp8_key, tel6738_vp8_sync,
-					tel6738_plcrc, flags ? *flags : 0, send_msg->header.x, tel6738_ext_profile, tel6738_ext_words,
-					mid_ext_id, switch_str_nil(mid));
 			}
 		}
 
@@ -11126,7 +10982,7 @@ fork_done:
 				char *srtp_err = NULL;
 				switch_srtp_err_to_txt(stat, &srtp_err);
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR,
-							  "TEL6738 SRTP protect failed common media=%s code=%d text=%s pt=%u seq=%u ts=%u ssrc=%u marker=%d bytes_before=%" SWITCH_SIZE_T_FMT " bytes_after=%d flags=0x%x secure_mki=%d mid_override=%s mid_ext_id=%u header_x=%d ext=%p\n",
+							  "BUNDLE SRTP protect failed common media=%s code=%d text=%s pt=%u seq=%u ts=%u ssrc=%u marker=%d bytes_before=%" SWITCH_SIZE_T_FMT " bytes_after=%d flags=0x%x secure_mki=%d mid_override=%s mid_ext_id=%u header_x=%d ext=%p\n",
 							  rtp_type(rtp_session), stat, switch_str_nil(srtp_err), send_msg->header.pt, ntohs(send_msg->header.seq),
 							  ntohl(send_msg->header.ts), ntohl(send_msg->header.ssrc), send_msg->header.m, bytes, sbytes,
 							  flags ? *flags : 0, rtp_session->flags[SWITCH_RTP_FLAG_SECURE_SEND_MKI], switch_str_nil(mid),
@@ -11461,20 +11317,20 @@ SWITCH_DECLARE(int) switch_rtp_write_frame(switch_rtp_t *rtp_session, switch_fra
    frames, which this fully covers; capping audio one-way delay at 150ms
    is preferred over fully protecting outlier frames. Raise toward
    ~250ms if a retest shows residual blockiness on the long-frame tail. */
-#define TEL6738_BUNDLE_AUDIO_DEFER_MAX_US 150000
+#define BUNDLE_AUDIO_DEFER_MAX_US 150000
 
 /* Frame-boundary defer: hold an audio/CNG/DTMF packet on a BUNDLE
    transport until the open video frame closes (marker emitted) so VP8
    fragments stay contiguous on the shared socket.  Primary exit is
    bundle_video_frame_in_progress == 0; the deadline is only a safety
-   bound (TEL6738_BUNDLE_AUDIO_DEFER_MAX_US) that releases the audio if
+   bound (BUNDLE_AUDIO_DEFER_MAX_US) that releases the audio if
    the frame never closes.  All flag reads are under
    bundle_video_frame_lock (brief lock/copy/unlock per poll); the mutex
    is NEVER held across switch_yield -- deadlock-safe.  The absolute
    deadline lets the caller share one safety budget across the pre-lock
    call and the per-packet re-check loop so worst-case audio latency
    cannot accumulate beyond a single deadline. */
-static void tel6738_bundle_audio_defer_until(switch_rtp_t *rtp_session, switch_time_t deadline_us)
+static void bundle_audio_defer_until(switch_rtp_t *rtp_session, switch_time_t deadline_us)
 {
 	switch_time_t defer_start;
 	switch_time_t frame_open_us;
@@ -11497,7 +11353,7 @@ static void tel6738_bundle_audio_defer_until(switch_rtp_t *rtp_session, switch_t
 	defer_start = switch_micro_time_now();
 	age_us = (frame_open_us && defer_start > frame_open_us) ? (defer_start - frame_open_us) : 0;
 
-	if (age_us > TEL6738_BUNDLE_AUDIO_DEFER_MAX_US) {
+	if (age_us > BUNDLE_AUDIO_DEFER_MAX_US) {
 		hit_stale = SWITCH_TRUE;
 		/* Stale frame: open longer than the safety bound, presumed stuck
 		   (encoder stall or lost marker) -- force-clear so audio cannot starve. */
@@ -11525,7 +11381,7 @@ static void tel6738_bundle_audio_defer_until(switch_rtp_t *rtp_session, switch_t
 			now_us = switch_micro_time_now();
 			waited_us = (now_us > defer_start) ? (now_us - defer_start) : 0;
 			if (now_us >= deadline_us) { hit_cap = SWITCH_TRUE; break; }
-			if (open_us && now_us > open_us && (now_us - open_us) > TEL6738_BUNDLE_AUDIO_DEFER_MAX_US) {
+			if (open_us && now_us > open_us && (now_us - open_us) > BUNDLE_AUDIO_DEFER_MAX_US) {
 				hit_stale = SWITCH_TRUE;
 				switch_mutex_lock(rtp_session->bundle_video_frame_lock);
 				if (rtp_session->bundle_video_frame_in_progress) {
@@ -11568,9 +11424,9 @@ static void tel6738_bundle_audio_defer_until(switch_rtp_t *rtp_session, switch_t
 
 /* Thin wrapper: callers without a shared deadline (CNG/DTMF) get their
    own fresh safety budget; primary exit is still frame close. */
-static void tel6738_bundle_audio_defer(switch_rtp_t *rtp_session)
+static void bundle_audio_defer(switch_rtp_t *rtp_session)
 {
-	tel6738_bundle_audio_defer_until(rtp_session, switch_micro_time_now() + TEL6738_BUNDLE_AUDIO_DEFER_MAX_US);
+	bundle_audio_defer_until(rtp_session, switch_micro_time_now() + BUNDLE_AUDIO_DEFER_MAX_US);
 }
 
 SWITCH_DECLARE(int) switch_rtp_write_frame_ex(switch_rtp_t *rtp_session, switch_frame_t *frame, uint32_t ssrc, uint8_t mid_ext_id, const char *mid)
@@ -11637,7 +11493,7 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 			if (force_video && payload_override != INVALID_PT) {
 				send_msg->header.pt = payload_override;
 			} else if (!force_video && rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] && rtp_session->payload > 0) {
-				/* TEL-6738: On a shared BUNDLE session rtp_session->payload holds the VIDEO PT
+				/* On a shared BUNDLE session rtp_session->payload holds the VIDEO PT
 				 * (set_default_payload overwrote it when the video engine reused the audio
 				 * session). frame->payload carries the bridge PEER's audio PT on a bridged
 				 * leg, not the local egress PT. Prefer the captured local audio PT. */
@@ -11707,7 +11563,7 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 
 	fwd = (rtp_session->flags[SWITCH_RTP_FLAG_RAW_WRITE] &&
 		   (switch_test_flag(frame, SFF_RAW_RTP) || switch_test_flag(frame, SFF_RAW_RTP_PARSE_FRAME))) ? 1 : 0;
-	if (fwd && !frame->packet) { fwd = 0; }   /* TEL-6738: never raw-forward without a packet */
+	if (fwd && !frame->packet) { fwd = 0; }   /* never raw-forward without a packet */
 #if DEBUG_RTP
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "RTP: write frame fwd: %s %u (%u %u %u / %u %u %u) %p/%p\n", rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName",fwd, rtp_session->flags[SWITCH_RTP_FLAG_RAW_WRITE], switch_test_flag(frame, SFF_RAW_RTP), switch_test_flag(frame, SFF_RAW_RTP_PARSE_FRAME), rtp_session->sending_dtmf, rtp_session->queue_delay, (rtp_session->rtp_bugs & RTP_BUG_GEN_ONE_GEN_ALL), (void*)rtp_session->session, (void*)rtp_session);
 #endif
@@ -11742,7 +11598,7 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 		}
 	} else {
 		payload = payload_override != INVALID_PT ? payload_override : rtp_session->payload;
-		/* TEL-6738: On a shared BUNDLE session rtp_session->payload holds the VIDEO PT
+		/* On a shared BUNDLE session rtp_session->payload holds the VIDEO PT
 		 * (e.g. 107) because the video engine reused the audio RTP session and
 		 * set_default_payload overwrote it. frame->payload carries the bridge PEER's
 		 * audio PT (e.g. 102) on a bridged leg, NOT the local egress audio PT. Prefer
@@ -11774,16 +11630,16 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 	/* Frame-boundary defer: audio packets on BUNDLE wait for the open
 	   video frame to close (marker emitted) so VP8 fragments stay
 	   contiguous on the shared socket.  One shared safety deadline
-	   (TEL6738_BUNDLE_AUDIO_DEFER_MAX_US) is threaded into the pre-lock
+	   (BUNDLE_AUDIO_DEFER_MAX_US) is threaded into the pre-lock
 	   helper AND the re-check-loop helper below, so the cumulative wait
 	   for a single audio packet is hard-capped at the safety bound
 	   (not per-call). */
 	if (!force_video) {
-		audio_defer_deadline = switch_micro_time_now() + TEL6738_BUNDLE_AUDIO_DEFER_MAX_US;
-		tel6738_bundle_audio_defer_until(rtp_session, audio_defer_deadline);
+		audio_defer_deadline = switch_micro_time_now() + BUNDLE_AUDIO_DEFER_MAX_US;
+		bundle_audio_defer_until(rtp_session, audio_defer_deadline);
 	}
 
-	/* TEL-6738: BUNDLE audio/video packet serialization (per-packet).
+	/* BUNDLE audio/video packet serialization (per-packet).
 	   Serialize each individual packet write against the shared UDP socket to prevent
 	   kernel-level reordering between audio and video on the BUNDLE transport.
 	   Per-PACKET (not per-frame): holding the lock across an entire video frame burst
@@ -11796,11 +11652,11 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 		/* Re-check: a video frame may have opened while we waited for the
 		   per-packet lock.  Re-defer if so, bounded by recheck_count AND by
 		   the shared audio_defer_deadline so total wait stays within the
-		   safety bound (TEL6738_BUNDLE_AUDIO_DEFER_MAX_US). */
+		   safety bound (BUNDLE_AUDIO_DEFER_MAX_US). */
 		while (!force_video && rtp_session->bundle_video_frame_in_progress && recheck_count < 2) {
 			recheck_count++;
 			switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
-			tel6738_bundle_audio_defer_until(rtp_session, audio_defer_deadline);
+			bundle_audio_defer_until(rtp_session, audio_defer_deadline);
 			switch_mutex_lock(rtp_session->bundle_video_frame_lock);
 		}
 	}
@@ -11820,7 +11676,7 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "RTP: write frame fwd: %u WROTE_MANUAL %p/%p\n", fwd, (void*)rtp_session->session, (void*)rtp_session);
 #endif
 
-		/* TEL-6738: Release per-packet BUNDLE lock after manual write path */
+		/* Release per-packet BUNDLE lock after manual write path */
 		if (rtp_session->bundle_has_video) {
 			switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
 		}
@@ -11881,7 +11737,7 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 
 	r = rtp_common_write(rtp_session, send_msg, data, len, payload, ts, &frame->flags, write_state, ssrc, mid_ext_id, mid, force_video);
 
-	/* TEL-6738: Release per-packet BUNDLE lock after common write path */
+	/* Release per-packet BUNDLE lock after common write path */
 	if (rtp_session->bundle_has_video) {
 		switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
 	}
@@ -11940,9 +11796,9 @@ SWITCH_DECLARE(int) switch_rtp_write_manual(switch_rtp_t *rtp_session,
 	}
 
 	/* Drain-open-frame-first: defer CNG/DTMF while a video frame is mid-emission. */
-	tel6738_bundle_audio_defer(rtp_session);
+	bundle_audio_defer(rtp_session);
 
-	/* TEL-6738: Block audio/DTMF while BUNDLE video frame burst in progress */
+	/* Block audio/DTMF while BUNDLE video frame burst in progress */
 	if (rtp_session->bundle_has_video) {
 		switch_mutex_lock(rtp_session->bundle_video_frame_lock);
 	}
@@ -11978,7 +11834,7 @@ SWITCH_DECLARE(int) switch_rtp_write_manual(switch_rtp_t *rtp_session,
 
 	WRITE_DEC(rtp_session);
 
-	/* TEL-6738: Release BUNDLE video frame burst lock */
+	/* Release BUNDLE video frame burst lock */
 	if (rtp_session->bundle_has_video) {
 		switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
 	}
@@ -11992,9 +11848,6 @@ static int rtp_write_manual_state(switch_rtp_t *rtp_session, switch_rtp_write_st
 							  switch_payload_t in_payload, uint16_t in_seq, uint32_t in_ssrc)
 {
 	switch_size_t bytes;
-	uint8_t in_m = m;
-	uint32_t in_ts = ts;
-	uint32_t *debug_bundle_write_count = NULL;
 	uint16_t *seq;
 	uint32_t *last_write_ts;
 	uint32_t *reset;
@@ -12037,7 +11890,6 @@ static int rtp_write_manual_state(switch_rtp_t *rtp_session, switch_rtp_write_st
 		reset = &write_state->reset;
 		video_frame_open = &write_state->video_frame_open;
 		video_frame_last_set = &write_state->video_frame_last_set;
-		debug_bundle_write_count = &write_state->debug_bundle_write_count;
 		video_frame_src_ts = &write_state->video_frame_src_ts;
 		video_frame_out_ts = &write_state->video_frame_out_ts;
 		video_frame_last_src_ts = &write_state->video_frame_last_src_ts;
@@ -12143,17 +11995,6 @@ static int rtp_write_manual_state(switch_rtp_t *rtp_session, switch_rtp_write_st
 		goto end;
 	}
 
-	if (debug_bundle_write_count && flags && ((*flags) & SFF_EXTERNAL) && ssrc && mid_ext_id > 0 && mid && *mid) {
-		(*debug_bundle_write_count)++;
-		if (*debug_bundle_write_count <= 10 || !((*debug_bundle_write_count) % 500)) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-				"TEL6738 BUNDLE RTP outbound map diag count=%u in_pt=%u in_seq=%u in_ts=%u in_ssrc=%u in_m=%d in_len=%u out_pt=%u out_seq=%u out_ts=%u out_ssrc=%u out_m=%d out_bytes=%" SWITCH_SIZE_T_FMT " mid=%s mid_ext_id=%u flags=0x%x\n",
-				*debug_bundle_write_count, in_payload, in_seq, in_ts, in_ssrc, in_m, datalen,
-				rtp_session->write_msg.header.pt, ntohs(rtp_session->write_msg.header.seq), ntohl(rtp_session->write_msg.header.ts),
-				ntohl(rtp_session->write_msg.header.ssrc), rtp_session->write_msg.header.m, bytes, switch_str_nil(mid), mid_ext_id, flags ? *flags : 0);
-		}
-	}
-
 	if (video_frame_commit_marker) {
 		*video_frame_last_src_ts = video_frame_commit_src_ts;
 		*video_frame_last_out_ts = video_frame_commit_out_ts;
@@ -12244,7 +12085,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_write_raw(switch_rtp_t *rtp_session, 
 				char *srtp_err = NULL;
 				switch_srtp_err_to_txt(stat, &srtp_err);
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR,
-							  "TEL6738 SRTP protect failed raw media=%s code=%d text=%s pt=%u seq=%u ts=%u ssrc=%u marker=%d bytes_before=%" SWITCH_SIZE_T_FMT " bytes_after=%d secure_mki=%d header_x=%d ext=%p\n",
+							  "BUNDLE SRTP protect failed raw media=%s code=%d text=%s pt=%u seq=%u ts=%u ssrc=%u marker=%d bytes_before=%" SWITCH_SIZE_T_FMT " bytes_after=%d secure_mki=%d header_x=%d ext=%p\n",
 							  rtp_type(rtp_session), stat, switch_str_nil(srtp_err), rtp_session->write_msg.header.pt,
 							  ntohs(rtp_session->write_msg.header.seq), ntohl(rtp_session->write_msg.header.ts),
 							  ntohl(rtp_session->write_msg.header.ssrc), rtp_session->write_msg.header.m, *bytes, sbytes,
@@ -12764,7 +12605,7 @@ static switch_status_t rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_
 				if (off + elem_len > old_ext_data_bytes) return SWITCH_STATUS_FALSE;
 
 				if (elem_id == mid_ext_id) {
-					/* TEL-6738 Guard 2: Only strip elements matching the MID ext id.
+					/* BUNDLE Guard 2: Only strip elements matching the MID ext id.
 					   Previously also stripped all elements with payload > 1 byte,
 					   which broke legitimate multi-byte extensions (e.g. abs-send-time)
 					   and could cause SWITCH_STATUS_FALSE returns on bridge legs. */
@@ -12796,14 +12637,14 @@ static switch_status_t rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_
 	new_ext_total = 4 + ext_data_padded;
 	payload_bytes = *bytes - rtp_header_len - body_header_bytes - old_ext_total;
 
-	/* TEL-6738 explicit bound: compute the final post-rewrite total bytes and verify
+	/* BUNDLE explicit bound: compute the final post-rewrite total bytes and verify
 	 * we will not overflow send_msg->body[SWITCH_RTP_MAX_BUF_LEN+...]. The packet body
 	 * after rewrite is body_header_bytes + new_ext_total + payload_bytes; reject any
 	 * write that would exceed SWITCH_RTP_MAX_BUF_LEN rather than corrupt the buffer. */
 	if (body_header_bytes + new_ext_total + payload_bytes > SWITCH_RTP_MAX_BUF_LEN) {
 		return SWITCH_STATUS_FALSE;
 	}
-	/* TEL-6738 sanity: ensure the existing packet was large enough that payload_bytes
+	/* BUNDLE sanity: ensure the existing packet was large enough that payload_bytes
 	 * is a valid (non-negative) span. Combined with the earlier "*bytes < rtp_header_len
 	 * + body_header_bytes + old_ext_total" guard, this means the source memmove range is
 	 * fully inside the input packet. */

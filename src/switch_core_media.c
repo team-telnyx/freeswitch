@@ -128,7 +128,7 @@ struct switch_rtp_text_factory_s {
 
 
 
-/* TEL-6738: Pre-DTLS video packet buffer.
+/* Pre-DTLS video packet buffer.
  * When video writes return wrote==0 (ICE/DTLS not ready), raw RTP packet
  * data is copied into this bounded ring buffer.  Diagnostics showed replaying
  * queued video at transport-ready time can collapse multiple VP8 frame starts
@@ -136,14 +136,14 @@ struct switch_rtp_text_factory_s {
  * Therefore transport-ready transition drops queued video and requests a fresh
  * source keyframe instead of flushing stale pre-DTLS frames. Allocated lazily
  * from the session pool on first use; freed with the session. */
-#define TEL6738_PRE_DTLS_CAPACITY  64
-/* TEL-6738: use SWITCH_RTP_MAX_BUF_LEN so we cannot drop valid RTP packets.
+#define PRE_DTLS_VIDEO_CAPACITY  64
+/* use SWITCH_RTP_MAX_BUF_LEN so we cannot drop valid RTP packets.
  * The PCAP frame length and downstream RTP datalen may exceed 1500 (e.g. larger
  * NALU slices or RTCP). Matching the engine-wide max prevents silent truncation. */
-#define TEL6738_PRE_DTLS_PKT_SIZE  SWITCH_RTP_MAX_BUF_LEN
+#define PRE_DTLS_VIDEO_PKT_SIZE  SWITCH_RTP_MAX_BUF_LEN
 
 typedef struct {
-	uint8_t  data[TEL6738_PRE_DTLS_PKT_SIZE];
+	uint8_t  data[PRE_DTLS_VIDEO_PKT_SIZE];
 	uint32_t datalen;
 	switch_frame_flag_t flags;
 	uint8_t  m;
@@ -151,16 +151,16 @@ typedef struct {
 	uint32_t timestamp;
 	uint16_t seq;
 	uint32_t ssrc;
-} tel6738_pre_dtls_entry_t;
+} pre_dtls_video_entry_t;
 
 typedef struct {
-	tel6738_pre_dtls_entry_t *entries;  /* pool-allocated array[TEL6738_PRE_DTLS_CAPACITY] */
+	pre_dtls_video_entry_t *entries;  /* pool-allocated array[PRE_DTLS_VIDEO_CAPACITY] */
 	uint32_t head;          /* index of oldest entry */
 	uint32_t count;         /* number of valid entries */
 	uint32_t stat_queued;   /* total packets ever queued */
 	uint32_t stat_dropped;  /* total packets dropped (buffer full, oversize, or readiness purge) */
 	switch_bool_t active;   /* SWITCH_TRUE while buffering (DTLS not ready) */
-} tel6738_pre_dtls_buf_t;
+} pre_dtls_video_buf_t;
 
 struct switch_rtp_engine_s {
 	switch_secure_settings_t ssec[CRYPTO_INVALID+1];
@@ -250,13 +250,12 @@ struct switch_rtp_engine_s {
 	uint32_t bundle_video_write_success;
 	uint32_t bundle_video_write_zero;
 	uint32_t bundle_video_write_fail;
-	uint32_t tel6738_eg_crc_logs; /* TEL6738: egress payload-integrity probe log throttle */
-	tel6738_pre_dtls_buf_t *pre_dtls_buf; /* TEL-6738: lazily allocated pre-DTLS video buffer */
-	switch_bool_t tel6738_pre_dtls_wait_keyframe; /* suppress startup video until a fresh VP8 keyframe follows pre-DTLS drop */
-	uint32_t tel6738_pre_dtls_wait_keyframe_drops;
+	pre_dtls_video_buf_t *pre_dtls_buf; /* lazily allocated pre-DTLS video buffer */
+	switch_bool_t pre_dtls_wait_keyframe; /* suppress startup video until a fresh VP8 keyframe follows pre-DTLS drop */
+	uint32_t pre_dtls_wait_keyframe_drops;
 	uint32_t bundle_demux_method_counts[4];
 
-	/* TEL-6738: BUNDLE drain thread state and fields */
+	/* BUNDLE drain thread state and fields */
 	volatile int bundle_drain_state;  /* 0=inactive, 1=starting, 2=running, 3=stopping */
 	switch_thread_t *bundle_drain_thread;
 	uint32_t bundle_drain_generation;
@@ -301,12 +300,12 @@ struct switch_rtp_engine_s {
 	rtp_extension_t rtp_send_extensions[MAX_RTP_EXTENSIONS];
 };
 
-/* TEL-6738: This gate keys on the first VP8 payload descriptor start packet
+/* This gate keys on the first VP8 payload descriptor start packet
  * carrying the uncompressed keyframe sync bytes. The target WebRTC/SIP
  * packetizer places the VP8 uncompressed header in the first keyframe packet;
  * if a future packetizer fragments those first bytes away, this deliberately
  * keeps waiting rather than opening on an ambiguous frame. */
-static switch_bool_t tel6738_vp8_frame_is_keyframe(switch_frame_t *frame)
+static switch_bool_t vp8_frame_is_keyframe(switch_frame_t *frame)
 {
 	const uint8_t *payload;
 	switch_size_t payload_len;
@@ -359,13 +358,13 @@ static switch_bool_t tel6738_vp8_frame_is_keyframe(switch_frame_t *frame)
 		payload_len >= off + 6 && payload[off + 3] == 0x9d && payload[off + 4] == 0x01 && payload[off + 5] == 0x2a) ? SWITCH_TRUE : SWITCH_FALSE);
 }
 
-static switch_bool_t tel6738_engine_uses_vp8(switch_rtp_engine_t *engine)
+static switch_bool_t engine_uses_vp8(switch_rtp_engine_t *engine)
 {
 	return (switch_bool_t)(engine && engine->cur_payload_map && engine->cur_payload_map->rm_encoding &&
 		!strcasecmp(engine->cur_payload_map->rm_encoding, "VP8"));
 }
 
-static void tel6738_request_partner_keyframe(switch_core_session_t *session, const char *reason)
+static void request_partner_keyframe(switch_core_session_t *session, const char *reason)
 {
 	switch_core_session_t *other_session = NULL;
 
@@ -377,51 +376,51 @@ static void tel6738_request_partner_keyframe(switch_core_session_t *session, con
 			switch_core_session_force_request_video_refresh(other_session);
 		} else {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-				"TEL6738 pre-DTLS video buffer drop skipped source keyframe request: reason=%s local_up=%d other_up=%d\n",
+				"BUNDLE pre-DTLS video buffer drop skipped source keyframe request: reason=%s local_up=%d other_up=%d\n",
 				switch_str_nil(reason), switch_channel_up_nosig(session->channel), other_channel ? switch_channel_up_nosig(other_channel) : 0);
 		}
 		switch_core_session_rwunlock(other_session);
 	} else {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-			"TEL6738 pre-DTLS video buffer drop skipped source keyframe request: reason=%s no partner session\n",
+			"BUNDLE pre-DTLS video buffer drop skipped source keyframe request: reason=%s no partner session\n",
 			switch_str_nil(reason));
 	}
 }
 
-static switch_bool_t tel6738_pre_dtls_keyframe_gate(switch_core_session_t *session, switch_rtp_engine_t *engine, switch_frame_t *frame, const char *path)
+static switch_bool_t pre_dtls_keyframe_gate(switch_core_session_t *session, switch_rtp_engine_t *engine, switch_frame_t *frame, const char *path)
 {
 	switch_bool_t is_keyframe;
 
-	if (!engine || !engine->tel6738_pre_dtls_wait_keyframe) {
+	if (!engine || !engine->pre_dtls_wait_keyframe) {
 		return SWITCH_TRUE;
 	}
 
-	if (!tel6738_engine_uses_vp8(engine)) {
-		engine->tel6738_pre_dtls_wait_keyframe = SWITCH_FALSE;
+	if (!engine_uses_vp8(engine)) {
+		engine->pre_dtls_wait_keyframe = SWITCH_FALSE;
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
-			"TEL6738 pre-DTLS %s keyframe gate bypassed for non-VP8 codec=%s\n",
+			"BUNDLE pre-DTLS %s keyframe gate bypassed for non-VP8 codec=%s\n",
 			switch_str_nil(path), engine->cur_payload_map && engine->cur_payload_map->rm_encoding ? engine->cur_payload_map->rm_encoding : "unknown");
 		return SWITCH_TRUE;
 	}
 
-	is_keyframe = tel6738_vp8_frame_is_keyframe(frame);
+	is_keyframe = vp8_frame_is_keyframe(frame);
 	if (is_keyframe) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
-			"TEL6738 pre-DTLS %s keyframe gate opened: suppressed=%u seq=%u ts=%u len=%u\n",
-			switch_str_nil(path), engine->tel6738_pre_dtls_wait_keyframe_drops, frame->seq, frame->timestamp, frame->datalen);
-		engine->tel6738_pre_dtls_wait_keyframe = SWITCH_FALSE;
-		engine->tel6738_pre_dtls_wait_keyframe_drops = 0;
+			"BUNDLE pre-DTLS %s keyframe gate opened: suppressed=%u seq=%u ts=%u len=%u\n",
+			switch_str_nil(path), engine->pre_dtls_wait_keyframe_drops, frame->seq, frame->timestamp, frame->datalen);
+		engine->pre_dtls_wait_keyframe = SWITCH_FALSE;
+		engine->pre_dtls_wait_keyframe_drops = 0;
 		return SWITCH_TRUE;
 	}
 
-	engine->tel6738_pre_dtls_wait_keyframe_drops++;
-	if (engine->tel6738_pre_dtls_wait_keyframe_drops <= 10 || !(engine->tel6738_pre_dtls_wait_keyframe_drops % 50)) {
+	engine->pre_dtls_wait_keyframe_drops++;
+	if (engine->pre_dtls_wait_keyframe_drops <= 10 || !(engine->pre_dtls_wait_keyframe_drops % 50)) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-			"TEL6738 pre-DTLS %s suppressing delta while waiting for VP8 keyframe: dropped=%u seq=%u ts=%u m=%d len=%u\n",
-			switch_str_nil(path), engine->tel6738_pre_dtls_wait_keyframe_drops, frame->seq, frame->timestamp, frame->m, frame->datalen);
+			"BUNDLE pre-DTLS %s suppressing delta while waiting for VP8 keyframe: dropped=%u seq=%u ts=%u m=%d len=%u\n",
+			switch_str_nil(path), engine->pre_dtls_wait_keyframe_drops, frame->seq, frame->timestamp, frame->m, frame->datalen);
 	}
-	if (!(engine->tel6738_pre_dtls_wait_keyframe_drops % 50)) {
-		tel6738_request_partner_keyframe(session, "gate-still-waiting");
+	if (!(engine->pre_dtls_wait_keyframe_drops % 50)) {
+		request_partner_keyframe(session, "gate-still-waiting");
 	}
 
 	return SWITCH_FALSE;
@@ -452,7 +451,7 @@ struct switch_media_handle_s {
 	switch_mutex_t *mutex;
 	switch_mutex_t *sdp_mutex;
 	switch_mutex_t *control_mutex;
-	switch_mutex_t *bundle_drain_mutex;  /* TEL-6738: protects drain thread start/stop */
+	switch_mutex_t *bundle_drain_mutex;  /* protects drain thread start/stop */
 
 	const switch_codec_implementation_t *negotiated_codecs[SWITCH_MAX_CODECS];
 	int num_negotiated_codecs;
@@ -2771,8 +2770,8 @@ SWITCH_DECLARE(void) switch_core_media_set_stats(switch_core_session_t *session)
 
 
 static void switch_core_media_flush_queued_read_frames(switch_rtp_engine_t *engine);
-static void tel6738_bundle_audio_queue_flush(switch_frame_buffer_t *audio_fb);
-static void tel6738_bundle_audio_queue_cleanup_locked(switch_core_session_t *session, switch_media_handle_t *smh, switch_rtp_engine_t *v_engine);
+static void bundle_audio_queue_flush(switch_frame_buffer_t *audio_fb);
+static void bundle_audio_queue_cleanup_locked(switch_core_session_t *session, switch_media_handle_t *smh, switch_rtp_engine_t *v_engine);
 
 SWITCH_DECLARE(void) switch_media_handle_destroy(switch_core_session_t *session)
 {
@@ -2823,12 +2822,12 @@ SWITCH_DECLARE(void) switch_media_handle_destroy(switch_core_session_t *session)
 	switch_core_media_flush_queued_read_frames(v_engine);
 	if (v_engine->read_fb) switch_frame_buffer_destroy(&v_engine->read_fb);
 
-	/* TEL-6738: cleanup audio drain frame buffer.
+	/* cleanup audio drain frame buffer.
 	 * bundle_audio_read_fb lifetime is protected by bundle_drain_mutex; the
 	 * drain thread is stopped by switch_core_media_deactivate_rtp() above before
 	 * this buffer is freed. */
 	switch_mutex_lock(smh->bundle_drain_mutex);
-	tel6738_bundle_audio_queue_cleanup_locked(session, smh, v_engine);
+	bundle_audio_queue_cleanup_locked(session, smh, v_engine);
 	if (v_engine->bundle_audio_read_fb) switch_frame_buffer_destroy(&v_engine->bundle_audio_read_fb);
 	switch_mutex_unlock(smh->bundle_drain_mutex);
 
@@ -3966,7 +3965,7 @@ static const char *switch_core_media_bundle_demux_method2str(switch_bundle_demux
 }
 
 
-/* TEL-6738: BUNDLE drain thread states */
+/* BUNDLE drain thread states */
 #define BUNDLE_DRAIN_INACTIVE   0
 #define BUNDLE_DRAIN_STARTING   1
 #define BUNDLE_DRAIN_RUNNING    2
@@ -3986,7 +3985,7 @@ static const char *bundle_drain_state_str(int state) {
  * resets RTP data to packet + 12, which corrupts packets with CSRC/header
  * extensions. Allocate the public RTP packet layout so downstream raw-forward
  * code has valid zero-initialized ext/ebody metadata for MID rewrite. */
-static switch_status_t tel6738_bundle_frame_dup(switch_frame_t *orig, switch_frame_t **clone)
+static switch_status_t bundle_frame_dup(switch_frame_t *orig, switch_frame_t **clone)
 {
 	switch_frame_t *new_frame;
 
@@ -4065,7 +4064,7 @@ static switch_status_t tel6738_bundle_frame_dup(switch_frame_t *orig, switch_fra
 	return SWITCH_STATUS_SUCCESS;
 }
 
-static void tel6738_bundle_audio_queue_flush(switch_frame_buffer_t *audio_fb)
+static void bundle_audio_queue_flush(switch_frame_buffer_t *audio_fb)
 {
 	void *pop = NULL;
 
@@ -4083,7 +4082,7 @@ static void tel6738_bundle_audio_queue_flush(switch_frame_buffer_t *audio_fb)
 }
 
 /* Caller must hold smh->bundle_drain_mutex. */
-static void tel6738_bundle_audio_queue_cleanup_locked(switch_core_session_t *session, switch_media_handle_t *smh, switch_rtp_engine_t *v_engine)
+static void bundle_audio_queue_cleanup_locked(switch_core_session_t *session, switch_media_handle_t *smh, switch_rtp_engine_t *v_engine)
 {
 	int waits = 0;
 
@@ -4093,7 +4092,7 @@ static void tel6738_bundle_audio_queue_cleanup_locked(switch_core_session_t *ses
 
 	if (v_engine->bundle_audio_read_consumers) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-			"TEL-6738 BUNDLE audio queue cleanup continuing with %u active consumers\n",
+			"BUNDLE audio queue cleanup continuing with %u active consumers\n",
 			v_engine->bundle_audio_read_consumers);
 	}
 
@@ -4101,10 +4100,10 @@ static void tel6738_bundle_audio_queue_cleanup_locked(switch_core_session_t *ses
 		switch_frame_free(&v_engine->bundle_audio_read_fb_frame);
 		v_engine->bundle_audio_read_fb_frame = NULL;
 	}
-	tel6738_bundle_audio_queue_flush(v_engine->bundle_audio_read_fb);
+	bundle_audio_queue_flush(v_engine->bundle_audio_read_fb);
 }
 
-/* TEL-6738: Continuous drain thread for BUNDLE socket.
+/* Continuous drain thread for BUNDLE socket.
  * This is the ONLY reader of a_engine->rtp_session while active.
  * Audio packets are cloned and queued to v_engine->bundle_audio_read_fb.
  * Video packets are cloned and queued to v_engine->read_fb.
@@ -4137,7 +4136,7 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 	generation = v_engine->bundle_drain_generation;
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-		"TEL-6738 BUNDLE drain thread started gen=%u\n", generation);
+		"BUNDLE drain thread started gen=%u\n", generation);
 
 	/* Promote STARTING -> RUNNING under the drain mutex. stop() can legally
 	 * set STOPPING while the thread is still starting; do not clobber that
@@ -4232,7 +4231,7 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 			v_engine->bundle_demux_miss_drops++;
 			if (v_engine->bundle_demux_miss_drops <= 10 || !(v_engine->bundle_demux_miss_drops % 1000)) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-					"TEL-6738 drain thread demux miss count=%u mid=%s ssrc=%u pt=%u\n",
+					"BUNDLE drain thread demux miss count=%u mid=%s ssrc=%u pt=%u\n",
 					v_engine->bundle_demux_miss_drops, switch_str_nil(mid),
 					drain_frame.ssrc, drain_frame.payload);
 			}
@@ -4247,13 +4246,13 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 			v_engine->bundle_video_demux_packets++;
 			v_engine->bundle_drain_thread_video_routed++;
 
-			if (tel6738_bundle_frame_dup(&drain_frame, &dupframe) == SWITCH_STATUS_SUCCESS) {
+			if (bundle_frame_dup(&drain_frame, &dupframe) == SWITCH_STATUS_SUCCESS) {
 				if (switch_frame_buffer_trypush(v_engine->read_fb, dupframe) != SWITCH_STATUS_SUCCESS) {
 					v_engine->bundle_queue_full_drops++;
 					v_engine->bundle_drain_thread_qfail++;
 					if (v_engine->bundle_queue_full_drops <= 10 || !(v_engine->bundle_queue_full_drops % 1000)) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-							"TEL-6738 drain thread video queue full count=%u enq=%u deq=%u\n",
+							"BUNDLE drain thread video queue full count=%u enq=%u deq=%u\n",
 							v_engine->bundle_queue_full_drops,
 							v_engine->bundle_video_enqueued, v_engine->bundle_video_dequeued);
 					}
@@ -4280,12 +4279,12 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 			}
 
 			if (audio_fb) {
-				if (tel6738_bundle_frame_dup(&drain_frame, &dupframe) == SWITCH_STATUS_SUCCESS) {
+				if (bundle_frame_dup(&drain_frame, &dupframe) == SWITCH_STATUS_SUCCESS) {
 					if (switch_frame_buffer_trypush(audio_fb, dupframe) != SWITCH_STATUS_SUCCESS) {
 						v_engine->bundle_drain_thread_audio_qfail++;
 						if (v_engine->bundle_drain_thread_audio_qfail <= 10 || !(v_engine->bundle_drain_thread_audio_qfail % 1000)) {
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-								"TEL-6738 drain thread audio queue full count=%u\n",
+								"BUNDLE drain thread audio queue full count=%u\n",
 								v_engine->bundle_drain_thread_audio_qfail);
 						}
 						switch_frame_free(&dupframe);
@@ -4297,7 +4296,7 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 	}
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-		"TEL-6738 BUNDLE drain thread exiting gen=%u state=%s reads=%u video_routed=%u audio_routed=%u "
+		"BUNDLE drain thread exiting gen=%u state=%s reads=%u video_routed=%u audio_routed=%u "
 		"miss=%u vqfail=%u aqfail=%u demux_total=%u venq=%u vdeq=%u\n",
 		generation, bundle_drain_state_str(v_engine->bundle_drain_state),
 		v_engine->bundle_drain_thread_reads, v_engine->bundle_drain_thread_video_routed,
@@ -4309,7 +4308,7 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 	return NULL;
 }
 
-/* TEL-6738: Start the BUNDLE drain thread.
+/* Start the BUNDLE drain thread.
  * Caller must hold smh->bundle_drain_mutex or be in single-threaded init. */
 static void bundle_drain_thread_start(switch_core_session_t *session)
 {
@@ -4326,7 +4325,7 @@ static void bundle_drain_thread_start(switch_core_session_t *session)
 	/* Preconditions */
 	if (!v_engine->bundled_with_audio || !a_engine->rtp_session || !v_engine->read_fb) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-			"TEL-6738 drain thread start skipped: bundled=%d rtp=%p read_fb=%p\n",
+			"BUNDLE drain thread start skipped: bundled=%d rtp=%p read_fb=%p\n",
 			v_engine->bundled_with_audio, (void *)a_engine->rtp_session, (void *)v_engine->read_fb);
 		return;
 	}
@@ -4337,7 +4336,7 @@ static void bundle_drain_thread_start(switch_core_session_t *session)
 
 	if (v_engine->bundle_drain_state != BUNDLE_DRAIN_INACTIVE) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-			"TEL-6738 drain thread start skipped: already state=%s\n",
+			"BUNDLE drain thread start skipped: already state=%s\n",
 			bundle_drain_state_str(v_engine->bundle_drain_state));
 		return;
 	}
@@ -4349,7 +4348,7 @@ static void bundle_drain_thread_start(switch_core_session_t *session)
 	if (!v_engine->bundle_audio_read_fb) {
 		if (switch_frame_buffer_create(&v_engine->bundle_audio_read_fb, 200) != SWITCH_STATUS_SUCCESS) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
-				"TEL-6738 failed to create audio drain frame buffer\n");
+				"BUNDLE failed to create audio drain frame buffer\n");
 			return;
 		}
 	}
@@ -4370,17 +4369,17 @@ static void bundle_drain_thread_start(switch_core_session_t *session)
 	if (switch_thread_create(&v_engine->bundle_drain_thread, thd_attr,
 							  bundle_drain_thread_func, session, pool) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
-			"TEL-6738 failed to create drain thread\n");
+			"BUNDLE failed to create drain thread\n");
 		v_engine->bundle_drain_state = BUNDLE_DRAIN_INACTIVE;
 		v_engine->bundle_drain_thread = NULL;
 		return;
 	}
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-		"TEL-6738 drain thread launched gen=%u\n", v_engine->bundle_drain_generation);
+		"BUNDLE drain thread launched gen=%u\n", v_engine->bundle_drain_generation);
 }
 
-/* TEL-6738: Stop the BUNDLE drain thread.
+/* Stop the BUNDLE drain thread.
  * Safe to call even if thread is not running. Does NOT hold bundle_drain_mutex during join. */
 static void bundle_drain_thread_stop(switch_core_session_t *session)
 {
@@ -4397,13 +4396,13 @@ static void bundle_drain_thread_stop(switch_core_session_t *session)
 	thd = v_engine->bundle_drain_thread;
 	if (!thd) {
 		v_engine->bundle_drain_state = BUNDLE_DRAIN_INACTIVE;
-		tel6738_bundle_audio_queue_cleanup_locked(session, smh, v_engine);
+		bundle_audio_queue_cleanup_locked(session, smh, v_engine);
 		switch_mutex_unlock(smh->bundle_drain_mutex);
 		return;
 	}
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-		"TEL-6738 stopping drain thread gen=%u state=%s\n",
+		"BUNDLE stopping drain thread gen=%u state=%s\n",
 		v_engine->bundle_drain_generation, bundle_drain_state_str(v_engine->bundle_drain_state));
 
 	v_engine->bundle_drain_state = BUNDLE_DRAIN_STOPPING;
@@ -4432,12 +4431,12 @@ static void bundle_drain_thread_stop(switch_core_session_t *session)
 
 	switch_mutex_lock(smh->bundle_drain_mutex);
 	v_engine->bundle_drain_thread = NULL;
-	tel6738_bundle_audio_queue_cleanup_locked(session, smh, v_engine);
+	bundle_audio_queue_cleanup_locked(session, smh, v_engine);
 	v_engine->bundle_drain_state = BUNDLE_DRAIN_INACTIVE;
 	switch_mutex_unlock(smh->bundle_drain_mutex);
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-		"TEL-6738 drain thread stopped, joined, and flushed gen=%u\n",
+		"BUNDLE drain thread stopped, joined, and flushed gen=%u\n",
 		v_engine->bundle_drain_generation);
 }
 
@@ -4478,7 +4477,7 @@ static switch_bool_t switch_core_media_route_bundled_rtp(switch_media_handle_t *
 		v_engine->bundle_audio_demux_packets++;
 		if (v_engine->bundle_audio_demux_packets <= 10 || !(v_engine->bundle_audio_demux_packets % 500)) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
-				"BUNDLE RTP audio demux diag total=%u audio=%u video=%u miss=%u method=%s mid=%s ssrc=%u pt=%u seq=%u ts=%u m=%d len=%u\n",
+				"BUNDLE RTP audio demux total=%u audio=%u video=%u miss=%u method=%s mid=%s ssrc=%u pt=%u seq=%u ts=%u m=%d len=%u\n",
 				v_engine->bundle_demux_packets, v_engine->bundle_audio_demux_packets, v_engine->bundle_video_demux_packets,
 				v_engine->bundle_demux_miss_drops, switch_core_media_bundle_demux_method2str(method), switch_str_nil(mid),
 				engine->read_frame.ssrc, engine->read_frame.payload, engine->read_frame.seq, engine->read_frame.timestamp,
@@ -4495,7 +4494,7 @@ static switch_bool_t switch_core_media_route_bundled_rtp(switch_media_handle_t *
 		}
 
 		v_engine->bundle_video_demux_packets++;
-		if (tel6738_bundle_frame_dup(&engine->read_frame, &dupframe) == SWITCH_STATUS_SUCCESS) {
+		if (bundle_frame_dup(&engine->read_frame, &dupframe) == SWITCH_STATUS_SUCCESS) {
 			if (switch_frame_buffer_trypush(v_engine->read_fb, dupframe) != SWITCH_STATUS_SUCCESS) {
 				v_engine->bundle_queue_full_drops++;
 				if (v_engine->bundle_queue_full_drops <= 10 || !(v_engine->bundle_queue_full_drops % 1000)) {
@@ -4510,7 +4509,7 @@ static switch_bool_t switch_core_media_route_bundled_rtp(switch_media_handle_t *
 				v_engine->bundle_video_enqueued++;
 				if (v_engine->bundle_video_enqueued <= 10 || !(v_engine->bundle_video_enqueued % 500)) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
-						"BUNDLE RTP video enqueue diag total=%u video=%u enq=%u deq=%u write_attempts=%u write_ok=%u write_zero=%u write_fail=%u method=%s mid=%s ssrc=%u pt=%u seq=%u ts=%u m=%d len=%u\n",
+						"BUNDLE RTP video enqueue total=%u video=%u enq=%u deq=%u write_attempts=%u write_ok=%u write_zero=%u write_fail=%u method=%s mid=%s ssrc=%u pt=%u seq=%u ts=%u m=%d len=%u\n",
 						v_engine->bundle_demux_packets, v_engine->bundle_video_demux_packets, v_engine->bundle_video_enqueued,
 						v_engine->bundle_video_dequeued, v_engine->bundle_video_write_attempts, v_engine->bundle_video_write_success,
 						v_engine->bundle_video_write_zero, v_engine->bundle_video_write_fail, switch_core_media_bundle_demux_method2str(method),
@@ -4603,7 +4602,7 @@ static switch_bool_t switch_core_media_drain_bundled_rtp(switch_media_handle_t *
 		v_engine->bundle_audio_drain_passes++;
 		if (v_engine->bundle_audio_drain_passes <= 10 || !(v_engine->bundle_audio_drain_passes % 500)) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
-				"BUNDLE RTP drain diag pass=%u video_routed=%u venq=%u vdeq=%u budget_left=%d got_audio=%d\n",
+				"BUNDLE RTP drain pass=%u video_routed=%u venq=%u vdeq=%u budget_left=%d got_audio=%d\n",
 				v_engine->bundle_audio_drain_passes, video_routed,
 				v_engine->bundle_video_enqueued, v_engine->bundle_video_dequeued,
 				budget, got_audio);
@@ -4683,7 +4682,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 				engine->bundle_video_empty_polls++;
 				if (engine->bundle_video_empty_polls <= 10 || !(engine->bundle_video_empty_polls % 1000)) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-						"BUNDLE RTP video dequeue empty diag empty=%u enq=%u deq=%u write_attempts=%u write_ok=%u write_zero=%u write_fail=%u\n",
+						"BUNDLE RTP video dequeue empty empty=%u enq=%u deq=%u write_attempts=%u write_ok=%u write_zero=%u write_fail=%u\n",
 						engine->bundle_video_empty_polls, engine->bundle_video_enqueued, engine->bundle_video_dequeued,
 						engine->bundle_video_write_attempts, engine->bundle_video_write_success, engine->bundle_video_write_zero, engine->bundle_video_write_fail);
 				}
@@ -4699,7 +4698,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 			engine->bundle_video_dequeued++;
 			if (engine->bundle_video_dequeued <= 10 || !(engine->bundle_video_dequeued % 500)) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-					"BUNDLE RTP video dequeue diag enq=%u deq=%u write_attempts=%u write_ok=%u write_zero=%u write_fail=%u pt=%u seq=%u ts=%u m=%d len=%u\n",
+					"BUNDLE RTP video dequeue enq=%u deq=%u write_attempts=%u write_ok=%u write_zero=%u write_fail=%u pt=%u seq=%u ts=%u m=%d len=%u\n",
 					engine->bundle_video_enqueued, engine->bundle_video_dequeued, engine->bundle_video_write_attempts,
 					engine->bundle_video_write_success, engine->bundle_video_write_zero, engine->bundle_video_write_fail,
 					engine->read_frame.payload, engine->read_frame.seq, engine->read_frame.timestamp, engine->read_frame.m, engine->read_frame.datalen);
@@ -4711,7 +4710,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 		} else if (type == SWITCH_MEDIA_TYPE_AUDIO
 				   && smh->engines[SWITCH_MEDIA_TYPE_VIDEO].bundle_drain_state == BUNDLE_DRAIN_RUNNING
 				   && smh->engines[SWITCH_MEDIA_TYPE_VIDEO].bundle_audio_read_fb) {
-			/* TEL-6738: Drain thread is the sole socket reader.
+			/* Drain thread is the sole socket reader.
 			 * This unlocked state read is an intentional fast-path: stop() pushes
 			 * a queue sentinel, and the mutex-protected re-check below guards the
 			 * frame-buffer pointer before registering a consumer. */
@@ -4804,7 +4803,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 			goto end;
 		}
 
-		/* TEL-6738: When drain thread is active, audio path reads from queue above
+		/* When drain thread is active, audio path reads from queue above
 		 * and should not reach this point. Old route+drain fallback only runs
 		 * when drain thread is inactive. */
 		if (smh->engines[SWITCH_MEDIA_TYPE_VIDEO].bundle_drain_state != BUNDLE_DRAIN_RUNNING
@@ -5352,7 +5351,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 	switch_rtp_engine_t *engine;
 	switch_media_handle_t *smh;
 	int bundle_video_wrote = 0;
-	int tel6738_video_suppressed = 0;
+	int video_suppressed = 0;
 	int fire_writable = 0;
 	int defer_writable = 0;
 
@@ -5424,21 +5423,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 
 	engine->timestamp_send += samples;
 
-	/* TEL6738 egress payload-integrity probe: CRC32 of the VP8 payload about to be handed to the
-	   RTP/SRTP write path. Compared by seq/ts against the bridge-read ingress plcrc to prove
-	   byte-level passthrough through the b2bua forward path. Forced on keyframes. */
-	if (type == SWITCH_MEDIA_TYPE_VIDEO && frame && !switch_test_flag(frame, SFF_CNG)) {
-		uint32_t tel6738_pl_crc = (frame->data && frame->datalen) ? switch_crc32_8bytes(frame->data, frame->datalen) : 0;
-		if (engine->tel6738_eg_crc_logs < 60 || switch_test_flag(frame, SFF_IS_KEYFRAME) || (engine->tel6738_eg_crc_logs % 500) == 0) {
-			engine->tel6738_eg_crc_logs++;
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-						  "TEL6738 video media-write %s bundled=%d pt=%u seq=%u ts=%u len=%u marker=%d key=%d flags=0x%x ssrc=%u plcrc=0x%08x\n",
-						  switch_channel_get_name(session->channel), engine->bundled_with_audio, frame->payload,
-						  frame->seq, frame->timestamp, frame->datalen, frame->m, switch_test_flag(frame, SFF_IS_KEYFRAME),
-						  frame->flags, engine->ssrc, tel6738_pl_crc);
-		}
-	}
-
 	fire_writable = !switch_channel_test_flag(session->channel, CF_MEDIA_WRITABLE_FIRED);
 	if (type == SWITCH_MEDIA_TYPE_VIDEO && engine->bundled_with_audio) {
 		rtp_extension_t *ext = switch_core_media_get_send_extension_by_type(engine, SWITCH_MEDIA_EXTENSION_MID);
@@ -5458,7 +5442,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 				"Unable to create isolated BUNDLE video RTP write state\n");
 			status = SWITCH_STATUS_FALSE;
 		} else {
-			/* TEL-6738: Pre-DTLS buffer logic for BUNDLE video.
+			/* Pre-DTLS buffer logic for BUNDLE video.
 			 * Buffered video written before DTLS is ready can contain valid VP8
 			 * frames, but replaying it through the RTP write path collapsed multiple
 			 * VP8 frame starts/keyframes onto one outgoing timestamp. Chrome then
@@ -5466,23 +5450,23 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 			 * drop queued pre-DTLS video and request a fresh source keyframe instead
 			 * of flushing stale startup frames. */
 			if (engine->pre_dtls_buf && engine->pre_dtls_buf->count > 0) {
-				uint32_t tel6738_dropped_pre_dtls;
+				uint32_t dropped_pre_dtls;
 
 				if (switch_rtp_write_ready(engine->rtp_session, frame->datalen)) {
-					tel6738_dropped_pre_dtls = engine->pre_dtls_buf->count;
-					engine->pre_dtls_buf->stat_dropped += tel6738_dropped_pre_dtls;
+					dropped_pre_dtls = engine->pre_dtls_buf->count;
+					engine->pre_dtls_buf->stat_dropped += dropped_pre_dtls;
 					engine->pre_dtls_buf->head = 0;
 					engine->pre_dtls_buf->count = 0;
 					engine->pre_dtls_buf->active = SWITCH_FALSE;
-					engine->tel6738_pre_dtls_wait_keyframe = (switch_bool_t)tel6738_engine_uses_vp8(engine);
-					engine->tel6738_pre_dtls_wait_keyframe_drops = 0;
+					engine->pre_dtls_wait_keyframe = (switch_bool_t)engine_uses_vp8(engine);
+					engine->pre_dtls_wait_keyframe_drops = 0;
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 						"pre-DTLS video buffer dropped after transport ready: dropped_now=%u dropped_total=%u queued=%u gate_vp8_keyframe=%d - requesting source keyframe\n",
-						tel6738_dropped_pre_dtls, engine->pre_dtls_buf->stat_dropped,
-						engine->pre_dtls_buf->stat_queued, engine->tel6738_pre_dtls_wait_keyframe);
-					tel6738_request_partner_keyframe(session, "bundle-ready-drop");
-					if (!tel6738_pre_dtls_keyframe_gate(session, engine, frame, "bundle")) {
-						tel6738_video_suppressed = 1;
+						dropped_pre_dtls, engine->pre_dtls_buf->stat_dropped,
+						engine->pre_dtls_buf->stat_queued, engine->pre_dtls_wait_keyframe);
+					request_partner_keyframe(session, "bundle-ready-drop");
+					if (!pre_dtls_keyframe_gate(session, engine, frame, "bundle")) {
+						video_suppressed = 1;
 					} else {
 						engine->bundle_video_write_attempts++;
 						bundle_video_wrote = switch_rtp_write_frame_ex_state(engine->rtp_session, frame,
@@ -5493,10 +5477,10 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 					/* Transport still not ready - buffer current frame too. */
 					engine->bundle_video_write_zero++;
 					defer_writable = 1;
-					goto tel6738_enqueue_pkt;
+					goto enqueue_pre_dtls_pkt;
 				}
-			} else if (engine->tel6738_pre_dtls_wait_keyframe && !tel6738_pre_dtls_keyframe_gate(session, engine, frame, "bundle")) {
-				tel6738_video_suppressed = 1;
+			} else if (engine->pre_dtls_wait_keyframe && !pre_dtls_keyframe_gate(session, engine, frame, "bundle")) {
+				video_suppressed = 1;
 			} else {
 				/* No buffered packets and no keyframe gate - normal write. */
 				engine->bundle_video_write_attempts++;
@@ -5504,7 +5488,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 						engine->bundle_write_state, engine->ssrc, mid_ext_id, mid,
 						SWITCH_TRUE, engine->cur_payload_map->pt);
 			}
-			if (tel6738_video_suppressed) {
+			if (video_suppressed) {
 				defer_writable = 1;
 				status = SWITCH_STATUS_SUCCESS;
 			} else if (bundle_video_wrote < 0) {
@@ -5519,37 +5503,37 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 			} else if (bundle_video_wrote == 0) {
 				engine->bundle_video_write_zero++;
 				defer_writable = 1;
-tel6738_enqueue_pkt:
-				/* TEL-6738: Buffer the packet until transport is writable; queued
+enqueue_pre_dtls_pkt:
+				/* Buffer the packet until transport is writable; queued
 				 * video is dropped on readiness. Allocate lazily on first use
 				 * from the session pool. */
 				if (!engine->pre_dtls_buf) {
-					engine->pre_dtls_buf = switch_core_session_alloc(session, sizeof(tel6738_pre_dtls_buf_t));
+					engine->pre_dtls_buf = switch_core_session_alloc(session, sizeof(pre_dtls_video_buf_t));
 					engine->pre_dtls_buf->entries = switch_core_session_alloc(session,
-						TEL6738_PRE_DTLS_CAPACITY * sizeof(tel6738_pre_dtls_entry_t));
+						PRE_DTLS_VIDEO_CAPACITY * sizeof(pre_dtls_video_entry_t));
 					engine->pre_dtls_buf->active = SWITCH_TRUE;
-					engine->tel6738_pre_dtls_wait_keyframe = SWITCH_FALSE;
-					engine->tel6738_pre_dtls_wait_keyframe_drops = 0;
+					engine->pre_dtls_wait_keyframe = SWITCH_FALSE;
+					engine->pre_dtls_wait_keyframe_drops = 0;
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 						"pre-DTLS buffer allocated: capacity=%d pkt_size=%d\n",
-						TEL6738_PRE_DTLS_CAPACITY, TEL6738_PRE_DTLS_PKT_SIZE);
+						PRE_DTLS_VIDEO_CAPACITY, PRE_DTLS_VIDEO_PKT_SIZE);
 				} else if (!engine->pre_dtls_buf->active) {
 					engine->pre_dtls_buf->head = 0;
 					engine->pre_dtls_buf->count = 0;
 					engine->pre_dtls_buf->active = SWITCH_TRUE;
-					engine->tel6738_pre_dtls_wait_keyframe = SWITCH_FALSE;
-					engine->tel6738_pre_dtls_wait_keyframe_drops = 0;
+					engine->pre_dtls_wait_keyframe = SWITCH_FALSE;
+					engine->pre_dtls_wait_keyframe_drops = 0;
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 						"pre-DTLS buffer re-armed after post-readiness-drop write 0 seq=%u\n",
 						frame->seq);
 				}
-				if (frame->datalen > 0 && frame->datalen <= TEL6738_PRE_DTLS_PKT_SIZE && frame->data) {
-					if (engine->pre_dtls_buf->count >= TEL6738_PRE_DTLS_CAPACITY) {
+				if (frame->datalen > 0 && frame->datalen <= PRE_DTLS_VIDEO_PKT_SIZE && frame->data) {
+					if (engine->pre_dtls_buf->count >= PRE_DTLS_VIDEO_CAPACITY) {
 						/* Buffer full: drop newest. */
 						engine->pre_dtls_buf->stat_dropped++;
 					} else {
-						uint32_t idx = (engine->pre_dtls_buf->head + engine->pre_dtls_buf->count) % TEL6738_PRE_DTLS_CAPACITY;
-						tel6738_pre_dtls_entry_t *e = &engine->pre_dtls_buf->entries[idx];
+						uint32_t idx = (engine->pre_dtls_buf->head + engine->pre_dtls_buf->count) % PRE_DTLS_VIDEO_CAPACITY;
+						pre_dtls_video_entry_t *e = &engine->pre_dtls_buf->entries[idx];
 						memcpy(e->data, frame->data, frame->datalen);
 						e->datalen = frame->datalen;
 						e->flags = frame->flags;
@@ -5562,7 +5546,7 @@ tel6738_enqueue_pkt:
 						engine->pre_dtls_buf->stat_queued++;
 						if (engine->pre_dtls_buf->stat_queued <= 10 || !(engine->pre_dtls_buf->stat_queued % 50)) {
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-								"TEL6738 pre-DTLS enqueue: queued=%u buffered=%u dropped=%u seq=%u ts=%u m=%d len=%u\n",
+								"BUNDLE pre-DTLS enqueue: queued=%u buffered=%u dropped=%u seq=%u ts=%u m=%d len=%u\n",
 								engine->pre_dtls_buf->stat_queued, engine->pre_dtls_buf->count,
 								engine->pre_dtls_buf->stat_dropped, frame->seq, frame->timestamp,
 								frame->m, frame->datalen);
@@ -5574,15 +5558,15 @@ tel6738_enqueue_pkt:
 					 * dropped counter so diagnostics surface that data was lost. */
 					engine->pre_dtls_buf->stat_dropped++;
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-						"TEL6738 pre-DTLS cannot buffer (dropped non-fatal): datalen=%u max=%d dropped_total=%u\n",
-						frame->datalen, TEL6738_PRE_DTLS_PKT_SIZE, engine->pre_dtls_buf->stat_dropped);
+						"BUNDLE pre-DTLS cannot buffer (dropped non-fatal): datalen=%u max=%d dropped_total=%u\n",
+						frame->datalen, PRE_DTLS_VIDEO_PKT_SIZE, engine->pre_dtls_buf->stat_dropped);
 					status = SWITCH_STATUS_BREAK;
 				}
 			} else {
 				engine->bundle_video_write_success++;
 				if (engine->bundle_video_write_success <= 10 || !(engine->bundle_video_write_success % 500)) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-						"BUNDLE video RTP write success diag wrote=%d attempts=%u ok=%u zero=%u fail=%u enq=%u deq=%u flags=0x%x pt=%u seq=%u ts=%u m=%d packetlen=%u datalen=%u\n",
+						"BUNDLE video RTP write success wrote=%d attempts=%u ok=%u zero=%u fail=%u enq=%u deq=%u flags=0x%x pt=%u seq=%u ts=%u m=%d packetlen=%u datalen=%u\n",
 						bundle_video_wrote, engine->bundle_video_write_attempts, engine->bundle_video_write_success,
 						engine->bundle_video_write_zero, engine->bundle_video_write_fail, engine->bundle_video_enqueued,
 						engine->bundle_video_dequeued, frame->flags, frame->payload, frame->seq, frame->timestamp, frame->m,
@@ -5597,22 +5581,22 @@ tel6738_enqueue_pkt:
 			int nb_do_enqueue = 0; /* set if current frame must be buffered */
 
 			if (engine->pre_dtls_buf && engine->pre_dtls_buf->active && engine->pre_dtls_buf->count > 0) {
-				uint32_t tel6738_dropped_pre_dtls;
+				uint32_t dropped_pre_dtls;
 
 				if (switch_rtp_write_ready(engine->rtp_session, frame->datalen)) {
-					tel6738_dropped_pre_dtls = engine->pre_dtls_buf->count;
-					engine->pre_dtls_buf->stat_dropped += tel6738_dropped_pre_dtls;
+					dropped_pre_dtls = engine->pre_dtls_buf->count;
+					engine->pre_dtls_buf->stat_dropped += dropped_pre_dtls;
 					engine->pre_dtls_buf->head = 0;
 					engine->pre_dtls_buf->count = 0;
 					engine->pre_dtls_buf->active = SWITCH_FALSE;
-					engine->tel6738_pre_dtls_wait_keyframe = (switch_bool_t)tel6738_engine_uses_vp8(engine);
-					engine->tel6738_pre_dtls_wait_keyframe_drops = 0;
+					engine->pre_dtls_wait_keyframe = (switch_bool_t)engine_uses_vp8(engine);
+					engine->pre_dtls_wait_keyframe_drops = 0;
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 						"pre-DTLS (non-bundle) video buffer dropped after transport ready: dropped_now=%u dropped_total=%u queued=%u gate_vp8_keyframe=%d - requesting source keyframe\n",
-						tel6738_dropped_pre_dtls, engine->pre_dtls_buf->stat_dropped,
-						engine->pre_dtls_buf->stat_queued, engine->tel6738_pre_dtls_wait_keyframe);
-					tel6738_request_partner_keyframe(session, "non-bundle-ready-drop");
-					if (tel6738_pre_dtls_keyframe_gate(session, engine, frame, "non-bundle")) {
+						dropped_pre_dtls, engine->pre_dtls_buf->stat_dropped,
+						engine->pre_dtls_buf->stat_queued, engine->pre_dtls_wait_keyframe);
+					request_partner_keyframe(session, "non-bundle-ready-drop");
+					if (pre_dtls_keyframe_gate(session, engine, frame, "non-bundle")) {
 						nbw = switch_rtp_write_frame(engine->rtp_session, frame);
 						if (nbw < 0) {
 							status = SWITCH_STATUS_FALSE;
@@ -5625,7 +5609,7 @@ tel6738_enqueue_pkt:
 					nb_do_enqueue = 1;
 					defer_writable = 1;
 				}
-			} else if (engine->tel6738_pre_dtls_wait_keyframe && !tel6738_pre_dtls_keyframe_gate(session, engine, frame, "non-bundle")) {
+			} else if (engine->pre_dtls_wait_keyframe && !pre_dtls_keyframe_gate(session, engine, frame, "non-bundle")) {
 				defer_writable = 1;
 				status = SWITCH_STATUS_SUCCESS;
 			} else {
@@ -5641,15 +5625,15 @@ tel6738_enqueue_pkt:
 
 			if (nb_do_enqueue) {
 				if (!engine->pre_dtls_buf) {
-					engine->pre_dtls_buf = switch_core_session_alloc(session, sizeof(tel6738_pre_dtls_buf_t));
+					engine->pre_dtls_buf = switch_core_session_alloc(session, sizeof(pre_dtls_video_buf_t));
 					engine->pre_dtls_buf->entries = switch_core_session_alloc(session,
-						TEL6738_PRE_DTLS_CAPACITY * sizeof(tel6738_pre_dtls_entry_t));
+						PRE_DTLS_VIDEO_CAPACITY * sizeof(pre_dtls_video_entry_t));
 					engine->pre_dtls_buf->active = SWITCH_TRUE;
-					engine->tel6738_pre_dtls_wait_keyframe = SWITCH_FALSE;
-					engine->tel6738_pre_dtls_wait_keyframe_drops = 0;
+					engine->pre_dtls_wait_keyframe = SWITCH_FALSE;
+					engine->pre_dtls_wait_keyframe_drops = 0;
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 						"pre-DTLS (non-bundle) buffer allocated: capacity=%d pkt_size=%d\n",
-						TEL6738_PRE_DTLS_CAPACITY, TEL6738_PRE_DTLS_PKT_SIZE);
+						PRE_DTLS_VIDEO_CAPACITY, PRE_DTLS_VIDEO_PKT_SIZE);
 				} else if (!engine->pre_dtls_buf->active) {
 					/* Re-arm: write failed after a previous readiness transition,
 					 * e.g. ICE candidate switch / DTLS re-handshake. Reset and
@@ -5657,20 +5641,20 @@ tel6738_enqueue_pkt:
 					engine->pre_dtls_buf->head  = 0;
 					engine->pre_dtls_buf->count = 0;
 					engine->pre_dtls_buf->active = SWITCH_TRUE;
-					engine->tel6738_pre_dtls_wait_keyframe = SWITCH_FALSE;
-					engine->tel6738_pre_dtls_wait_keyframe_drops = 0;
+					engine->pre_dtls_wait_keyframe = SWITCH_FALSE;
+					engine->pre_dtls_wait_keyframe_drops = 0;
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 						"pre-DTLS (non-bundle) buffer re-armed after post-readiness-drop write 0 seq=%u\n",
 						frame->seq);
 				}
-				if (frame->datalen > 0 && frame->datalen <= TEL6738_PRE_DTLS_PKT_SIZE && frame->data) {
-					if (engine->pre_dtls_buf->count >= TEL6738_PRE_DTLS_CAPACITY) {
+				if (frame->datalen > 0 && frame->datalen <= PRE_DTLS_VIDEO_PKT_SIZE && frame->data) {
+					if (engine->pre_dtls_buf->count >= PRE_DTLS_VIDEO_CAPACITY) {
 						/* Buffer full: drop newest. */
 						engine->pre_dtls_buf->stat_dropped++;
 					} else {
 						uint32_t idx;
-						tel6738_pre_dtls_entry_t *e;
-						idx = (engine->pre_dtls_buf->head + engine->pre_dtls_buf->count) % TEL6738_PRE_DTLS_CAPACITY;
+						pre_dtls_video_entry_t *e;
+						idx = (engine->pre_dtls_buf->head + engine->pre_dtls_buf->count) % PRE_DTLS_VIDEO_CAPACITY;
 						e = &engine->pre_dtls_buf->entries[idx];
 						memcpy(e->data, frame->data, frame->datalen);
 						e->datalen   = frame->datalen;
@@ -5684,7 +5668,7 @@ tel6738_enqueue_pkt:
 						engine->pre_dtls_buf->stat_queued++;
 						if (engine->pre_dtls_buf->stat_queued <= 10 || !(engine->pre_dtls_buf->stat_queued % 50)) {
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-								"TEL6738 pre-DTLS (non-bundle) enqueue: queued=%u buffered=%u dropped=%u seq=%u ts=%u m=%d len=%u\n",
+								"BUNDLE pre-DTLS (non-bundle) enqueue: queued=%u buffered=%u dropped=%u seq=%u ts=%u m=%d len=%u\n",
 								engine->pre_dtls_buf->stat_queued, engine->pre_dtls_buf->count,
 								engine->pre_dtls_buf->stat_dropped, frame->seq, frame->timestamp,
 								frame->m, frame->datalen);
@@ -5694,8 +5678,8 @@ tel6738_enqueue_pkt:
 					/* Oversized or empty frame: non-fatal drop. */
 					engine->pre_dtls_buf->stat_dropped++;
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-						"TEL6738 pre-DTLS (non-bundle) cannot buffer (dropped non-fatal): datalen=%u max=%d dropped_total=%u\n",
-						frame->datalen, TEL6738_PRE_DTLS_PKT_SIZE, engine->pre_dtls_buf->stat_dropped);
+						"BUNDLE pre-DTLS (non-bundle) cannot buffer (dropped non-fatal): datalen=%u max=%d dropped_total=%u\n",
+						frame->datalen, PRE_DTLS_VIDEO_PKT_SIZE, engine->pre_dtls_buf->stat_dropped);
 					status = SWITCH_STATUS_BREAK;
 				}
 			}
@@ -6762,7 +6746,7 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 					switch_rtp_set_remote_ssrc(engine->rtp_session, engine->remote_ssrc);
 				}
 
-				/* TEL6738: when BUNDLE is reusing the audio RTP session for video,
+				/* when BUNDLE is reusing the audio RTP session for video,
 				 * the just-learned video remote SSRC must be wired into the shared
 				 * session so PLI/FIR/NACK target the correct stream. */
 				if (type == SWITCH_MEDIA_TYPE_VIDEO && engine->bundled_with_audio && engine->remote_ssrc) {
@@ -6770,7 +6754,7 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 					if (bundle_a_engine->rtp_session && engine->rtp_session == bundle_a_engine->rtp_session) {
 						switch_rtp_set_bundle_video_ssrcs(engine->rtp_session, engine->ssrc, engine->remote_ssrc);
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
-										  "TEL6738 BUNDLE video SSRCs wired local=%u remote=%u (sdp ssrc-learn)\n",
+										  "BUNDLE video SSRCs wired local=%u remote=%u (sdp ssrc-learn)\n",
 										  engine->ssrc, engine->remote_ssrc);
 					}
 				}
@@ -12623,7 +12607,7 @@ SWITCH_DECLARE(void) switch_core_media_deactivate_rtp(switch_core_session_t *ses
 		a_engine->media_thread = NULL;
 	}
 
-	/* TEL-6738: Stop drain thread before video engine teardown */
+	/* Stop drain thread before video engine teardown */
 	bundle_drain_thread_stop(session);
 	if (v_engine->bundled_with_audio && a_engine->rtp_session) {
 		switch_rtp_clear_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_BUNDLE_ACCEPT_ANY_PT);
@@ -13993,7 +13977,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 				v_engine->bundled_with_audio = 1;
 				switch_rtp_set_bundle_has_video(a_engine->rtp_session, SWITCH_TRUE);
 				if (a_engine->cur_payload_map) {
-					/* TEL-6738: capture local audio PT before video set_default_payload overwrites
+					/* capture local audio PT before video set_default_payload overwrites
 					 * the shared session's payload with the video PT (107). */
 					switch_rtp_set_bundle_audio_pt(a_engine->rtp_session, a_engine->cur_payload_map->pt);
 				}
@@ -14006,7 +13990,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 
 				switch_rtp_set_bundle_video_ssrcs(a_engine->rtp_session, v_engine->ssrc, v_engine->remote_ssrc);
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-					"TEL6738 BUNDLE video SSRCs wired local=%u remote=%u audio_local=%u audio_remote=%u (activate_rtp)\n",
+					"BUNDLE video SSRCs wired local=%u remote=%u audio_local=%u audio_remote=%u (activate_rtp)\n",
 					v_engine->ssrc, v_engine->remote_ssrc, a_engine->ssrc, a_engine->remote_ssrc);
 
 				if (v_engine->fir) {
@@ -14028,7 +14012,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 					switch_rtp_write_state_reset(v_engine->bundle_write_state);
 				}
 				/* BUNDLE video read_fb stores malloc-backed frames cloned by
-				 * tel6738_bundle_frame_dup(). Do not use switch_frame_buffer_dup/free()
+				 * bundle_frame_dup(). Do not use switch_frame_buffer_dup/free()
 				 * with this queue; the frame-buffer free-list is not the owner. */
 				if (!v_engine->read_fb && switch_frame_buffer_create(&v_engine->read_fb, 500) != SWITCH_STATUS_SUCCESS) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
@@ -14055,7 +14039,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 				memset(v_engine->bundle_demux_method_counts, 0, sizeof(v_engine->bundle_demux_method_counts));
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 					"BUNDLE video is borrowing audio RTP transport; video engine will not own RTP teardown/reset\n");
-				/* TEL-6738: Start the continuous drain thread. Stop first so BUNDLE restart
+				/* Start the continuous drain thread. Stop first so BUNDLE restart
 				 * joins any exited-but-not-cleared drain thread and flushes stale audio. */
 				bundle_drain_thread_stop(session);
 				switch_mutex_lock(smh->bundle_drain_mutex);
@@ -14063,7 +14047,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 				switch_mutex_unlock(smh->bundle_drain_mutex);
 			} else {
 				if (v_engine->bundled_with_audio) {
-					/* TEL-6738: Stop drain thread before disabling BUNDLE */
+					/* Stop drain thread before disabling BUNDLE */
 					bundle_drain_thread_stop(session);
 					switch_core_media_flush_queued_read_frames(v_engine);
 					if (v_engine->bundle_write_state) {
@@ -17739,7 +17723,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_receive_message(switch_core_se
 				if (v_engine->bundled_with_audio && a_engine && v_engine->rtp_session == a_engine->rtp_session) {
 					switch_rtp_set_bundle_video_ssrcs(v_engine->rtp_session, v_engine->ssrc, v_engine->remote_ssrc);
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-									  "TEL6738 BUNDLE refresh_req: bundled=%d rtp=%p fir_flag=%d pli_flag=%d numeric_arg=%ld manual_refresh=%d v_ssrc=%u v_remote_ssrc=%u\n",
+									  "BUNDLE refresh_req: bundled=%d rtp=%p fir_flag=%d pli_flag=%d numeric_arg=%ld manual_refresh=%d v_ssrc=%u v_remote_ssrc=%u\n",
 									  v_engine->bundled_with_audio,
 									  (void *)v_engine->rtp_session,
 									  switch_rtp_test_flag(v_engine->rtp_session, SWITCH_RTP_FLAG_FIR) ? 1 : 0,
@@ -19703,7 +19687,7 @@ SWITCH_DECLARE(void) switch_core_session_video_reinit(switch_core_session_t *ses
 
 }
 
-/* TEL-6738: see header docstring. */
+/* see header docstring. */
 SWITCH_DECLARE(switch_bool_t) switch_core_media_video_is_bundled(switch_core_session_t *session)
 {
 	switch_media_handle_t *smh;
@@ -19761,7 +19745,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_video_frame(switch_cor
 	}
 
 	if (!(switch_channel_test_flag(session->channel, CF_VIDEO_READY) || (flags & SWITCH_IO_FLAG_FORCE))) {
-		/* TEL-6738: On a BUNDLE leg, the shared transport (ICE+DTLS) is already up via
+		/* On a BUNDLE leg, the shared transport (ICE+DTLS) is already up via
 		 * audio long before CF_VIDEO_READY flips. Dropping callee->Safari video for the
 		 * 10-20s gap that follows leaves the user staring at a black frame. If the video
 		 * engine is bundled_with_audio and the bundled audio RTP session is ready, treat
