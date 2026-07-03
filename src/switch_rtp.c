@@ -11652,7 +11652,6 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 
 			send_msg->header.seq = htons(write_state ? ++write_state->seq : ++rtp_session->seq);
 			send_msg->header.ssrc = htonl(ssrc ? ssrc : rtp_session->ssrc);
-#if HAVE_MID_EXT
 			if ((mid_ext_id > 0 && mid && *mid) || (rtp_session->ext_mid.enabled && rtp_session->ext_mid.ext_id > 0)) {
 				if (rtp_add_mid_extension(rtp_session, send_msg, &bytes, mid_ext_id, mid) != SWITCH_STATUS_SUCCESS && mid_ext_id > 0 && mid && *mid) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR,
@@ -11661,7 +11660,6 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 					return -1;
 				}
 			}
-#endif
 		}
 
 		if (rtp_session->flags[SWITCH_RTP_FLAG_DEBUG_RTP_WRITE]) {
@@ -12130,7 +12128,6 @@ static int rtp_write_manual_state(switch_rtp_t *rtp_session, switch_rtp_write_st
 	memcpy(rtp_session->write_msg.body, data, datalen);
 
 	bytes = rtp_header_len + datalen;
-#if HAVE_MID_EXT
 	if ((mid_ext_id > 0 && mid && *mid) || (rtp_session->ext_mid.enabled && rtp_session->ext_mid.ext_id > 0)) {
 		if (rtp_add_mid_extension(rtp_session, &rtp_session->write_msg, &bytes, mid_ext_id, mid) != SWITCH_STATUS_SUCCESS && mid_ext_id > 0 && mid && *mid) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR,
@@ -12139,7 +12136,6 @@ static int rtp_write_manual_state(switch_rtp_t *rtp_session, switch_rtp_write_st
 			goto end;
 		}
 	}
-#endif
 
 	if (switch_rtp_write_raw(rtp_session, (void *) &rtp_session->write_msg, &bytes, SWITCH_TRUE) != SWITCH_STATUS_SUCCESS) {
 		(*seq)--;
@@ -12599,15 +12595,20 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_handle_extensions(switch_rtp_t *rtp_s
 					ext_payload_len = ext_len + 1;
 
 					if (ext_id == 0) {
-						if (*ext_data_ptr != 0x00) {
-							return SWITCH_STATUS_FALSE;
+						if (*ext_data_ptr == 0x00) {
+							ext_data_ptr++;
+							continue;
 						}
-						ext_data_ptr += 1;
-						continue;
+						/* RFC 8285 padding is only zero bytes. A non-zero id=0 nibble
+						 * is not a valid one-byte element, but the RTP payload itself is
+						 * still usable; stop parsing extensions instead of dropping media. */
+						break;
 					}
 
 					if (ext_id == 15) {
-						return SWITCH_STATUS_FALSE;
+						/* Reserved in the one-byte header form. Treat it as end-of-parse,
+						 * not a packet-level failure. */
+						break;
 					}
 
 					if ((uint32_t)(ext_header_len + ext_payload_len) > remaining_ext_bytes) {
@@ -12698,7 +12699,6 @@ static switch_status_t rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_
 
 	if (!mid_ext_id || mid_ext_id > 14 || zstr(mid_value)) return SWITCH_STATUS_FALSE;
 
-	payload_len = strlen(mid_value);
 	payload_len = strlen(mid_value);
 	if (!payload_len) return SWITCH_STATUS_FALSE;
 	/* One-byte RTP header extensions can carry at most 16 bytes per element.

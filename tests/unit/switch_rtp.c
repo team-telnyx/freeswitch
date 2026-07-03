@@ -104,8 +104,13 @@ FST_TEARDOWN_END()
 			0xbe, 0xde, 0x00, 0x01, (TEST_MID_EXT_ID << 4) | 0x00, '1', 0x00, 0x00,
 			0xff
 		};
-		uint8_t packet_malformed_mid_ext[] = {
+		uint8_t packet_padding_before_mid[] = {
 			0x90, TEST_PT, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x11, 0x22, 0x33, 0x44,
+			0xbe, 0xde, 0x00, 0x01, 0x00, (TEST_MID_EXT_ID << 4) | 0x00, '1', 0x00,
+			0xcc
+		};
+		uint8_t packet_malformed_mid_ext[] = {
+			0x90, TEST_PT, 0x00, 0x03, 0x00, 0x00, 0x00, 0x03, 0x11, 0x22, 0x33, 0x44,
 			0xbe, 0xde, 0x00, 0x01, (TEST_MID_EXT_ID << 4) | 0x0f, 0x00, 0x00, 0x00,
 			0xdd
 		};
@@ -165,6 +170,14 @@ FST_TEARDOWN_END()
 		fst_requires(mid != NULL);
 		fst_check(!strcmp(mid, "1"));
 
+		packet_len = sizeof(packet_padding_before_mid);
+		fst_requires(switch_socket_sendto(send_sock, rtp_addr, 0, (const char *) packet_padding_before_mid, &packet_len) == SWITCH_STATUS_SUCCESS);
+		status = switch_rtp_zerocopy_read_frame(mid_rtp, &frame, SWITCH_IO_FLAG_NONE);
+		fst_requires(status == SWITCH_STATUS_SUCCESS);
+		mid = switch_rtp_get_received_mid(mid_rtp);
+		fst_requires(mid != NULL);
+		fst_check(!strcmp(mid, "1"));
+
 		packet_len = sizeof(packet_malformed_mid_ext);
 		fst_requires(switch_socket_sendto(send_sock, rtp_addr, 0, (const char *) packet_malformed_mid_ext, &packet_len) == SWITCH_STATUS_SUCCESS);
 		packet_len = sizeof(packet_truncated_csrc_ext);
@@ -175,8 +188,29 @@ FST_TEARDOWN_END()
 		fst_requires(switch_socket_sendto(send_sock, rtp_addr, 0, (const char *) packet_oversized_ext_block, &packet_len) == SWITCH_STATUS_SUCCESS);
 		packet_len = sizeof(packet_malformed_padding);
 		fst_requires(switch_socket_sendto(send_sock, rtp_addr, 0, (const char *) packet_malformed_padding, &packet_len) == SWITCH_STATUS_SUCCESS);
+
+		/* Non-zero id=0 nibble is malformed padding, but the media packet is still
+		 * usable. The extension parser should stop parsing, clear remote MID, and
+		 * keep the packet instead of dropping media. */
+		memset(&frame, 0, sizeof(frame));
+		status = switch_rtp_zerocopy_read_frame(mid_rtp, &frame, SWITCH_IO_FLAG_NONE);
+		fst_requires(status == SWITCH_STATUS_SUCCESS);
+		fst_check(switch_rtp_get_received_mid(mid_rtp) == NULL);
+		fst_check(frame.datalen == 1);
+		fst_check(((uint8_t *) frame.data)[0] == 0xaa);
+
 		packet_len = sizeof(packet_reserved_ext_id);
 		fst_requires(switch_socket_sendto(send_sock, rtp_addr, 0, (const char *) packet_reserved_ext_id, &packet_len) == SWITCH_STATUS_SUCCESS);
+
+		/* id=15 is reserved in the one-byte form. Treat it as end-of-parse, not
+		 * as a packet-level failure. */
+		memset(&frame, 0, sizeof(frame));
+		status = switch_rtp_zerocopy_read_frame(mid_rtp, &frame, SWITCH_IO_FLAG_NONE);
+		fst_requires(status == SWITCH_STATUS_SUCCESS);
+		fst_check(switch_rtp_get_received_mid(mid_rtp) == NULL);
+		fst_check(frame.datalen == 1);
+		fst_check(((uint8_t *) frame.data)[0] == 0xbb);
+
 		packet_len = sizeof(packet_without_mid);
 		fst_requires(switch_socket_sendto(send_sock, rtp_addr, 0, (const char *) packet_without_mid, &packet_len) == SWITCH_STATUS_SUCCESS);
 

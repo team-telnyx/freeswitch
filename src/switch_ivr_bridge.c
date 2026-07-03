@@ -352,21 +352,29 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 
 			if (refresh_timer) {
 				if (refresh_timer > 0 && (refresh_timer % 100) == 0) {
-					/* Force-bypass throttle only for bridge startup / codec-transition retry.
+					switch_status_t refresh_status;
+
+					if (tel6738_dst_is_bundle) {
+						/* Force-bypass throttle only for BUNDLE-destination startup / codec-transition retry.
 						 * CF_VIDEO_REFRESH_REQ propagation must not arm this timer because it
 						 * is source-side only (session_a) and bypasses VIDEO_REFRESH_FREQ. */
-					switch_status_t refresh_status = switch_core_session_force_request_video_refresh(vh->session_a);
+						refresh_status = switch_core_session_force_request_video_refresh(vh->session_a);
+					} else {
+						/* Preserve legacy non-BUNDLE behavior: periodic retry requests a refresh
+						 * from the bridge destination, not from the source. */
+						refresh_status = switch_core_session_request_video_refresh(vh->session_b);
+					}
 
 					tel6738_bridge_source_refreshes++;
 					if (tel6738_bridge_source_refreshes <= 5) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
-									  "TEL6738 video bridge retry refresh %s -> %s source_refresh=%u refresh_status=%d\n",
-									  switch_channel_get_name(channel), switch_channel_get_name(b_channel),
-									  tel6738_bridge_source_refreshes, refresh_status);
+								  "TEL6738 video bridge retry refresh %s -> %s bundle_dst=%d source_refresh=%u refresh_status=%d\n",
+								  switch_channel_get_name(channel), switch_channel_get_name(b_channel), tel6738_dst_is_bundle,
+								  tel6738_bridge_source_refreshes, refresh_status);
 					}
 				}
 				refresh_timer--;
-			} else if (tel6738_last_real_video) {
+			} else if (tel6738_dst_is_bundle && tel6738_last_real_video) {
 				switch_time_t now = switch_micro_time_now();
 
 				if ((now - tel6738_bridge_start) >= tel6738_periodic_refresh_initial_delay &&
