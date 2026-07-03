@@ -78,10 +78,17 @@ FST_SUITE_BEGIN(switch_bundle)
 	FST_TEST_BEGIN(test_missing_rtcp_mux_rejects)
 	{
 		switch_bundle_group_t group;
+		switch_bundle_mline_t *audio, *video;
 		switch_bundle_group_init(&group, SWITCH_BUNDLE_POLICY_AUTO);
 		fst_check(switch_bundle_group_set_offered_mids(&group, "BUNDLE 0 1") == SWITCH_STATUS_SUCCESS);
-		fst_check(switch_bundle_group_add_mline(&group, 0, SWITCH_MEDIA_TYPE_AUDIO, "0", 10000, SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE));
-		fst_check(switch_bundle_group_add_mline(&group, 1, SWITCH_MEDIA_TYPE_VIDEO, "1", 10002, SWITCH_FALSE, SWITCH_FALSE, SWITCH_FALSE));
+		audio = switch_bundle_group_add_mline(&group, 0, SWITCH_MEDIA_TYPE_AUDIO, "0", 10000, SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE);
+		video = switch_bundle_group_add_mline(&group, 1, SWITCH_MEDIA_TYPE_VIDEO, "1", 10002, SWITCH_FALSE, SWITCH_FALSE, SWITCH_FALSE);
+		fst_check(audio != NULL);
+		fst_check(video != NULL);
+		/* Give the audio (BUNDLE-tag) m-line a valid MID extension so validation
+		 * advances past the MID-ext gate and reaches the video m-line's rtcp-mux
+		 * check, which is the condition under test. */
+		fst_check(switch_bundle_mline_set_remote_mid_ext(audio, 1) == SWITCH_STATUS_SUCCESS);
 		fst_check(switch_bundle_group_validate(&group) == SWITCH_STATUS_FALSE);
 		fst_check(strstr(switch_bundle_group_reject_reason(&group), "rtcp-mux"));
 	}
@@ -232,6 +239,114 @@ FST_SUITE_BEGIN(switch_bundle)
 		fst_check(match == NULL);
 		fst_check(method == SWITCH_BUNDLE_DEMUX_NONE);
 		fst_check(video->remote_ssrc == 0);
+	}
+	FST_TEST_END()
+
+	FST_TEST_BEGIN(test_group_reset_bumps_generation_preserves_policy)
+	{
+		switch_bundle_group_t group;
+		switch_bundle_group_init(&group, SWITCH_BUNDLE_POLICY_FORCE);
+		fst_check(switch_bundle_group_set_offered_mids(&group, "BUNDLE 0 1") == SWITCH_STATUS_SUCCESS);
+		fst_check(switch_bundle_group_add_mline(&group, 0, SWITCH_MEDIA_TYPE_AUDIO, "0", 10000, SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE));
+		fst_check(group.mline_count == 1);
+		fst_check(group.generation == 0);
+
+		/* reset increments generation, preserves policy, clears offered mids + mlines */
+		switch_bundle_group_reset(&group);
+		fst_check(group.generation == 1);
+		fst_check(group.policy == SWITCH_BUNDLE_POLICY_FORCE);
+		fst_check(group.mline_count == 0);
+		fst_check(group.offered_mid_count == 0);
+		fst_check(group.state == SWITCH_BUNDLE_STATE_NONE);
+
+		/* a second reset keeps bumping the generation counter */
+		switch_bundle_group_reset(&group);
+		fst_check(group.generation == 2);
+		fst_check(group.policy == SWITCH_BUNDLE_POLICY_FORCE);
+	}
+	FST_TEST_END()
+
+	FST_TEST_BEGIN(test_find_mline_by_mid_and_index)
+	{
+		switch_bundle_group_t group;
+		switch_bundle_mline_t *audio, *video;
+		switch_bundle_group_init(&group, SWITCH_BUNDLE_POLICY_AUTO);
+		fst_check(switch_bundle_group_set_offered_mids(&group, "BUNDLE 0 1") == SWITCH_STATUS_SUCCESS);
+		audio = switch_bundle_group_add_mline(&group, 0, SWITCH_MEDIA_TYPE_AUDIO, "0", 10000, SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE);
+		video = switch_bundle_group_add_mline(&group, 1, SWITCH_MEDIA_TYPE_VIDEO, "1", 10000, SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE);
+		fst_check(audio && video);
+
+		/* positive lookups resolve to the exact mline */
+		fst_check(switch_bundle_group_find_mline_by_mid(&group, "0") == audio);
+		fst_check(switch_bundle_group_find_mline_by_mid(&group, "1") == video);
+		fst_check(switch_bundle_group_find_mline_by_index(&group, 0) == audio);
+		fst_check(switch_bundle_group_find_mline_by_index(&group, 1) == video);
+
+		/* negative lookups: unknown mid, empty/NULL mid, unknown index */
+		fst_check(switch_bundle_group_find_mline_by_mid(&group, "99") == NULL);
+		fst_check(switch_bundle_group_find_mline_by_mid(&group, "") == NULL);
+		fst_check(switch_bundle_group_find_mline_by_mid(&group, NULL) == NULL);
+		fst_check(switch_bundle_group_find_mline_by_index(&group, 7) == NULL);
+	}
+	FST_TEST_END()
+
+	FST_TEST_BEGIN(test_learn_remote_ssrc_idempotent_and_rebind_guard)
+	{
+		switch_bundle_group_t group;
+		switch_bundle_mline_t *audio, *video;
+		switch_bundle_group_init(&group, SWITCH_BUNDLE_POLICY_AUTO);
+		fst_check(switch_bundle_group_set_offered_mids(&group, "BUNDLE 0 1") == SWITCH_STATUS_SUCCESS);
+		audio = switch_bundle_group_add_mline(&group, 0, SWITCH_MEDIA_TYPE_AUDIO, "0", 10000, SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE);
+		video = switch_bundle_group_add_mline(&group, 1, SWITCH_MEDIA_TYPE_VIDEO, "1", 10000, SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE);
+		fst_check(audio && video);
+		fst_check(switch_bundle_mline_set_remote_mid_ext(audio, 1) == SWITCH_STATUS_SUCCESS);
+		fst_check(switch_bundle_mline_set_remote_mid_ext(video, 1) == SWITCH_STATUS_SUCCESS);
+		fst_check(switch_bundle_group_validate(&group) == SWITCH_STATUS_SUCCESS);
+
+		/* first learn binds the ssrc */
+		fst_check(switch_bundle_group_learn_remote_ssrc(&group, audio, 4444) == SWITCH_STATUS_SUCCESS);
+		fst_check(audio->remote_ssrc == 4444);
+
+		/* re-learning the SAME ssrc on the same mline is idempotent */
+		fst_check(switch_bundle_group_learn_remote_ssrc(&group, audio, 4444) == SWITCH_STATUS_SUCCESS);
+		fst_check(audio->remote_ssrc == 4444);
+
+		/* rebinding the same mline to a DIFFERENT ssrc is rejected, binding preserved */
+		fst_check(switch_bundle_group_learn_remote_ssrc(&group, audio, 5555) == SWITCH_STATUS_FALSE);
+		fst_check(audio->remote_ssrc == 4444);
+
+		/* another mline claiming the already-owned ssrc is rejected */
+		fst_check(switch_bundle_group_learn_remote_ssrc(&group, video, 4444) == SWITCH_STATUS_FALSE);
+		fst_check(video->remote_ssrc == 0);
+
+		/* zero ssrc is invalid input */
+		fst_check(switch_bundle_group_learn_remote_ssrc(&group, video, 0) == SWITCH_STATUS_FALSE);
+		fst_check(video->remote_ssrc == 0);
+	}
+	FST_TEST_END()
+
+	FST_TEST_BEGIN(test_demux_unknown_mid_returns_none)
+	{
+		switch_bundle_group_t group;
+		switch_bundle_mline_t *audio, *video, *match;
+		switch_bundle_demux_t method = SWITCH_BUNDLE_DEMUX_MID;
+
+		switch_bundle_group_init(&group, SWITCH_BUNDLE_POLICY_AUTO);
+		fst_check(switch_bundle_group_set_offered_mids(&group, "BUNDLE 0 1") == SWITCH_STATUS_SUCCESS);
+		audio = switch_bundle_group_add_mline(&group, 0, SWITCH_MEDIA_TYPE_AUDIO, "0", 10000, SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE);
+		video = switch_bundle_group_add_mline(&group, 1, SWITCH_MEDIA_TYPE_VIDEO, "1", 10000, SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE);
+		fst_check(audio && video);
+		fst_check(switch_bundle_mline_set_remote_mid_ext(audio, 1) == SWITCH_STATUS_SUCCESS);
+		fst_check(switch_bundle_mline_set_remote_mid_ext(video, 1) == SWITCH_STATUS_SUCCESS);
+		fst_check(switch_bundle_mline_add_payload_type(audio, 111) == SWITCH_STATUS_SUCCESS);
+		fst_check(switch_bundle_mline_add_payload_type(video, 96) == SWITCH_STATUS_SUCCESS);
+		fst_check(switch_bundle_group_validate(&group) == SWITCH_STATUS_SUCCESS);
+
+		/* a packet carrying a MID the group never offered demuxes to nothing;
+		 * the MID path must NOT silently fall through to SSRC/PT matching */
+		match = switch_bundle_group_demux_rtp(&group, "9", 0, 96, &method);
+		fst_check(match == NULL);
+		fst_check(method == SWITCH_BUNDLE_DEMUX_NONE);
 	}
 	FST_TEST_END()
 
