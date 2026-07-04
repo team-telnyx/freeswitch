@@ -181,14 +181,10 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 	int set_decoded_read = 0, refresh_timer = 0;
 	int refresh_cnt = 300;
 	int pass_val = 0, last_pass_val = 0;
-	uint32_t bridge_read_ok = 0, bridge_read_bad = 0, bridge_cng_skip = 0;
-	uint32_t bridge_block_skip = 0, bridge_no_dst_media = 0;
-	uint32_t bridge_write_attempts = 0, bridge_write_ok = 0, bridge_write_fail = 0;
-	uint32_t bridge_cng_streak = 0, bridge_source_refreshes = 0;
-	uint32_t bridge_periodic_refreshes = 0;
+	uint32_t bridge_cng_streak = 0;
 	uint32_t bundle_kf_kick = 0;  /* keyframe kick on first write to BUNDLE dst */
 	switch_bool_t dst_is_bundle = SWITCH_FALSE;
-	switch_time_t last_real_video = 0, last_cng_refresh = 0, last_cng_log = 0;
+	switch_time_t last_real_video = 0, last_cng_refresh = 0;
 	switch_time_t bridge_start = switch_micro_time_now();
 	switch_time_t last_periodic_refresh = 0;
 	switch_time_t periodic_refresh_interval = 10000000;
@@ -243,11 +239,6 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 
 	/* sample once whether destination video is bundled with audio. */
 	dst_is_bundle = switch_core_media_video_is_bundled(vh->session_b);
-	if (dst_is_bundle) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
-						  "BUNDLE video bridge dst-is-bundle %s -> %s; will bypass CF_VIDEO_READY and kick keyframe on first write\n",
-						  switch_channel_get_name(channel), switch_channel_get_name(b_channel));
-	}
 
 	switch_core_session_request_video_refresh(vh->session_a);
 	switch_core_session_request_video_refresh(vh->session_b);
@@ -263,17 +254,11 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 			}
 
 			if (pass_val != last_pass_val) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
-							  "BUNDLE video bridge mode %s -> %s pass_val=%d src_ready=%d dst_ready=%d src_decoded=%d dst_decoded=%d\n",
-							  switch_channel_get_name(channel), switch_channel_get_name(b_channel), pass_val,
-							  switch_channel_test_flag(channel, CF_VIDEO_READY), switch_channel_test_flag(b_channel, CF_VIDEO_READY),
-							  switch_channel_test_flag(channel, CF_VIDEO_DECODED_READ), switch_channel_test_flag(b_channel, CF_VIDEO_DECODED_READ));
 				switch_core_session_passthru(session, SWITCH_MEDIA_TYPE_VIDEO, pass_val == 2 ? SWITCH_TRUE : SWITCH_FALSE);
 				last_pass_val = pass_val;
 			}
 			
 			if (switch_channel_test_flag(b_channel, CF_VIDEO_REFRESH_REQ)) {
-				switch_status_t refresh_status = SWITCH_STATUS_BREAK;
 				switch_time_t relay_now = switch_micro_time_now();
 
 				switch_channel_clear_flag(b_channel, CF_VIDEO_REFRESH_REQ);
@@ -282,18 +267,12 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 				 * — well below encoder stall threshold, and much faster than 1s for PLI relay. */
 				if (!last_relay_refresh_a || (relay_now - last_relay_refresh_a) >= 200000) {
 					last_relay_refresh_a = relay_now;
-					refresh_status = switch_core_session_force_request_video_refresh(vh->session_a);
+					switch_core_session_force_request_video_refresh(vh->session_a);
 				}
-				bridge_source_refreshes++;
 
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
-							  "BUNDLE video bridge propagated refresh %s -> %s source_refresh=%u refresh_status=%d\n",
-							  switch_channel_get_name(channel), switch_channel_get_name(b_channel),
-							  bridge_source_refreshes, refresh_status);
 			}
 
 			if (switch_channel_test_flag(channel, CF_VIDEO_REFRESH_REQ)) {
-				switch_status_t refresh_status = SWITCH_STATUS_BREAK;
 				switch_time_t relay_now = switch_micro_time_now();
 
 				switch_channel_clear_flag(channel, CF_VIDEO_REFRESH_REQ);
@@ -303,14 +282,9 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 				 * must reach the source quickly or blocky video persists for ~1-1.5s per event. */
 				if (!last_relay_refresh_b || (relay_now - last_relay_refresh_b) >= 200000) {
 					last_relay_refresh_b = relay_now;
-					refresh_status = switch_core_session_force_request_video_refresh(vh->session_b);
+					switch_core_session_force_request_video_refresh(vh->session_b);
 				}
-				bridge_source_refreshes++;
 
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
-							  "BUNDLE video bridge propagated reverse refresh %s -> %s source_refresh=%u refresh_status=%d\n",
-							  switch_channel_get_name(channel), switch_channel_get_name(b_channel),
-							  bridge_source_refreshes, refresh_status);
 			}
 
 			if (!switch_channel_test_flag(channel, CF_PROXY_MEDIA)) {
@@ -323,11 +297,6 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 				if (switch_channel_test_flag(channel, CF_VIDEO_DECODED_READ)) {
 					if (session_a_codec_implementation.impl_id == session_b_codec_implementation.impl_id && !switch_channel_test_flag(b_channel, CF_VIDEO_DECODED_READ)) {
 						if (set_decoded_read) {
-							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
-										  "BUNDLE video bridge clear decoded-read %s -> %s read_impl=%u write_impl=%u dst_decoded=%d\n",
-										  switch_channel_get_name(channel), switch_channel_get_name(b_channel),
-										  session_a_codec_implementation.impl_id, session_b_codec_implementation.impl_id,
-										  switch_channel_test_flag(b_channel, CF_VIDEO_DECODED_READ));
 							switch_channel_clear_flag_recursive(channel, CF_VIDEO_DECODED_READ);
 							set_decoded_read = 0;
 							refresh_timer = refresh_cnt;
@@ -336,11 +305,6 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 				} else {
 					if (session_a_codec_implementation.impl_id != session_b_codec_implementation.impl_id ||
 						switch_channel_test_flag(b_channel, CF_VIDEO_DECODED_READ)) {
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
-									  "BUNDLE video bridge set decoded-read %s -> %s read_impl=%u write_impl=%u dst_decoded=%d\n",
-									  switch_channel_get_name(channel), switch_channel_get_name(b_channel),
-									  session_a_codec_implementation.impl_id, session_b_codec_implementation.impl_id,
-									  switch_channel_test_flag(b_channel, CF_VIDEO_DECODED_READ));
 						switch_channel_set_flag_recursive(channel, CF_VIDEO_DECODED_READ);
 						set_decoded_read = 1;
 						refresh_timer = refresh_cnt;
@@ -350,25 +314,15 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 
 			if (refresh_timer) {
 				if (refresh_timer > 0 && (refresh_timer % 100) == 0) {
-					switch_status_t refresh_status;
-
 					if (dst_is_bundle) {
 						/* Force-bypass throttle only for BUNDLE-destination startup / codec-transition retry.
 						 * CF_VIDEO_REFRESH_REQ propagation must not arm this timer because it
 						 * is source-side only (session_a) and bypasses VIDEO_REFRESH_FREQ. */
-						refresh_status = switch_core_session_force_request_video_refresh(vh->session_a);
+						switch_core_session_force_request_video_refresh(vh->session_a);
 					} else {
 						/* Preserve legacy non-BUNDLE behavior: periodic retry requests a refresh
 						 * from the bridge destination, not from the source. */
-						refresh_status = switch_core_session_request_video_refresh(vh->session_b);
-					}
-
-					bridge_source_refreshes++;
-					if (bridge_source_refreshes <= 5) {
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
-								  "BUNDLE video bridge retry refresh %s -> %s bundle_dst=%d source_refresh=%u refresh_status=%d\n",
-								  switch_channel_get_name(channel), switch_channel_get_name(b_channel), dst_is_bundle,
-								  bridge_source_refreshes, refresh_status);
+						switch_core_session_request_video_refresh(vh->session_b);
 					}
 				}
 				refresh_timer--;
@@ -377,144 +331,64 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 
 				if ((now - bridge_start) >= periodic_refresh_initial_delay &&
 					(!last_periodic_refresh || (now - last_periodic_refresh) >= periodic_refresh_interval)) {
-					switch_status_t refresh_status = switch_core_session_request_video_refresh(vh->session_a);
-
+					switch_core_session_request_video_refresh(vh->session_a);
 					last_periodic_refresh = now;
-					bridge_source_refreshes++;
-					bridge_periodic_refreshes++;
-
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
-									  "BUNDLE video bridge periodic refresh %s -> %s periodic_refresh=%u source_refresh=%u refresh_status=%d age_ms=%lld interval_ms=%lld read_ok=%u write_ok=%u write_fail=%u\n",
-									  switch_channel_get_name(channel), switch_channel_get_name(b_channel),
-									  bridge_periodic_refreshes, bridge_source_refreshes, refresh_status,
-									  (long long)((now - bridge_start) / 1000),
-									  (long long)(periodic_refresh_interval / 1000),
-									  bridge_read_ok, bridge_write_ok, bridge_write_fail);
 				}
 			}
 
 			status = switch_core_session_read_video_frame(vh->session_a, &read_frame, SWITCH_IO_FLAG_NONE, 0);
 
 			if (!SWITCH_READ_ACCEPTABLE(status)) {
-				bridge_read_bad++;
-				if (bridge_read_bad <= 20 || (bridge_read_bad % 500) == 0) {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
-							  "BUNDLE video bridge read-bad %s -> %s status=%d read_ok=%u read_bad=%u write_attempt=%u write_ok=%u write_fail=%u\n",
-							  switch_channel_get_name(channel), switch_channel_get_name(b_channel), status, bridge_read_ok,
-							  bridge_read_bad, bridge_write_attempts, bridge_write_ok, bridge_write_fail);
-				}
 				switch_cond_next();
 				continue;
 			}
 
 			if (read_frame && !switch_test_flag(read_frame, SFF_CNG)) {
-				bridge_read_ok++;
 				bridge_cng_streak = 0;
 				last_real_video = switch_micro_time_now();
 			}
 		}
-
 
 		if (read_frame && (switch_test_flag(read_frame, SFF_CNG) ||
 			switch_channel_test_flag(channel, CF_LEG_HOLDING) || switch_channel_test_flag(b_channel, CF_VIDEO_READ_FILE_ATTACHED))) {
 			if (switch_test_flag(read_frame, SFF_CNG)) {
 				switch_time_t now = switch_micro_time_now();
 
-				bridge_cng_skip++;
 				if (last_real_video && switch_channel_media_up(channel) && switch_channel_media_up(b_channel)) {
 					bridge_cng_streak++;
 
 					if (bridge_cng_streak >= 25 && (!last_cng_refresh || (now - last_cng_refresh) > 1000000)) {
-						switch_status_t refresh_status;
-
 						last_cng_refresh = now;
-						bridge_source_refreshes++;
-						refresh_status = switch_core_session_request_video_refresh(vh->session_a);
-
-						if (bridge_source_refreshes <= 5 || !last_cng_log || (now - last_cng_log) > 5000000) {
-							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
-										  "BUNDLE video source stalled %s -> %s cng_streak=%u cng_skip=%u read_ok=%u read_bad=%u write_ok=%u write_fail=%u source_refresh=%u refresh_status=%d last_real_age_ms=%" SWITCH_TIME_T_FMT " src_media_up=%d dst_media_up=%d\n",
-										  switch_channel_get_name(channel), switch_channel_get_name(b_channel), bridge_cng_streak,
-										  bridge_cng_skip, bridge_read_ok, bridge_read_bad,
-										  bridge_write_ok, bridge_write_fail, bridge_source_refreshes,
-										  refresh_status, (now - last_real_video) / 1000, switch_channel_media_up(channel),
-										  switch_channel_media_up(b_channel));
-							last_cng_log = now;
-						}
+						switch_core_session_request_video_refresh(vh->session_a);
 					}
 				}
-			} else {
-				bridge_block_skip++;
 			}
 			continue;
 		}
 
-		if (read_frame && !switch_channel_media_up(b_channel)) {
-			bridge_no_dst_media++;
-			if (!switch_test_flag(read_frame, SFF_CNG) && (bridge_no_dst_media <= 20 || (bridge_no_dst_media % 500) == 0)) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
-						  "BUNDLE video bridge no-dst-media %s -> %s read_ok=%u no_dst=%u seq=%u ts=%u len=%u marker=%d dst_media_up=%d\n",
-						  switch_channel_get_name(channel), switch_channel_get_name(b_channel), bridge_read_ok,
-						  bridge_no_dst_media, read_frame->seq, read_frame->timestamp, read_frame->datalen, read_frame->m,
-						  switch_channel_media_up(b_channel));
-			}
-		}
-
 		if (read_frame && switch_channel_media_up(b_channel)) {
 			switch_status_t write_status;
+			/* When destination video shares the BUNDLE transport with audio,
+			 * the underlying transport is already up via audio ICE/DTLS. Pass
+			 * SWITCH_IO_FLAG_FORCE so the CF_VIDEO_READY gate in
+			 * switch_core_session_write_video_frame() does not silently drop the
+			 * callee video for the 10-20s before the destination video flips
+			 * CF_VIDEO_READY. Non-BUNDLE destinations keep the original gating. */
+			switch_io_flag_t write_flags = dst_is_bundle ? SWITCH_IO_FLAG_FORCE : SWITCH_IO_FLAG_NONE;
 
-			if (!switch_test_flag(read_frame, SFF_CNG)) {
-				bridge_write_attempts++;
-			}
-
-			{
-				/* When destination video shares the BUNDLE transport with audio,
-				 * the underlying transport is already up via audio ICE/DTLS. Pass
-				 * SWITCH_IO_FLAG_FORCE so the CF_VIDEO_READY gate in
-				 * switch_core_session_write_video_frame() does not silently drop the
-				 * callee video for the 10-20s before the destination video flips
-				 * CF_VIDEO_READY. Non-BUNDLE destinations keep the original gating. */
-				switch_io_flag_t write_flags = dst_is_bundle ? SWITCH_IO_FLAG_FORCE : SWITCH_IO_FLAG_NONE;
-				write_status = switch_core_session_write_video_frame(vh->session_b, read_frame, write_flags, 0);
-			}
+			write_status = switch_core_session_write_video_frame(vh->session_b, read_frame, write_flags, 0);
 			if (write_status == SWITCH_STATUS_SUCCESS) {
-				if (!switch_test_flag(read_frame, SFF_CNG)) {
-					bridge_write_ok++;
+				if (!switch_test_flag(read_frame, SFF_CNG) && dst_is_bundle && bundle_kf_kick == 0) {
 					/* On the FIRST real video write to a BUNDLE destination, request a
 					 * keyframe from the source so the destination's first decodable frame is an
 					 * IDR rather than an inter-frame. Without this the decoder sees mid-stream
 					 * slices and renders nothing until the next periodic keyframe. */
-					if (dst_is_bundle && bundle_kf_kick == 0) {
-						switch_status_t kf_status = switch_core_session_force_request_video_refresh(vh->session_a);
-						bundle_kf_kick++;
-						bridge_source_refreshes++;
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
-										  "BUNDLE video bridge bundle-kf-kick %s -> %s seq=%u ts=%u len=%u marker=%d key=%d refresh_status=%d source_refresh=%u\n",
-										  switch_channel_get_name(channel), switch_channel_get_name(b_channel),
-										  read_frame->seq, read_frame->timestamp, read_frame->datalen, read_frame->m,
-										  switch_test_flag(read_frame, SFF_IS_KEYFRAME), kf_status, bridge_source_refreshes);
-					}
+					switch_core_session_force_request_video_refresh(vh->session_a);
+					bundle_kf_kick++;
 				}
 			} else {
-				if (!switch_test_flag(read_frame, SFF_CNG)) {
-					bridge_write_fail++;
-				}
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
-						  "BUNDLE video bridge write-result %s -> %s status=%d read_ok=%u write_attempt=%u write_ok=%u write_fail=%u\n",
-						  switch_channel_get_name(channel), switch_channel_get_name(b_channel), write_status, bridge_read_ok,
-						  bridge_write_attempts, bridge_write_ok, bridge_write_fail);
 				switch_cond_next();
 				continue;
-			}
-
-			if (!switch_test_flag(read_frame, SFF_CNG) &&
-				(bridge_write_attempts <= 20 || (bridge_write_attempts % 500) == 0)) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
-						  "BUNDLE video bridge counters %s -> %s read_ok=%u read_bad=%u cng_skip=%u block_skip=%u no_dst=%u write_attempt=%u write_ok=%u write_fail=%u last_seq=%u last_ts=%u last_len=%u last_marker=%d\n",
-						  switch_channel_get_name(channel), switch_channel_get_name(b_channel), bridge_read_ok, bridge_read_bad,
-						  bridge_cng_skip, bridge_block_skip, bridge_no_dst_media,
-						  bridge_write_attempts, bridge_write_ok, bridge_write_fail, read_frame->seq,
-						  read_frame->timestamp, read_frame->datalen, read_frame->m);
 			}
 		}
 	}
@@ -524,13 +398,6 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 	}
 
 	switch_core_session_kill_channel(vh->session_b, SWITCH_SIG_BREAK);
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG,
-					  "BUNDLE video bridge final %s -> %s read_ok=%u read_bad=%u cng_skip=%u block_skip=%u no_dst=%u write_attempt=%u write_ok=%u write_fail=%u cng_streak=%u source_refresh=%u periodic_refresh=%u bundle_kf_kick=%u\n",
-					  switch_channel_get_name(channel), switch_channel_get_name(b_channel),
-					  bridge_read_ok, bridge_read_bad, bridge_cng_skip, bridge_block_skip,
-					  bridge_no_dst_media, bridge_write_attempts, bridge_write_ok, bridge_write_fail,
-					  bridge_cng_streak, bridge_source_refreshes,
-					  bridge_periodic_refreshes, bundle_kf_kick);
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(vh->session_a), SWITCH_LOG_DEBUG, "%s video thread ended.\n", switch_channel_get_name(channel));
 
 	switch_core_session_request_video_refresh(vh->session_a);

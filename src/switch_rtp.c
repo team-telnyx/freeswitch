@@ -494,7 +494,6 @@ struct switch_rtp {
 	uint8_t bundle_video_frame_in_progress;
 	switch_time_t bundle_video_frame_open_us;
 	uint32_t bundle_audio_deferred_total;
-	uint32_t bundle_audio_stale_log_count;
 	uint32_t bundle_audio_pt_restamped_total;
 	switch_payload_t bundle_audio_pt;  /* local egress audio PT, immune to video set_default_payload on shared BUNDLE session */
 	switch_mutex_t *ice_mutex;
@@ -518,7 +517,6 @@ struct switch_rtp {
 	int from_auto;
 	uint32_t cng_count;
 	switch_rtp_bug_flag_t rtp_bugs;
-	uint32_t debug_bundle_raw_read_count;
 	switch_rtp_stats_t stats;
 	switch_rtcp_video_stats_t rtcp_vstats;
 	uint32_t clean_stream;
@@ -2825,8 +2823,6 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 		struct switch_rtcp_sender_info *rtcp_sender_info = 0;
 		switch_bool_t is_only_receiver = FALSE;
 		switch_bool_t report_sent = FALSE;
-		int fb_pli = 0, fb_fir = 0, fb_nack = 0;
-
 		if (!rtcp_fb) {
 			rtp_session->rtcp_last_sent = now;
 			rtp_session->rtcp_sent_packets++;
@@ -2933,13 +2929,6 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 				ext_hdr->send_ssrc = htonl(rtp_feedback_local_ssrc(rtp_session));
 				ext_hdr->recv_ssrc = htonl(rtp_feedback_remote_ssrc(rtp_session));
 				rtp_session->rtcp_vstats.video_in.pli_count++;
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-								  "BUNDLE RTCP send PLI %s local_ssrc=%u remote_ssrc=%u fb_local_ssrc=%u fb_remote_ssrc=%u count=%u\n",
-								  switch_core_session_get_name(rtp_session->session), rtp_session->ssrc, rtp_session->remote_ssrc,
-								  rtp_feedback_local_ssrc(rtp_session), rtp_feedback_remote_ssrc(rtp_session),
-								  rtp_session->rtcp_vstats.video_in.pli_count);
-				fb_pli = 1;
-
 				ext_hdr->length = htons((uint8_t)(sizeof(switch_rtcp_ext_hdr_t) / 4) - 1);
 				rtcp_bytes += sizeof(switch_rtcp_ext_hdr_t);
 				rtp_session->pli_count = 0;
@@ -2965,12 +2954,6 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 					p += sizeof(switch_rtcp_ext_hdr_t);
 					nack = (uint32_t *) p;
 					*nack = cur_nack[n];
-
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-								  "BUNDLE RTCP send NACK %s seq=%u local_ssrc=%u remote_ssrc=%u count=%d\n",
-								  switch_core_session_get_name(rtp_session->session), ntohs(*nack & 0xFFFF),
-								  rtp_feedback_local_ssrc(rtp_session), rtp_feedback_remote_ssrc(rtp_session), rtp_session->rtcp_vstats.video_in.nack_count);
-					fb_nack = 1;
 
 					rtcp_bytes += sizeof(switch_rtcp_ext_hdr_t) + sizeof(cur_nack[n]);
 					cur_nack[n] = 0;
@@ -3011,12 +2994,6 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 				fir->r1 = fir->r2 = fir->r3 = 0;
 
 				rtp_session->rtcp_vstats.video_in.fir_count++;
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-								  "BUNDLE RTCP send FIR %s fir_seq=%d local_ssrc=%u remote_ssrc=%u count=%u\n",
-								  switch_core_session_get_name(rtp_session->session), rtp_session->fir_seq,
-								  rtp_feedback_local_ssrc(rtp_session), rtp_feedback_remote_ssrc(rtp_session), rtp_session->rtcp_vstats.video_in.fir_count);
-				fb_fir = 1;
-
 				rtp_session->fir_seq++;
 
 				ext_hdr->length = htons((uint8_t)((sizeof(switch_rtcp_ext_hdr_t) + sizeof(rtcp_fir_t)) / 4) - 1);
@@ -3150,12 +3127,6 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,"RTCP packet not written\n");
 		} else {
 			rtp_session->stats.inbound.period_packet_count = 0;
-			if (rtp_session->bundle_has_video && (fb_pli || fb_fir || fb_nack)) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-								  "BUNDLE RTCP feedback sent bytes=%" SWITCH_SIZE_T_FMT " pli=%d fir=%d nack=%d fb_local=%u fb_remote=%u\n",
-								  rtcp_bytes, fb_pli, fb_fir, fb_nack,
-								  rtp_feedback_local_ssrc(rtp_session), rtp_feedback_remote_ssrc(rtp_session));
-			}
 		}
 	}
 
@@ -6333,30 +6304,11 @@ SWITCH_DECLARE(void) switch_rtp_video_refresh(switch_rtp_t *rtp_session)
 {
 
 	if (!rtp_write_ready(rtp_session, 0, __LINE__)) {
-		if (rtp_session && rtp_session->bundle_has_video && rtp_session->session) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-							  "BUNDLE RTCP queue FIR DROPPED: rtp_write_ready=0 ice_user=%s ice_rready=%d dtls=%p dtls_state=%d\n",
-							  rtp_session->ice.ice_user ? rtp_session->ice.ice_user : "(null)",
-							  (int)(rtp_session->ice.rready || rtp_session->ice.ready),
-							  (void *)rtp_session->dtls,
-							  rtp_session->dtls ? (int)rtp_session->dtls->state : -1);
-		}
 		return;
 	}
 
 	if (rtp_has_video_feedback(rtp_session) && (rtp_session->ice.ice_user || rtp_session->flags[SWITCH_RTP_FLAG_FIR] || rtp_session->flags[SWITCH_RTP_FLAG_OLD_FIR])) {
 		rtp_session->fir_count = 1;
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-						  "BUNDLE RTCP queue FIR %s local_ssrc=%u remote_ssrc=%u fb_local_ssrc=%u fb_remote_ssrc=%u\n",
-						  switch_core_session_get_name(rtp_session->session), rtp_session->ssrc, rtp_session->remote_ssrc,
-						  rtp_feedback_local_ssrc(rtp_session), rtp_feedback_remote_ssrc(rtp_session));
-	} else if (rtp_session->bundle_has_video) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-						  "BUNDLE RTCP queue FIR DROPPED: has_video_fb=%d ice_user=%s fir=%d old_fir=%d\n",
-						  rtp_has_video_feedback(rtp_session) ? 1 : 0,
-						  rtp_session->ice.ice_user ? rtp_session->ice.ice_user : "(null)",
-						  (int)rtp_session->flags[SWITCH_RTP_FLAG_FIR],
-						  (int)rtp_session->flags[SWITCH_RTP_FLAG_OLD_FIR]);
 	}
 }
 
@@ -6364,29 +6316,11 @@ SWITCH_DECLARE(void) switch_rtp_video_loss(switch_rtp_t *rtp_session)
 {
 
 	if (!rtp_write_ready(rtp_session, 0, __LINE__)) {
-		if (rtp_session && rtp_session->bundle_has_video && rtp_session->session) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-							  "BUNDLE RTCP queue PLI DROPPED: rtp_write_ready=0 ice_user=%s ice_rready=%d dtls=%p dtls_state=%d\n",
-							  rtp_session->ice.ice_user ? rtp_session->ice.ice_user : "(null)",
-							  (int)(rtp_session->ice.rready || rtp_session->ice.ready),
-							  (void *)rtp_session->dtls,
-							  rtp_session->dtls ? (int)rtp_session->dtls->state : -1);
-		}
 		return;
 	}
 
 	if (rtp_has_video_feedback(rtp_session) && (rtp_session->ice.ice_user || rtp_session->flags[SWITCH_RTP_FLAG_PLI])) {
 		rtp_session->pli_count = 1;
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-						  "BUNDLE RTCP queue PLI %s local_ssrc=%u remote_ssrc=%u fb_local_ssrc=%u fb_remote_ssrc=%u\n",
-						  switch_core_session_get_name(rtp_session->session), rtp_session->ssrc, rtp_session->remote_ssrc,
-						  rtp_feedback_local_ssrc(rtp_session), rtp_feedback_remote_ssrc(rtp_session));
-	} else if (rtp_session->bundle_has_video) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-						  "BUNDLE RTCP queue PLI DROPPED: has_video_fb=%d ice_user=%s pli=%d\n",
-						  rtp_has_video_feedback(rtp_session) ? 1 : 0,
-						  rtp_session->ice.ice_user ? rtp_session->ice.ice_user : "(null)",
-						  (int)rtp_session->flags[SWITCH_RTP_FLAG_PLI]);
 	}
 }
 
@@ -8065,14 +7999,6 @@ fork_end:
 		}
 		/* skip stats/JB for video packets on audio session */
 		if (*bytes && rtp_should_bypass_audio_jb(rtp_session)) {
-			rtp_session->debug_bundle_raw_read_count++;
-			if (rtp_session->debug_bundle_raw_read_count <= 10 || !(rtp_session->debug_bundle_raw_read_count % 500)) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-					"BUNDLE RTP audio-jb bypass count=%u pt=%u seq=%u ts=%u ssrc=%u m=%d bytes=%ld\n",
-					rtp_session->debug_bundle_raw_read_count, rtp_session->last_rtp_hdr.pt,
-					ntohs(rtp_session->last_rtp_hdr.seq), ntohl(rtp_session->last_rtp_hdr.ts),
-					ntohl(rtp_session->last_rtp_hdr.ssrc), rtp_session->last_rtp_hdr.m, (long)*bytes);
-			}
 			return SWITCH_STATUS_SUCCESS;
 		}
 
@@ -8493,36 +8419,22 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 				 * timeout fires). Skip partner propagation once either side is no longer up. */
 				switch_channel_t *local_channel = switch_core_session_get_channel(rtp_session->session);
 
-				if (!switch_channel_up_nosig(local_channel)) {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-									  "BUNDLE RTCP recv FIR/PLI %s local channel down, skipping partner propagation\n",
-									  switch_core_session_get_name(rtp_session->session));
-				} else {
+				if (switch_channel_up_nosig(local_channel)) {
 					switch_core_session_t *partner_session = NULL;
 
 					if (switch_core_session_get_partner(rtp_session->session, &partner_session) == SWITCH_STATUS_SUCCESS) {
 						switch_channel_t *partner_channel = switch_core_session_get_channel(partner_session);
-						switch_status_t refresh_status = SWITCH_STATUS_FALSE;
 
 						if (switch_channel_up_nosig(partner_channel)) {
 							switch_core_media_gen_key_frame(partner_session);
-							refresh_status = switch_core_session_request_video_refresh(partner_session);
+							switch_core_session_request_video_refresh(partner_session);
 							switch_channel_set_flag(partner_channel, CF_VIDEO_REFRESH_REQ);
-							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-											  "BUNDLE RTCP recv FIR/PLI %s -> partner %s type=%u fmt=%u send_ssrc=%u recv_ssrc=%u refresh_status=%d\n",
-											  switch_core_session_get_name(rtp_session->session), switch_core_session_get_name(partner_session),
-											  msg->header.type, extp->header.fmt,
-											  ntohl(extp->header.send_ssrc), ntohl(extp->header.recv_ssrc), refresh_status);
-						} else {
-							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-											  "BUNDLE RTCP recv FIR/PLI %s partner %s not up, skipping refresh\n",
-											  switch_core_session_get_name(rtp_session->session), switch_core_session_get_name(partner_session));
 						}
 						switch_core_session_rwunlock(partner_session);
 					} else {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
-										  "BUNDLE RTCP recv FIR/PLI %s but no bridged partner found\n",
-										  switch_core_session_get_name(rtp_session->session));
+									  "BUNDLE RTCP recv FIR/PLI %s but no bridged partner found\n",
+									  switch_core_session_get_name(rtp_session->session));
 					}
 					/* Also flag local channel for bridge thread b_channel visibility (belt-and-suspenders) */
 					switch_channel_set_flag(local_channel, CF_VIDEO_REFRESH_REQ);
@@ -8530,10 +8442,6 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 			} else {
 				switch_core_media_gen_key_frame(rtp_session->session);
 				switch_core_session_request_video_refresh(rtp_session->session);
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-								  "BUNDLE RTCP recv FIR/PLI %s type=%u fmt=%u send_ssrc=%u recv_ssrc=%u\n",
-								  switch_core_session_get_name(rtp_session->session), msg->header.type, extp->header.fmt,
-								  ntohl(extp->header.send_ssrc), ntohl(extp->header.recv_ssrc));
 				switch_channel_set_flag(switch_core_session_get_channel(rtp_session->session), CF_VIDEO_REFRESH_REQ);
 			}
 		}
@@ -8542,12 +8450,6 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 			uint32_t *nack = (uint32_t *) extp->body;
 			int i;
 
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-							  "BUNDLE RTCP recv %sNACK %s count=%d send_ssrc=%u recv_ssrc=%u local_ssrc=%u remote_ssrc=%u bundle_has_video=%u\n",
-							  rtp_session->bundle_has_video ? "bundled " : "",
-							  switch_core_session_get_name(rtp_session->session), ntohs(extp->header.length) - 2,
-							  ntohl(extp->header.send_ssrc), ntohl(extp->header.recv_ssrc), rtp_session->ssrc, rtp_session->remote_ssrc,
-							  rtp_session->bundle_has_video);
 
 
 			for (i = 0; i < ntohs(extp->header.length) - 2; i++) {
@@ -10889,11 +10791,6 @@ fork_done:
 						   A packet without MID is better than no packet. This prevents audio drops
 						   on bridge legs where the inbound BEDE header has elements the MID parser
 						   cannot handle. Clear header.x so libsrtp sees a clean packet. */
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-							"BUNDLE MID strip: session MID failed, sending without extension media=%s pt=%u seq=%u ts=%u ssrc=%u bundle_has_video=%u header_x=%d ext_profile=0x%04x ext_len=%u\n",
-							rtp_type(rtp_session), send_msg->header.pt, ntohs(send_msg->header.seq), ntohl(send_msg->header.ts),
-							ntohl(send_msg->header.ssrc), rtp_session->bundle_has_video, send_msg->header.x,
-							send_msg->ext ? ntohs(send_msg->ext->profile) : 0, send_msg->ext ? ntohs(send_msg->ext->length) : 0);
 						if (send_msg->header.x) {
 							/* Strip the entire extension: move payload back over the extension block
 							   and clear the extension bit so libsrtp sees a clean packet. */
@@ -11396,29 +11293,10 @@ static void bundle_audio_defer_until(switch_rtp_t *rtp_session, switch_time_t de
 	}
 
 	if (waited_us > 0 || hit_stale || hit_cap) {
-		uint32_t deferred;
-		uint32_t stale_count = 0;
-
-		/* Counters live on the shared struct -- bump them under the lock,
-		   copy out locals, then drop the lock before logging. */
+		/* Counters live on the shared struct. */
 		switch_mutex_lock(rtp_session->bundle_video_frame_lock);
-		deferred = ++rtp_session->bundle_audio_deferred_total;
-		if (hit_stale) {
-			stale_count = ++rtp_session->bundle_audio_stale_log_count;
-		}
+		rtp_session->bundle_audio_deferred_total++;
 		switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
-
-		if (hit_stale) {
-			if (stale_count <= 5 || (stale_count % 500) == 0) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-					"BUNDLE audio defer stale_clear waited_us=%lld age_us=%lld stale_count=%u deferred_total=%u\n",
-					(long long) waited_us, (long long) age_us, stale_count, deferred);
-			}
-		} else if (deferred <= 10 || (deferred % 500) == 0 || hit_cap) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-				"BUNDLE audio defer waited_us=%lld age_us=%lld hit_cap=%d deferred_total=%u\n",
-				(long long) waited_us, (long long) age_us, hit_cap ? 1 : 0, deferred);
-		}
 	}
 }
 

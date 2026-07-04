@@ -374,16 +374,8 @@ static void request_partner_keyframe(switch_core_session_t *session, const char 
 		if (switch_channel_up_nosig(session->channel) && other_channel && switch_channel_up_nosig(other_channel)) {
 			switch_core_media_gen_key_frame(other_session);
 			switch_core_session_force_request_video_refresh(other_session);
-		} else {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-				"BUNDLE pre-DTLS video buffer drop skipped source keyframe request: reason=%s local_up=%d other_up=%d\n",
-				switch_str_nil(reason), switch_channel_up_nosig(session->channel), other_channel ? switch_channel_up_nosig(other_channel) : 0);
 		}
 		switch_core_session_rwunlock(other_session);
-	} else {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-			"BUNDLE pre-DTLS video buffer drop skipped source keyframe request: reason=%s no partner session\n",
-			switch_str_nil(reason));
 	}
 }
 
@@ -414,11 +406,6 @@ static switch_bool_t pre_dtls_keyframe_gate(switch_core_session_t *session, swit
 	}
 
 	engine->pre_dtls_wait_keyframe_drops++;
-	if (engine->pre_dtls_wait_keyframe_drops <= 10 || !(engine->pre_dtls_wait_keyframe_drops % 50)) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-			"BUNDLE pre-DTLS %s suppressing delta while waiting for VP8 keyframe: dropped=%u seq=%u ts=%u m=%d len=%u\n",
-			switch_str_nil(path), engine->pre_dtls_wait_keyframe_drops, frame->seq, frame->timestamp, frame->m, frame->datalen);
-	}
 	if (!(engine->pre_dtls_wait_keyframe_drops % 50)) {
 		request_partner_keyframe(session, "gate-still-waiting");
 	}
@@ -3949,37 +3936,11 @@ static void switch_core_media_flush_queued_read_frames(switch_rtp_engine_t *engi
 	}
 }
 
-static const char *switch_core_media_bundle_demux_method2str(switch_bundle_demux_t method)
-{
-	switch(method) {
-	case SWITCH_BUNDLE_DEMUX_MID:
-		return "mid";
-	case SWITCH_BUNDLE_DEMUX_SSRC:
-		return "ssrc";
-	case SWITCH_BUNDLE_DEMUX_PAYLOAD_TYPE:
-		return "pt";
-	case SWITCH_BUNDLE_DEMUX_NONE:
-	default:
-		return "none";
-	}
-}
-
-
 /* BUNDLE drain thread states */
 #define BUNDLE_DRAIN_INACTIVE   0
 #define BUNDLE_DRAIN_STARTING   1
 #define BUNDLE_DRAIN_RUNNING    2
 #define BUNDLE_DRAIN_STOPPING   3
-
-static const char *bundle_drain_state_str(int state) {
-	switch(state) {
-	case BUNDLE_DRAIN_INACTIVE: return "inactive";
-	case BUNDLE_DRAIN_STARTING: return "starting";
-	case BUNDLE_DRAIN_RUNNING:  return "running";
-	case BUNDLE_DRAIN_STOPPING: return "stopping";
-	default: return "unknown";
-	}
-}
 
 /* BUNDLE raw RTP frames must preserve the exact payload offset. switch_frame_dup()
  * resets RTP data to packet + 12, which corrupts packets with CSRC/header
@@ -4125,7 +4086,6 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 	switch_rtp_engine_t *a_engine, *v_engine;
 	switch_frame_t drain_frame;
 	uint8_t drain_buf[SWITCH_RTP_MAX_BUF_LEN];
-	uint32_t generation;
 
 	if (!session || !(smh = session->media_handle)) {
 		return NULL;
@@ -4133,10 +4093,7 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 
 	a_engine = &smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
 	v_engine = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
-	generation = v_engine->bundle_drain_generation;
 
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-		"BUNDLE drain thread started gen=%u\n", generation);
 
 	/* Promote STARTING -> RUNNING under the drain mutex. stop() can legally
 	 * set STOPPING while the thread is still starting; do not clobber that
@@ -4229,12 +4186,6 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 		if (!mline) {
 			v_engine->bundle_drain_thread_miss++;
 			v_engine->bundle_demux_miss_drops++;
-			if (v_engine->bundle_demux_miss_drops <= 10 || !(v_engine->bundle_demux_miss_drops % 1000)) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-					"BUNDLE drain thread demux miss count=%u mid=%s ssrc=%u pt=%u\n",
-					v_engine->bundle_demux_miss_drops, switch_str_nil(mid),
-					drain_frame.ssrc, drain_frame.payload);
-			}
 			continue;
 		}
 
@@ -4250,12 +4201,6 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 				if (switch_frame_buffer_trypush(v_engine->read_fb, dupframe) != SWITCH_STATUS_SUCCESS) {
 					v_engine->bundle_queue_full_drops++;
 					v_engine->bundle_drain_thread_qfail++;
-					if (v_engine->bundle_queue_full_drops <= 10 || !(v_engine->bundle_queue_full_drops % 1000)) {
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-							"BUNDLE drain thread video queue full count=%u enq=%u deq=%u\n",
-							v_engine->bundle_queue_full_drops,
-							v_engine->bundle_video_enqueued, v_engine->bundle_video_dequeued);
-					}
 					switch_frame_free(&dupframe);
 				} else {
 					v_engine->bundle_video_enqueued++;
@@ -4282,11 +4227,6 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 				if (bundle_frame_dup(&drain_frame, &dupframe) == SWITCH_STATUS_SUCCESS) {
 					if (switch_frame_buffer_trypush(audio_fb, dupframe) != SWITCH_STATUS_SUCCESS) {
 						v_engine->bundle_drain_thread_audio_qfail++;
-						if (v_engine->bundle_drain_thread_audio_qfail <= 10 || !(v_engine->bundle_drain_thread_audio_qfail % 1000)) {
-							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-								"BUNDLE drain thread audio queue full count=%u\n",
-								v_engine->bundle_drain_thread_audio_qfail);
-						}
 						switch_frame_free(&dupframe);
 					}
 				}
@@ -4295,14 +4235,6 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 		}
 	}
 
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-		"BUNDLE drain thread exiting gen=%u state=%s reads=%u video_routed=%u audio_routed=%u "
-		"miss=%u vqfail=%u aqfail=%u demux_total=%u venq=%u vdeq=%u\n",
-		generation, bundle_drain_state_str(v_engine->bundle_drain_state),
-		v_engine->bundle_drain_thread_reads, v_engine->bundle_drain_thread_video_routed,
-		v_engine->bundle_drain_thread_audio_routed, v_engine->bundle_drain_thread_miss,
-		v_engine->bundle_drain_thread_qfail, v_engine->bundle_drain_thread_audio_qfail,
-		v_engine->bundle_demux_packets, v_engine->bundle_video_enqueued, v_engine->bundle_video_dequeued);
 
 	v_engine->bundle_drain_state = BUNDLE_DRAIN_INACTIVE;
 	return NULL;
@@ -4324,9 +4256,6 @@ static void bundle_drain_thread_start(switch_core_session_t *session)
 
 	/* Preconditions */
 	if (!v_engine->bundled_with_audio || !a_engine->rtp_session || !v_engine->read_fb) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-			"BUNDLE drain thread start skipped: bundled=%d rtp=%p read_fb=%p\n",
-			v_engine->bundled_with_audio, (void *)a_engine->rtp_session, (void *)v_engine->read_fb);
 		return;
 	}
 
@@ -4335,9 +4264,6 @@ static void bundle_drain_thread_start(switch_core_session_t *session)
 	}
 
 	if (v_engine->bundle_drain_state != BUNDLE_DRAIN_INACTIVE) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-			"BUNDLE drain thread start skipped: already state=%s\n",
-			bundle_drain_state_str(v_engine->bundle_drain_state));
 		return;
 	}
 
@@ -4375,8 +4301,6 @@ static void bundle_drain_thread_start(switch_core_session_t *session)
 		return;
 	}
 
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-		"BUNDLE drain thread launched gen=%u\n", v_engine->bundle_drain_generation);
 }
 
 /* Stop the BUNDLE drain thread.
@@ -4401,9 +4325,6 @@ static void bundle_drain_thread_stop(switch_core_session_t *session)
 		return;
 	}
 
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-		"BUNDLE stopping drain thread gen=%u state=%s\n",
-		v_engine->bundle_drain_generation, bundle_drain_state_str(v_engine->bundle_drain_state));
 
 	v_engine->bundle_drain_state = BUNDLE_DRAIN_STOPPING;
 	switch_mutex_unlock(smh->bundle_drain_mutex);
@@ -4435,9 +4356,6 @@ static void bundle_drain_thread_stop(switch_core_session_t *session)
 	v_engine->bundle_drain_state = BUNDLE_DRAIN_INACTIVE;
 	switch_mutex_unlock(smh->bundle_drain_mutex);
 
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-		"BUNDLE drain thread stopped, joined, and flushed gen=%u\n",
-		v_engine->bundle_drain_generation);
 }
 
 static switch_bool_t switch_core_media_route_bundled_rtp(switch_media_handle_t *smh, switch_rtp_engine_t *engine, switch_media_type_t type)
@@ -4465,24 +4383,11 @@ static switch_bool_t switch_core_media_route_bundled_rtp(switch_media_handle_t *
 
 	if (!mline) {
 		v_engine->bundle_demux_miss_drops++;
-		if (v_engine->bundle_demux_miss_drops <= 10 || !(v_engine->bundle_demux_miss_drops % 1000)) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
-				"BUNDLE RTP demux miss/drop count=%u mid=%s ssrc=%u pt=%u\n",
-				v_engine->bundle_demux_miss_drops, switch_str_nil(mid), engine->read_frame.ssrc, engine->read_frame.payload);
-		}
 		return SWITCH_TRUE;
 	}
 
 	if (mline->media_type == SWITCH_MEDIA_TYPE_AUDIO) {
 		v_engine->bundle_audio_demux_packets++;
-		if (v_engine->bundle_audio_demux_packets <= 10 || !(v_engine->bundle_audio_demux_packets % 500)) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
-				"BUNDLE RTP audio demux total=%u audio=%u video=%u miss=%u method=%s mid=%s ssrc=%u pt=%u seq=%u ts=%u m=%d len=%u\n",
-				v_engine->bundle_demux_packets, v_engine->bundle_audio_demux_packets, v_engine->bundle_video_demux_packets,
-				v_engine->bundle_demux_miss_drops, switch_core_media_bundle_demux_method2str(method), switch_str_nil(mid),
-				engine->read_frame.ssrc, engine->read_frame.payload, engine->read_frame.seq, engine->read_frame.timestamp,
-				engine->read_frame.m, engine->read_frame.datalen);
-		}
 		return SWITCH_FALSE;
 	}
 
@@ -4497,35 +4402,12 @@ static switch_bool_t switch_core_media_route_bundled_rtp(switch_media_handle_t *
 		if (bundle_frame_dup(&engine->read_frame, &dupframe) == SWITCH_STATUS_SUCCESS) {
 			if (switch_frame_buffer_trypush(v_engine->read_fb, dupframe) != SWITCH_STATUS_SUCCESS) {
 				v_engine->bundle_queue_full_drops++;
-				if (v_engine->bundle_queue_full_drops <= 10 || !(v_engine->bundle_queue_full_drops % 1000)) {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
-						"BUNDLE RTP video queue full/drop count=%u total=%u video=%u enq=%u deq=%u mid=%s ssrc=%u pt=%u seq=%u ts=%u m=%d len=%u\n",
-						v_engine->bundle_queue_full_drops, v_engine->bundle_demux_packets, v_engine->bundle_video_demux_packets,
-						v_engine->bundle_video_enqueued, v_engine->bundle_video_dequeued, switch_str_nil(mid), engine->read_frame.ssrc,
-						engine->read_frame.payload, engine->read_frame.seq, engine->read_frame.timestamp, engine->read_frame.m, engine->read_frame.datalen);
-				}
 				switch_frame_free(&dupframe);
 			} else {
 				v_engine->bundle_video_enqueued++;
-				if (v_engine->bundle_video_enqueued <= 10 || !(v_engine->bundle_video_enqueued % 500)) {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
-						"BUNDLE RTP video enqueue total=%u video=%u enq=%u deq=%u write_attempts=%u write_ok=%u write_zero=%u write_fail=%u method=%s mid=%s ssrc=%u pt=%u seq=%u ts=%u m=%d len=%u\n",
-						v_engine->bundle_demux_packets, v_engine->bundle_video_demux_packets, v_engine->bundle_video_enqueued,
-						v_engine->bundle_video_dequeued, v_engine->bundle_video_write_attempts, v_engine->bundle_video_write_success,
-						v_engine->bundle_video_write_zero, v_engine->bundle_video_write_fail, switch_core_media_bundle_demux_method2str(method),
-						switch_str_nil(mid), engine->read_frame.ssrc, engine->read_frame.payload, engine->read_frame.seq,
-						engine->read_frame.timestamp, engine->read_frame.m, engine->read_frame.datalen);
-				}
 			}
 		} else {
 			v_engine->bundle_video_dup_fail_drops++;
-			if (v_engine->bundle_video_dup_fail_drops <= 10 || !(v_engine->bundle_video_dup_fail_drops % 1000)) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
-					"BUNDLE RTP video dup/drop count=%u total=%u video=%u enq=%u deq=%u mid=%s ssrc=%u pt=%u seq=%u ts=%u m=%d len=%u\n",
-					v_engine->bundle_video_dup_fail_drops, v_engine->bundle_demux_packets, v_engine->bundle_video_demux_packets,
-					v_engine->bundle_video_enqueued, v_engine->bundle_video_dequeued, switch_str_nil(mid), engine->read_frame.ssrc,
-					engine->read_frame.payload, engine->read_frame.seq, engine->read_frame.timestamp, engine->read_frame.m, engine->read_frame.datalen);
-			}
 		}
 	}
 
@@ -4600,13 +4482,6 @@ static switch_bool_t switch_core_media_drain_bundled_rtp(switch_media_handle_t *
 
 	if (video_routed || audio_absorbed) {
 		v_engine->bundle_audio_drain_passes++;
-		if (v_engine->bundle_audio_drain_passes <= 10 || !(v_engine->bundle_audio_drain_passes % 500)) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
-				"BUNDLE RTP drain pass=%u video_routed=%u venq=%u vdeq=%u budget_left=%d got_audio=%d\n",
-				v_engine->bundle_audio_drain_passes, video_routed,
-				v_engine->bundle_video_enqueued, v_engine->bundle_video_dequeued,
-				budget, got_audio);
-		}
 	}
 
 	return got_audio;
@@ -4680,12 +4555,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 
 			if (switch_frame_buffer_trypop(engine->read_fb, &pop) != SWITCH_STATUS_SUCCESS || !pop) {
 				engine->bundle_video_empty_polls++;
-				if (engine->bundle_video_empty_polls <= 10 || !(engine->bundle_video_empty_polls % 1000)) {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-						"BUNDLE RTP video dequeue empty empty=%u enq=%u deq=%u write_attempts=%u write_ok=%u write_zero=%u write_fail=%u\n",
-						engine->bundle_video_empty_polls, engine->bundle_video_enqueued, engine->bundle_video_dequeued,
-						engine->bundle_video_write_attempts, engine->bundle_video_write_success, engine->bundle_video_write_zero, engine->bundle_video_write_fail);
-				}
 				switch_yield(5000);
 				*frame = NULL;
 				switch_goto_status(SWITCH_STATUS_BREAK, end);
@@ -4696,13 +4565,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 			engine->read_frame.codec = &engine->read_codec;
 			engine->read_frame.pmap = NULL;
 			engine->bundle_video_dequeued++;
-			if (engine->bundle_video_dequeued <= 10 || !(engine->bundle_video_dequeued % 500)) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-					"BUNDLE RTP video dequeue enq=%u deq=%u write_attempts=%u write_ok=%u write_zero=%u write_fail=%u pt=%u seq=%u ts=%u m=%d len=%u\n",
-					engine->bundle_video_enqueued, engine->bundle_video_dequeued, engine->bundle_video_write_attempts,
-					engine->bundle_video_write_success, engine->bundle_video_write_zero, engine->bundle_video_write_fail,
-					engine->read_frame.payload, engine->read_frame.seq, engine->read_frame.timestamp, engine->read_frame.m, engine->read_frame.datalen);
-			}
 			if (engine->cur_payload_map) {
 				engine->read_frame.rate = engine->cur_payload_map->rm_rate;
 			}
@@ -5544,13 +5406,6 @@ enqueue_pre_dtls_pkt:
 						e->ssrc = frame->ssrc;
 						engine->pre_dtls_buf->count++;
 						engine->pre_dtls_buf->stat_queued++;
-						if (engine->pre_dtls_buf->stat_queued <= 10 || !(engine->pre_dtls_buf->stat_queued % 50)) {
-							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-								"BUNDLE pre-DTLS enqueue: queued=%u buffered=%u dropped=%u seq=%u ts=%u m=%d len=%u\n",
-								engine->pre_dtls_buf->stat_queued, engine->pre_dtls_buf->count,
-								engine->pre_dtls_buf->stat_dropped, frame->seq, frame->timestamp,
-								frame->m, frame->datalen);
-						}
 						/* Packet buffered successfully; it will be dropped if transport becomes writable. */
 					}
 				} else {
@@ -5564,14 +5419,6 @@ enqueue_pre_dtls_pkt:
 				}
 			} else {
 				engine->bundle_video_write_success++;
-				if (engine->bundle_video_write_success <= 10 || !(engine->bundle_video_write_success % 500)) {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-						"BUNDLE video RTP write success wrote=%d attempts=%u ok=%u zero=%u fail=%u enq=%u deq=%u flags=0x%x pt=%u seq=%u ts=%u m=%d packetlen=%u datalen=%u\n",
-						bundle_video_wrote, engine->bundle_video_write_attempts, engine->bundle_video_write_success,
-						engine->bundle_video_write_zero, engine->bundle_video_write_fail, engine->bundle_video_enqueued,
-						engine->bundle_video_dequeued, frame->flags, frame->payload, frame->seq, frame->timestamp, frame->m,
-						frame->packetlen, frame->datalen);
-				}
 			}
 		}
 	} else {
@@ -5666,13 +5513,6 @@ enqueue_pre_dtls_pkt:
 						e->ssrc      = frame->ssrc;
 						engine->pre_dtls_buf->count++;
 						engine->pre_dtls_buf->stat_queued++;
-						if (engine->pre_dtls_buf->stat_queued <= 10 || !(engine->pre_dtls_buf->stat_queued % 50)) {
-							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-								"BUNDLE pre-DTLS (non-bundle) enqueue: queued=%u buffered=%u dropped=%u seq=%u ts=%u m=%d len=%u\n",
-								engine->pre_dtls_buf->stat_queued, engine->pre_dtls_buf->count,
-								engine->pre_dtls_buf->stat_dropped, frame->seq, frame->timestamp,
-								frame->m, frame->datalen);
-						}
 					}
 				} else {
 					/* Oversized or empty frame: non-fatal drop. */
@@ -6753,9 +6593,6 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 					switch_rtp_engine_t *bundle_a_engine = &smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
 					if (bundle_a_engine->rtp_session && engine->rtp_session == bundle_a_engine->rtp_session) {
 						switch_rtp_set_bundle_video_ssrcs(engine->rtp_session, engine->ssrc, engine->remote_ssrc);
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
-										  "BUNDLE video SSRCs wired local=%u remote=%u (sdp ssrc-learn)\n",
-										  engine->ssrc, engine->remote_ssrc);
 					}
 				}
 
@@ -8387,10 +8224,6 @@ static void switch_core_media_bundle_populate_from_sdp(switch_media_handle_t *sm
 
 		if (remote_mid_ext_id && !mid_extmap_collision) {
 			switch_bundle_mline_set_remote_mid_ext(bundle_mline, remote_mid_ext_id);
-		} else if (mid_extmap_collision) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
-				"BUNDLE SDP %s m-line %d has MID RTP extension id collision; leaving MID extension unaccepted\n",
-				sdp_type == SDP_ANSWER ? "answer" : "offer", mline_index);
 		}
 
 		for (map = m->m_rtpmaps; map; map = map->rm_next) {
@@ -8412,20 +8245,8 @@ static void switch_core_media_bundle_populate_from_sdp(switch_media_handle_t *sm
 				switch_snprintf(mids + strlen(mids), sizeof(mids) - strlen(mids), "%s", smh->bundle.offered_mids[i]);
 			}
 			switch_channel_set_variable(channel, "rtp_group_bundle", mids);
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
-				"BUNDLE SDP %s accepted in %s mode: tag=%s mline=%d mids=%u\n",
-				sdp_type == SDP_ANSWER ? "answer" : "offer",
-				switch_bundle_policy_str(smh->bundle.policy),
-				smh->bundle.bundle_tag_mid,
-				smh->bundle.bundle_tag_mline_index,
-				smh->bundle.offered_mid_count);
 		} else {
 			switch_channel_set_variable(channel, "rtp_group_bundle", NULL);
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
-				"BUNDLE SDP %s rejected in %s mode: %s\n",
-				sdp_type == SDP_ANSWER ? "answer" : "offer",
-				switch_bundle_policy_str(smh->bundle.policy),
-				switch_bundle_group_reject_reason(&smh->bundle));
 		}
 	} else {
 		switch_channel_set_variable(channel, "rtp_group_bundle", NULL);
@@ -12488,7 +12309,7 @@ SWITCH_DECLARE(void) switch_core_media_fork_do_fire_start_event(switch_core_sess
 
 	if (switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, "telnyx_media_stream::start") == SWITCH_STATUS_SUCCESS) {
 		switch_channel_event_set_data(session->channel, event);
-		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "telnyx_media_streaming_start_time", "%ld", fork->start_time);
+		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "telnyx_media_streaming_start_time", "%" SWITCH_TIME_T_FMT, fork->start_time);
 		if (!zstr(fork->fork_rx.cmd)) {
 			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "telnyx_media_streaming_rx", fork->fork_rx.cmd);
 		}
@@ -12566,7 +12387,7 @@ SWITCH_DECLARE(void) switch_core_media_fork_do_fire_stop_event(switch_core_sessi
 			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "variable_media_fork_request", fmr);
 		}
 
-		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "telnyx_media_streaming_stop_time", "%ld", fork->stop_time);
+		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "telnyx_media_streaming_stop_time", "%" SWITCH_TIME_T_FMT, fork->stop_time);
 		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "telnyx_media_streaming_last_duration", "%d", last_duration);
 		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "telnyx_media_streaming_duration", "%d", fork->duration);
 		switch_event_fire(&event);
@@ -13989,9 +13810,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 				}
 
 				switch_rtp_set_bundle_video_ssrcs(a_engine->rtp_session, v_engine->ssrc, v_engine->remote_ssrc);
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-					"BUNDLE video SSRCs wired local=%u remote=%u audio_local=%u audio_remote=%u (activate_rtp)\n",
-					v_engine->ssrc, v_engine->remote_ssrc, a_engine->ssrc, a_engine->remote_ssrc);
 
 				if (v_engine->fir) {
 					switch_rtp_set_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_FIR);
@@ -14037,8 +13855,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 				v_engine->bundle_video_write_zero = 0;
 				v_engine->bundle_video_write_fail = 0;
 				memset(v_engine->bundle_demux_method_counts, 0, sizeof(v_engine->bundle_demux_method_counts));
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-					"BUNDLE video is borrowing audio RTP transport; video engine will not own RTP teardown/reset\n");
 				/* Start the continuous drain thread. Stop first so BUNDLE restart
 				 * joins any exited-but-not-cleared drain thread and flushes stale audio. */
 				bundle_drain_thread_stop(session);
@@ -14086,8 +13902,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 				switch_core_session_start_video_thread(session);
 
 				if (!video_owns_rtp) {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-						"BUNDLE video is using borrowed audio RTP transport; skipping video RTP transport setup\n");
 					goto video_transport_done;
 				}
 
@@ -17722,15 +17536,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_receive_message(switch_core_se
 			if (v_engine->rtp_session) {
 				if (v_engine->bundled_with_audio && a_engine && v_engine->rtp_session == a_engine->rtp_session) {
 					switch_rtp_set_bundle_video_ssrcs(v_engine->rtp_session, v_engine->ssrc, v_engine->remote_ssrc);
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-									  "BUNDLE refresh_req: bundled=%d rtp=%p fir_flag=%d pli_flag=%d numeric_arg=%ld manual_refresh=%d v_ssrc=%u v_remote_ssrc=%u\n",
-									  v_engine->bundled_with_audio,
-									  (void *)v_engine->rtp_session,
-									  switch_rtp_test_flag(v_engine->rtp_session, SWITCH_RTP_FLAG_FIR) ? 1 : 0,
-									  switch_rtp_test_flag(v_engine->rtp_session, SWITCH_RTP_FLAG_PLI) ? 1 : 0,
-									  (long)msg->numeric_arg,
-									  switch_channel_test_flag(session->channel, CF_MANUAL_VID_REFRESH) ? 1 : 0,
-									  v_engine->ssrc, v_engine->remote_ssrc);
 				}
 
 				if (msg->numeric_arg || !switch_channel_test_flag(session->channel, CF_MANUAL_VID_REFRESH)) {
