@@ -493,7 +493,6 @@ struct switch_rtp {
 	   two fields are protected by bundle_video_frame_lock. */
 	uint8_t bundle_video_frame_in_progress;
 	switch_time_t bundle_video_frame_open_us;
-	uint32_t bundle_audio_deferred_total;
 	uint32_t bundle_audio_pt_restamped_total;
 	switch_payload_t bundle_audio_pt;  /* local egress audio PT, immune to video set_default_payload on shared BUNDLE session */
 	switch_mutex_t *ice_mutex;
@@ -11233,9 +11232,6 @@ static void bundle_audio_defer_until(switch_rtp_t *rtp_session, switch_time_t de
 	switch_time_t frame_open_us;
 	uint8_t in_progress;
 	switch_time_t age_us = 0;
-	switch_time_t waited_us = 0;
-	switch_bool_t hit_cap = SWITCH_FALSE;
-	switch_bool_t hit_stale = SWITCH_FALSE;
 
 	if (!rtp_session->bundle_has_video) return;
 
@@ -11251,7 +11247,6 @@ static void bundle_audio_defer_until(switch_rtp_t *rtp_session, switch_time_t de
 	age_us = (frame_open_us && defer_start > frame_open_us) ? (defer_start - frame_open_us) : 0;
 
 	if (age_us > BUNDLE_AUDIO_DEFER_MAX_US) {
-		hit_stale = SWITCH_TRUE;
 		/* Stale frame: open longer than the safety bound, presumed stuck
 		   (encoder stall or lost marker) -- force-clear so audio cannot starve. */
 		switch_mutex_lock(rtp_session->bundle_video_frame_lock);
@@ -11262,7 +11257,6 @@ static void bundle_audio_defer_until(switch_rtp_t *rtp_session, switch_time_t de
 		switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
 	} else if (defer_start >= deadline_us) {
 		/* Caller already burned the shared budget; do not wait further. */
-		hit_cap = SWITCH_TRUE;
 	} else {
 		while (1) {
 			switch_time_t now_us;
@@ -11276,10 +11270,8 @@ static void bundle_audio_defer_until(switch_rtp_t *rtp_session, switch_time_t de
 			if (!in_progress) break;
 
 			now_us = switch_micro_time_now();
-			waited_us = (now_us > defer_start) ? (now_us - defer_start) : 0;
-			if (now_us >= deadline_us) { hit_cap = SWITCH_TRUE; break; }
+			if (now_us >= deadline_us) break;
 			if (open_us && now_us > open_us && (now_us - open_us) > BUNDLE_AUDIO_DEFER_MAX_US) {
-				hit_stale = SWITCH_TRUE;
 				switch_mutex_lock(rtp_session->bundle_video_frame_lock);
 				if (rtp_session->bundle_video_frame_in_progress) {
 					rtp_session->bundle_video_frame_in_progress = 0;
@@ -11290,13 +11282,6 @@ static void bundle_audio_defer_until(switch_rtp_t *rtp_session, switch_time_t de
 			}
 			switch_yield(500);
 		}
-	}
-
-	if (waited_us > 0 || hit_stale || hit_cap) {
-		/* Counters live on the shared struct. */
-		switch_mutex_lock(rtp_session->bundle_video_frame_lock);
-		rtp_session->bundle_audio_deferred_total++;
-		switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
 	}
 }
 
