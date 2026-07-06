@@ -10770,9 +10770,9 @@ fork_done:
 				   the browser to demux audio from video on the shared transport
 				   (RFC 9143 BUNDLE).  Without MID, Safari cannot associate audio
 				   packets with the correct m-line, which degrades video quality.
-				   rtp_add_mid_extension() strips only the old MID element (Guard 2)
-				   and preserves other extensions (audio-level, abs-send-time, etc.),
-				   producing a clean BEDE header for SRTP.  Video writes arrive via
+				   rtp_add_mid_extension() drops peer-scoped inbound header extensions
+				   and rebuilds a clean BEDE header with the outbound MID before SRTP.
+				   Video writes arrive via
 				   force_video with an explicit mid_ext_id/mid carrying the VIDEO MID. */
 				{
 					switch_status_t mid_status = rtp_add_mid_extension(rtp_session, send_msg, &bytes, mid_ext_id, mid);
@@ -12388,9 +12388,9 @@ SWITCH_DECLARE(const char *) switch_rtp_get_received_mid(switch_rtp_t *rtp_sessi
 
 static switch_status_t rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_t *send_msg, switch_size_t *bytes, uint8_t ext_id, const char *mid)
 {
-	uint8_t *ext_ptr, *ext_data;
+	uint8_t *ext_ptr;
 	uint16_t words;
-	size_t payload_len, ext_data_bytes, ext_data_padded, old_ext_data_bytes = 0, old_ext_total = 0, new_ext_total, payload_bytes, off;
+	size_t payload_len, ext_data_bytes, ext_data_padded, old_ext_data_bytes = 0, old_ext_total = 0, new_ext_total, payload_bytes;
 	size_t csrc_bytes, body_header_bytes;
 	uint8_t len_field, pad, mid_ext_id = ext_id;
 	const char *mid_value = mid;
@@ -12449,50 +12449,16 @@ static switch_status_t rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_
 			}
 		}
 
-		if (old_ext_total && ntohs(send_msg->ext->profile) == 0xBEDE && ext_id > 0 && mid && *mid) {
-			/* Explicit BUNDLE MID overrides are for forwarding media onto a
-			   different negotiated leg.  Do not preserve inbound RTP header
-			   extensions, because their ids are scoped to the previous leg and can
-			   collide with the browser extmap (for example id 1 carrying stale
-			   MID while the browser negotiated id 1 as audio-level).  Keep
-			   old_ext_total so payload_bytes below still skips the inbound extension
-			   block, then rebuild the block with only the negotiated outbound MID. */
+		if (old_ext_total && ntohs(send_msg->ext->profile) == 0xBEDE) {
+			/* RTP header-extension ids are scoped to the negotiated leg.  When
+			   forwarding media across legs, never preserve the peer's BEDE
+			   extension block while stamping the outbound MID: Chrome may send
+			   sdes:mid as id 4 while Safari negotiated sdes:mid as id 1, and
+			   forwarding both elements makes Safari discard audio.  Keep
+			   old_ext_total so payload_bytes below skips the inbound extension
+			   block, then rebuild a clean block containing only the negotiated
+			   outbound MID. */
 			old_ext_data_bytes = 0;
-		} else if (old_ext_total && ntohs(send_msg->ext->profile) == 0xBEDE) {
-			ext_data = (uint8_t *)send_msg->ext + 4;
-
-			for (off = 0; off < old_ext_data_bytes;) {
-				uint8_t hdr = ext_data[off];
-				uint8_t elem_id;
-				size_t elem_payload_len, elem_len;
-
-				if (!hdr) {
-					off++;
-					continue;
-				}
-
-				elem_id = (uint8_t)(hdr >> 4);
-				elem_payload_len = (size_t)((hdr & 0x0F) + 1);
-				elem_len = 1 + elem_payload_len;
-				if (off + elem_len > old_ext_data_bytes) return SWITCH_STATUS_FALSE;
-
-				if (elem_id == mid_ext_id) {
-					/* BUNDLE Guard 2: Only strip elements matching the MID ext id.
-					   Previously also stripped all elements with payload > 1 byte,
-					   which broke legitimate multi-byte extensions (e.g. abs-send-time)
-					   and could cause SWITCH_STATUS_FALSE returns on bridge legs. */
-					memmove(ext_data + off, ext_data + off + elem_len, old_ext_data_bytes - off - elem_len);
-					old_ext_data_bytes -= elem_len;
-					memset(ext_data + old_ext_data_bytes, 0, elem_len);
-					continue;
-				}
-
-				off += elem_len;
-			}
-
-			while (old_ext_data_bytes && !ext_data[old_ext_data_bytes - 1]) {
-				old_ext_data_bytes--;
-			}
 		} else {
 			/* BUNDLE writes must stamp the negotiated MID for the outbound leg.
 			   If the forwarded packet carries a different RTP extension profile,
