@@ -87,14 +87,17 @@ struct switch_rtp_crypto_key {
 };
 typedef struct switch_rtp_crypto_key switch_rtp_crypto_key_t;
 
+typedef struct switch_rtp_write_state switch_rtp_write_state_t;
+
 typedef enum {
 	IPR_RTP,
 	IPR_RTCP
 } ice_proto_t;
 
 typedef struct ext_mid_s {
-	uint8_t ext_id;   /* negotiated extmap ID for MID (1-14 for 1-byte header) */
-	char mid[17];     /* MID string (max 16 bytes for 1-byte hdr format) */
+	uint8_t ext_id;      /* negotiated extmap ID for MID (1-14 for 1-byte header) */
+	char local_mid[17];  /* MID string to write (max 16 bytes for 1-byte hdr format) */
+	char remote_mid[17]; /* MID string read from the current packet (max 16 bytes for 1-byte hdr format) */
 	uint8_t enabled;
 } ext_mid_t;
 
@@ -562,6 +565,9 @@ SWITCH_DECLARE(switch_jb_t *) switch_rtp_get_jitter_buffer(switch_rtp_t *rtp_ses
   \param flags the flags to set
 */
 SWITCH_DECLARE(void) switch_rtp_set_flag(switch_rtp_t *rtp_session, switch_rtp_flag_t flag);
+SWITCH_DECLARE(void) switch_rtp_set_bundle_has_video(switch_rtp_t *rtp_session, switch_bool_t enabled);
+SWITCH_DECLARE(void) switch_rtp_set_bundle_video_ssrcs(switch_rtp_t *rtp_session, uint32_t local_ssrc, uint32_t remote_ssrc);
+SWITCH_DECLARE(void) switch_rtp_set_bundle_audio_pt(switch_rtp_t *rtp_session, switch_payload_t pt);
 SWITCH_DECLARE(void) switch_rtp_set_flags(switch_rtp_t *rtp_session, switch_rtp_flag_t flags[SWITCH_RTP_FLAG_INVALID]);
 SWITCH_DECLARE(void) switch_rtp_clear_flags(switch_rtp_t *rtp_session, switch_rtp_flag_t flags[SWITCH_RTP_FLAG_INVALID]);
 
@@ -744,8 +750,16 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_offer_audio_level_extension(switch_co
   \param rtp_session the RTP session to write to
   \param frame the frame to write
   \return the number of bytes written
+  \note switch_rtp_write_frame_ex_state can use write_state to isolate
+  seq/timestamp/write-tracking state from rtp_session while sharing the
+  session socket/security context.
 */
 SWITCH_DECLARE(int) switch_rtp_write_frame(switch_rtp_t *rtp_session, switch_frame_t *frame);
+SWITCH_DECLARE(int) switch_rtp_write_frame_ex(switch_rtp_t *rtp_session, switch_frame_t *frame, uint32_t ssrc, uint8_t mid_ext_id, const char *mid);
+SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, switch_frame_t *frame, switch_rtp_write_state_t *write_state,
+										   uint32_t ssrc, uint8_t mid_ext_id, const char *mid, switch_bool_t force_video, switch_payload_t payload_override);
+SWITCH_DECLARE(switch_status_t) switch_rtp_write_state_create(switch_rtp_write_state_t **write_state, switch_memory_pool_t *pool);
+SWITCH_DECLARE(void) switch_rtp_write_state_reset(switch_rtp_write_state_t *write_state);
 
 /*!
   \brief Write data with a specified payload and sequence number to a given RTP session
@@ -810,6 +824,7 @@ SWITCH_DECLARE(void) switch_rtp_set_ignore_rtp_during_dtmf_timeout(switch_rtp_t 
 SWITCH_DECLARE(switch_status_t) switch_rtp_add_dtls(switch_rtp_t *rtp_session, dtls_fingerprint_t *local_fp, dtls_fingerprint_t *remote_fp, dtls_type_t type, uint8_t want_DTLSv1_2);
 SWITCH_DECLARE(switch_status_t) switch_rtp_del_dtls(switch_rtp_t *rtp_session, dtls_type_t type);
 SWITCH_DECLARE(dtls_state_t) switch_rtp_dtls_state(switch_rtp_t *rtp_session, dtls_type_t type);
+SWITCH_DECLARE(int) switch_rtp_write_ready(switch_rtp_t *rtp_session, uint32_t bytes);
 
 SWITCH_DECLARE(int) switch_rtp_has_dtls(void);
 
@@ -826,7 +841,11 @@ SWITCH_DECLARE(switch_time_t) switch_rtp_session_set_dtls_checks_started(switch_
 SWITCH_DECLARE(switch_sockaddr_t*) switch_rtp_session_get_remote_addr(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(switch_sockaddr_t*) switch_rtp_session_get_rtcp_remote_addr(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(char *) switch_rtp_session_get_type(switch_rtp_t *rtp_session);
+/* Enables MID receive parsing for ext_id and clears any configured local MID, so outbound MID insertion is disabled until switch_rtp_enable_mid() is called. */
+SWITCH_DECLARE(switch_status_t) switch_rtp_enable_mid_receive(switch_rtp_t *rtp_session, uint8_t ext_id);
 SWITCH_DECLARE(switch_status_t) switch_rtp_enable_mid(switch_rtp_t *rtp_session, uint8_t ext_id, const char *mid);
+/* Returns the session-owned MID parsed from the current returned RTP packet, or NULL when that packet did not carry MID. The returned pointer is overwritten by the next RTP read and must not be retained across reads or threads. */
+SWITCH_DECLARE(const char *) switch_rtp_get_received_mid(switch_rtp_t *rtp_session);
 
 
 /* Trickle ICE extensions */

@@ -192,10 +192,35 @@ static switch_frame_t *find_free_frame(switch_frame_buffer_t *fb, switch_frame_t
 	switch_set_flag(np->frame, SFF_DYNAMIC);
 
 	if (orig->packet) {
-		memcpy(np->frame->packet, orig->packet, orig->packetlen);
-		np->frame->packetlen = orig->packetlen;
-		np->frame->data = ((unsigned char *)np->frame->packet) + 12;
-		np->frame->datalen = orig->datalen;
+		switch_size_t data_offset = 12;
+		switch_size_t datalen = orig->datalen;
+		uint8_t *packet = (uint8_t *)np->frame->packet;
+		const uint8_t *orig_packet = (const uint8_t *)orig->packet;
+		const uint8_t *orig_data = (const uint8_t *)orig->data;
+
+		if (!orig->data) {
+			datalen = 0;
+		}
+
+		if (orig->data && orig_data > orig_packet && (switch_size_t)(orig_data - orig_packet) < SWITCH_RTP_MAX_BUF_LEN) {
+			data_offset = (switch_size_t)(orig_data - orig_packet);
+		}
+
+		if (data_offset + datalen > SWITCH_RTP_MAX_BUF_LEN) {
+			data_offset = 12;
+			if (data_offset + datalen > SWITCH_RTP_MAX_BUF_LEN) {
+				datalen = SWITCH_RTP_MAX_BUF_LEN - data_offset;
+			}
+		}
+
+		memcpy(packet, orig->packet, data_offset);
+		if (datalen) {
+			memcpy(packet + data_offset, orig->data, datalen);
+		}
+		np->frame->packetlen = data_offset + datalen;
+		np->frame->data = packet + data_offset;
+		np->frame->datalen = datalen;
+		np->frame->buflen = SWITCH_RTP_MAX_BUF_LEN;
 	} else {
 		np->frame->packet = NULL;
 		np->frame->packetlen = 0;
@@ -280,6 +305,11 @@ SWITCH_DECLARE(switch_status_t) switch_frame_buffer_pop(switch_frame_buffer_t *f
 SWITCH_DECLARE(switch_status_t) switch_frame_buffer_trypop(switch_frame_buffer_t *fb, void **ptr)
 {
 	return switch_queue_trypop(fb->queue, ptr);
+}
+
+SWITCH_DECLARE(switch_status_t) switch_frame_buffer_pop_timeout(switch_frame_buffer_t *fb, void **ptr, switch_interval_time_t timeout)
+{
+	return switch_queue_pop_timeout(fb->queue, ptr, timeout);
 }
 
 SWITCH_DECLARE(int) switch_frame_buffer_size(switch_frame_buffer_t *fb)

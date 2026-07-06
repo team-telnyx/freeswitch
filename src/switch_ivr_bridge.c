@@ -181,6 +181,16 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 	int set_decoded_read = 0, refresh_timer = 0;
 	int refresh_cnt = 300;
 	int pass_val = 0, last_pass_val = 0;
+	uint32_t bridge_cng_streak = 0;
+	uint32_t bundle_kf_kick = 0;  /* keyframe kick on first write to BUNDLE dst */
+	switch_bool_t dst_is_bundle = SWITCH_FALSE;
+	switch_time_t last_real_video = 0, last_cng_refresh = 0;
+	switch_time_t bridge_start = switch_micro_time_now();
+	switch_time_t last_periodic_refresh = 0;
+	switch_time_t periodic_refresh_interval = 10000000;
+	switch_time_t periodic_refresh_initial_delay = 20000000;
+	switch_time_t last_relay_refresh_a = 0; /* 200ms PLI-relay throttle toward session_a */
+	switch_time_t last_relay_refresh_b = 0; /* 200ms PLI-relay throttle toward session_b */
 
 	vh->up = 1;
 
@@ -195,6 +205,25 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 	}
 	channel = switch_core_session_get_channel(vh->session_a);
 
+	{
+		const char *interval_ms = switch_channel_get_variable(channel, "bundle_video_refresh_interval_ms");
+		const char *initial_delay_ms = switch_channel_get_variable(channel, "bundle_video_refresh_initial_delay_ms");
+
+		if (!zstr(interval_ms)) {
+			int val = atoi(interval_ms);
+			if (val >= 5000 && val <= 120000) {
+				periodic_refresh_interval = (switch_time_t) val * 1000;
+			}
+		}
+
+		if (!zstr(initial_delay_ms)) {
+			int val = atoi(initial_delay_ms);
+			if (val >= 0 && val <= 120000) {
+				periodic_refresh_initial_delay = (switch_time_t) val * 1000;
+			}
+		}
+	}
+
 	if (!zstr(vh->session_b_uuid)) {
 		if (!(vh->session_b = switch_core_session_locate(vh->session_b_uuid))) {
 			vh->up = 0;
@@ -207,6 +236,9 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 		return;
 	}
 	b_channel = switch_core_session_get_channel(vh->session_b);
+
+	/* sample once whether destination video is bundled with audio. */
+	dst_is_bundle = switch_core_media_video_is_bundled(vh->session_b);
 
 	switch_core_session_request_video_refresh(vh->session_a);
 	switch_core_session_request_video_refresh(vh->session_b);
@@ -226,9 +258,33 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 				last_pass_val = pass_val;
 			}
 			
+			if (switch_channel_test_flag(b_channel, CF_VIDEO_REFRESH_REQ)) {
+				switch_time_t relay_now = switch_micro_time_now();
+
+				switch_channel_clear_flag(b_channel, CF_VIDEO_REFRESH_REQ);
+				/* Relay PLI/FIR from the SIP leg to Chrome using a per-bridge 200ms throttle
+				 * + force, bypassing the global 1s VIDEO_REFRESH_FREQ gate. Capped at 5/s
+				 * — well below encoder stall threshold, and much faster than 1s for PLI relay. */
+				if (!last_relay_refresh_a || (relay_now - last_relay_refresh_a) >= 200000) {
+					last_relay_refresh_a = relay_now;
+					switch_core_session_force_request_video_refresh(vh->session_a);
+				}
+
+			}
+
 			if (switch_channel_test_flag(channel, CF_VIDEO_REFRESH_REQ)) {
+				switch_time_t relay_now = switch_micro_time_now();
+
 				switch_channel_clear_flag(channel, CF_VIDEO_REFRESH_REQ);
-				refresh_timer = refresh_cnt;
+				/* Relay Chrome's incoming PLI/FIR to the SIP source (NJ1/Safari) using a
+				 * per-bridge 200ms throttle + force, bypassing the global 1s VIDEO_REFRESH_FREQ
+				 * gate. This is the critical path: Chrome PLIs requesting a keyframe from Safari
+				 * must reach the source quickly or blocky video persists for ~1-1.5s per event. */
+				if (!last_relay_refresh_b || (relay_now - last_relay_refresh_b) >= 200000) {
+					last_relay_refresh_b = relay_now;
+					switch_core_session_force_request_video_refresh(vh->session_b);
+				}
+
 			}
 
 			if (!switch_channel_test_flag(channel, CF_PROXY_MEDIA)) {
@@ -258,9 +314,26 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 
 			if (refresh_timer) {
 				if (refresh_timer > 0 && (refresh_timer % 100) == 0) {
-					switch_core_session_request_video_refresh(vh->session_b);
+					if (dst_is_bundle) {
+						/* Force-bypass throttle only for BUNDLE-destination startup / codec-transition retry.
+						 * CF_VIDEO_REFRESH_REQ propagation must not arm this timer because it
+						 * is source-side only (session_a) and bypasses VIDEO_REFRESH_FREQ. */
+						switch_core_session_force_request_video_refresh(vh->session_a);
+					} else {
+						/* Preserve legacy non-BUNDLE behavior: periodic retry requests a refresh
+						 * from the bridge destination, not from the source. */
+						switch_core_session_request_video_refresh(vh->session_b);
+					}
 				}
 				refresh_timer--;
+			} else if (dst_is_bundle && last_real_video) {
+				switch_time_t now = switch_micro_time_now();
+
+				if ((now - bridge_start) >= periodic_refresh_initial_delay &&
+					(!last_periodic_refresh || (now - last_periodic_refresh) >= periodic_refresh_interval)) {
+					switch_core_session_request_video_refresh(vh->session_a);
+					last_periodic_refresh = now;
+				}
 			}
 
 			status = switch_core_session_read_video_frame(vh->session_a, &read_frame, SWITCH_IO_FLAG_NONE, 0);
@@ -269,16 +342,51 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 				switch_cond_next();
 				continue;
 			}
-		}
 
+			if (read_frame && !switch_test_flag(read_frame, SFF_CNG)) {
+				bridge_cng_streak = 0;
+				last_real_video = switch_micro_time_now();
+			}
+		}
 
 		if (read_frame && (switch_test_flag(read_frame, SFF_CNG) ||
 			switch_channel_test_flag(channel, CF_LEG_HOLDING) || switch_channel_test_flag(b_channel, CF_VIDEO_READ_FILE_ATTACHED))) {
+			if (switch_test_flag(read_frame, SFF_CNG)) {
+				switch_time_t now = switch_micro_time_now();
+
+				if (last_real_video && switch_channel_media_up(channel) && switch_channel_media_up(b_channel)) {
+					bridge_cng_streak++;
+
+					if (bridge_cng_streak >= 25 && (!last_cng_refresh || (now - last_cng_refresh) > 1000000)) {
+						last_cng_refresh = now;
+						switch_core_session_request_video_refresh(vh->session_a);
+					}
+				}
+			}
 			continue;
 		}
 
 		if (read_frame && switch_channel_media_up(b_channel)) {
-			if (switch_core_session_write_video_frame(vh->session_b, read_frame, SWITCH_IO_FLAG_NONE, 0) != SWITCH_STATUS_SUCCESS) {
+			switch_status_t write_status;
+			/* When destination video shares the BUNDLE transport with audio,
+			 * the underlying transport is already up via audio ICE/DTLS. Pass
+			 * SWITCH_IO_FLAG_FORCE so the CF_VIDEO_READY gate in
+			 * switch_core_session_write_video_frame() does not silently drop the
+			 * callee video for the 10-20s before the destination video flips
+			 * CF_VIDEO_READY. Non-BUNDLE destinations keep the original gating. */
+			switch_io_flag_t write_flags = dst_is_bundle ? SWITCH_IO_FLAG_FORCE : SWITCH_IO_FLAG_NONE;
+
+			write_status = switch_core_session_write_video_frame(vh->session_b, read_frame, write_flags, 0);
+			if (write_status == SWITCH_STATUS_SUCCESS) {
+				if (!switch_test_flag(read_frame, SFF_CNG) && dst_is_bundle && bundle_kf_kick == 0) {
+					/* On the FIRST real video write to a BUNDLE destination, request a
+					 * keyframe from the source so the destination's first decodable frame is an
+					 * IDR rather than an inter-frame. Without this the decoder sees mid-stream
+					 * slices and renders nothing until the next periodic keyframe. */
+					switch_core_session_force_request_video_refresh(vh->session_a);
+					bundle_kf_kick++;
+				}
+			} else {
 				switch_cond_next();
 				continue;
 			}
