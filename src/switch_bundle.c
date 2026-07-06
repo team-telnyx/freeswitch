@@ -172,7 +172,7 @@ SWITCH_DECLARE(switch_status_t) switch_bundle_mline_add_payload_type(switch_bund
 	return SWITCH_STATUS_SUCCESS;
 }
 
-SWITCH_DECLARE(switch_status_t) switch_bundle_group_learn_remote_ssrc(switch_bundle_group_t *group, switch_bundle_mline_t *mline, uint32_t ssrc)
+static switch_status_t bundle_group_bind_remote_ssrc(switch_bundle_group_t *group, switch_bundle_mline_t *mline, uint32_t ssrc, switch_bool_t allow_rebind)
 {
 	uint32_t i;
 
@@ -192,12 +192,17 @@ SWITCH_DECLARE(switch_status_t) switch_bundle_group_learn_remote_ssrc(switch_bun
 		}
 	}
 
-	if (mline->remote_ssrc && mline->remote_ssrc != ssrc) {
+	if (!allow_rebind && mline->remote_ssrc && mline->remote_ssrc != ssrc) {
 		return SWITCH_STATUS_FALSE;
 	}
 
 	mline->remote_ssrc = ssrc;
 	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_bundle_group_learn_remote_ssrc(switch_bundle_group_t *group, switch_bundle_mline_t *mline, uint32_t ssrc)
+{
+	return bundle_group_bind_remote_ssrc(group, mline, ssrc, SWITCH_FALSE);
 }
 
 SWITCH_DECLARE(switch_bundle_mline_t *) switch_bundle_group_demux_rtp(switch_bundle_group_t *group,
@@ -223,7 +228,7 @@ SWITCH_DECLARE(switch_bundle_mline_t *) switch_bundle_group_demux_rtp(switch_bun
 			return NULL;
 		}
 
-		if (ssrc && switch_bundle_group_learn_remote_ssrc(group, mline, ssrc) != SWITCH_STATUS_SUCCESS) {
+		if (ssrc && bundle_group_bind_remote_ssrc(group, mline, ssrc, SWITCH_TRUE) != SWITCH_STATUS_SUCCESS) {
 			return NULL;
 		}
 

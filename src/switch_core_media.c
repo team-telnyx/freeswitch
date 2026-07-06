@@ -4103,8 +4103,11 @@ static void bundle_audio_queue_cleanup_locked(switch_core_session_t *session, sw
  *
  * Tradeoff for audio delivery: We bypass the jitter buffer for audio packets.
  * The drain thread reads raw RTP frames and queues them directly. The audio
- * read path receives raw RTP frames (SFF_RAW_RTP set) which will be decoded
- * by the normal codec path in switch_core_media_read_frame. JB smoothing is
+ * read path copies only the payload out of the queued frame and clears
+ * SFF_RAW_RTP/SFF_RAW_RTP_PARSE_FRAME so the audio re-enters the normal codec
+ * and RTP-generation path in switch_core_media_read_frame. This deliberately
+ * drops the peer packet's RTP header extensions (e.g. foreign/stale MID ids)
+ * so the local egress leg emits clean, locally-negotiated RTP. JB smoothing is
  * lost but this is acceptable because:
  * 1. Audio over BUNDLE is already unusual (most BUNDLE is audio+video on
  *    audio socket, so audio is the "native" stream).
@@ -4592,11 +4595,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 			if (qst == SWITCH_STATUS_SUCCESS && apop && apop != (void *)1) {
 				switch_frame_t *audio_fb_frame = (switch_frame_t *) apop;
 				switch_rtp_packet_t *stable_packet;
-				switch_size_t data_offset = 0;
-				switch_size_t packet_storage_len = offsetof(switch_rtp_packet_t, ext);
-				char *packet_data = NULL;
-				char *frame_data = NULL;
-				switch_bool_t data_in_packet = SWITCH_FALSE;
 
 				if (veng->bundle_audio_read_fb_frame) {
 					switch_frame_free(&veng->bundle_audio_read_fb_frame);
@@ -4609,24 +4607,12 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 				stable_packet = veng->bundle_audio_read_packet;
 				engine->read_frame = *audio_fb_frame;
 
-				if (audio_fb_frame->packet && audio_fb_frame->packetlen && audio_fb_frame->packetlen <= packet_storage_len) {
-					packet_data = (char *)audio_fb_frame->packet;
-					frame_data = (char *)audio_fb_frame->data;
-					if (frame_data && frame_data >= packet_data && frame_data < packet_data + audio_fb_frame->packetlen) {
-						data_offset = (switch_size_t)(frame_data - packet_data);
-						if (data_offset + audio_fb_frame->datalen <= audio_fb_frame->packetlen) {
-							data_in_packet = SWITCH_TRUE;
-						}
-					}
-				}
-
-				if (data_in_packet) {
-					memcpy(stable_packet, audio_fb_frame->packet, audio_fb_frame->packetlen);
-					stable_packet->ext = NULL;
-					stable_packet->ebody = NULL;
-					engine->read_frame.packet = stable_packet;
-					engine->read_frame.data = (char *)stable_packet + data_offset;
-				} else if (audio_fb_frame->data && audio_fb_frame->datalen <= SWITCH_RTP_MAX_BUF_LEN) {
+				/* Audio drained from the shared BUNDLE socket must re-enter the normal
+				 * audio write path as payload, not as a raw forwarded RTP packet.
+				 * Raw-forwarding preserves the peer packet's RTP header extensions
+				 * (including stale/foreign MID ids) and can make browser BUNDLE demux
+				 * reject otherwise valid audio. */
+				if (audio_fb_frame->data && audio_fb_frame->datalen <= SWITCH_RTP_MAX_BUF_LEN) {
 					memcpy(stable_packet->body, audio_fb_frame->data, audio_fb_frame->datalen);
 					stable_packet->ext = NULL;
 					stable_packet->ebody = NULL;
@@ -15409,14 +15395,14 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 			switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=%s\r\n", sr);
 		}
 		
-		if (!audio_mid) {
+		if (zstr(audio_mid)) {
 			switch_channel_set_variable(session->channel, "rtp_audio_mid", "audio");
 		}
 
 		if (switch_channel_var_true(session->channel, "rtp_no_audio_mid") || switch_channel_var_true(session->channel, "rtp_no_attr_mid")) {
 			switch_channel_set_variable(session->channel, "rtp_audio_mid", NULL);
 		} else {
-			switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=mid:%s\r\n", audio_mid ? audio_mid : "audio");
+			switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=mid:%s\r\n", !zstr(audio_mid) ? audio_mid : "audio");
 		}
 
 		if (!zstr(a_engine->local_dtls_fingerprint.type)) {
@@ -15906,14 +15892,14 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 
 				}
 
-				if (!video_mid) {
+				if (zstr(video_mid)) {
 					switch_channel_set_variable(session->channel, "rtp_video_mid", "video");
 				}
 
 				if (switch_channel_var_true(session->channel, "rtp_no_video_mid") || switch_channel_var_true(session->channel, "rtp_no_attr_mid")) {
 					switch_channel_set_variable(session->channel, "rtp_video_mid", NULL);
 				} else {
-					switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=mid:%s\r\n", video_mid ? video_mid : "video");
+					switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=mid:%s\r\n", !zstr(video_mid) ? video_mid : "video");
 				}
 				
 				if (switch_rtp_ready(v_engine->rtp_session)) {

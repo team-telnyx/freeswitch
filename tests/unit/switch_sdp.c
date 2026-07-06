@@ -484,6 +484,43 @@ FST_CORE_BEGIN("./conf_sdp")
 		}
 		FST_SESSION_END()
 
+		FST_SESSION_BEGIN(sdp_bundle_offer_empty_mid_vars_use_defaults)
+		{
+			switch_status_t status;
+			switch_media_handle_t *media_handle;
+			switch_core_media_params_t *mparams;
+			const char *s;
+
+			mparams  = switch_core_session_alloc(fst_session, sizeof(switch_core_media_params_t));
+			mparams->inbound_codec_string = switch_core_session_strdup(fst_session, "PCMU,VP8");
+			mparams->outbound_codec_string = switch_core_session_strdup(fst_session, "PCMU,VP8");
+			mparams->rtpip = switch_core_session_strdup(fst_session, (char *)rx_host);
+
+			status = switch_media_handle_create(&media_handle, fst_session, mparams);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			status = switch_core_media_prepare_codecs(fst_session, SWITCH_FALSE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			status = switch_core_media_choose_ports(fst_session, SWITCH_TRUE, SWITCH_TRUE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+
+			switch_channel_set_flag(fst_channel, CF_VIDEO);
+			switch_channel_set_variable(fst_channel, "rtp_use_bundle", "true");
+			switch_channel_set_variable(fst_channel, "rtp_audio_mid", "");
+			switch_channel_set_variable(fst_channel, "rtp_video_mid", "");
+			switch_channel_set_variable(fst_channel, "rtp_no_audio_mid", "false");
+			switch_channel_set_variable(fst_channel, "rtp_no_video_mid", "false");
+			switch_channel_set_variable(fst_channel, "rtp_no_attr_mid", "false");
+
+			switch_core_media_gen_local_sdp(fst_session, SDP_OFFER, "127.0.0.1", 40000, NULL, 1);
+			s = switch_channel_get_variable(fst_channel, "rtp_local_sdp_str");
+			fst_requires(s != NULL);
+			fst_check(strstr(s, "a=group:BUNDLE audio video") != NULL);
+			fst_check(strstr(s, "a=mid:audio") != NULL);
+			fst_check(strstr(s, "a=mid:video") != NULL);
+			fst_check(strstr(s, "a=mid:\r\n") == NULL);
+		}
+		FST_SESSION_END()
+
 		FST_SESSION_BEGIN(sdp_trickle_ice)
 		{
 		switch_sdp_info_t info;
