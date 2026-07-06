@@ -22,6 +22,8 @@ switch_io_flag_t io_flags;
 switch_payload_t read_pt;
 int send_rtcp_test_success = 0;
 
+SWITCH_DECLARE(switch_status_t) switch_rtp_test_rewrite_mid_extension(switch_rtp_packet_t *packet, switch_size_t *bytes, uint8_t ext_id, const char *mid, switch_bool_t drop_peer_extensions);
+
 static void show_event(switch_event_t *event) {
 	char *str;
 	/*print the event*/
@@ -226,6 +228,59 @@ FST_TEARDOWN_END()
 		}
 		switch_rtp_destroy(&mid_rtp);
 		switch_core_destroy_memory_pool(&test_pool);
+	}
+	FST_TEST_END()
+
+	FST_TEST_BEGIN(test_mid_rewrite_drops_peer_extensions_but_preserves_local_extensions)
+	{
+		switch_rtp_packet_t packet = { 0 };
+		switch_size_t bytes;
+		uint8_t *body;
+		const uint8_t exact_peer_mid_leak[] = { 0xbe, 0xde, 0x00, 0x01, 0x40, 0x30, 0x10, 0x30, 0xaa, 0xbb };
+		const uint8_t expected_clean_mid[] = { 0xbe, 0xde, 0x00, 0x01, 0x10, 0x30, 0x00, 0x00, 0xaa, 0xbb };
+		const uint8_t local_audio_level_plus_mid[] = { 0xbe, 0xde, 0x00, 0x01, 0x10, 0x55, 0x40, 0x39, 0xcc };
+		const uint8_t expected_preserved_audio_level[] = { 0xbe, 0xde, 0x00, 0x01, 0x10, 0x55, 0x40, 0x30, 0xcc };
+		const uint8_t csrc_peer_mid_leak[] = {
+			0x11, 0x22, 0x33, 0x44,
+			0xbe, 0xde, 0x00, 0x01, 0x40, 0x30, 0x10, 0x30, 0xdd
+		};
+		const uint8_t expected_csrc_clean_mid[] = {
+			0x11, 0x22, 0x33, 0x44,
+			0xbe, 0xde, 0x00, 0x01, 0x10, 0x30, 0x00, 0x00, 0xdd
+		};
+
+		body = (uint8_t *) packet.body;
+
+		memset(&packet, 0, sizeof(packet));
+		packet.header.x = 1;
+		packet.ebody = packet.body;
+		packet.ext = (switch_rtp_hdr_ext_t *) packet.body;
+		memcpy(packet.body, exact_peer_mid_leak, sizeof(exact_peer_mid_leak));
+		bytes = SWITCH_RTP_HEADER_LEN + sizeof(exact_peer_mid_leak);
+		fst_check(switch_rtp_test_rewrite_mid_extension(&packet, &bytes, 1, "0", SWITCH_TRUE) == SWITCH_STATUS_SUCCESS);
+		fst_check(bytes == SWITCH_RTP_HEADER_LEN + sizeof(expected_clean_mid));
+		fst_check(!memcmp(body, expected_clean_mid, sizeof(expected_clean_mid)));
+
+		memset(&packet, 0, sizeof(packet));
+		packet.header.x = 1;
+		packet.ebody = packet.body;
+		packet.ext = (switch_rtp_hdr_ext_t *) packet.body;
+		memcpy(packet.body, local_audio_level_plus_mid, sizeof(local_audio_level_plus_mid));
+		bytes = SWITCH_RTP_HEADER_LEN + sizeof(local_audio_level_plus_mid);
+		fst_check(switch_rtp_test_rewrite_mid_extension(&packet, &bytes, 4, "0", SWITCH_FALSE) == SWITCH_STATUS_SUCCESS);
+		fst_check(bytes == SWITCH_RTP_HEADER_LEN + sizeof(expected_preserved_audio_level));
+		fst_check(!memcmp(body, expected_preserved_audio_level, sizeof(expected_preserved_audio_level)));
+
+		memset(&packet, 0, sizeof(packet));
+		packet.header.x = 1;
+		packet.header.cc = 1;
+		packet.ebody = packet.body + sizeof(uint32_t);
+		packet.ext = (switch_rtp_hdr_ext_t *) packet.ebody;
+		memcpy(packet.body, csrc_peer_mid_leak, sizeof(csrc_peer_mid_leak));
+		bytes = SWITCH_RTP_HEADER_LEN + sizeof(csrc_peer_mid_leak);
+		fst_check(switch_rtp_test_rewrite_mid_extension(&packet, &bytes, 1, "0", SWITCH_TRUE) == SWITCH_STATUS_SUCCESS);
+		fst_check(bytes == SWITCH_RTP_HEADER_LEN + sizeof(expected_csrc_clean_mid));
+		fst_check(!memcmp(body, expected_csrc_clean_mid, sizeof(expected_csrc_clean_mid)));
 	}
 	FST_TEST_END()
 	FST_TEST_BEGIN(test_session_with_rtp)
