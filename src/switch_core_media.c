@@ -14109,6 +14109,7 @@ static void generate_m(switch_core_session_t *session, char *buf, size_t buflen,
 	switch_rtp_engine_t *a_engine;
 	int include_external;
 	switch_core_media_avp_secure_t avp_secure = AVP_NO_SECURE;
+	const char *audio_mid = NULL;
 
 	switch_assert(session);
 
@@ -14318,6 +14319,13 @@ static void generate_m(switch_core_session_t *session, char *buf, size_t buflen,
 			}
 		}
 	}
+	if (switch_core_media_bundle_should_offer(smh) &&
+		!switch_channel_var_true(session->channel, "rtp_no_audio_mid") &&
+		!switch_channel_var_true(session->channel, "rtp_no_attr_mid")) {
+		audio_mid = switch_channel_get_variable_dup(session->channel, "rtp_audio_mid", SWITCH_FALSE, -1);
+		switch_snprintf(buf + strlen(buf), buflen - strlen(buf), "a=mid:%s\r\n", !zstr(audio_mid) ? audio_mid : "audio");
+	}
+
 
 	if (!zstr(a_engine->local_dtls_fingerprint.type) && secure) {
 		switch_snprintf(buf + strlen(buf), buflen - strlen(buf), "a=fingerprint:%s %s\r\na=setup:%s\r\n", a_engine->local_dtls_fingerprint.type,
@@ -15040,9 +15048,9 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 	/* Optional Unified Plan BUNDLE grouping. Only reference MIDs that will be
 	 * emitted below; SDP BUNDLE group values must exactly match a=mid lines. */
 	if (switch_core_media_bundle_should_offer(smh) && !bundle_no_attr_mid && !bundle_no_audio_mid) {
-		bundle_audio_mid = audio_mid ? audio_mid : "audio";
+		bundle_audio_mid = !zstr(audio_mid) ? audio_mid : "audio";
 		if (bundle_has_vid && !bundle_no_video_mid) {
-			bundle_video_mid = video_mid ? video_mid : "video";
+			bundle_video_mid = !zstr(video_mid) ? video_mid : "video";
 		}
 
 		if (!bundle_has_vid || bundle_video_mid) {
