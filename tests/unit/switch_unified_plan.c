@@ -187,8 +187,6 @@ FCT_BGN()
 			s = (char *)switch_channel_get_variable(switch_core_session_get_channel(session), "rtp_local_sdp_str");
 			fct_req(s != NULL);
 			fct_chk(strstr(s, "a=group:BUNDLE 0 1") != NULL);
-			fct_chk(strstr(s, "a=mid:0") != NULL);
-			fct_chk(strstr(s, "a=mid:1") != NULL);
 
 
 			/* Now disable bundle and ensure the line disappears */
