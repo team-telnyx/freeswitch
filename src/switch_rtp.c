@@ -11308,6 +11308,7 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 	int r = 0;
 	switch_status_t status;
 	switch_time_t audio_defer_deadline = 0;
+	switch_bool_t bundle_video_frame_lock_held = SWITCH_FALSE;
 
 #if DEBUG_RTP
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "RTP: write frame %s %p/%p\n", rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName", (void*)rtp_session->session, (void*)rtp_session);
@@ -11512,6 +11513,7 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 	if (rtp_session->bundle_has_video) {
 		int recheck_count = 0;
 		switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+		bundle_video_frame_lock_held = SWITCH_TRUE;
 		/* Re-check: a video frame may have opened while we waited for the
 		   per-packet lock.  Re-defer if so, bounded by recheck_count AND by
 		   the shared audio_defer_deadline so total wait stays within the
@@ -11519,8 +11521,10 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 		while (!force_video && rtp_session->bundle_video_frame_in_progress && recheck_count < 2) {
 			recheck_count++;
 			switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+			bundle_video_frame_lock_held = SWITCH_FALSE;
 			bundle_audio_defer_until(rtp_session, audio_defer_deadline);
 			switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+			bundle_video_frame_lock_held = SWITCH_TRUE;
 		}
 	}
 
@@ -11540,8 +11544,9 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 #endif
 
 		/* Release per-packet BUNDLE lock after manual write path */
-		if (rtp_session->bundle_has_video) {
+		if (bundle_video_frame_lock_held) {
 			switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+			bundle_video_frame_lock_held = SWITCH_FALSE;
 		}
 
 		return wrote;
@@ -11601,8 +11606,9 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 	r = rtp_common_write(rtp_session, send_msg, data, len, payload, ts, &frame->flags, write_state, ssrc, mid_ext_id, mid, force_video);
 
 	/* Release per-packet BUNDLE lock after common write path */
-	if (rtp_session->bundle_has_video) {
+	if (bundle_video_frame_lock_held) {
 		switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+		bundle_video_frame_lock_held = SWITCH_FALSE;
 	}
 
 	if (send_msg) {
@@ -11645,6 +11651,7 @@ SWITCH_DECLARE(int) switch_rtp_write_manual(switch_rtp_t *rtp_session,
 {
 	switch_size_t bytes;
 	int ret = -1;
+	switch_bool_t bundle_video_frame_lock_held = SWITCH_FALSE;
 
 	if (!switch_rtp_ready(rtp_session) || !rtp_session->remote_addr || datalen > SWITCH_RTP_MAX_BUF_LEN) {
 		return -1;
@@ -11664,6 +11671,7 @@ SWITCH_DECLARE(int) switch_rtp_write_manual(switch_rtp_t *rtp_session,
 	/* Block audio/DTMF while BUNDLE video frame burst in progress */
 	if (rtp_session->bundle_has_video) {
 		switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+		bundle_video_frame_lock_held = SWITCH_TRUE;
 	}
 
 	WRITE_INC(rtp_session);
@@ -11698,8 +11706,9 @@ SWITCH_DECLARE(int) switch_rtp_write_manual(switch_rtp_t *rtp_session,
 	WRITE_DEC(rtp_session);
 
 	/* Release BUNDLE video frame burst lock */
-	if (rtp_session->bundle_has_video) {
+	if (bundle_video_frame_lock_held) {
 		switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+		bundle_video_frame_lock_held = SWITCH_FALSE;
 	}
 
 	return ret;

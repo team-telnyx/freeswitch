@@ -246,8 +246,10 @@ struct switch_rtp_engine_s {
 	uint32_t bundle_drain_generation;
 	switch_frame_buffer_t *bundle_audio_read_fb;
 	switch_frame_t *bundle_audio_read_fb_frame;
+	switch_rtp_packet_t *bundle_audio_read_packet;
 	switch_thread_cond_t *bundle_audio_read_cond;
 	uint32_t bundle_audio_read_consumers;
+	uint32_t bundle_audio_direct_readers;
 
 	uint8_t no_crypto;
 	uint8_t dtls_controller;
@@ -4021,6 +4023,57 @@ static void bundle_audio_queue_flush(switch_frame_buffer_t *audio_fb)
 	}
 }
 
+static switch_bool_t bundle_audio_direct_read_enter(switch_media_handle_t *smh, switch_rtp_engine_t *v_engine, int *statep)
+{
+	switch_bool_t admitted = SWITCH_FALSE;
+	int state;
+
+	switch_mutex_lock(smh->bundle_drain_mutex);
+	state = v_engine->bundle_drain_state;
+	if (state == BUNDLE_DRAIN_INACTIVE) {
+		v_engine->bundle_audio_direct_readers++;
+		admitted = SWITCH_TRUE;
+	}
+	switch_mutex_unlock(smh->bundle_drain_mutex);
+
+	if (statep) {
+		*statep = state;
+	}
+
+	return admitted;
+}
+
+static void bundle_audio_direct_read_exit(switch_media_handle_t *smh, switch_rtp_engine_t *v_engine)
+{
+	switch_mutex_lock(smh->bundle_drain_mutex);
+	if (v_engine->bundle_audio_direct_readers) {
+		v_engine->bundle_audio_direct_readers--;
+	}
+	if (!v_engine->bundle_audio_direct_readers && v_engine->bundle_audio_read_cond) {
+		switch_thread_cond_signal(v_engine->bundle_audio_read_cond);
+	}
+	switch_mutex_unlock(smh->bundle_drain_mutex);
+}
+
+/* Caller must hold smh->bundle_drain_mutex. */
+static switch_bool_t bundle_audio_direct_read_wait_locked(switch_core_session_t *session, switch_media_handle_t *smh, switch_rtp_engine_t *v_engine)
+{
+	int waits = 0;
+
+	while (v_engine->bundle_audio_direct_readers && v_engine->bundle_audio_read_cond && waits++ < 250) {
+		switch_thread_cond_timedwait(v_engine->bundle_audio_read_cond, smh->bundle_drain_mutex, 20000);
+	}
+
+	if (v_engine->bundle_audio_direct_readers) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+			"BUNDLE drain start skipped with %u active direct audio readers\n",
+			v_engine->bundle_audio_direct_readers);
+		return SWITCH_FALSE;
+	}
+
+	return SWITCH_TRUE;
+}
+
 /* Caller must hold smh->bundle_drain_mutex. */
 static void bundle_audio_queue_cleanup_locked(switch_core_session_t *session, switch_media_handle_t *smh, switch_rtp_engine_t *v_engine)
 {
@@ -4240,6 +4293,10 @@ static void bundle_drain_thread_start(switch_core_session_t *session)
 	v_engine->bundle_drain_generation++;
 
 	v_engine->bundle_drain_state = BUNDLE_DRAIN_STARTING;
+	if (bundle_audio_direct_read_wait_locked(session, smh, v_engine) != SWITCH_TRUE) {
+		v_engine->bundle_drain_state = BUNDLE_DRAIN_INACTIVE;
+		return;
+	}
 
 	switch_threadattr_create(&thd_attr, pool);
 	switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
@@ -4428,6 +4485,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 	switch_media_handle_t *smh;
 	int do_cng = 0;
 	int fire_readable = 0;
+	switch_bool_t bundle_direct_read_active = SWITCH_FALSE;
+	switch_rtp_engine_t *bundle_direct_veng = NULL;
 
 	switch_assert(session);
 
@@ -4532,15 +4591,61 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 			switch_mutex_lock(smh->bundle_drain_mutex);
 			if (qst == SWITCH_STATUS_SUCCESS && apop && apop != (void *)1) {
 				switch_frame_t *audio_fb_frame = (switch_frame_t *) apop;
-				/* Release previous frame if any */
+				switch_rtp_packet_t *stable_packet;
+				switch_size_t data_offset = 0;
+				switch_size_t packet_storage_len = offsetof(switch_rtp_packet_t, ext);
+				char *packet_data = NULL;
+				char *frame_data = NULL;
+				switch_bool_t data_in_packet = SWITCH_FALSE;
+
 				if (veng->bundle_audio_read_fb_frame) {
 					switch_frame_free(&veng->bundle_audio_read_fb_frame);
 				}
-				veng->bundle_audio_read_fb_frame = audio_fb_frame;
+
+				if (!veng->bundle_audio_read_packet) {
+					veng->bundle_audio_read_packet = switch_core_session_alloc(session, sizeof(*veng->bundle_audio_read_packet));
+				}
+
+				stable_packet = veng->bundle_audio_read_packet;
 				engine->read_frame = *audio_fb_frame;
+
+				if (audio_fb_frame->packet && audio_fb_frame->packetlen && audio_fb_frame->packetlen <= packet_storage_len) {
+					packet_data = (char *)audio_fb_frame->packet;
+					frame_data = (char *)audio_fb_frame->data;
+					if (frame_data && frame_data >= packet_data && frame_data < packet_data + audio_fb_frame->packetlen) {
+						data_offset = (switch_size_t)(frame_data - packet_data);
+						if (data_offset + audio_fb_frame->datalen <= audio_fb_frame->packetlen) {
+							data_in_packet = SWITCH_TRUE;
+						}
+					}
+				}
+
+				if (data_in_packet) {
+					memcpy(stable_packet, audio_fb_frame->packet, audio_fb_frame->packetlen);
+					stable_packet->ext = NULL;
+					stable_packet->ebody = NULL;
+					engine->read_frame.packet = stable_packet;
+					engine->read_frame.data = (char *)stable_packet + data_offset;
+				} else if (audio_fb_frame->data && audio_fb_frame->datalen <= SWITCH_RTP_MAX_BUF_LEN) {
+					memcpy(stable_packet->body, audio_fb_frame->data, audio_fb_frame->datalen);
+					stable_packet->ext = NULL;
+					stable_packet->ebody = NULL;
+					engine->read_frame.packet = NULL;
+					engine->read_frame.packetlen = 0;
+					switch_clear_flag((&engine->read_frame), SFF_RAW_RTP);
+					switch_clear_flag((&engine->read_frame), SFF_RAW_RTP_PARSE_FRAME);
+					engine->read_frame.data = stable_packet->body;
+				} else {
+					engine->read_frame.datalen = 0;
+					status = SWITCH_STATUS_BREAK;
+				}
+
 				engine->read_frame.codec = &engine->read_codec;
 				engine->read_frame.pmap = NULL;
-				status = SWITCH_STATUS_SUCCESS;
+				if (engine->read_frame.datalen) {
+					status = SWITCH_STATUS_SUCCESS;
+				}
+				switch_frame_free(&audio_fb_frame);
 			} else if (apop == (void *)1) {
 				/* Sentinel from drain thread stop; treat as break */
 				status = SWITCH_STATUS_BREAK;
@@ -4563,6 +4668,29 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 			} else {
 				continue;
 			}
+		} else if (type == SWITCH_MEDIA_TYPE_AUDIO) {
+			switch_rtp_engine_t *veng = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
+			switch_bool_t direct_read_admitted;
+			int drain_state;
+
+			/* Direct audio reads are admitted under bundle_drain_mutex so drain
+			 * startup cannot race a second reader onto the shared BUNDLE socket.
+			 * This intentionally covers every audio read because BUNDLE can start
+			 * while a normal audio read is already in progress. */
+			direct_read_admitted = bundle_audio_direct_read_enter(smh, veng, &drain_state);
+			if (!direct_read_admitted) {
+				engine->read_frame.datalen = 0;
+				if (drain_state == BUNDLE_DRAIN_STARTING) {
+					switch_yield(1000);
+					continue;
+				}
+				status = SWITCH_STATUS_BREAK;
+				goto end;
+			}
+
+			bundle_direct_read_active = SWITCH_TRUE;
+			bundle_direct_veng = veng;
+			status = switch_rtp_zerocopy_read_frame(engine->rtp_session, &engine->read_frame, flags);
 		} else {
 			status = switch_rtp_zerocopy_read_frame(engine->rtp_session, &engine->read_frame, flags);
 		}
@@ -4606,6 +4734,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 				/* Drain yielded an audio frame from JB; check it isn't also video */
 				if (switch_core_media_route_bundled_rtp(smh, engine, type) == SWITCH_TRUE) {
 					engine->read_frame.datalen = 0;
+					if (bundle_direct_read_active) {
+						bundle_audio_direct_read_exit(smh, bundle_direct_veng);
+						bundle_direct_read_active = SWITCH_FALSE;
+						bundle_direct_veng = NULL;
+					}
 					continue;
 				}
 				/* Got audio from drain, fall through */
@@ -4620,15 +4753,31 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 					&& !switch_test_flag(&engine->read_frame, SFF_CNG)) {
 					if (switch_core_media_route_bundled_rtp(smh, engine, type) == SWITCH_TRUE) {
 						engine->read_frame.datalen = 0;
+						if (bundle_direct_read_active) {
+							bundle_audio_direct_read_exit(smh, bundle_direct_veng);
+							bundle_direct_read_active = SWITCH_FALSE;
+							bundle_direct_veng = NULL;
+						}
 						continue;
 					}
 					/* Got audio from JB extraction */
 				} else {
 					/* JB empty or only CNG; wait for next timer tick */
 					engine->read_frame.datalen = 0;
+					if (bundle_direct_read_active) {
+						bundle_audio_direct_read_exit(smh, bundle_direct_veng);
+						bundle_direct_read_active = SWITCH_FALSE;
+						bundle_direct_veng = NULL;
+					}
 					continue;
 				}
 			}
+		}
+
+		if (bundle_direct_read_active) {
+			bundle_audio_direct_read_exit(smh, bundle_direct_veng);
+			bundle_direct_read_active = SWITCH_FALSE;
+			bundle_direct_veng = NULL;
 		}
 
 		fire_readable = !switch_channel_test_flag(session->channel, CF_MEDIA_READABLE_FIRED);
@@ -5124,6 +5273,12 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 	status = SWITCH_STATUS_SUCCESS;
 
  end:
+
+	if (bundle_direct_read_active) {
+		bundle_audio_direct_read_exit(smh, bundle_direct_veng);
+		bundle_direct_read_active = SWITCH_FALSE;
+		bundle_direct_veng = NULL;
+	}
 
 	if (smh->read_mutex[type]) {
 		switch_mutex_unlock(smh->read_mutex[type]);
