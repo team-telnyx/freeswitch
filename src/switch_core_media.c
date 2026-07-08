@@ -13325,6 +13325,27 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 		}
 		switch_core_session_parse_crypto_prefs(session);
 
+		/*
+		 * Inbound 3PCC calls default to CRYPTO_MODE_OPTIONAL (parse_crypto_prefs
+		 * line 2056-2057), which sets CF_SECURE and produces a dual SAVP+AVP SDP
+		 * offer.  Some carriers (e.g. AT&T) reject multi-m=line SDP in 3PCC flows.
+		 * When no explicit rtp_secure_media preference is set and the offer_both
+		 * flag is not enabled, force FORBIDDEN so we emit a single RTP/AVP line.
+		 * Explicit rtp_secure_media=optional/mandatory is always honored.
+		 */
+		if (!is_outbound &&
+		    sdp_type == SDP_OFFER &&
+		    switch_channel_test_flag(session->channel, CF_3PCC) &&
+		    !switch_channel_test_flag(session->channel, CF_RECOVERING) &&
+		    smh->crypto_mode == CRYPTO_MODE_OPTIONAL &&
+		    !switch_channel_var_true(session->channel, "rtp_secure_media_3pcc_offer_both")) {
+			const char *rsm = switch_channel_get_variable(session->channel, "rtp_secure_media_inbound");
+			if (!rsm) rsm = switch_channel_get_variable(session->channel, "rtp_secure_media");
+			if (!rsm) {
+				smh->crypto_mode = CRYPTO_MODE_FORBIDDEN;
+			}
+		}
+
 		// Skip generating new crypto keys if this is a recovering call - keys were already restored
 		if (!switch_channel_test_flag(session->channel, CF_RECOVERING)) {
 			switch_core_session_check_outgoing_crypto(session, sdp_type);
