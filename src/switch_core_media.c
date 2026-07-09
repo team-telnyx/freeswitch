@@ -9731,17 +9731,22 @@ static void *SWITCH_THREAD_FUNC text_helper_thread(switch_thread_t *thread, void
 	while (switch_channel_up_nosig(channel)) {
 
 		if (t_engine->engine_function) {
-			int run = 0;
+			switch_engine_function_t run_fn = NULL;
+			void *run_data = NULL;
 
 			switch_mutex_lock(smh->control_mutex);
-			if (t_engine->engine_function_running == 0) {
+			/* Latch the job under the lock and re-check engine_function: it may
+			 * have been cancelled by end_engine_function() since the unlocked
+			 * test above. */
+			if (t_engine->engine_function && t_engine->engine_function_running == 0) {
 				t_engine->engine_function_running = 1;
-				run = 1;
+				run_fn = t_engine->engine_function;
+				run_data = t_engine->engine_user_data;
 			}
 			switch_mutex_unlock(smh->control_mutex);
 
-			if (run) {
-				t_engine->engine_function(session, t_engine->engine_user_data);
+			if (run_fn) {
+				run_fn(session, run_data);
 				switch_mutex_lock(smh->control_mutex);
 				t_engine->engine_function = NULL;
 				t_engine->engine_user_data = NULL;
@@ -9939,17 +9944,22 @@ static void *SWITCH_THREAD_FUNC video_helper_thread(switch_thread_t *thread, voi
 		}
 
 		if (v_engine->engine_function) {
-			int run = 0;
+			switch_engine_function_t run_fn = NULL;
+			void *run_data = NULL;
 
 			switch_mutex_lock(smh->control_mutex);
-			if (v_engine->engine_function_running == 0) {
+			/* Latch the job under the lock and re-check engine_function: it may
+			 * have been cancelled by end_engine_function() since the unlocked
+			 * test above. */
+			if (v_engine->engine_function && v_engine->engine_function_running == 0) {
 				v_engine->engine_function_running = 1;
-				run = 1;
+				run_fn = v_engine->engine_function;
+				run_data = v_engine->engine_user_data;
 			}
 			switch_mutex_unlock(smh->control_mutex);
 
-			if (run) {
-				v_engine->engine_function(session, v_engine->engine_user_data);
+			if (run_fn) {
+				run_fn(session, run_data);
 				switch_mutex_lock(smh->control_mutex);
 				v_engine->engine_function = NULL;
 				v_engine->engine_user_data = NULL;
@@ -10096,7 +10106,14 @@ SWITCH_DECLARE(int) switch_core_media_check_engine_function(switch_core_session_
 	engine = &smh->engines[type];
 
 	switch_mutex_lock(smh->control_mutex);
-	r = (engine->engine_function_running > 0);
+	/* An outstanding job exists as soon as it has been submitted (engine_function
+	 * set), not only once the media thread has actually started running it
+	 * (engine_function_running > 0). Reporting only the "running" state opened a
+	 * window where a caller (the bridge) that submitted a job pointing at a
+	 * stack-allocated context would skip switch_core_media_end_engine_function()
+	 * and let that stack go out of scope while the job was still pending, so the
+	 * media thread later invoked it with a dangling user_data. */
+	r = (engine->engine_function_running > 0 || engine->engine_function != NULL);
 	switch_mutex_unlock(smh->control_mutex);
 
 	return r;
@@ -10115,7 +10132,16 @@ SWITCH_DECLARE(void) switch_core_media_end_engine_function(switch_core_session_t
 
 	switch_mutex_lock(smh->control_mutex);
 	if (engine->engine_function_running > 0) {
+		/* Already running: ask it to stop and wait below for the media thread
+		 * to clear engine_function_running back to 0 when the job returns. */
 		engine->engine_function_running = -1;
+	} else if (engine->engine_function) {
+		/* Submitted but the media thread has not picked it up yet. Cancel it in
+		 * place so the thread never runs it against a user_data whose lifetime is
+		 * ending. The media thread's pickup re-checks engine_function under the
+		 * control_mutex, so clearing it here is safe against a concurrent start. */
+		engine->engine_function = NULL;
+		engine->engine_user_data = NULL;
 	}
 	switch_mutex_unlock(smh->control_mutex);
 
