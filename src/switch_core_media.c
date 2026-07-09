@@ -19126,6 +19126,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 	unsigned int flag = 0, need_codec = 0, perfect = 0, do_bugs = 0, do_write = 0, do_resample = 0, ptime_mismatch = 0, pass_cng = 0, resample = 0;
 	int did_write_resample = 0;
 	int16_t *resample_tmp = NULL;
+	uint8_t *orig_frame_data = frame->data;
+	uint32_t orig_frame_buflen = frame->buflen;
 	switch_mutex_t *write_codec_mutex = NULL, *frame_codec_mutex = NULL;
 
 	switch_assert(session != NULL);
@@ -19847,6 +19849,17 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 					break;
 				}
 
+				if (resample_tmp) {
+					free(resample_tmp);
+					resample_tmp = NULL;
+					session->raw_write_frame.data = session->raw_write_buf;
+					session->raw_write_frame.buflen = sizeof(session->raw_write_buf);
+					session->enc_write_frame.data = session->enc_write_buf;
+					session->enc_write_frame.buflen = sizeof(session->enc_write_buf);
+					frame->data = orig_frame_data;
+					frame->buflen = orig_frame_buflen;
+				}
+
 			}
 
 			goto error;
@@ -19879,6 +19892,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 		session->enc_write_frame.data = session->enc_write_buf;
 		session->enc_write_frame.buflen = sizeof(session->enc_write_buf);
 	}
+
+	frame->data = orig_frame_data;
+	frame->buflen = orig_frame_buflen;
 
 	/* Unlock the same mutex objects we locked above (see snapshot rationale). */
 	switch_mutex_unlock(frame_codec_mutex);
