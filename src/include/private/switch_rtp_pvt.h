@@ -27,6 +27,11 @@ typedef struct {
 		uint8_t nomination_fallback_cached;
 		uint8_t nomination_fallback_enabled;
 		uint32_t nomination_fallback_ms;
+		uint8_t mid_call_failover_cached;
+		uint8_t mid_call_failover_enabled;
+		uint32_t mid_call_failover_ms;
+		int mid_call_nominated_idx;
+		switch_time_t mid_call_nominated_us;
 } switch_rtp_ice_t;
 
 SWITCH_DECLARE(void) switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *data, switch_size_t len);
