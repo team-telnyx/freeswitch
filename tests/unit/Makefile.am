@@ -6,6 +6,10 @@ noinst_PROGRAMS += switch_core_video switch_core_db switch_vad switch_packetizer
 
 noinst_PROGRAMS += switch_hold switch_sip switch_mod_telnyx switch_mod_gstt switch_3pcc test_inuse_race switch_jb_deadlock switch_cjson switch_sockaddr test_rtp_set_flag_null_crash test_write_frame_foreign_codec test_video_bridge_engine_race
 
+# switch_mod_lumenvox is intentionally NOT built/run in CI yet: LumenVox servers
+# are not reachable from CI, so the ASR tests cannot run there. Re-enable by
+# appending switch_mod_lumenvox to the line above. See TELCORE-249.
+
 if HAVE_SOFIA_SIP
 noinst_PROGRAMS += switch_sdp
 switch_sdp_SOURCES = switch_sdp.c
