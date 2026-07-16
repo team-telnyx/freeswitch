@@ -7160,13 +7160,19 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 	switch_size_t xcheck_jitter = 0;
 	int tries = 0;
 	int block = 0;
+	int accelerate = 0;
 
 	switch_assert(bytes);
+
+	if (rtp_session->session) {
+		accelerate = switch_channel_var_true(switch_core_session_get_channel(rtp_session->session), "rtp_jitter_buffer_accelerate") ? 1 : 0;
+	}
+
  more:
 
 	tries++;
 
-	if (tries > 20 && !(switch_channel_var_true(switch_core_session_get_channel(rtp_session->session), "rtp_jitter_buffer_accelerate"))) {
+	if (tries > 20 && (!accelerate || tries > 100)) {
 		if (rtp_session->jb && !rtp_session->pause_jb && jb_valid(rtp_session)) {
 			switch_jb_reset(rtp_session->jb);
 		}
