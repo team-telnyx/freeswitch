@@ -601,6 +601,11 @@ have_openal=no
 AC_CHECK_LIB(openal, alcLoopbackOpenDeviceSOFT, [have_openal="yes"])
 AM_CONDITIONAL([HAVE_OPENAL],[test "${have_openal}" = "yes"])
 
+# Shared googleapis library (fs_docker_grpc >= 1.1.1); gRPC modules must link
+# it instead of embedding googleapis protos (duplicate descriptor registration
+# aborts at dlopen).
+AM_CONDITIONAL([HAVE_GOOGLEAPIS_SO],[test -f /usr/local/lib/libgoogleapis.so])
+
 PA_LIBS=
 
 PKG_CHECK_MODULES(JACK, jack, have_jack=yes, have_jack=no)
