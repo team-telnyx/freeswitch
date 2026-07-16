@@ -1,6 +1,13 @@
 <?xml version="1.0"?>
 <document type="freeswitch/xml">
   <X-PRE-PROCESS cmd="set" data="rtp_timer_name=soft"/>
+  <!-- Live mode (see switch_mod_lumenvox.c): LV_TEST_TARGET points the profile
+       at a reachable LumenVox gRPC API, LV_TEST_DEPLOYMENT/LV_TEST_OPERATOR
+       supply the tenancy UUIDs. Unset (CI), the profile targets a closed local
+       port with nil tenancy ids and open is asserted to fail closed. -->
+  <X-PRE-PROCESS cmd="exec-set" data="lv_test_target=echo ${LV_TEST_TARGET:-127.0.0.1:1}"/>
+  <X-PRE-PROCESS cmd="exec-set" data="lv_test_deployment=echo ${LV_TEST_DEPLOYMENT:-00000000-0000-0000-0000-000000000000}"/>
+  <X-PRE-PROCESS cmd="exec-set" data="lv_test_operator=echo ${LV_TEST_OPERATOR:-00000000-0000-0000-0000-000000000000}"/>
   <section name="configuration" description="Various Configuration">
     <configuration name="modules.conf" description="Modules">
       <modules>
@@ -37,9 +44,9 @@
     </configuration>
 
     <!-- mod_lumenvox config. The target is deliberately a closed local port so
-         the unit test exercises the FreeSWITCH-facing ASR interface offline
-         (no live LumenVox server in CI): session open still succeeds, and any
-         operation that needs the server fails gracefully rather than hanging. -->
+         the unit test asserts that session open fails CLOSED, promptly
+         (bounded by connect-timeout-ms), rather than handing out a half-open
+         handle. With LV_TEST_* set, it targets a real server instead. -->
     <configuration name="lumenvox.conf" description="LumenVox gRPC ASR/TTS">
       <settings>
         <param name="default-asr-profile" value="default"/>
@@ -48,9 +55,9 @@
       </settings>
       <profiles>
         <profile name="default">
-          <param name="target" value="127.0.0.1:1"/>
-          <param name="deployment-id" value="2c62306f-5049-4cea-82c9-0e694f79f7f3"/>
-          <param name="operator-id" value="00000000-0000-0000-0000-000000000000"/>
+          <param name="target" value="$${lv_test_target}"/>
+          <param name="deployment-id" value="$${lv_test_deployment}"/>
+          <param name="operator-id" value="$${lv_test_operator}"/>
           <param name="language" value="en-US"/>
           <param name="voice" value="chris"/>
           <param name="use-tls" value="false"/>

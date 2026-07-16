@@ -8,12 +8,20 @@
  * switch_core_asr_* API -- exactly how the core (play_and_detect_speech, etc.)
  * uses it.
  *
- * There is no live LumenVox gRPC server in CI, so conf_lumenvox points the
- * profile at a closed local port (127.0.0.1:1). That is deliberate: it lets us
- * validate the whole interface surface offline. The server-independent logic
- * (grammar bookkeeping, param handling, handle lifecycle, guard conditions) is
- * asserted exactly; the operations that need the server are asserted to fail
- * *gracefully* (deterministic status, no crash, no hang) rather than to succeed.
+ * The suite runs in one of two modes:
+ *
+ *  - Offline (default, CI): conf_lumenvox points the profile at a closed local
+ *    port (127.0.0.1:1). lv_session_open() fails closed when no session_id
+ *    arrives within connect-timeout-ms, so switch_core_asr_open() against a
+ *    dead backend must FAIL promptly -- that fail-closed contract is what the
+ *    offline tests assert. Everything that needs an open handle is live-only.
+ *
+ *  - Live: set LV_TEST_TARGET (host:port of a reachable LumenVox gRPC API) and
+ *    LV_TEST_DEPLOYMENT / LV_TEST_OPERATOR (tenancy UUIDs) to run the full
+ *    interface surface against a real server: open/close, grammar bookkeeping,
+ *    params, guards, handle lifecycle. Recognition itself is still not asserted
+ *    to succeed -- that depends on the ASR engine being provisioned on the
+ *    target deployment.
  *
  * TTS is intentionally not covered here: the LumenVox TTS engine is not reliably
  * available on the dev deployment, and this suite is scoped to ASR.
@@ -27,6 +35,14 @@
  * module is ever switched to the transparent "unimrcp" drop-in name, change this
  * single define. */
 #define LV_ENGINE "lumenvox"
+
+/* Live mode: a reachable LumenVox server was provided via the environment
+ * (conf_lumenvox/freeswitch.xml picks the same variables up via exec-set). */
+static int lv_live(void)
+{
+	const char *t = getenv("LV_TEST_TARGET");
+	return t && *t;
+}
 
 /* Open an ASR handle on the default profile; used by most tests. */
 static switch_status_t lv_open(switch_asr_handle_t *ah, switch_memory_pool_t *pool)
@@ -56,14 +72,22 @@ FST_CORE_BEGIN("./conf_lumenvox")
 		}
 		FST_TEARDOWN_END()
 
-		/* The interface loads and a handle can be opened on the default profile
-		 * and cleanly closed. */
+		/* Live: a handle can be opened on the default profile and cleanly
+		 * closed. Offline: open must fail CLOSED, and promptly (bounded by
+		 * connect-timeout-ms) -- a dead backend must not hand out a half-open
+		 * handle that only breaks later, mid-recognition. */
 		FST_TEST_BEGIN(asr_open_close)
 		{
 			switch_asr_handle_t ah = { 0 };
-			fst_requires(lv_open(&ah, fst_pool) == SWITCH_STATUS_SUCCESS);
-			fst_check(ah.private_info != NULL);
-			fst_requires(lv_close(&ah) == SWITCH_STATUS_SUCCESS);
+			if (lv_live()) {
+				fst_requires(lv_open(&ah, fst_pool) == SWITCH_STATUS_SUCCESS);
+				fst_check(ah.private_info != NULL);
+				fst_requires(lv_close(&ah) == SWITCH_STATUS_SUCCESS);
+			} else {
+				switch_time_t started = switch_time_now();
+				fst_check(lv_open(&ah, fst_pool) != SWITCH_STATUS_SUCCESS);
+				fst_check(switch_time_now() - started < 3000000); /* well under 3 s */
+			}
 		}
 		FST_TEST_END()
 
@@ -77,11 +101,13 @@ FST_CORE_BEGIN("./conf_lumenvox")
 		}
 		FST_TEST_END()
 
-		/* Grammar bookkeeping is entirely server-independent, so it is asserted
-		 * exactly: load, enable/disable, disable-all, unload, and the correct
-		 * failure codes for operations on unknown grammar names. */
+		/* Grammar bookkeeping is server-independent once a handle is open, and
+		 * is asserted exactly: load, enable/disable, disable-all, unload, and
+		 * the correct failure codes for operations on unknown grammar names.
+		 * Live-only: opening a handle requires a reachable server. */
 		FST_TEST_BEGIN(asr_grammar_management)
 		{
+			if (lv_live()) {
 			switch_asr_handle_t ah = { 0 };
 			fst_requires(lv_open(&ah, fst_pool) == SWITCH_STATUS_SUCCESS);
 
@@ -109,13 +135,16 @@ FST_CORE_BEGIN("./conf_lumenvox")
 			fst_check(switch_core_asr_unload_grammar(&ah, "nope") == SWITCH_STATUS_SUCCESS);
 
 			fst_requires(lv_close(&ah) == SWITCH_STATUS_SUCCESS);
+			}
 		}
 		FST_TEST_END()
 
 		/* Param setters accept known/unknown params without crashing, and with
-		 * no recognition in flight the result accessors report "nothing yet". */
+		 * no recognition in flight the result accessors report "nothing yet".
+		 * Live-only: needs an open handle. */
 		FST_TEST_BEGIN(asr_params_and_empty_results)
 		{
+			if (lv_live()) {
 			switch_asr_handle_t ah = { 0 };
 			switch_asr_flag_t flags = SWITCH_ASR_FLAG_NONE;
 			char *xmlstr = NULL;
@@ -140,13 +169,16 @@ FST_CORE_BEGIN("./conf_lumenvox")
 			fst_check(headers == NULL);
 
 			fst_requires(lv_close(&ah) == SWITCH_STATUS_SUCCESS);
+			}
 		}
 		FST_TEST_END()
 
 		/* Feeding audio before recognition has started is a no-op that succeeds
-		 * (the interface must tolerate early frames). */
+		 * (the interface must tolerate early frames). Live-only: needs an open
+		 * handle. */
 		FST_TEST_BEGIN(asr_feed_before_start)
 		{
+			if (lv_live()) {
 			switch_asr_handle_t ah = { 0 };
 			switch_asr_flag_t flags = SWITCH_ASR_FLAG_NONE;
 			int16_t frame[160];                 /* 20 ms @ 8 kHz mono L16 */
@@ -158,15 +190,18 @@ FST_CORE_BEGIN("./conf_lumenvox")
 			fst_check(switch_core_asr_feed(&ah, frame, sizeof(frame), &flags) == SWITCH_STATUS_SUCCESS);
 
 			fst_requires(lv_close(&ah) == SWITCH_STATUS_SUCCESS);
+			}
 		}
 		FST_TEST_END()
 
-		/* With no reachable server, the operations that need one must fail
-		 * gracefully and promptly -- resume() cannot start recognition, DTMF has
-		 * no interaction to target -- while the local guards (cancel, timers,
-		 * pause) still succeed. Nothing here may hang or crash. */
-		FST_TEST_BEGIN(asr_guards_without_server)
+		/* With no recognition in flight the guarded operations behave
+		 * deterministically regardless of what is provisioned server-side:
+		 * resume() with no enabled grammar fails locally, DTMF has no
+		 * interaction to target, and the local-only operations (timers,
+		 * cancel, pause) succeed. Live-only: needs an open handle. */
+		FST_TEST_BEGIN(asr_guards_without_recognition)
 		{
+			if (lv_live()) {
 			switch_asr_handle_t ah = { 0 };
 			switch_asr_flag_t flags = SWITCH_ASR_FLAG_NONE;
 			switch_dtmf_t dtmf = { 0 };
@@ -174,10 +209,8 @@ FST_CORE_BEGIN("./conf_lumenvox")
 			dtmf.duration = 2000;
 
 			fst_requires(lv_open(&ah, fst_pool) == SWITCH_STATUS_SUCCESS);
-			fst_check(switch_core_asr_load_grammar(&ah, "builtin:digits", "g1") == SWITCH_STATUS_SUCCESS);
-			fst_check(switch_core_asr_enable_grammar(&ah, "g1") == SWITCH_STATUS_SUCCESS);
 
-			/* cannot reach the gRPC server -> recognition start fails cleanly */
+			/* no grammar loaded/enabled -> recognition start fails cleanly */
 			fst_check(switch_core_asr_resume(&ah) != SWITCH_STATUS_SUCCESS);
 
 			/* no active interaction -> DTMF injection fails cleanly */
@@ -189,18 +222,47 @@ FST_CORE_BEGIN("./conf_lumenvox")
 			fst_check(switch_core_asr_pause(&ah) == SWITCH_STATUS_SUCCESS);
 
 			fst_requires(lv_close(&ah) == SWITCH_STATUS_SUCCESS);
+			}
 		}
 		FST_TEST_END()
 
-		/* Repeated open/close cycles must not crash or leak handles/threads. */
+		/* pause -> resume -> pause cycles on one handle must never crash: they
+		 * used to overwrite a still-joinable writer std::thread, which calls
+		 * std::terminate(). resume()'s status is deliberately not asserted --
+		 * it succeeds only where the ASR engine is provisioned -- the test is
+		 * that the lifecycle is safe either way. Live-only. */
+		FST_TEST_BEGIN(asr_pause_resume_cycle)
+		{
+			if (lv_live()) {
+			int i;
+			switch_asr_handle_t ah = { 0 };
+
+			fst_requires(lv_open(&ah, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_load_grammar(&ah, "builtin:digits", "g1") == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_enable_grammar(&ah, "g1") == SWITCH_STATUS_SUCCESS);
+
+			for (i = 0; i < 2; i++) {
+				switch_core_asr_resume(&ah);
+				fst_check(switch_core_asr_pause(&ah) == SWITCH_STATUS_SUCCESS);
+			}
+
+			fst_requires(lv_close(&ah) == SWITCH_STATUS_SUCCESS);
+			}
+		}
+		FST_TEST_END()
+
+		/* Repeated open/close cycles must not crash or leak handles/threads.
+		 * Live-only: needs an open handle. */
 		FST_TEST_BEGIN(asr_lifecycle_repeat)
 		{
+			if (lv_live()) {
 			int i;
 			for (i = 0; i < 3; i++) {
 				switch_asr_handle_t ah = { 0 };
 				fst_requires(lv_open(&ah, fst_pool) == SWITCH_STATUS_SUCCESS);
 				fst_check(switch_core_asr_load_grammar(&ah, "builtin:digits", "g1") == SWITCH_STATUS_SUCCESS);
 				fst_requires(lv_close(&ah) == SWITCH_STATUS_SUCCESS);
+			}
 			}
 		}
 		FST_TEST_END()
