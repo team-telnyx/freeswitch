@@ -5872,6 +5872,17 @@ SWITCH_DECLARE(switch_jb_t *) switch_rtp_get_jitter_buffer(switch_rtp_t *rtp_ses
 	return rtp_session->jb ? rtp_session->jb : rtp_session->vb;
 }
 
+SWITCH_DECLARE(switch_jb_t *) switch_rtp_get_jitter_buffer_for_stats(switch_rtp_t *rtp_session)
+{
+	/* Bypass ready check - used for stats export during shutdown
+	 * when rtp_session may not be "ready" but JB still exists */
+	if (!rtp_session) {
+		return NULL;
+	}
+
+	return rtp_session->jb ? rtp_session->jb : rtp_session->vb;
+}
+
 SWITCH_DECLARE(switch_status_t) switch_rtp_pause_jitter_buffer(switch_rtp_t *rtp_session, switch_bool_t pause)
 {
 	int new_val;
@@ -6399,15 +6410,19 @@ SWITCH_DECLARE(void) switch_rtp_destroy(switch_rtp_t **rtp_session)
 		switch_safe_free(pop);
 	}
 
+	/* Export jitter buffer stats before destroying them */
 	if ((*rtp_session)->jb) {
+		switch_jb_export_stats((*rtp_session)->jb);
 		switch_jb_destroy(&(*rtp_session)->jb);
 	}
 
 	if ((*rtp_session)->vb) {
+		switch_jb_export_stats((*rtp_session)->vb);
 		switch_jb_destroy(&(*rtp_session)->vb);
 	}
 
 	if ((*rtp_session)->vbw) {
+		switch_jb_export_stats((*rtp_session)->vbw);
 		switch_jb_destroy(&(*rtp_session)->vbw);
 	}
 
@@ -7145,13 +7160,19 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 	switch_size_t xcheck_jitter = 0;
 	int tries = 0;
 	int block = 0;
+	int accelerate = 0;
 
 	switch_assert(bytes);
+
+	if (rtp_session->session) {
+		accelerate = switch_channel_var_true(switch_core_session_get_channel(rtp_session->session), "rtp_jitter_buffer_accelerate") ? 1 : 0;
+	}
+
  more:
 
 	tries++;
 
-	if (tries > 20) {
+	if (tries > 20 && (!accelerate || tries > 100)) {
 		if (rtp_session->jb && !rtp_session->pause_jb && jb_valid(rtp_session)) {
 			switch_jb_reset(rtp_session->jb);
 		}
@@ -7865,15 +7886,19 @@ fork_end:
 	if (rtp_session->flags[SWITCH_RTP_FLAG_KILL_JB]) {
 		rtp_session->flags[SWITCH_RTP_FLAG_KILL_JB] = 0;
 
+		/* Export jitter buffer stats before destroying them */
 		if (rtp_session->jb) {
+			switch_jb_export_stats(rtp_session->jb);
 			switch_jb_destroy(&rtp_session->jb);
 		}
 
 		if (rtp_session->vb) {
+			switch_jb_export_stats(rtp_session->vb);
 			switch_jb_destroy(&rtp_session->vb);
 		}
 
 		if (rtp_session->vbw) {
+			switch_jb_export_stats(rtp_session->vbw);
 			switch_jb_destroy(&rtp_session->vbw);
 		}
 
@@ -8873,7 +8898,7 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 			rtp_session->read_pollfd) {
 
 			if (rtp_session->jb && !rtp_session->pause_jb && jb_valid(rtp_session)) {
-				while (switch_poll(rtp_session->read_pollfd, 1, &fdr, 0) == SWITCH_STATUS_SUCCESS) {
+				while (switch_rtp_ready(rtp_session) && switch_poll(rtp_session->read_pollfd, 1, &fdr, 0) == SWITCH_STATUS_SUCCESS) {
 					status = read_rtp_packet(rtp_session, &bytes, flags, pmapP, SWITCH_STATUS_SUCCESS, SWITCH_FALSE);
 
 					if (status == SWITCH_STATUS_GENERR) {
