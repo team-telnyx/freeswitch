@@ -3272,6 +3272,12 @@ static switch_status_t rtp_socket_create(switch_rtp_t *rtp_session, switch_socke
 
 static void rtp_socket_close(switch_rtp_t *rtp_session, switch_socket_t *sock)
 {
+	/* switch_socket_close() -> fspr_socket_close() dereferences sock->pool, so a
+	 * NULL sock segfaults. switch_rtp_destroy closes sock_output unguarded (it can
+	 * be NULL when the remote was never set), so guard centrally here. */
+	if (!sock) {
+		return;
+	}
 	switch_mutex_lock(rtp_session->sock_mutex);
 	switch_socket_close(sock);
 	switch_mutex_unlock(rtp_session->sock_mutex);
