@@ -2040,6 +2040,8 @@ APR_DECLARE(void) fspr_pool_cleanup_kill(fspr_pool_t *p, const void *data,
                       fspr_status_t (*cleanup_fn)(void *))
 {
     cleanup_t *c, **lastp;
+    cleanup_t *slow;    /* tortoise for Floyd cycle detection (TELCORE-302) */
+    int parity = 0;
 
 #if APR_POOL_DEBUG
     fspr_pool_check_integrity(p);
@@ -2050,6 +2052,7 @@ APR_DECLARE(void) fspr_pool_cleanup_kill(fspr_pool_t *p, const void *data,
 
     c = p->cleanups;
     lastp = &p->cleanups;
+    slow = p->cleanups;
     while (c) {
         if (c->data == data && c->plain_cleanup_fn == cleanup_fn) {
             *lastp = c->next;
@@ -2060,12 +2063,20 @@ APR_DECLARE(void) fspr_pool_cleanup_kill(fspr_pool_t *p, const void *data,
         }
 
         lastp = &c->next;
+        c = c->next;
 
-		if (c == c->next) {
-			c = NULL;
-		} else {
-			c = c->next;
-		}
+        /* TELCORE-302: Floyd tortoise/hare. The hare (c) advances every step;
+         * the tortoise (slow) advances every other step. If the cleanup list has
+         * been corrupted into a cycle (concurrent register/kill without a shared
+         * lock), the hare meets the tortoise and we break instead of spinning
+         * forever. The old `c == c->next` guard only caught 1-node self-loops. */
+        parity ^= 1;
+        if (parity == 0) {
+            slow = slow->next;
+            if (c == slow) {
+                break;
+            }
+        }
     }
 }
 
@@ -2103,11 +2114,20 @@ APR_DECLARE(fspr_status_t) fspr_pool_cleanup_run(fspr_pool_t *p, void *data,
 static void run_cleanups(cleanup_t **cref)
 {
     cleanup_t *c = *cref;
+    /* ponytail: hard cap on the cleanup walk. A corrupted/cyclic cleanup list
+     * (see TELCORE-302) would otherwise loop forever running cleanups. No pool
+     * legitimately registers anywhere near this many cleanups; if we hit it the
+     * list is corrupt, so stop rather than spin. */
+    unsigned long guard = 0;
+    const unsigned long RUN_CLEANUPS_MAX = 100000000UL;
 
     while (c) {
         *cref = c->next;
         (*c->plain_cleanup_fn)((void *)c->data);
         c = *cref;
+        if (++guard >= RUN_CLEANUPS_MAX) {
+            break;
+        }
     }
 }
 

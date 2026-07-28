@@ -467,6 +467,7 @@ struct switch_rtp {
 	switch_mutex_t *read_mutex;
 	switch_mutex_t *write_mutex;
 	switch_mutex_t *ice_mutex;
+	switch_mutex_t *sock_mutex;
 	switch_timer_t timer;
 	switch_timer_t write_timer;
 	uint8_t ready;
@@ -3252,6 +3253,39 @@ SWITCH_DECLARE(void) switch_rtp_intentional_bugs(switch_rtp_t *rtp_session, swit
 }
 
 
+/* TELCORE-302: every RTP socket create/close/pollset op mutates the shared APR
+ * cleanup list on rtp_session->pool (p->cleanups). These ops run from several
+ * threads under different outer locks (flag/read/write/ice -- or none), so a
+ * concurrent create (cleanup_register) and close (cleanup_kill) can corrupt the
+ * singly-linked cleanup list into a cycle and wedge a SCHED_FIFO thread spinning
+ * in fspr_pool_cleanup_kill. Serialize all of them under this dedicated leaf
+ * mutex. It is always acquired innermost (callers already holding an outer lock
+ * simply nest it), so it adds no new lock-order hazard. */
+static switch_status_t rtp_socket_create(switch_rtp_t *rtp_session, switch_socket_t **new_sock, int family)
+{
+	switch_status_t status;
+	switch_mutex_lock(rtp_session->sock_mutex);
+	status = switch_socket_create(new_sock, family, SOCK_DGRAM, 0, rtp_session->pool);
+	switch_mutex_unlock(rtp_session->sock_mutex);
+	return status;
+}
+
+static void rtp_socket_close(switch_rtp_t *rtp_session, switch_socket_t *sock)
+{
+	switch_mutex_lock(rtp_session->sock_mutex);
+	switch_socket_close(sock);
+	switch_mutex_unlock(rtp_session->sock_mutex);
+}
+
+static switch_status_t rtp_socket_create_pollset(switch_rtp_t *rtp_session, switch_pollfd_t **pollfd, switch_socket_t *sock, int16_t pollflags)
+{
+	switch_status_t status;
+	switch_mutex_lock(rtp_session->sock_mutex);
+	status = switch_socket_create_pollset(pollfd, sock, pollflags, rtp_session->pool);
+	switch_mutex_unlock(rtp_session->sock_mutex);
+	return status;
+}
+
 static switch_status_t enable_remote_rtcp_socket(switch_rtp_t *rtp_session, const char **err) {
 
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
@@ -3278,13 +3312,12 @@ static switch_status_t enable_remote_rtcp_socket(switch_rtp_t *rtp_session, cons
 		} else {
 
 			if (rtp_session->rtcp_sock_output && rtp_session->rtcp_sock_output != rtp_session->rtcp_sock_input) {
-				switch_socket_close(rtp_session->rtcp_sock_output);
+				rtp_socket_close(rtp_session, rtp_session->rtcp_sock_output);
 				rtp_session->rtcp_sock_output = NULL;
 			}
 
-			if ((status = switch_socket_create(&rtp_session->rtcp_sock_output,
-											   switch_sockaddr_get_family(rtp_session->rtcp_remote_addr),
-											   SOCK_DGRAM, 0, rtp_session->pool)) != SWITCH_STATUS_SUCCESS) {
+			if ((status = rtp_socket_create(rtp_session, &rtp_session->rtcp_sock_output,
+											switch_sockaddr_get_family(rtp_session->rtcp_remote_addr))) != SWITCH_STATUS_SUCCESS) {
 				RTP_SET_ERR(err, "RTCP Socket Error!");
 			}
 		}
@@ -3311,7 +3344,7 @@ static switch_status_t enable_local_rtcp_socket(switch_rtp_t *rtp_session, const
 			goto done;
 		}
 
-		if (switch_socket_create(&rtcp_new_sock, switch_sockaddr_get_family(rtp_session->rtcp_local_addr), SOCK_DGRAM, 0, rtp_session->pool) != SWITCH_STATUS_SUCCESS) {
+		if (rtp_socket_create(rtp_session, &rtcp_new_sock, switch_sockaddr_get_family(rtp_session->rtcp_local_addr)) != SWITCH_STATUS_SUCCESS) {
 			RTP_SET_ERR(err, "RTCP Socket Error!");
 			goto done;
 		}
@@ -3336,7 +3369,7 @@ static switch_status_t enable_local_rtcp_socket(switch_rtp_t *rtp_session, const
 		rtp_session->rtcp_sock_input = rtcp_new_sock;
 		rtcp_new_sock = NULL;
 
-		switch_socket_create_pollset(&rtp_session->rtcp_read_pollfd, rtp_session->rtcp_sock_input, SWITCH_POLLIN | SWITCH_POLLERR, rtp_session->pool);
+		rtp_socket_create_pollset(rtp_session, &rtp_session->rtcp_read_pollfd, rtp_session->rtcp_sock_input, SWITCH_POLLIN | SWITCH_POLLERR);
 
  done:
 
@@ -3347,11 +3380,11 @@ static switch_status_t enable_local_rtcp_socket(switch_rtp_t *rtp_session, const
 		}
 
 		if (rtcp_new_sock) {
-			switch_socket_close(rtcp_new_sock);
+			rtp_socket_close(rtp_session, rtcp_new_sock);
 		}
 
 		if (rtcp_old_sock) {
-			switch_socket_close(rtcp_old_sock);
+			rtp_socket_close(rtp_session, rtcp_old_sock);
 		}
 	} else {
 		status = SWITCH_STATUS_FALSE;
@@ -3407,7 +3440,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_set_local_address(switch_rtp_t *rtp_s
 		switch_rtp_kill_socket(rtp_session);
 	}
 
-	if (switch_socket_create(&new_sock, switch_sockaddr_get_family(rtp_session->local_addr), SOCK_DGRAM, 0, rtp_session->pool) != SWITCH_STATUS_SUCCESS) {
+	if (rtp_socket_create(rtp_session, &new_sock, switch_sockaddr_get_family(rtp_session->local_addr)) != SWITCH_STATUS_SUCCESS) {
 		*err = "Socket Error!";
 		goto done;
 	}
@@ -3499,7 +3532,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_set_local_address(switch_rtp_t *rtp_s
 		switch_rtp_set_flag(rtp_session, SWITCH_RTP_FLAG_NOBLOCK);
 	}
 
-	switch_socket_create_pollset(&rtp_session->read_pollfd, rtp_session->sock_input, SWITCH_POLLIN | SWITCH_POLLERR, rtp_session->pool);
+	rtp_socket_create_pollset(rtp_session, &rtp_session->read_pollfd, rtp_session->sock_input, SWITCH_POLLIN | SWITCH_POLLERR);
 
 	if (rtp_session->flags[SWITCH_RTP_FLAG_ENABLE_RTCP]) {
 		if ((status = enable_local_rtcp_socket(rtp_session, err)) == SWITCH_STATUS_SUCCESS) {
@@ -3515,11 +3548,11 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_set_local_address(switch_rtp_t *rtp_s
  done:
 
 	if (new_sock) {
-		switch_socket_close(new_sock);
+		rtp_socket_close(rtp_session, new_sock);
 	}
 
 	if (old_sock) {
-		switch_socket_close(old_sock);
+		rtp_socket_close(rtp_session, old_sock);
 	}
 
 
@@ -3702,12 +3735,12 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_udptl_mode(switch_rtp_t *rtp_session)
 
 		if ((sock = rtp_session->rtcp_sock_input)) {
 			rtp_session->rtcp_sock_input = NULL;
-			switch_socket_close(sock);
+			rtp_socket_close(rtp_session, sock);
 
 			if (rtp_session->rtcp_sock_output && rtp_session->rtcp_sock_output != sock) {
 				sock = rtp_session->rtcp_sock_output;
 				rtp_session->rtcp_sock_output = NULL;
-				switch_socket_close(sock);
+				rtp_socket_close(rtp_session, sock);
 			}
 		}
 	}
@@ -3762,11 +3795,10 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_set_remote_address(switch_rtp_t *rtp_
 		if (rtp_session->sock_output && rtp_session->sock_output != rtp_session->sock_input) {
 			sock = rtp_session->sock_output;
 			rtp_session->sock_output = NULL;
-			switch_socket_close(sock);
+			rtp_socket_close(rtp_session, sock);
 		}
-		if ((status = switch_socket_create(&rtp_session->sock_output,
-										   switch_sockaddr_get_family(rtp_session->remote_addr),
-										   SOCK_DGRAM, 0, rtp_session->pool)) != SWITCH_STATUS_SUCCESS) {
+		if ((status = rtp_socket_create(rtp_session, &rtp_session->sock_output,
+										switch_sockaddr_get_family(rtp_session->remote_addr))) != SWITCH_STATUS_SUCCESS) {
 
 			*err = "Socket Error!";
 		}
@@ -5480,6 +5512,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_create(switch_rtp_t **new_rtp_session
 	switch_mutex_init(&rtp_session->read_mutex, SWITCH_MUTEX_NESTED, pool);
 	switch_mutex_init(&rtp_session->write_mutex, SWITCH_MUTEX_NESTED, pool);
 	switch_mutex_init(&rtp_session->ice_mutex, SWITCH_MUTEX_NESTED, pool);
+	switch_mutex_init(&rtp_session->sock_mutex, SWITCH_MUTEX_NESTED, pool);
 	switch_mutex_init(&rtp_session->dtmf_data.dtmf_mutex, SWITCH_MUTEX_NESTED, pool);
 	switch_queue_create(&rtp_session->dtmf_data.dtmf_queue, 100, rtp_session->pool);
 	switch_queue_create(&rtp_session->dtmf_data.dtmf_inqueue, 100, rtp_session->pool);
@@ -5704,24 +5737,24 @@ static void close_rtp_sockets(switch_rtp_t *rtp_session)
 	sock = rtp_session->sock_input;
 	rtp_session->sock_input = NULL;
 	if (sock) {
-		switch_socket_close(sock);
+		rtp_socket_close(rtp_session, sock);
 	}
 
 	if (rtp_session->sock_output && rtp_session->sock_output != sock) {
 		sock = rtp_session->sock_output;
 		rtp_session->sock_output = NULL;
-		switch_socket_close(sock);
+		rtp_socket_close(rtp_session, sock);
 	}
 
 	if ((sock = rtp_session->rtcp_sock_input)) {
 		rtp_session->rtcp_sock_input = NULL;
-		switch_socket_close(sock);
+		rtp_socket_close(rtp_session, sock);
 	}
 
 	if (rtp_session->rtcp_sock_output && rtp_session->rtcp_sock_output != sock) {
 		sock = rtp_session->rtcp_sock_output;
 		rtp_session->rtcp_sock_output = NULL;
-		switch_socket_close(sock);
+		rtp_socket_close(rtp_session, sock);
 	}
 }
 
@@ -6449,24 +6482,24 @@ SWITCH_DECLARE(void) switch_rtp_destroy(switch_rtp_t **rtp_session)
 	sock = (*rtp_session)->sock_input;
 	(*rtp_session)->sock_input = NULL;
 	if (sock) {
-		switch_socket_close(sock);
+		rtp_socket_close(*rtp_session, sock);
 	}
-	
+
 	if ((*rtp_session)->sock_output != sock) {
 		sock = (*rtp_session)->sock_output;
 		(*rtp_session)->sock_output = NULL;
-		switch_socket_close(sock);
+		rtp_socket_close(*rtp_session, sock);
 	}
 
 	if ((sock = (*rtp_session)->rtcp_sock_input)) {
 		(*rtp_session)->rtcp_sock_input = NULL;
-		switch_socket_close(sock);
+		rtp_socket_close(*rtp_session, sock);
 	}
 
 	if ((*rtp_session)->rtcp_sock_output && (*rtp_session)->rtcp_sock_output != sock) {
 		sock = (*rtp_session)->rtcp_sock_output;
 		(*rtp_session)->rtcp_sock_output = NULL;
-		switch_socket_close(sock);
+		rtp_socket_close(*rtp_session, sock);
 	}
 
 #ifdef ENABLE_SRTP
