@@ -33,6 +33,7 @@
 
 #if APR_HAVE_STDLIB_H
 #include <stdlib.h>     /* for malloc, free and abort */
+#include <stdio.h>      /* for fprintf(stderr) cycle-detection warning (TELCORE-302) */
 #endif
 
 #if APR_HAVE_UNISTD_H
@@ -2036,6 +2037,33 @@ APR_DECLARE(void) fspr_pool_cleanup_register(fspr_pool_t *p, const void *data,
     }
 }
 
+/* TELCORE-302: read-only Floyd cycle check on a cleanup list. The singly-linked
+ * cleanup list on a pool can be corrupted into a cycle if two threads mutate it
+ * concurrently (register on one thread, kill on another) without a shared lock.
+ * A cyclic list makes run_cleanups / run_child_cleanups either spin forever or
+ * re-invoke each cleanup repeatedly (double-free / use-after-free), so the run
+ * paths must check first and refuse to run a corrupt list. */
+static int cleanup_list_is_cyclic(cleanup_t *c)
+{
+    cleanup_t *slow = c, *fast = c;
+
+    while (fast && fast->next) {
+        slow = slow->next;
+        fast = fast->next->next;
+        if (slow == fast) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void log_cleanup_cycle(const char *where)
+{
+    fprintf(stderr,
+        "APR: cyclic pool cleanup list detected in %s; skipping to avoid "
+        "double-free/spin (TELCORE-302)\n", where);
+}
+
 APR_DECLARE(void) fspr_pool_cleanup_kill(fspr_pool_t *p, const void *data,
                       fspr_status_t (*cleanup_fn)(void *))
 {
@@ -2074,6 +2102,7 @@ APR_DECLARE(void) fspr_pool_cleanup_kill(fspr_pool_t *p, const void *data,
         if (parity == 0) {
             slow = slow->next;
             if (c == slow) {
+                log_cleanup_cycle("fspr_pool_cleanup_kill");
                 break;
             }
         }
@@ -2114,20 +2143,20 @@ APR_DECLARE(fspr_status_t) fspr_pool_cleanup_run(fspr_pool_t *p, void *data,
 static void run_cleanups(cleanup_t **cref)
 {
     cleanup_t *c = *cref;
-    /* ponytail: hard cap on the cleanup walk. A corrupted/cyclic cleanup list
-     * (see TELCORE-302) would otherwise loop forever running cleanups. No pool
-     * legitimately registers anywhere near this many cleanups; if we hit it the
-     * list is corrupt, so stop rather than spin. */
-    unsigned long guard = 0;
-    const unsigned long RUN_CLEANUPS_MAX = 100000000UL;
+
+    /* TELCORE-302: never run a corrupt (cyclic) list. Running it would re-invoke
+     * each cleanup repeatedly -> double-free/use-after-free, or spin forever on a
+     * SCHED_FIFO thread. Detect first and stop; leaking the tail at teardown is
+     * the safe choice, and log so the (now-guarded) corruption is not silent. */
+    if (cleanup_list_is_cyclic(c)) {
+        log_cleanup_cycle("run_cleanups");
+        return;
+    }
 
     while (c) {
         *cref = c->next;
         (*c->plain_cleanup_fn)((void *)c->data);
         c = *cref;
-        if (++guard >= RUN_CLEANUPS_MAX) {
-            break;
-        }
     }
 }
 
@@ -2135,12 +2164,45 @@ static void run_child_cleanups(cleanup_t **cref)
 {
     cleanup_t *c = *cref;
 
+    /* TELCORE-302: same cycle guard as run_cleanups (this path runs on fork). */
+    if (cleanup_list_is_cyclic(c)) {
+        log_cleanup_cycle("run_child_cleanups");
+        return;
+    }
+
     while (c) {
         *cref = c->next;
         (*c->child_cleanup_fn)((void *)c->data);
         c = *cref;
     }
 }
+
+#ifdef APR_POOL_CLEANUP_CYCLE_TEST
+/* TEST-ONLY (compiled only with -DAPR_POOL_CLEANUP_CYCLE_TEST): register n
+ * cleanups on p, then splice the tail back to the head so p->cleanups is an
+ * n-node cycle. Lets the TELCORE-302 cycle guards be exercised against the real
+ * fspr_pool_cleanup_* code from the test suite. Never built in production. */
+APR_DECLARE(void) fspr_pool_make_cleanup_cycle_for_testing(fspr_pool_t *p, int n,
+                                      fspr_status_t (*fn)(void *))
+{
+    cleanup_t *head, *tail;
+    int i;
+
+    for (i = 0; i < n; i++) {
+        fspr_pool_cleanup_register(p, NULL, fn, fn);
+    }
+
+    head = p->cleanups;
+    if (head == NULL) {
+        return;
+    }
+    tail = head;
+    while (tail->next) {
+        tail = tail->next;
+    }
+    tail->next = head;  /* close the loop -> n-node cycle */
+}
+#endif /* APR_POOL_CLEANUP_CYCLE_TEST */
 
 static void cleanup_pool_for_exec(fspr_pool_t *p)
 {
