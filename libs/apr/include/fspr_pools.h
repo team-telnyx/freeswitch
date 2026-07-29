@@ -538,16 +538,6 @@ APR_DECLARE(void) fspr_pool_cleanup_register(
 APR_DECLARE(void) fspr_pool_cleanup_kill(fspr_pool_t *p, const void *data,
                                         fspr_status_t (*cleanup)(void *));
 
-#ifdef APR_POOL_CLEANUP_CYCLE_TEST
-/**
- * TEST-ONLY: force a pool's cleanup list into an n-node cycle so the TELCORE-302
- * cycle guards can be tested against the real cleanup code. Compiled only with
- * -DAPR_POOL_CLEANUP_CYCLE_TEST; never present in production builds.
- */
-APR_DECLARE(void) fspr_pool_make_cleanup_cycle_for_testing(fspr_pool_t *p, int n,
-                                        fspr_status_t (*fn)(void *));
-#endif
-
 /**
  * Replace the child cleanup function of a previously registered cleanup.
  * 

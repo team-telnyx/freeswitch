@@ -2177,33 +2177,6 @@ static void run_child_cleanups(cleanup_t **cref)
     }
 }
 
-#ifdef APR_POOL_CLEANUP_CYCLE_TEST
-/* TEST-ONLY (compiled only with -DAPR_POOL_CLEANUP_CYCLE_TEST): register n
- * cleanups on p, then splice the tail back to the head so p->cleanups is an
- * n-node cycle. Lets the TELCORE-302 cycle guards be exercised against the real
- * fspr_pool_cleanup_* code from the test suite. Never built in production. */
-APR_DECLARE(void) fspr_pool_make_cleanup_cycle_for_testing(fspr_pool_t *p, int n,
-                                      fspr_status_t (*fn)(void *))
-{
-    cleanup_t *head, *tail;
-    int i;
-
-    for (i = 0; i < n; i++) {
-        fspr_pool_cleanup_register(p, NULL, fn, fn);
-    }
-
-    head = p->cleanups;
-    if (head == NULL) {
-        return;
-    }
-    tail = head;
-    while (tail->next) {
-        tail = tail->next;
-    }
-    tail->next = head;  /* close the loop -> n-node cycle */
-}
-#endif /* APR_POOL_CLEANUP_CYCLE_TEST */
-
 static void cleanup_pool_for_exec(fspr_pool_t *p)
 {
     run_child_cleanups(&p->cleanups);
