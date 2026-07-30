@@ -1776,8 +1776,19 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 				switch_bool_t fresh_nomination = SWITCH_FALSE;
 				switch_bool_t media_unhealthy = SWITCH_FALSE;
 				switch_bool_t defer_to_prflx_bootstrap = SWITCH_FALSE;
+				switch_bool_t preserve_dtls_tuple = SWITCH_FALSE;
+				switch_bool_t prior_current_nomination = SWITCH_FALSE;
+				const char *current_host = NULL;
+				switch_port_t current_port = 0;
+				char current_buf[80] = "";
 				switch_dtls_t *dtls = is_rtcp ? rtp_session->rtcp_dtls : rtp_session->dtls;
+				int prior_nominated_idx = ice->mid_call_nominated_idx;
 				int peer_candidate_idx = -1;
+
+				if (ice->addr) {
+					current_host = switch_get_addr(current_buf, sizeof(current_buf), ice->addr);
+					current_port = switch_sockaddr_get_port(ice->addr);
+				}
 
 				ice->rready = 1;
 				for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; ++i) {
@@ -1788,6 +1799,11 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 							"Got USE-CANDIDATE on %s cand %s:%d\n", rtp_type(rtp_session),
 							ice->ice_params->cands[i][ice->proto].con_addr, ice->ice_params->cands[i][ice->proto].con_port);
 					}
+				}
+
+				if (prior_nominated_idx > -1 && prior_nominated_idx < ice->ice_params->cand_idx[ice->proto] && current_host &&
+					ice_candidate_matches_addr(&ice->ice_params->cands[prior_nominated_idx][ice->proto], current_host, current_port)) {
+					prior_current_nomination = SWITCH_TRUE;
 				}
 
 				if (peer_candidate_idx > -1) {
@@ -1829,6 +1845,8 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 					ice->initializing && !rtp_session->ice.dtls_handshake && (!dtls || dtls->state < DS_READY) &&
 					got_message_integrity && got_fingerprint &&
 					(!ice->prflx_bootstrap_require_use_candidate || got_use_candidate) ? SWITCH_TRUE : SWITCH_FALSE;
+				preserve_dtls_tuple = !is_rtcp && peer_candidate && prior_current_nomination && peer_candidate_idx != prior_nominated_idx &&
+					!dtls_ready && rtp_session->ice.dtls_handshake && ice->cand_responsive ? SWITCH_TRUE : SWITCH_FALSE;
 
 				if (ice->addr && !switch_cmp_addr(from_addr, ice->addr, SWITCH_TRUE)) {
 					if (dtls_ready) {
@@ -1836,6 +1854,10 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 							"USE-CANDIDATE: DTLS already READY, %s %s nomination from %s:%d (elapsed_stun=%u, elapsed_media=%u, mid_call_failover_ms=%u, controlled=%d, known_candidate=%d, fresh_nomination=%d, nomination_age_ms=%u, media_unhealthy=%d, rtcp_mux=%d)\n",
 							allow_mid_call_failover ? "accepted" : "ignoring", rtp_type(rtp_session), from_host, from_port, rtp_session->elapsed_stun, rtp_session->elapsed_media, mid_call_failover_ms,
 							!!(ice->type & ICE_CONTROLLED), peer_candidate, fresh_nomination, nomination_age_ms, media_unhealthy, !!rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX]);
+					} else if (preserve_dtls_tuple) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
+							"USE-CANDIDATE: preserving %s DTLS tuple during handshake, ignoring nomination from %s:%d (cand_responsive=%d, prior_idx=%d)\n",
+							rtp_type(rtp_session), from_host, from_port, ice->cand_responsive, prior_nominated_idx);
 					} else if (peer_candidate || !defer_to_prflx_bootstrap) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
 							"USE-CANDIDATE: switching %s ice dest from current to nominated %s:%d\n",
