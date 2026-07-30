@@ -32,6 +32,12 @@ typedef struct {
 		uint32_t mid_call_failover_ms;
 		int mid_call_nominated_idx;
 		switch_time_t mid_call_nominated_us;
+		uint8_t prflx_bootstrap_cached;
+		uint8_t prflx_bootstrap_enabled;
+		uint8_t prflx_bootstrap_require_use_candidate;
+		uint32_t prflx_bootstrap_ms;
+		int prflx_bootstrap_idx;
+		switch_time_t prflx_bootstrap_us;
 } switch_rtp_ice_t;
 
 SWITCH_DECLARE(void) switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *data, switch_size_t len);
