@@ -16,6 +16,7 @@ typedef struct {
 		uint8_t sending;
 		uint8_t ready;
 		uint8_t rready;
+		uint8_t remote_eoc_received;
 		uint8_t initializing;
 		int missed_count;
 		char last_sent_id[13];
