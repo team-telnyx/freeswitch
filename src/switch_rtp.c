@@ -306,6 +306,8 @@ typedef struct switch_dtls_s {
 	void *data;
 	switch_socket_t *sock_output;
 	switch_sockaddr_t *remote_addr;
+	switch_sockaddr_t *handshake_peer_addr;
+	uint8_t handshake_peer_set;
 	char *rsa;
 	char *pvt;
 	char *ca;
@@ -783,26 +785,17 @@ static const char *ice_candidate_type_safe(const icand_t *cand)
 	return (cand && cand->cand_type) ? cand->cand_type : "(unknown)";
 }
 
-static switch_bool_t ice_should_preserve_peer_nominated_dtls_tuple(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, switch_dtls_t *dtls, switch_bool_t is_rtcp)
+static switch_bool_t ice_should_preserve_active_dtls_tuple(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, switch_dtls_t *dtls, switch_bool_t is_rtcp)
 {
-	int idx;
-	char cur_buf[80] = "";
-	const char *cur_host;
-	switch_port_t cur_port;
-
-	if (is_rtcp || !rtp_session || !ice || !ice->ice_params || !ice->addr || !dtls || dtls->state >= DS_READY || !rtp_session->ice.dtls_handshake) {
+	if (is_rtcp || !rtp_session || !ice || !ice->addr || !dtls || !dtls->handshake_peer_set || !dtls->handshake_peer_addr) {
 		return SWITCH_FALSE;
 	}
 
-	idx = ice->mid_call_nominated_idx;
-	if (idx < 0 || idx >= ice->ice_params->cand_idx[ice->proto]) {
+	if (dtls->state <= DS_OFF || dtls->state >= DS_READY) {
 		return SWITCH_FALSE;
 	}
 
-	cur_host = switch_get_addr(cur_buf, sizeof(cur_buf), ice->addr);
-	cur_port = switch_sockaddr_get_port(ice->addr);
-
-	return ice_candidate_matches_addr(&ice->ice_params->cands[idx][ice->proto], cur_host, cur_port) ? SWITCH_TRUE : SWITCH_FALSE;
+	return switch_cmp_addr(ice->addr, dtls->handshake_peer_addr, SWITCH_TRUE) ? SWITCH_TRUE : SWITCH_FALSE;
 }
 
 static uint32_t ice_prflx_bootstrap_ms(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice)
@@ -1579,7 +1572,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "Marked %s ICE candidate %s:%d as responsive (is_relay: %d)\n", rtp_type(rtp_session), ice->ice_params->cands[i][ice->proto].con_addr, ice->ice_params->cands[i][ice->proto].con_port, is_relay);
 
 						if (!ice->cand_responsive && !switch_cmp_addr(from_addr, ice->addr, SWITCH_FALSE) && (!is_relay || rtp_session->elapsed_stun >= 1000) &&
-							!ice_should_preserve_peer_nominated_dtls_tuple(rtp_session, ice, is_rtcp ? rtp_session->rtcp_dtls : rtp_session->dtls, is_rtcp)) {
+							!ice_should_preserve_active_dtls_tuple(rtp_session, ice, is_rtcp ? rtp_session->rtcp_dtls : rtp_session->dtls, is_rtcp)) {
 							switch_channel_t *channel = NULL;
 							char ice_cur_buf[80] = "";
 							const char *ice_cur_host = switch_get_addr(ice_cur_buf, sizeof(ice_cur_buf), ice->addr);
@@ -1803,17 +1796,15 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 				switch_bool_t media_unhealthy = SWITCH_FALSE;
 				switch_bool_t defer_to_prflx_bootstrap = SWITCH_FALSE;
 				switch_bool_t preserve_dtls_tuple = SWITCH_FALSE;
-				switch_bool_t prior_current_nomination = SWITCH_FALSE;
-				const char *current_host = NULL;
-				switch_port_t current_port = 0;
-				char current_buf[80] = "";
+				const char *active_host = NULL;
+				switch_port_t active_port = 0;
+				char active_buf[80] = "";
 				switch_dtls_t *dtls = is_rtcp ? rtp_session->rtcp_dtls : rtp_session->dtls;
-				int prior_nominated_idx = ice->mid_call_nominated_idx;
 				int peer_candidate_idx = -1;
 
 				if (ice->addr) {
-					current_host = switch_get_addr(current_buf, sizeof(current_buf), ice->addr);
-					current_port = switch_sockaddr_get_port(ice->addr);
+					active_host = switch_get_addr(active_buf, sizeof(active_buf), ice->addr);
+					active_port = switch_sockaddr_get_port(ice->addr);
 				}
 
 				ice->rready = 1;
@@ -1827,14 +1818,9 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 					}
 				}
 
-				if (prior_nominated_idx > -1 && prior_nominated_idx < ice->ice_params->cand_idx[ice->proto] && current_host &&
-					ice_candidate_matches_addr(&ice->ice_params->cands[prior_nominated_idx][ice->proto], current_host, current_port)) {
-					prior_current_nomination = SWITCH_TRUE;
-				}
-
 				dtls_ready = dtls && dtls->state >= DS_READY && ice->ready;
-				preserve_dtls_tuple = !is_rtcp && peer_candidate && prior_current_nomination && peer_candidate_idx != prior_nominated_idx &&
-					!dtls_ready && rtp_session->ice.dtls_handshake && ice->cand_responsive ? SWITCH_TRUE : SWITCH_FALSE;
+				preserve_dtls_tuple = peer_candidate && active_host && !switch_cmp_addr(from_addr, ice->addr, SWITCH_TRUE) &&
+					ice_should_preserve_active_dtls_tuple(rtp_session, ice, dtls, is_rtcp) ? SWITCH_TRUE : SWITCH_FALSE;
 
 				if (peer_candidate_idx > -1 && !preserve_dtls_tuple) {
 					for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; ++i) {
@@ -1882,8 +1868,8 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 							!!(ice->type & ICE_CONTROLLED), peer_candidate, fresh_nomination, nomination_age_ms, media_unhealthy, !!rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX]);
 					} else if (preserve_dtls_tuple) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
-							"USE-CANDIDATE: preserving %s DTLS tuple during handshake, ignoring nomination from %s:%d (cand_responsive=%d, prior_idx=%d)\n",
-							rtp_type(rtp_session), from_host, from_port, ice->cand_responsive, prior_nominated_idx);
+							"USE-CANDIDATE: preserving active %s DTLS tuple %s:%d during handshake, ignoring nomination from %s:%d\n",
+							rtp_type(rtp_session), active_host, active_port, from_host, from_port);
 					} else if (peer_candidate || !defer_to_prflx_bootstrap) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
 							"USE-CANDIDATE: switching %s ice dest from current to nominated %s:%d\n",
@@ -2100,9 +2086,9 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 			}
 
 			if ((ice->type & ICE_VANILLA) && ice->ice_params && do_adj &&
-				ice_should_preserve_peer_nominated_dtls_tuple(rtp_session, ice, dtls, is_rtcp)) {
+				ice_should_preserve_active_dtls_tuple(rtp_session, ice, dtls, is_rtcp)) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
-					"ICE preserving peer-nominated %s DTLS tuple during handshake, ignoring auto-adjust from %s:%d (idx:%d)\n",
+					"ICE preserving active %s DTLS tuple during handshake, ignoring auto-adjust from %s:%d (idx:%d)\n",
 					rtp_type(rtp_session), from_host, from_port, cur_idx);
 				do_adj = 0;
 			}
@@ -4663,6 +4649,18 @@ static int do_dtls(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 		}
 	}
 
+	if (is_ice && dtls->bytes > 0 && dtls->data && dtls->state > DS_OFF && dtls->state < DS_READY && !dtls->handshake_peer_set) {
+		char dtls_peer_buf[80] = "";
+		const char *dtls_peer_host = switch_get_addr(dtls_peer_buf, sizeof(dtls_peer_buf), rtp_session->from_addr);
+		switch_port_t dtls_peer_port = switch_sockaddr_get_port(rtp_session->from_addr);
+
+		if (!zstr(dtls_peer_host) && switch_sockaddr_info_get(&dtls->handshake_peer_addr, dtls_peer_host, SWITCH_UNSPEC, dtls_peer_port, 0, rtp_session->pool) == SWITCH_STATUS_SUCCESS) {
+			dtls->handshake_peer_set = 1;
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
+				"DTLS handshake peer locked to %s:%d until READY\n", dtls_peer_host, dtls_peer_port);
+		}
+	}
+
 	if (dtls->bytes > 0 && dtls->data) {
 		ret = BIO_write(dtls->read_bio, dtls->data, (int)dtls->bytes);
 		if (ret <= 0) {
@@ -5135,6 +5133,8 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_add_dtls(switch_rtp_t *rtp_session, d
 	}
 
 	dtls = switch_core_alloc(rtp_session->pool, sizeof(*dtls));
+	dtls->handshake_peer_addr = NULL;
+	dtls->handshake_peer_set = 0;
 
 	dtls->pem = switch_core_sprintf(rtp_session->pool, "%s%s%s.pem", SWITCH_GLOBAL_dirs.certs_dir, SWITCH_PATH_SEPARATOR, DTLS_SRTP_FNAME);
 
