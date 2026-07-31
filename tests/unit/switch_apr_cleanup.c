@@ -1,19 +1,13 @@
 /*
- * TELCORE-302 -- CI unit coverage for the APR pool cleanup-list fixes.
+ * Unit coverage for the APR pool cleanup-list handling, against the real exported
+ * fspr_pool_cleanup_* symbols rather than a copy.
  *
- * Calls the REAL APR_DECLARE-exported fspr_pool_cleanup_* symbols (not a copy),
- * so a divergence in the shipped fspr_pool_cleanup_kill / run_cleanups fails this
- * test. Wired into tests/unit/Makefile.am noinst_PROGRAMS (== TESTS) so it runs
- * under `make check`.
- *
- * <fspr_pools.h> is not on the tests/unit include path (the APR includes live in
- * CORE_CFLAGS, used by libfreeswitch, not in the shared test CFLAGS) and switch.h
- * exposes only the opaque switch_memory_pool_t (== fspr_pool_t) typedef, so we
- * forward-declare the handful of real exported symbols we call. They resolve at
- * link against the APR bundled in libfreeswitch. (fspr_pool_create is only a macro
- * over the exported fspr_pool_create_ex, so we call the underlying function; using
- * fspr_pool_destroy directly keeps cleanup execution synchronous, unlike
- * switch_core_destroy_memory_pool which defers to the async pool thread.)
+ * <fspr_pools.h> is not on the tests/unit include path (APR includes live in
+ * CORE_CFLAGS, not the shared test CFLAGS) and switch.h exposes only the opaque
+ * switch_memory_pool_t (== fspr_pool_t), so the symbols we call are forward-declared
+ * here and resolve at link against the APR in libfreeswitch. fspr_pool_create is
+ * just a macro over fspr_pool_create_ex; fspr_pool_destroy runs cleanups
+ * synchronously, unlike switch_core_destroy_memory_pool.
  */
 
 #include <switch.h>
@@ -88,9 +82,7 @@ FST_TEST_BEGIN(test_cleanup_kill_and_run)
 FST_TEST_END()
 
 /* Mirrors rtp_get_pool_sock_mutex: a mutex attached to a pool via userdata is
- * shared -- a later lookup on the SAME pool returns the identical object. This is
- * what makes the TELCORE-302 socket lock pool-scoped (one lock shared by the
- * audio/video/T.38 rtp_sessions that share the session pool). */
+ * shared -- a later lookup on the same pool returns the identical object. */
 FST_TEST_BEGIN(test_pool_sock_mutex_shared)
 {
 	switch_memory_pool_t *pool = NULL;

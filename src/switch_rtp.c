@@ -111,8 +111,7 @@ static switch_port_t END_PORT = RTP_END_PORT;
 static uint16_t START_SEQUENCE = RTP_START_SEQUENCE;
 static uint16_t END_SEQUENCE = RTP_END_SEQUENCE;
 static switch_mutex_t *port_lock = NULL;
-/* TELCORE-302: process-global guard serializing lazy creation of the per-pool
- * socket mutex (see rtp_get_pool_sock_mutex). Initialized in switch_rtp_init. */
+/* Guards lazy creation of the per-pool socket mutex (see rtp_get_pool_sock_mutex). */
 static switch_mutex_t *sock_mutex_init_lock = NULL;
 static switch_size_t do_flush(switch_rtp_t *rtp_session, int force, switch_size_t bytes_in);
 static rtp_create_probe_func create_probe = 0;
@@ -3257,15 +3256,10 @@ SWITCH_DECLARE(void) switch_rtp_intentional_bugs(switch_rtp_t *rtp_session, swit
 }
 
 
-/* TELCORE-302: the cleanup list guarded by sock_mutex lives on rtp_session->pool,
- * which is the shared switch_core_session pool -- the audio, video and T.38 RTP
- * sessions of one call all pass switch_core_session_get_pool() to switch_rtp_new,
- * so they share ONE pool and ONE cleanups list. A per-rtp_session mutex would not
- * serialize cross-engine socket teardown on that shared list. So attach a single
- * mutex to the pool itself (via pool userdata) and hand every rtp_session on that
- * pool the same one. Lazy creation is serialized by the process-global
- * sock_mutex_init_lock; the mutex is allocated from (and lives as long as) the
- * pool, which outlives every rtp_session sharing it. */
+/* The cleanup list guarded by sock_mutex lives on the pool, and the audio, video
+ * and T.38 rtp_sessions of one call share one pool. So the mutex is attached to
+ * the pool (userdata), not to the rtp_session: every session on a pool gets the
+ * same lock. Allocated from the pool, so it outlives all of them. */
 static switch_mutex_t *rtp_get_pool_sock_mutex(switch_memory_pool_t *pool)
 {
 	switch_mutex_t *sock_mutex;
@@ -3281,15 +3275,10 @@ static switch_mutex_t *rtp_get_pool_sock_mutex(switch_memory_pool_t *pool)
 	return sock_mutex;
 }
 
-/* TELCORE-302: every RTP socket create/close/pollset op mutates the shared APR
- * cleanup list on rtp_session->pool (p->cleanups). These ops run from several
- * threads under different outer locks (flag/read/write/ice -- or none), so a
- * concurrent create (cleanup_register) and close (cleanup_kill) can corrupt the
- * singly-linked cleanup list into a cycle and wedge a SCHED_FIFO thread spinning
- * in fspr_pool_cleanup_kill. Serialize all of them under this dedicated leaf
- * mutex (pool-scoped, so all engines sharing the pool share it). It is always
- * acquired innermost (callers already holding an outer lock simply nest it), so
- * it adds no new lock-order hazard. */
+/* Socket create/close/pollset all mutate the pool's APR cleanup list from several
+ * threads under different outer locks, which can corrupt it into a cycle. These
+ * wrappers serialize them under sock_mutex, always taken innermost (leaf lock, so
+ * no new lock-order hazard). Use them instead of switch_socket_* on the RTP pool. */
 static switch_status_t rtp_socket_create(switch_rtp_t *rtp_session, switch_socket_t **new_sock, int family)
 {
 	switch_status_t status;
@@ -3301,9 +3290,8 @@ static switch_status_t rtp_socket_create(switch_rtp_t *rtp_session, switch_socke
 
 static void rtp_socket_close(switch_rtp_t *rtp_session, switch_socket_t *sock)
 {
-	/* switch_socket_close() -> fspr_socket_close() dereferences sock->pool, so a
-	 * NULL sock segfaults. switch_rtp_destroy closes sock_output unguarded (it can
-	 * be NULL when the remote was never set), so guard centrally here. */
+	/* switch_socket_close() derefs sock->pool; switch_rtp_destroy can pass a NULL
+	 * sock_output (remote never set), so guard here rather than at each caller. */
 	if (!sock) {
 		return;
 	}
@@ -5547,8 +5535,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_create(switch_rtp_t **new_rtp_session
 	switch_mutex_init(&rtp_session->read_mutex, SWITCH_MUTEX_NESTED, pool);
 	switch_mutex_init(&rtp_session->write_mutex, SWITCH_MUTEX_NESTED, pool);
 	switch_mutex_init(&rtp_session->ice_mutex, SWITCH_MUTEX_NESTED, pool);
-	/* TELCORE-302: pool-scoped, shared by every rtp_session on this pool (see
-	 * rtp_get_pool_sock_mutex) -- NOT a fresh per-session mutex. */
+	/* Pool-scoped: shared with every rtp_session on this pool, not per-session. */
 	rtp_session->sock_mutex = rtp_get_pool_sock_mutex(pool);
 	switch_mutex_init(&rtp_session->dtmf_data.dtmf_mutex, SWITCH_MUTEX_NESTED, pool);
 	switch_queue_create(&rtp_session->dtmf_data.dtmf_queue, 100, rtp_session->pool);

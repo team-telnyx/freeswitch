@@ -33,7 +33,7 @@
 
 #if APR_HAVE_STDLIB_H
 #include <stdlib.h>     /* for malloc, free and abort */
-#include <stdio.h>      /* for fprintf(stderr) cycle-detection warning (TELCORE-302) */
+#include <stdio.h>      /* for fprintf(stderr) cycle-detection warning */
 #endif
 
 #if APR_HAVE_UNISTD_H
@@ -2037,12 +2037,8 @@ APR_DECLARE(void) fspr_pool_cleanup_register(fspr_pool_t *p, const void *data,
     }
 }
 
-/* TELCORE-302: read-only Floyd cycle check on a cleanup list. The singly-linked
- * cleanup list on a pool can be corrupted into a cycle if two threads mutate it
- * concurrently (register on one thread, kill on another) without a shared lock.
- * A cyclic list makes run_cleanups / run_child_cleanups either spin forever or
- * re-invoke each cleanup repeatedly (double-free / use-after-free), so the run
- * paths must check first and refuse to run a corrupt list. */
+/* Read-only Floyd cycle check. Concurrent register/kill without a shared lock can
+ * corrupt the singly-linked cleanup list into a cycle. */
 static int cleanup_list_is_cyclic(cleanup_t *c)
 {
     cleanup_t *slow = c, *fast = c;
@@ -2061,14 +2057,14 @@ static void log_cleanup_cycle(const char *where)
 {
     fprintf(stderr,
         "APR: cyclic pool cleanup list detected in %s; skipping to avoid "
-        "double-free/spin (TELCORE-302)\n", where);
+        "double-free/spin\n", where);
 }
 
 APR_DECLARE(void) fspr_pool_cleanup_kill(fspr_pool_t *p, const void *data,
                       fspr_status_t (*cleanup_fn)(void *))
 {
     cleanup_t *c, **lastp;
-    cleanup_t *slow;    /* tortoise for Floyd cycle detection (TELCORE-302) */
+    cleanup_t *slow;    /* tortoise for Floyd cycle detection */
     int parity = 0;
 
 #if APR_POOL_DEBUG
@@ -2093,11 +2089,8 @@ APR_DECLARE(void) fspr_pool_cleanup_kill(fspr_pool_t *p, const void *data,
         lastp = &c->next;
         c = c->next;
 
-        /* TELCORE-302: Floyd tortoise/hare. The hare (c) advances every step;
-         * the tortoise (slow) advances every other step. If the cleanup list has
-         * been corrupted into a cycle (concurrent register/kill without a shared
-         * lock), the hare meets the tortoise and we break instead of spinning
-         * forever. The old `c == c->next` guard only caught 1-node self-loops. */
+        /* Floyd tortoise/hare: break on a cyclic list instead of spinning. The
+         * previous `c == c->next` guard only caught 1-node self-loops. */
         parity ^= 1;
         if (parity == 0) {
             slow = slow->next;
@@ -2144,10 +2137,8 @@ static void run_cleanups(cleanup_t **cref)
 {
     cleanup_t *c = *cref;
 
-    /* TELCORE-302: never run a corrupt (cyclic) list. Running it would re-invoke
-     * each cleanup repeatedly -> double-free/use-after-free, or spin forever on a
-     * SCHED_FIFO thread. Detect first and stop; leaking the tail at teardown is
-     * the safe choice, and log so the (now-guarded) corruption is not silent. */
+    /* Never run a cyclic list: it would re-invoke cleanups repeatedly
+     * (double-free) or spin forever. Leaking the tail is the safer outcome. */
     if (cleanup_list_is_cyclic(c)) {
         log_cleanup_cycle("run_cleanups");
         return;
@@ -2164,7 +2155,7 @@ static void run_child_cleanups(cleanup_t **cref)
 {
     cleanup_t *c = *cref;
 
-    /* TELCORE-302: same cycle guard as run_cleanups (this path runs on fork). */
+    /* Same cycle guard as run_cleanups (this path runs on fork). */
     if (cleanup_list_is_cyclic(c)) {
         log_cleanup_cycle("run_child_cleanups");
         return;
