@@ -542,6 +542,10 @@ struct switch_rtp {
 	uint8_t ext_total_len;
 	ext_mid_t ext_mid;
 	struct trickle_cb_ctx trickle;
+	/* TELCORE-322: observability counter for non-proxy frames silently dropped
+	 * on a proxy_media/UDPTL session in switch_rtp_write_frame(). Observability
+	 * only - does not gate any RTP behavior. */
+	uint32_t proxy_media_write_drops;
 };
 
 #if 0
@@ -11079,6 +11083,20 @@ SWITCH_DECLARE(int) switch_rtp_write_frame(switch_rtp_t *rtp_session, switch_fra
 
 		/* Fast PASS! */
 		if (!switch_test_flag(frame, SFF_PROXY_PACKET) && !switch_test_flag(frame, SFF_UDPTL_PACKET)) {
+			/* TELCORE-322: a non-proxy/non-UDPTL frame reached a proxy_media (or
+			 * UDPTL) RTP session and is silently dropped here. This is by design
+			 * (proxy mode forwards raw SFF_PROXY_PACKET/SFF_UDPTL_PACKET frames
+			 * only); the drop is preserved exactly as-is. The counter and
+			 * rate-limited WARNING below are observability only so a 0-out leg
+			 * is no longer indistinguishable from a successful send. No RTP
+			 * behavior change. */
+			rtp_session->proxy_media_write_drops++;
+			if (rtp_session->proxy_media_write_drops == 1 || rtp_session->proxy_media_write_drops % 1000 == 1) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
+									  "%s PROXY_MEDIA silent drop: non-proxy frame on proxy/UDPTL session (cumulative drops=%u)\n",
+									  rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName",
+									  rtp_session->proxy_media_write_drops);
+			}
 #if DEBUG_RTP
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "RTP: write frame !UDPTL %p/%p\n", (void*)rtp_session->session, (void*)rtp_session); 
 #endif

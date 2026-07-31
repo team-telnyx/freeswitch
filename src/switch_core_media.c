@@ -226,6 +226,10 @@ struct switch_rtp_engine_s {
 	switch_thread_rwlock_t *dtls_init_rwlock;
 	rtp_extension_t rtp_recv_extensions[MAX_RTP_EXTENSIONS];
 	rtp_extension_t rtp_send_extensions[MAX_RTP_EXTENSIONS];
+	/* TELCORE-322: observability counter for audio frames dropped in
+	 * switch_core_media_write_frame() because the leg's media flow is not
+	 * send-capable. Observability only - does not gate any RTP behavior. */
+	uint32_t audio_flow_write_drops;
 };
 
 #define MAX_REJ_STREAMS 10
@@ -4390,6 +4394,19 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 		switch_media_flow_t audio_flow = switch_core_session_media_flow(session, SWITCH_MEDIA_TYPE_AUDIO);
 
 		if (audio_flow != SWITCH_MEDIA_FLOW_SENDRECV && audio_flow != SWITCH_MEDIA_FLOW_SENDONLY) {
+			/* TELCORE-322: audio frame dropped because the leg's media flow is not
+			 * send-capable (e.g. RECVONLY/INACTIVE/DISABLED). The early-return is
+			 * preserved exactly as-is (still unlocks and returns SUCCESS so callers
+			 * treat it as a no-op, matching historic behavior). The counter and
+			 * rate-limited WARNING below are observability only. No RTP behavior
+			 * change. */
+			engine->audio_flow_write_drops++;
+			if (engine->audio_flow_write_drops == 1 || engine->audio_flow_write_drops % 1000 == 1) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+									  "%s audio write dropped due to media flow=%d (cumulative drops=%u)\n",
+									  switch_channel_get_name(switch_core_session_get_channel(session)),
+									  (int)audio_flow, engine->audio_flow_write_drops);
+			}
 			switch_thread_rwlock_unlock(engine->dtls_init_rwlock);
 			return SWITCH_STATUS_SUCCESS;
 		}
