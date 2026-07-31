@@ -33,6 +33,8 @@ typedef struct {
 		uint32_t mid_call_failover_ms;
 		int mid_call_nominated_idx;
 		switch_time_t mid_call_nominated_us;
+		int inbound_media_idx;
+		switch_time_t inbound_media_us;
 		uint8_t prflx_bootstrap_cached;
 		uint8_t prflx_bootstrap_enabled;
 		uint8_t prflx_bootstrap_require_use_candidate;

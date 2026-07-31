@@ -785,6 +785,35 @@ static const char *ice_candidate_type_safe(const icand_t *cand)
 	return (cand && cand->cand_type) ? cand->cand_type : "(unknown)";
 }
 
+static void ice_track_inbound_media_candidate(switch_rtp_ice_t *ice, switch_sockaddr_t *from_addr)
+{
+	char media_buf[80] = "";
+	const char *media_host;
+	switch_port_t media_port;
+	int i;
+
+	if (!ice || !ice->ice_params || !from_addr) {
+		return;
+	}
+
+	media_host = switch_get_addr(media_buf, sizeof(media_buf), from_addr);
+	media_port = switch_sockaddr_get_port(from_addr);
+
+	if (ice->inbound_media_idx > -1 && ice->inbound_media_idx < ice->ice_params->cand_idx[ice->proto] &&
+		ice_candidate_matches_addr(&ice->ice_params->cands[ice->inbound_media_idx][ice->proto], media_host, media_port)) {
+		ice->inbound_media_us = switch_micro_time_now();
+		return;
+	}
+
+	for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; ++i) {
+		if (ice_candidate_matches_addr(&ice->ice_params->cands[i][ice->proto], media_host, media_port)) {
+			ice->inbound_media_idx = i;
+			ice->inbound_media_us = switch_micro_time_now();
+			break;
+		}
+	}
+}
+
 static switch_bool_t ice_should_preserve_active_dtls_tuple(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, switch_dtls_t *dtls, switch_bool_t is_rtcp)
 {
 	if (is_rtcp || !rtp_session || !ice || !ice->addr || !dtls || !dtls->handshake_peer_set || !dtls->handshake_peer_addr) {
@@ -1752,6 +1781,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 			uint32_t prflx_priority = 0;
 			switch_bool_t dtls_ready = SWITCH_FALSE;
 			switch_bool_t fresh_nomination = SWITCH_FALSE;
+			switch_bool_t nominated_media_recent = SWITCH_FALSE;
 			switch_bool_t media_unhealthy = SWITCH_FALSE;
 			switch_bool_t mid_call_failover = SWITCH_FALSE;
 			switch_bool_t prflx_bootstrap = SWITCH_FALSE;
@@ -1793,6 +1823,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 				switch_bool_t allow_mid_call_failover = SWITCH_FALSE;
 				switch_bool_t peer_candidate = SWITCH_FALSE;
 				switch_bool_t fresh_nomination = SWITCH_FALSE;
+				switch_bool_t nominated_media_recent = SWITCH_FALSE;
 				switch_bool_t media_unhealthy = SWITCH_FALSE;
 				switch_bool_t defer_to_prflx_bootstrap = SWITCH_FALSE;
 				switch_bool_t preserve_dtls_tuple = SWITCH_FALSE;
@@ -1849,8 +1880,10 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 						nomination_age_ms = (uint32_t)((now - ice->mid_call_nominated_us) / 1000);
 						nomination_fresh_ms = mid_call_failover_ms > (UINT_MAX / 2) ? UINT_MAX : (mid_call_failover_ms * 2);
 						fresh_nomination = ice->mid_call_nominated_idx == peer_candidate_idx && nomination_age_ms <= nomination_fresh_ms;
+						nominated_media_recent = ice->inbound_media_idx == peer_candidate_idx && ice->inbound_media_us &&
+							(uint32_t)((now - ice->inbound_media_us) / 1000) <= nomination_fresh_ms;
 					}
-					if (fresh_nomination && media_unhealthy && rtp_session->elapsed_stun >= mid_call_failover_ms) {
+					if (fresh_nomination && ((media_unhealthy && rtp_session->elapsed_stun >= mid_call_failover_ms) || nominated_media_recent)) {
 						allow_mid_call_failover = SWITCH_TRUE;
 					}
 				}
@@ -1863,9 +1896,9 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 				if (ice->addr && !switch_cmp_addr(from_addr, ice->addr, SWITCH_TRUE)) {
 					if (dtls_ready) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), allow_mid_call_failover ? SWITCH_LOG_DEBUG : SWITCH_LOG_DEBUG5,
-							"USE-CANDIDATE: DTLS already READY, %s %s nomination from %s:%d (elapsed_stun=%u, elapsed_media=%u, mid_call_failover_ms=%u, controlled=%d, known_candidate=%d, fresh_nomination=%d, nomination_age_ms=%u, media_unhealthy=%d, rtcp_mux=%d)\n",
+							"USE-CANDIDATE: DTLS already READY, %s %s nomination from %s:%d (elapsed_stun=%u, elapsed_media=%u, mid_call_failover_ms=%u, controlled=%d, known_candidate=%d, fresh_nomination=%d, nomination_age_ms=%u, media_unhealthy=%d, nominated_media_recent=%d, rtcp_mux=%d)\n",
 							allow_mid_call_failover ? "accepted" : "ignoring", rtp_type(rtp_session), from_host, from_port, rtp_session->elapsed_stun, rtp_session->elapsed_media, mid_call_failover_ms,
-							!!(ice->type & ICE_CONTROLLED), peer_candidate, fresh_nomination, nomination_age_ms, media_unhealthy, !!rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX]);
+							!!(ice->type & ICE_CONTROLLED), peer_candidate, fresh_nomination, nomination_age_ms, media_unhealthy, nominated_media_recent, !!rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX]);
 					} else if (preserve_dtls_tuple) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
 							"USE-CANDIDATE: preserving active %s DTLS tuple %s:%d during handshake, ignoring nomination from %s:%d\n",
@@ -2018,12 +2051,14 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 					nomination_age_ms = (uint32_t)((now - ice->mid_call_nominated_us) / 1000);
 					nomination_fresh_ms = mid_call_failover_ms > (UINT_MAX / 2) ? UINT_MAX : (mid_call_failover_ms * 2);
 					fresh_nomination = nomination_age_ms <= nomination_fresh_ms;
+					nominated_media_recent = ice->inbound_media_idx == cur_idx && ice->inbound_media_us &&
+						(uint32_t)((now - ice->inbound_media_us) / 1000) <= nomination_fresh_ms;
 				}
-				if (fresh_nomination && media_unhealthy && rtp_session->elapsed_stun >= mid_call_failover_ms) {
+				if (fresh_nomination && ((media_unhealthy && rtp_session->elapsed_stun >= mid_call_failover_ms) || nominated_media_recent)) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE,
-						"%s %s %s ICE mid-call failover accepting freshly nominated %s:%d after %u ms without active-pair STUN (elapsed_media=%u, nomination_age_ms=%u, current: %s:%d typ: %s)\n",
+						"%s %s %s ICE mid-call failover accepting freshly nominated %s:%d (elapsed_stun=%u, elapsed_media=%u, nomination_age_ms=%u, nominated_media_recent=%d, current: %s:%d typ: %s)\n",
 						switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp", from_host, from_port, rtp_session->elapsed_stun,
-						rtp_session->elapsed_media, nomination_age_ms,
+						rtp_session->elapsed_media, nomination_age_ms, nominated_media_recent,
 						ice_candidate_addr_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]),
 						ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port,
 						ice_candidate_type_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]));
@@ -6536,6 +6571,8 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice(switch_rtp_t *rtp_sessio
 	ice->mid_call_failover_ms = 0;
 	ice->mid_call_nominated_idx = -1;
 	ice->mid_call_nominated_us = 0;
+	ice->inbound_media_idx = -1;
+	ice->inbound_media_us = 0;
 	ice->prflx_bootstrap_cached = 0;
 	ice->prflx_bootstrap_enabled = 0;
 	ice->prflx_bootstrap_require_use_candidate = 1;
@@ -7759,6 +7796,7 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 				}
 			}
 
+
 			/* Drop audio packets during active DTMF events to prevent corruption (MS Teams RFC2833 workaround) */
 			if (accept_packet &&
 				rtp_session->flags[SWITCH_RTP_FLAG_IGNORE_RTP_DURING_DTMF] &&
@@ -7875,6 +7913,10 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 	}
 
 	switch_mutex_lock(rtp_session->ice_mutex);
+
+	if (*bytes && rtp_session->has_rtp && rtp_session->ice.ice_user) {
+		ice_track_inbound_media_candidate(&rtp_session->ice, rtp_session->from_addr);
+	}
 
 	if (rtp_session->dtls) {
 
@@ -12068,6 +12110,10 @@ static switch_status_t switch_rtp_internal_add_remote_candidate(switch_rtp_t *rt
 
 			if (ice->mid_call_nominated_idx >= (int)insert_at) {
 				ice->mid_call_nominated_idx++;
+			}
+
+			if (ice->inbound_media_idx >= (int)insert_at) {
+				ice->inbound_media_idx++;
 			}
 
 			if (ice->prflx_bootstrap_idx >= (int)insert_at) {
