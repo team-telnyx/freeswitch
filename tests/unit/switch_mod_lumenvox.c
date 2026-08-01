@@ -480,6 +480,91 @@ FST_CORE_BEGIN("./conf_lumenvox")
 		}
 		FST_TEST_END()
 
+		/* End-to-end CPA classification through the module: feed real speech
+		 * and assert the deployment classifies it, with the NLSML and the
+		 * completion headers arriving the way a dialplan would see them.
+		 *
+		 * Needs a speech sample, so it is gated on LV_TEST_AUDIO (raw 8 kHz
+		 * mono S16LE) as well as LV_TEST_TARGET -- no suitable audio ships in
+		 * the tree. Generate one with any TTS, e.g. AWS Polly with
+		 * OutputFormat=pcm and SampleRate=8000.
+		 *
+		 * Note what CPA does and does not tell you: it returns HUMAN RESIDENCE,
+		 * HUMAN BUSINESS, UNKNOWN SPEECH or UNKNOWN SILENCE, and *every* one of
+		 * them is completion cause 000. There is no MACHINE classification --
+		 * an answering machine surfaces as UNKNOWN SPEECH, which is
+		 * indistinguishable from a human who talks past human-business-time.
+		 * So the assertion here is on the transcript, never on the cause. */
+		FST_TEST_BEGIN(asr_cpa_classifies_speech)
+		{
+			const char *audio_path = getenv("LV_TEST_AUDIO");
+			if (lv_live() && audio_path && *audio_path) {
+			switch_asr_handle_t ah = { 0 };
+			switch_asr_flag_t flags = SWITCH_ASR_FLAG_NONE;
+			int16_t frame[160];                 /* 20 ms @ 8 kHz mono L16 */
+			char *xmlstr = NULL;
+			switch_event_t *headers = NULL;
+			FILE *f = fopen(audio_path, "rb");
+			int got = 0, i;
+			size_t n;
+
+			fst_requires(f != NULL);
+			fst_requires(lv_open(&ah, fst_pool) == SWITCH_STATUS_SUCCESS);
+
+			/* start-recognize defaults true, so loading starts the CPA
+			 * interaction immediately -- the production shape. */
+			fst_check(switch_core_asr_load_grammar(&ah, "builtin:special/cpa", "cpa") == SWITCH_STATUS_SUCCESS);
+
+			/* Feed at roughly twice real time. The classifier measures speech
+			 * in audio duration, not wall clock, but pacing keeps the audio
+			 * queue well inside its bound. */
+			while ((n = fread(frame, 1, sizeof(frame), f)) > 0 && !got) {
+				if (switch_core_asr_feed(&ah, frame, (unsigned int) n, &flags) != SWITCH_STATUS_SUCCESS) {
+					break;
+				}
+				if (switch_core_asr_check_results(&ah, &flags) == SWITCH_STATUS_SUCCESS) {
+					got = 1;
+					break;
+				}
+				switch_sleep(10000);
+			}
+			fclose(f);
+
+			/* Audio may run out before the classifier commits; keep polling. */
+			memset(frame, 0, sizeof(frame));
+			for (i = 0; i < 400 && !got; i++) {
+				switch_core_asr_feed(&ah, frame, sizeof(frame), &flags);
+				if (switch_core_asr_check_results(&ah, &flags) == SWITCH_STATUS_SUCCESS) {
+					got = 1;
+					break;
+				}
+				switch_sleep(10000);
+			}
+
+			fst_check(got == 1);
+			if (got) {
+				fst_check(switch_core_asr_get_results(&ah, &xmlstr, &flags) == SWITCH_STATUS_SUCCESS);
+				fst_check(xmlstr != NULL);
+				if (xmlstr) {
+					/* A real classification, not the no-result sentinel. */
+					fst_check(strstr(xmlstr, "Completion-Cause:") == NULL);
+					fst_check(strstr(xmlstr, "<interpretation") != NULL);
+					fst_check(strstr(xmlstr, "HUMAN") != NULL || strstr(xmlstr, "UNKNOWN") != NULL);
+					switch_safe_free(xmlstr);
+				}
+				fst_check(switch_core_asr_get_result_headers(&ah, &headers, &flags) == SWITCH_STATUS_SUCCESS);
+				if (headers) {
+					const char *cause = switch_event_get_header(headers, "ASR-Completion-Cause");
+					fst_check(cause != NULL && !strcmp(cause, "000"));
+					switch_event_destroy(&headers);
+				}
+			}
+
+			fst_requires(lv_close(&ah) == SWITCH_STATUS_SUCCESS);
+			}
+		}
+		FST_TEST_END()
+
 		/* Repeated open/close cycles must not crash or leak handles/threads.
 		 * Live-only: needs an open handle. */
 		FST_TEST_BEGIN(asr_lifecycle_repeat)
