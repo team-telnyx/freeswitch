@@ -511,6 +511,14 @@ FST_CORE_BEGIN("./conf_lumenvox")
 			fst_requires(f != NULL);
 			fst_requires(lv_open(&ah, fst_pool) == SWITCH_STATUS_SUCCESS);
 
+			/* Exercise the CPA param surface on the way through, so a field
+			 * the server rejects shows up as a failure to classify rather than
+			 * passing unnoticed -- a rejected request is only a warning now.
+			 * speech-complete-timeout is VadSettings.eos_delay_ms, which the
+			 * Call Control API drives as after_greeting_silence_millis. */
+			switch_core_asr_text_param(&ah, "cpa-human-business-time", "4000");
+			switch_core_asr_text_param(&ah, "speech-complete-timeout", "1200");
+
 			/* start-recognize defaults true, so loading starts the CPA
 			 * interaction immediately -- the production shape. */
 			fst_check(switch_core_asr_load_grammar(&ah, "builtin:special/cpa", "cpa") == SWITCH_STATUS_SUCCESS);
