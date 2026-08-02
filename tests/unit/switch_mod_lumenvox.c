@@ -278,14 +278,47 @@ FST_CORE_BEGIN("./conf_lumenvox")
 			if (lv_live()) {
 			switch_asr_handle_t ah = { 0 };
 			fst_requires(lv_open(&ah, fst_pool) == SWITCH_STATUS_SUCCESS);
+
+			/* Nothing may start on load; the starts below are the assertions. */
 			switch_core_asr_text_param(&ah, "start-recognize", "false");
 
 			fst_check(switch_core_asr_load_grammar(&ah, "builtin:special/cpa", "cpa") == SWITCH_STATUS_SUCCESS);
 			fst_check(switch_core_asr_load_grammar(&ah, "BUILTIN:SPECIAL/AMD", "amd") == SWITCH_STATUS_SUCCESS);
 			fst_check(switch_core_asr_load_grammar(&ah, "builtin:special/cpa?x=1", "cpaq") == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_load_grammar(&ah, "builtin:digits", "plain") == SWITCH_STATUS_SUCCESS);
 
+			/* load_grammar succeeds for any non-empty string, so it proves
+			 * nothing about classification on its own. What the kind is only
+			 * becomes observable through the mixed-mode guard: a start succeeds
+			 * when every enabled grammar classifies the same way, and fails
+			 * when they disagree. Each case below is chosen so that a
+			 * classify_grammar() which stopped recognising these URIs -- and
+			 * therefore returned ASR for all of them -- flips the result. */
+
+			/* Canonical and ?query-suffixed forms agree, so this starts. If the
+			 * suffix stopped matching, this would be CPA + ASR and fail. */
+			fst_check(switch_core_asr_disable_all_grammars(&ah) == SWITCH_STATUS_SUCCESS);
 			fst_check(switch_core_asr_enable_grammar(&ah, "cpa") == SWITCH_STATUS_SUCCESS);
-			fst_check(switch_core_asr_disable_grammar(&ah, "cpa") == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_enable_grammar(&ah, "cpaq") == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_resume(&ah) == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_pause(&ah) == SWITCH_STATUS_SUCCESS);
+
+			/* Upper-case AMD against CPA: two different kinds, so rejected.
+			 * If matching were case-sensitive the AMD entry would fall through
+			 * to ASR -- still a mismatch -- so this case alone is not enough,
+			 * which is what the previous case covers. */
+			fst_check(switch_core_asr_disable_all_grammars(&ah) == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_enable_grammar(&ah, "cpa") == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_enable_grammar(&ah, "amd") == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_resume(&ah) != SWITCH_STATUS_SUCCESS);
+
+			/* An ordinary grammar against CPA is likewise rejected. This is the
+			 * case that fails if builtin:special/cpa is no longer recognised,
+			 * because then both would be ASR and the start would be allowed. */
+			fst_check(switch_core_asr_disable_all_grammars(&ah) == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_enable_grammar(&ah, "plain") == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_enable_grammar(&ah, "cpa") == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_resume(&ah) != SWITCH_STATUS_SUCCESS);
 
 			fst_requires(lv_close(&ah) == SWITCH_STATUS_SUCCESS);
 			}
@@ -428,10 +461,32 @@ FST_CORE_BEGIN("./conf_lumenvox")
 		FST_TEST_BEGIN(asr_paused_deadline_does_not_fire)
 		{
 			if (lv_live()) {
+			switch_asr_handle_t control = { 0 };
 			switch_asr_handle_t ah = { 0 };
 			switch_asr_flag_t flags = SWITCH_ASR_FLAG_NONE;
-			int i;
+			int i, got = 0;
 
+			/* Positive control first. "No result after pausing" is only
+			 * meaningful if the deadline would otherwise have fired -- without
+			 * this, a deadline that was never armed at all would pass the
+			 * assertion below just as happily. */
+			fst_requires(lv_open(&control, fst_pool) == SWITCH_STATUS_SUCCESS);
+			switch_core_asr_text_param(&control, "start-input-timers", "false");
+			switch_core_asr_text_param(&control, "no-input-timeout", "200");
+			fst_check(switch_core_asr_load_grammar(&control, "builtin:special/cpa", "cpa") == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_start_input_timers(&control) == SWITCH_STATUS_SUCCESS);
+			for (i = 0; i < 100 && !got; i++) {
+				if (switch_core_asr_check_results(&control, &flags) == SWITCH_STATUS_SUCCESS) {
+					got = 1;
+					break;
+				}
+				switch_sleep(10000);
+			}
+			fst_check(got == 1);
+			fst_requires(lv_close(&control) == SWITCH_STATUS_SUCCESS);
+
+			/* Same setup, but paused straight after arming: the deadline must
+			 * not fire for a recognition that is no longer running. */
 			fst_requires(lv_open(&ah, fst_pool) == SWITCH_STATUS_SUCCESS);
 			switch_core_asr_text_param(&ah, "start-input-timers", "false");
 			switch_core_asr_text_param(&ah, "no-input-timeout", "200");
@@ -440,7 +495,7 @@ FST_CORE_BEGIN("./conf_lumenvox")
 			fst_check(switch_core_asr_start_input_timers(&ah) == SWITCH_STATUS_SUCCESS);
 			fst_check(switch_core_asr_pause(&ah) == SWITCH_STATUS_SUCCESS);
 
-			/* Well past the deadline, nothing may be delivered. */
+			/* Well past the deadline the control just demonstrated. */
 			for (i = 0; i < 30; i++) {
 				fst_check(switch_core_asr_check_results(&ah, &flags) != SWITCH_STATUS_SUCCESS);
 				switch_sleep(20000);
@@ -462,18 +517,40 @@ FST_CORE_BEGIN("./conf_lumenvox")
 			switch_asr_handle_t ah = { 0 };
 			switch_asr_flag_t flags = SWITCH_ASR_FLAG_NONE;
 
+			switch_time_t started;
+			int i, rearmed = 0, got = 0, elapsed_ms = 0;
+
 			fst_requires(lv_open(&ah, fst_pool) == SWITCH_STATUS_SUCCESS);
 			switch_core_asr_text_param(&ah, "start-input-timers", "false");
-			switch_core_asr_text_param(&ah, "no-input-timeout", "5000");
+			switch_core_asr_text_param(&ah, "no-input-timeout", "400");
 			fst_check(switch_core_asr_load_grammar(&ah, "builtin:special/cpa", "cpa") == SWITCH_STATUS_SUCCESS);
 
-			/* Repeated arming must not re-arm or otherwise disturb the state. */
-			fst_check(switch_core_asr_start_input_timers(&ah) == SWITCH_STATUS_SUCCESS);
-			fst_check(switch_core_asr_start_input_timers(&ah) == SWITCH_STATUS_SUCCESS);
+			/* Arm once, arm again part-way, and measure when the deadline
+			 * lands. Asserting only that the calls return SUCCESS proves
+			 * nothing -- every path returns SUCCESS, including one that
+			 * re-armed. The timing is what separates the two: measured from
+			 * the first arming the result is due at ~400 ms, whereas a re-arm
+			 * at 250 ms would push it to ~650 ms. */
+			started = switch_time_now();
 			fst_check(switch_core_asr_start_input_timers(&ah) == SWITCH_STATUS_SUCCESS);
 
-			/* Nowhere near the 5 s deadline, so nothing may be delivered yet. */
-			fst_check(switch_core_asr_check_results(&ah, &flags) != SWITCH_STATUS_SUCCESS);
+			for (i = 0; i < 200 && !got; i++) {
+				elapsed_ms = (int) ((switch_time_now() - started) / 1000);
+				if (!rearmed && elapsed_ms >= 250) {
+					fst_check(switch_core_asr_start_input_timers(&ah) == SWITCH_STATUS_SUCCESS);
+					rearmed = 1;
+				}
+				if (switch_core_asr_check_results(&ah, &flags) == SWITCH_STATUS_SUCCESS) {
+					got = 1;
+					break;
+				}
+				switch_sleep(10000);
+			}
+
+			fst_check(rearmed == 1);   /* the re-arm actually happened */
+			fst_check(got == 1);
+			elapsed_ms = (int) ((switch_time_now() - started) / 1000);
+			fst_check(elapsed_ms < 600);
 
 			fst_requires(lv_close(&ah) == SWITCH_STATUS_SUCCESS);
 			}
