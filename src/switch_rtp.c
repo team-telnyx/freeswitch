@@ -542,7 +542,7 @@ struct switch_rtp {
 	uint8_t ext_total_len;
 	ext_mid_t ext_mid;
 	struct trickle_cb_ctx trickle;
-	/* TELCORE-322: observability counter for non-proxy frames silently dropped
+	/* observability counter for non-proxy frames silently dropped
 	 * on a proxy_media/UDPTL session in switch_rtp_write_frame(). Observability
 	 * only - does not gate any RTP behavior. */
 	uint32_t proxy_media_write_drops;
@@ -11083,7 +11083,7 @@ SWITCH_DECLARE(int) switch_rtp_write_frame(switch_rtp_t *rtp_session, switch_fra
 
 		/* Fast PASS! */
 		if (!switch_test_flag(frame, SFF_PROXY_PACKET) && !switch_test_flag(frame, SFF_UDPTL_PACKET)) {
-			/* TELCORE-322: a non-proxy/non-UDPTL frame reached a proxy_media (or
+			/* a non-proxy/non-UDPTL frame reached a proxy_media (or
 			 * UDPTL) RTP session and is silently dropped here. This is by design
 			 * (proxy mode forwards raw SFF_PROXY_PACKET/SFF_UDPTL_PACKET frames
 			 * only); the drop is preserved exactly as-is. The counter and
