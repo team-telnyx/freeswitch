@@ -4348,6 +4348,32 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_fork_reset_state(switch_rtp_t *rtp_se
 	rtp_session->fork.start_time = 0;
 	rtp_session->fork.stop_time = 0;
 
+	/*
+	 * Clear the latched per-direction SSRC so that a fork whose state is
+	 * reset (e.g. resumed after a hold/unhold re-INVITE by mod_call_control)
+	 * re-observes the current remote SSRC before re-firing the start event.
+	 *
+	 * The RX read loop only re-fires the wait_ssrc start event inside
+	 * `if (!fork->fork_rx.ssrc)` (see switch_rtp_zerocopy_read_frame()); if
+	 * we leave the pre-hold SSRC latched, a stream started with wait_ssrc
+	 * would never re-enter the wait path and the post-unhold start event
+	 * would describe the stale SSRC (or never fire at all when the far end
+	 * picks a new SSRC across the re-INVITE). Take the direction mutexes to
+	 * stay consistent with switch_rtp_fork_set()/_activate() which mutate
+	 * these fields under the same locks.
+	 *
+	 * This is safe for the only other caller (media_stream::on_init), which
+	 * calls reset_state() before switch_rtp_fork_set() re-populates the
+	 * SSRC, so clearing it here has no effect on initial setup.
+	 */
+	switch_mutex_lock(rtp_session->read_mutex);
+	rtp_session->fork.fork_rx.ssrc = 0;
+	switch_mutex_unlock(rtp_session->read_mutex);
+
+	switch_mutex_lock(rtp_session->write_mutex);
+	rtp_session->fork.fork_tx.ssrc = 0;
+	switch_mutex_unlock(rtp_session->write_mutex);
+
 	return SWITCH_STATUS_SUCCESS;
 }
 
