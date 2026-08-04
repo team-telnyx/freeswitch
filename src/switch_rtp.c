@@ -1600,7 +1600,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "Marked %s ICE candidate %s:%d as responsive (is_relay: %d)\n", rtp_type(rtp_session), ice->ice_params->cands[i][ice->proto].con_addr, ice->ice_params->cands[i][ice->proto].con_port, is_relay);
 
-						if (!ice->cand_responsive && !switch_cmp_addr(from_addr, ice->addr, SWITCH_FALSE) && (!is_relay || rtp_session->elapsed_stun >= 1000) &&
+						if (!ice->cand_responsive && ice->addr && !switch_cmp_addr(from_addr, ice->addr, SWITCH_FALSE) && (!is_relay || rtp_session->elapsed_stun >= 1000) &&
 							!ice_should_preserve_active_dtls_tuple(rtp_session, ice, is_rtcp ? rtp_session->rtcp_dtls : rtp_session->dtls, is_rtcp)) {
 							switch_channel_t *channel = NULL;
 							char ice_cur_buf[80] = "";
@@ -1771,7 +1771,10 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 			switch_socket_t *sock_output = rtp_session->sock_output;
 			uint8_t do_adj = 0;
 			switch_time_t now = switch_micro_time_now();
+			switch_sockaddr_t *prflx_ice_addr = NULL;
+			switch_sockaddr_t *prflx_dtls_addr = NULL;
 			int cmp = 0;
+			int same_host = 0;
 			int cur_idx = -1, is_relay = 0, is_responsive = 0, use_candidate = 0;
 			uint32_t mid_call_failover_ms = 0;
 			uint32_t nomination_age_ms = 0;
@@ -1935,9 +1938,14 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 				prflx_age_ms = (uint32_t)((now - ice->prflx_bootstrap_us) / 1000);
 			}
 
-			host2 = switch_get_addr(buf2, sizeof(buf2), ice->addr);
-			port2 = switch_sockaddr_get_port(ice->addr);
-			cmp = switch_cmp_addr(from_addr, ice->addr, SWITCH_FALSE);
+			if (ice->addr) {
+				host2 = switch_get_addr(buf2, sizeof(buf2), ice->addr);
+				port2 = switch_sockaddr_get_port(ice->addr);
+				cmp = switch_cmp_addr(from_addr, ice->addr, SWITCH_FALSE);
+				same_host = switch_cmp_addr(from_addr, ice->addr, SWITCH_TRUE);
+			} else {
+				host2 = "unselected";
+			}
 
 			for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; i++) {
 				if (ice_candidate_matches_addr(&ice->ice_params->cands[i][ice->proto], from_host, from_port)) {
@@ -1968,7 +1976,13 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 
 				prflx_addr_ok = ice_remote_ip_is_acceptable(rtp_session, from_host, "udp", &prflx_family);
 				if (prflx_addr_ok) {
-					prflx_idx = switch_rtp_add_prflx_candidate(rtp_session, ice, from_host, from_port, prflx_priority, got_use_candidate ? SWITCH_TRUE : SWITCH_FALSE);
+					if (switch_sockaddr_info_get(&prflx_ice_addr, from_host, SWITCH_UNSPEC, from_port, 0, rtp_session->pool) != SWITCH_STATUS_SUCCESS || !prflx_ice_addr ||
+						(dtls && (switch_sockaddr_info_get(&prflx_dtls_addr, from_host, SWITCH_UNSPEC, from_port, 0, rtp_session->pool) != SWITCH_STATUS_SUCCESS || !prflx_dtls_addr))) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
+							"ICE peer-reflexive bootstrap: failed to resolve learned tuple %s:%d\n", from_host, from_port);
+					} else {
+						prflx_idx = switch_rtp_add_prflx_candidate(rtp_session, ice, from_host, from_port, prflx_priority, got_use_candidate ? SWITCH_TRUE : SWITCH_FALSE);
+					}
 				}
 
 				if (prflx_idx > -1) {
@@ -2025,10 +2039,10 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 				}
 
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s %s %s ICE CHECK SAME IP DIFFT PORT %d %d on binding request from %s:%d (is_relay: %d, is_responsive: %d, use_candidate: %d) Current cand: %s:%d typ: %s\n",
-								switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp",ice->initializing, switch_cmp_addr(from_addr, ice->addr, SWITCH_TRUE), from_host, from_port, is_relay, is_responsive, use_candidate,
+								switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp",ice->initializing, same_host, from_host, from_port, is_relay, is_responsive, use_candidate,
 								ice_candidate_addr_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]), ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice_candidate_type_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]));
 
-				if (!do_adj && (switch_cmp_addr(from_addr, ice->addr, SWITCH_TRUE) || (use_candidate && !is_relay))) {
+				if (!do_adj && (same_host || (use_candidate && !is_relay))) {
 					do_adj++;
 					rtp_session->last_adj = now;
 
@@ -2072,7 +2086,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 					rtp_session->last_adj = now;
 				}
 			} else if (!do_adj && !rtp_session->ice.dtls_handshake) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "ICE %d/%d dt:%d i:%d i2:%d cmp:%d\n", rtp_session->elapsed_stun, rtp_session->elapsed_media, (rtp_session->dtls && rtp_session->dtls->state != DS_READY), !ice->ready, !ice->rready, switch_cmp_addr(from_addr, ice->addr, SWITCH_TRUE));
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "ICE %d/%d dt:%d i:%d i2:%d cmp:%d\n", rtp_session->elapsed_stun, rtp_session->elapsed_media, (rtp_session->dtls && rtp_session->dtls->state != DS_READY), !ice->ready, !ice->rready, same_host);
 
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s %s %s ICE ADJUST ELAPSED vs 1000 %d on binding request from %s:%d (is_relay: %d, is_responsive: %d, use_candidate: %d) Current cand: %s:%d typ: %s\n",
 								switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp" ,rtp_session->elapsed_adj, from_host, from_port, is_relay, is_responsive, use_candidate,
@@ -2085,7 +2099,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 									ice_candidate_addr_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]), ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port, ice_candidate_type_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]));
 
 					if (!is_relay && ((rtp_session->dtls && rtp_session->dtls->state != DS_READY) ||
-						((!ice->ready || !ice->rready) && (rtp_session->elapsed_stun >= 3000 || switch_cmp_addr(from_addr, ice->addr, SWITCH_TRUE))))) {
+						((!ice->ready || !ice->rready) && (rtp_session->elapsed_stun >= 3000 || same_host)))) {
 
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s %s %s ICE ADJUST HIT 3 on binding request from %s:%d (is_relay: %d, is_responsive: %d, use_candidate: %d) Current cand: %s:%d typ: %s\n",
 										switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp", from_host, from_port, is_relay, is_responsive, use_candidate,
@@ -2151,13 +2165,14 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 				switch_core_media_gen_key_frame(rtp_session->session);
 
 				switch_rtp_change_ice_dest(rtp_session, ice, from_host, from_port);
-				if (prflx_bootstrap && dtls && dtls->remote_addr) {
-					if (switch_sockaddr_info_get(&dtls->remote_addr, from_host, SWITCH_UNSPEC, from_port, 0, rtp_session->pool) == SWITCH_STATUS_SUCCESS) {
+				if (prflx_bootstrap) {
+					if (!ice->addr && prflx_ice_addr) {
+						ice->addr = prflx_ice_addr;
+					}
+					if (dtls && prflx_dtls_addr) {
+						dtls->remote_addr = prflx_dtls_addr;
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
 							"ICE peer-reflexive bootstrap: updated DTLS remote addr to %s:%d\n", from_host, from_port);
-					} else {
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
-							"ICE peer-reflexive bootstrap: failed to resolve DTLS remote addr %s:%d\n", from_host, from_port);
 					}
 				}
 				if (mid_call_failover && !is_rtcp && dtls && dtls->remote_addr) {
@@ -4621,6 +4636,10 @@ static int do_dtls(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 		return 0;
 	}
 
+	if (is_ice && !rtp_session->ice.addr) {
+		return 0;
+	}
+
 	if (is_ice && !(rtp_session->ice.type & ICE_LITE) && !rtp_session->ice.cand_responsive) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG6, "Got DTLS packet but candidate is not responsive\n");
 
@@ -6516,6 +6535,8 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice(switch_rtp_t *rtp_sessio
 	char *host = NULL;
 	switch_port_t port = 0;
 	char bufc[50];
+	int provisional = 0;
+	icand_t *candidate = NULL;
 
 
 	switch_mutex_lock(rtp_session->ice_mutex);
@@ -6599,10 +6620,20 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice(switch_rtp_t *rtp_sessio
 	}
 
 	if ((ice->type & ICE_VANILLA) && ice->ice_params) {
-		host = ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_addr;
-		port = ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port;
+		candidate = &ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto];
+		host = candidate->con_addr;
+		port = candidate->con_port;
 
-		if (!host || !port || switch_sockaddr_info_get(&ice->addr, host, SWITCH_UNSPEC, port, 0, rtp_session->pool) != SWITCH_STATUS_SUCCESS || !ice->addr) {
+		if (!candidate->ready) {
+			if (ice_prflx_bootstrap_ms(rtp_session, ice) > 0) {
+				ice->addr = NULL;
+				provisional = 1;
+			} else {
+				switch_mutex_unlock(rtp_session->ice_mutex);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR, "Cannot activate ICE with an unready remote candidate\n");
+				return SWITCH_STATUS_FALSE;
+			}
+		} else if (!host || !port || switch_sockaddr_info_get(&ice->addr, host, SWITCH_UNSPEC, port, 0, rtp_session->pool) != SWITCH_STATUS_SUCCESS || !ice->addr) {
 			switch_mutex_unlock(rtp_session->ice_mutex);
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR, "Error setting remote host!\n");
 			return SWITCH_STATUS_FALSE;
@@ -6622,8 +6653,14 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice(switch_rtp_t *rtp_sessio
 		switch_rtp_set_flag(rtp_session, SWITCH_RTP_FLAG_ICE_NO_RESPONSE_IGNORED);
 	}
 
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "Activating %s %s ICE: %s %s:%d\n",
+	if (provisional) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE,
+			"Armed %s %s ICE for peer-reflexive bootstrap: %s\n",
+			proto == IPR_RTP ? "RTP" : "RTCP", rtp_type(rtp_session), ice_user);
+	} else {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "Activating %s %s ICE: %s %s:%d\n",
 					  proto == IPR_RTP ? "RTP" : "RTCP", rtp_type(rtp_session), ice_user, host, port);
+	}
 
 
 	rtp_session->rtp_bugs |= RTP_BUG_ACCEPT_ANY_PACKETS;
@@ -10296,7 +10333,7 @@ static int rtp_write_ready(switch_rtp_t *rtp_session, uint32_t bytes, int line)
 {
 	if (!rtp_session) return 0;
 
-	if (rtp_session->ice.ice_user && !(rtp_session->ice.rready || rtp_session->ice.ready)) {
+	if (rtp_session->ice.ice_user && (!rtp_session->ice.addr || !(rtp_session->ice.rready || rtp_session->ice.ready))) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG3, "Skip sending %s packet %ld bytes (ice not ready @ line %d!)\n",
 						  rtp_type(rtp_session), (long)bytes, line);
 		return 0;

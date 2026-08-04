@@ -11351,12 +11351,14 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 	const char *val = NULL;
 	switch_rtp_flag_t flags[SWITCH_RTP_FLAG_INVALID] = {0};
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
+	switch_status_t audio_ice_status = SWITCH_STATUS_SUCCESS;
 	char tmp[50];
 	char *timer_name = NULL;
 	const char *var;
 	switch_rtp_engine_t *a_engine, *v_engine, *t_engine;
 	switch_media_handle_t *smh;
 	int is_reinvite = 0;
+	int provisional_audio_ice = 0;
 
 #ifdef HAVE_OPENSSL_DTLSv1_2_method
 			uint8_t want_DTLSv1_2 = 1;
@@ -11780,13 +11782,15 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 								switch_channel_get_name(switch_core_session_get_channel(session)));
 		}
 
-		if (a_engine->ice_in.cands[a_engine->ice_in.chosen[0]][0].ready) {
+		provisional_audio_ice = !a_engine->ice_in.cands[a_engine->ice_in.chosen[0]][0].ready &&
+			switch_channel_var_true(session->channel, "rtp_ice_prflx_bootstrap");
+
+		if (a_engine->ice_in.cands[a_engine->ice_in.chosen[0]][0].ready || provisional_audio_ice) {
 
 			gen_ice(session, SWITCH_MEDIA_TYPE_AUDIO, NULL, 0);
 
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Activating Audio ICE\n");
 
-			switch_rtp_activate_ice(a_engine->rtp_session,
+			audio_ice_status = switch_rtp_activate_ice(a_engine->rtp_session,
 									a_engine->ice_in.ufrag,
 									a_engine->ice_out.ufrag,
 									a_engine->ice_out.pwd,
@@ -11800,6 +11804,14 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 									&a_engine->ice_in
 #endif
 									);
+			if (audio_ice_status == SWITCH_STATUS_SUCCESS) {
+				if (a_engine->ice_in.cands[a_engine->ice_in.chosen[0]][0].ready) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Activating Audio ICE\n");
+				} else {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+						"Armed Audio ICE for peer-reflexive bootstrap\n");
+				}
+			}
 
 
 
@@ -11882,7 +11894,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 
 		skip_audio_rtcp_ice:
 
-		if (!zstr(a_engine->local_dtls_fingerprint.str) && switch_rtp_has_dtls() && dtls_ok(smh->session)) {
+		if (!zstr(a_engine->local_dtls_fingerprint.str) && switch_rtp_has_dtls() && dtls_ok(smh->session) &&
+			(!provisional_audio_ice || audio_ice_status == SWITCH_STATUS_SUCCESS)) {
 			dtls_type_t xtype, dtype = a_engine->dtls_controller ? DTLS_TYPE_CLIENT : DTLS_TYPE_SERVER;
 
 			//if (switch_channel_test_flag(smh->session->channel, CF_3PCC)) {
