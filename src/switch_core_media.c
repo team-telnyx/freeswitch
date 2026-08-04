@@ -4389,7 +4389,19 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 	if (type == SWITCH_MEDIA_TYPE_AUDIO) {
 		switch_media_flow_t audio_flow = switch_core_session_media_flow(session, SWITCH_MEDIA_TYPE_AUDIO);
 
-		if (audio_flow != SWITCH_MEDIA_FLOW_SENDRECV && audio_flow != SWITCH_MEDIA_FLOW_SENDONLY) {
+		/* A proxy_media leg is a blind bidirectional RTP relay: its SDP direction is
+		 * never negotiated into an smode (switch_core_media_proxy_remote_addr() only
+		 * string-parses the c=/m= lines), so the engine smode stays at its init
+		 * default SWITCH_MEDIA_FLOW_DISABLED. The RFC 3264 send-direction gate below
+		 * was written for anchored legs whose smode reflects a real a= direction and
+		 * must NOT apply to a proxy_media relay leg -- otherwise every frame the peer
+		 * relays toward this leg is dropped here (SUCCESS no-op) before it can reach
+		 * switch_rtp_write_frame(), producing one-way / zero outbound audio even
+		 * though RTP auto-adjust has already latched the correct remote address.
+		 * Skip the gate for proxy_media so the relay keeps forwarding in both
+		 * directions, matching the pre-media-flow behavior for this channel class. */
+		if (!switch_channel_test_flag(session->channel, CF_PROXY_MEDIA) &&
+			audio_flow != SWITCH_MEDIA_FLOW_SENDRECV && audio_flow != SWITCH_MEDIA_FLOW_SENDONLY) {
 			switch_thread_rwlock_unlock(engine->dtls_init_rwlock);
 			return SWITCH_STATUS_SUCCESS;
 		}
