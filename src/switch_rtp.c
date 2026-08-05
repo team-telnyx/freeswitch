@@ -266,7 +266,7 @@ struct switch_rtp_rfc2833_data {
 	unsigned int out_digit_sofar;
 	unsigned int out_digit_sub_sofar;
 	unsigned int out_digit_dur;
-	switch_time_t out_digit_last_progress_us; /* gate against sub-ptime do_2833() wakeups; see ENGDESK-48201 */
+	switch_time_t out_digit_last_progress_us; /* Prevents sub-ptime do_2833() wakeups. */
 	uint16_t in_digit_seq;
 	uint32_t in_digit_ts;
 	uint32_t last_in_digit_ts;
@@ -1427,6 +1427,10 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 	int got_use_candidate = 0;
 	int got_message_integrity = 0;
 	int got_fingerprint = 0;
+	uint32_t prflx_bootstrap_ms = 0;
+	uint16_t raw_packet_type = 0;
+	switch_bool_t provisional_ice = SWITCH_FALSE;
+	switch_bool_t stun_auth_valid = SWITCH_FALSE;
 
 	if (is_rtcp) {
 		from_addr = rtp_session->rtcp_from_addr;
@@ -1453,6 +1457,23 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 	}
 
 	channel = switch_core_session_get_channel(rtp_session->session);
+	provisional_ice = ice->addr ? SWITCH_FALSE : SWITCH_TRUE;
+	if (cpylen >= sizeof(switch_stun_packet_header_t)) {
+		memcpy(&raw_packet_type, data, sizeof(raw_packet_type));
+		raw_packet_type = ntohs(raw_packet_type);
+	}
+	if (raw_packet_type == SWITCH_STUN_BINDING_REQUEST) {
+		prflx_bootstrap_ms = ice_prflx_bootstrap_ms(rtp_session, ice);
+		if (prflx_bootstrap_ms > 0) {
+			stun_auth_valid = switch_stun_packet_validate_auth(data, (uint32_t)cpylen, ice->pass) ? SWITCH_TRUE : SWITCH_FALSE;
+		}
+	}
+	if (provisional_ice && (raw_packet_type != SWITCH_STUN_BINDING_REQUEST || !prflx_bootstrap_ms || !stun_auth_valid)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
+			"ICE peer-reflexive bootstrap: rejected unvalidated %s STUN packet from %s:%d (bootstrap:%u auth:%d)\n",
+			rtp_type(rtp_session), from_host, from_port, prflx_bootstrap_ms, stun_auth_valid);
+		goto end;
+	}
 
 	memcpy(buf, data, cpylen);
 	packet = switch_stun_packet_parse(buf, (uint32_t)cpylen);
@@ -1644,7 +1665,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 		}
 			
 
-		if (!ok && ice == &rtp_session->ice && rtp_session->rtcp_ice.ice_params && pri &&
+		if (!provisional_ice && !ok && ice == &rtp_session->ice && rtp_session->rtcp_ice.ice_params && pri &&
 			*pri == rtp_session->rtcp_ice.ice_params->cands[rtp_session->rtcp_ice.ice_params->chosen[1]][1].priority) {
 			ice = &rtp_session->rtcp_ice;
 			ok = 1;
@@ -1653,7 +1674,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 		if (!zstr(username)) {
 			if (!icecmp(username, ice)) {
 				ok = 1;
-			} else if(!zstr(rtp_session->rtcp_ice.user_ice) && !icecmp(username, &rtp_session->rtcp_ice)) {
+			} else if(!provisional_ice && !zstr(rtp_session->rtcp_ice.user_ice) && !icecmp(username, &rtp_session->rtcp_ice)) {
 				ice = &rtp_session->rtcp_ice;
 				ok = 1;
 			}
@@ -1661,7 +1682,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 
 		if (ok) {
 			ice->missed_count = 0;
-		} else {
+		} else if (!provisional_ice) {
 			switch_rtp_ice_t *icep[2] = { &rtp_session->ice, &rtp_session->rtcp_ice };
 			switch_port_t port = 0;
 			char *host = NULL;
@@ -1749,7 +1770,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 		}
 	}
 
-	if (ice->missed_count > 5 && !(ice->type & ICE_GOOGLE_JINGLE)) {
+	if (!provisional_ice && ice->missed_count > 5 && !(ice->type & ICE_GOOGLE_JINGLE)) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "missed too many: %d, looking for new ICE dest.\n",
 						  ice->missed_count);
 		ice->rready = 0;
@@ -1779,7 +1800,6 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 			uint32_t mid_call_failover_ms = 0;
 			uint32_t nomination_age_ms = 0;
 			uint32_t nomination_fresh_ms = 0;
-			uint32_t prflx_bootstrap_ms = 0;
 			uint32_t prflx_age_ms = 0;
 			uint32_t prflx_priority = 0;
 			switch_bool_t dtls_ready = SWITCH_FALSE;
@@ -1787,19 +1807,20 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 			switch_bool_t nominated_media_recent = SWITCH_FALSE;
 			switch_bool_t media_unhealthy = SWITCH_FALSE;
 			switch_bool_t mid_call_failover = SWITCH_FALSE;
-			switch_bool_t prflx_bootstrap = SWITCH_FALSE;
 			switch_bool_t prflx_addr_ok = SWITCH_FALSE;
+			switch_bool_t prflx_bootstrap_installed = SWITCH_FALSE;
 			switch_dtls_t *dtls = is_rtcp ? rtp_session->rtcp_dtls : rtp_session->dtls;
 
 			if (is_rtcp) {
 				sock_output = rtp_session->rtcp_sock_output;
 			}
 
-			if (!ice->ready) {
-				ice->ready = 1;
+			if (!provisional_ice) {
+				if (!ice->ready) {
+					ice->ready = 1;
+				}
+				switch_channel_clear_flag(channel, CF_NO_ICE);
 			}
-
-			switch_channel_clear_flag(channel, CF_NO_ICE);
 			memset(stunbuf, 0, sizeof(stunbuf));
 			rpacket = switch_stun_packet_build_header(SWITCH_STUN_BINDING_RESPONSE, packet->header.id, stunbuf);
 
@@ -1818,7 +1839,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 
 			bytes = switch_stun_packet_length(rpacket);
 
-			if (got_use_candidate) {
+			if (got_use_candidate && !provisional_ice) {
 				uint32_t mid_call_failover_ms = 0;
 				uint32_t nomination_age_ms = 0;
 				uint32_t nomination_fresh_ms = 0;
@@ -1930,7 +1951,6 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 				}
 			}
 
-			prflx_bootstrap_ms = ice_prflx_bootstrap_ms(rtp_session, ice);
 			if (pri) {
 				prflx_priority = ntohl(*pri);
 			}
@@ -1968,7 +1988,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 							  "%s %s STUN from %s:%d %s is_relay: %d is_responsive: %d use_candidate: %d ready: %d, rready: %d dtls_handshake: %d\n", switch_channel_get_name(channel), rtp_type(rtp_session), from_host, from_port, cmp ? "EXPECTED" : "IGNORED", is_relay, is_responsive, use_candidate, ice->ready, ice->rready, rtp_session->ice.dtls_handshake);
 
 			if (prflx_bootstrap_ms > 0 && pri && cur_idx < 0 && rtp_session->elapsed_stun <= prflx_bootstrap_ms && ice->initializing && !ice->cand_responsive && !cmp &&
-				(!dtls || dtls->state < DS_READY) && got_message_integrity && got_fingerprint &&
+				(!dtls || dtls->state < DS_READY) && stun_auth_valid &&
 				(!ice->prflx_bootstrap_require_use_candidate || got_use_candidate) &&
 				(!ice->prflx_bootstrap_us || prflx_age_ms <= prflx_bootstrap_ms)) {
 				int prflx_family = AF_UNSPEC;
@@ -1992,12 +2012,28 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 					ice->ice_params->chosen[ice->proto] = prflx_idx;
 					ice->ice_params->is_chosen[ice->proto] = 1;
 					ice->missed_count = 0;
+					ice->ready = 1;
 					ice->rready = 1;
 					ice->cand_responsive = 1;
 					ice->prflx_bootstrap_idx = prflx_idx;
 					ice->prflx_bootstrap_us = now;
-					prflx_bootstrap = SWITCH_TRUE;
+					prflx_bootstrap_installed = SWITCH_TRUE;
+					ice->initializing = 0;
+					if (!ice->first_responsive_us) {
+						ice->first_responsive_us = now;
+					}
+					switch_rtp_change_ice_dest(rtp_session, ice, from_host, from_port);
+					ice->addr = prflx_ice_addr;
+					if (dtls && prflx_dtls_addr) {
+						dtls->remote_addr = prflx_dtls_addr;
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+							"ICE peer-reflexive bootstrap: updated DTLS remote addr to %s:%d\n", from_host, from_port);
+					}
+					switch_channel_clear_flag(channel, CF_NO_ICE);
+					switch_channel_set_flag(channel, CF_VIDEO_REFRESH_REQ);
+					switch_core_media_gen_key_frame(rtp_session->session);
 					do_adj++;
+					ice->last_ok = now;
 					rtp_session->last_adj = now;
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE,
 						"ICE peer-reflexive bootstrap: learned %s candidate %s:%d idx:%d priority:%u use_candidate:%d\n",
@@ -2010,7 +2046,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 				}
 			}
 
-			if (ice->initializing && !cmp && !rtp_session->ice.dtls_handshake) {
+			if (!provisional_ice && ice->initializing && !cmp && !rtp_session->ice.dtls_handshake) {
 				if (!rtp_session->adj_window && (!ice->ready || !ice->rready || (!rtp_session->dtls || rtp_session->dtls->state != DS_READY))) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s %s %s ICE set ADJUST window to 10 seconds on binding request from %s:%d (is_relay: %d, is_responsivie: %d, use_candidate: %d) Current cand: %s:%d typ: %s\n",
 									switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp", from_host, from_port, is_relay, is_responsive, use_candidate,
@@ -2054,9 +2090,9 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 
 			dtls_ready = dtls && dtls->state >= DS_READY && ice->ready;
 
-			if (cmp) {
+			if (!provisional_ice && cmp) {
 				ice->last_ok = now;
-			} else if (!do_adj && !is_rtcp && rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX] && dtls_ready && (ice->type & ICE_CONTROLLED) && use_candidate) {
+			} else if (!provisional_ice && !do_adj && !is_rtcp && rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX] && dtls_ready && (ice->type & ICE_CONTROLLED) && use_candidate) {
 				mid_call_failover_ms = ice_mid_call_failover_ms(rtp_session, ice);
 				if (mid_call_failover_ms > 0) {
 					media_unhealthy = rtp_session->elapsed_media >= mid_call_failover_ms || !ice->cand_responsive || !ice->rready;
@@ -2085,7 +2121,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 					do_adj++;
 					rtp_session->last_adj = now;
 				}
-			} else if (!do_adj && !rtp_session->ice.dtls_handshake) {
+			} else if (!provisional_ice && !do_adj && !rtp_session->ice.dtls_handshake) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "ICE %d/%d dt:%d i:%d i2:%d cmp:%d\n", rtp_session->elapsed_stun, rtp_session->elapsed_media, (rtp_session->dtls && rtp_session->dtls->state != DS_READY), !ice->ready, !ice->rready, same_host);
 
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s %s %s ICE ADJUST ELAPSED vs 1000 %d on binding request from %s:%d (is_relay: %d, is_responsive: %d, use_candidate: %d) Current cand: %s:%d typ: %s\n",
@@ -2134,7 +2170,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 				}
 			}
 
-			if ((ice->type & ICE_VANILLA) && ice->ice_params && do_adj &&
+			if (!provisional_ice && !prflx_bootstrap_installed && (ice->type & ICE_VANILLA) && ice->ice_params && do_adj &&
 				ice_should_preserve_active_dtls_tuple(rtp_session, ice, dtls, is_rtcp)) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
 					"ICE preserving active %s DTLS tuple during handshake, ignoring auto-adjust from %s:%d (idx:%d)\n",
@@ -2142,7 +2178,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 				do_adj = 0;
 			}
 
-			if ((ice->type & ICE_VANILLA) && ice->ice_params && do_adj) {
+			if (!provisional_ice && !prflx_bootstrap_installed && (ice->type & ICE_VANILLA) && ice->ice_params && do_adj) {
 				switch_channel_t *channel = NULL;
 
 				if (rtp_session->session) {
@@ -2165,16 +2201,6 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 				switch_core_media_gen_key_frame(rtp_session->session);
 
 				switch_rtp_change_ice_dest(rtp_session, ice, from_host, from_port);
-				if (prflx_bootstrap) {
-					if (!ice->addr && prflx_ice_addr) {
-						ice->addr = prflx_ice_addr;
-					}
-					if (dtls && prflx_dtls_addr) {
-						dtls->remote_addr = prflx_dtls_addr;
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-							"ICE peer-reflexive bootstrap: updated DTLS remote addr to %s:%d\n", from_host, from_port);
-					}
-				}
 				if (mid_call_failover && !is_rtcp && dtls && dtls->remote_addr) {
 					if (switch_sockaddr_info_get(&dtls->remote_addr, from_host, SWITCH_UNSPEC, from_port, 0, rtp_session->pool) == SWITCH_STATUS_SUCCESS) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
@@ -7170,8 +7196,7 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 		int x, loops = 1;
 		switch_time_t now_us = switch_micro_time_now();
 
-		/* ENGDESK-48201: drop calls less than half a ptime since the last in-flight progress
-		   so a tight-looping read path (e.g. silent peer + SIG_BREAK) can't collapse the digit. */
+		/* Ignore sub-ptime wakeups so tight read loops cannot collapse the digit. */
 		if (rtp_session->dtmf_data.out_digit_last_progress_us &&
 			rtp_session->samples_per_second &&
 			rtp_session->samples_per_interval) {

@@ -44,6 +44,39 @@ FST_TEARDOWN_END()
 		switch_assert(packet);
 	}
 	FST_TEST_END()
+	FST_TEST_BEGIN(test_stun_auth_validation)
+	{
+		static const uint8_t authenticated_request[] = {
+			0x00, 0x01, 0x00, 0x58, 0x21, 0x12, 0xa4, 0x42,
+			0xb7, 0xe7, 0xa7, 0x01, 0xbc, 0x34, 0xd6, 0x86,
+			0xfa, 0x87, 0xdf, 0xae, 0x80, 0x22, 0x00, 0x10,
+			0x53, 0x54, 0x55, 0x4e, 0x20, 0x74, 0x65, 0x73,
+			0x74, 0x20, 0x63, 0x6c, 0x69, 0x65, 0x6e, 0x74,
+			0x00, 0x24, 0x00, 0x04, 0x6e, 0x00, 0x01, 0xff,
+			0x80, 0x29, 0x00, 0x08, 0x93, 0x2f, 0xf9, 0xb1,
+			0x51, 0x26, 0x3b, 0x36, 0x00, 0x06, 0x00, 0x09,
+			0x65, 0x76, 0x74, 0x6a, 0x3a, 0x68, 0x36, 0x76,
+			0x59, 0x20, 0x20, 0x20, 0x00, 0x08, 0x00, 0x14,
+			0x9a, 0xea, 0xa7, 0x0c, 0xbf, 0xd8, 0xcb, 0x56,
+			0x78, 0x1e, 0xf2, 0xb5, 0xb2, 0xd3, 0xf2, 0x49,
+			0xc1, 0xb5, 0x71, 0xa2, 0x80, 0x28, 0x00, 0x04,
+			0xe5, 0x7a, 0x3b, 0xcf
+		};
+		static const char password[] = "VOkJxbRl1RmTxUk/WvJxBt";
+		uint8_t tampered[sizeof(authenticated_request)];
+
+		fst_check(switch_stun_packet_validate_auth(authenticated_request, sizeof(authenticated_request), password));
+		fst_check(!switch_stun_packet_validate_auth(authenticated_request, sizeof(authenticated_request), "wrong-password"));
+
+		memcpy(tampered, authenticated_request, sizeof(tampered));
+		tampered[80] ^= 0x01;
+		fst_check(!switch_stun_packet_validate_auth(tampered, sizeof(tampered), password));
+
+		memcpy(tampered, authenticated_request, sizeof(tampered));
+		tampered[104] ^= 0x01;
+		fst_check(!switch_stun_packet_validate_auth(tampered, sizeof(tampered), password));
+	}
+	FST_TEST_END()
 		FST_SESSION_BEGIN(test_stun_msg)
 		{
 				/* Binding Success Response */
@@ -156,6 +189,100 @@ FST_TEARDOWN_END()
 			switch_rtp_pvt_handle_ice(rtp_session, &ice, incoming, sizeof(incoming));
 
 			fst_check(ice.ready);
+
+			switch_rtp_destroy(&rtp_session);
+			switch_core_session_rwunlock(session);
+			switch_core_destroy_memory_pool(&pool);
+		}
+		FST_SESSION_END()
+		FST_SESSION_BEGIN(test_provisional_ice_requires_explicit_bootstrap)
+		{
+			static const uint8_t authenticated_request[] = {
+				0x00, 0x01, 0x00, 0x58, 0x21, 0x12, 0xa4, 0x42,
+				0xb7, 0xe7, 0xa7, 0x01, 0xbc, 0x34, 0xd6, 0x86,
+				0xfa, 0x87, 0xdf, 0xae, 0x80, 0x22, 0x00, 0x10,
+				0x53, 0x54, 0x55, 0x4e, 0x20, 0x74, 0x65, 0x73,
+				0x74, 0x20, 0x63, 0x6c, 0x69, 0x65, 0x6e, 0x74,
+				0x00, 0x24, 0x00, 0x04, 0x6e, 0x00, 0x01, 0xff,
+				0x80, 0x29, 0x00, 0x08, 0x93, 0x2f, 0xf9, 0xb1,
+				0x51, 0x26, 0x3b, 0x36, 0x00, 0x06, 0x00, 0x09,
+				0x65, 0x76, 0x74, 0x6a, 0x3a, 0x68, 0x36, 0x76,
+				0x59, 0x20, 0x20, 0x20, 0x00, 0x08, 0x00, 0x14,
+				0x9a, 0xea, 0xa7, 0x0c, 0xbf, 0xd8, 0xcb, 0x56,
+				0x78, 0x1e, 0xf2, 0xb5, 0xb2, 0xd3, 0xf2, 0x49,
+				0xc1, 0xb5, 0x71, 0xa2, 0x80, 0x28, 0x00, 0x04,
+				0xe5, 0x7a, 0x3b, 0xcf
+			};
+			switch_core_session_t *session = NULL;
+			switch_channel_t *channel = NULL;
+			switch_status_t status;
+			switch_call_cause_t cause;
+			switch_rtp_ice_t ice = { 0 };
+			switch_memory_pool_t *pool = NULL;
+			static switch_rtp_t *rtp_session = NULL;
+			static switch_rtp_flag_t flags[SWITCH_RTP_FLAG_INVALID] = { 0 };
+			const char *err = NULL;
+			ice_t ice_params = { 0 };
+			uint8_t tampered[sizeof(authenticated_request)];
+
+			switch_core_new_memory_pool(&pool);
+			status = switch_ivr_originate(NULL, &session, &cause, "null/+15553334444", 2, NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL);
+			fst_check(session);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+
+			channel = switch_core_session_get_channel(session);
+			fst_check(channel);
+			switch_channel_set_variable(channel, "rtp_ice_prflx_bootstrap", "true");
+			switch_channel_set_variable(channel, "rtp_ice_prflx_bootstrap_ms", "5000");
+
+			switch_core_memory_pool_set_data(pool, "__session", session);
+			rtp_session = switch_rtp_new(rx_host, rx_port, tx_host, tx_port, TEST_PT, 8000, 20 * 1000, flags, "soft", &err, pool);
+			fst_xcheck(rtp_session != NULL, "switch_rtp_new()");
+			fst_check(switch_rtp_ready(rtp_session));
+			switch_core_media_set_rtp_session(session, SWITCH_MEDIA_TYPE_AUDIO, rtp_session);
+
+			ice.ice_params = &ice_params;
+			ice.user_ice = "evtj:h6vY";
+			ice.ice_user = "h6vY:evtj";
+			ice.pass = "VOkJxbRl1RmTxUk/WvJxBt";
+			ice.rpass = "remote-pass";
+			ice.type = ICE_VANILLA | ICE_CONTROLLED;
+			ice.proto = IPR_RTP;
+			ice.initializing = 1;
+			ice.ice_params->chosen[ice.proto] = 0;
+			ice.ice_params->cand_idx[ice.proto] = 1;
+			ice.ice_params->cands[0][ice.proto].priority = 0x6e0001ff;
+
+			memcpy(tampered, authenticated_request, sizeof(tampered));
+			tampered[80] ^= 0x01;
+			switch_rtp_pvt_handle_ice(rtp_session, &ice, tampered, sizeof(tampered));
+			fst_check(ice.addr == NULL);
+			fst_check(ice.ice_params->cand_idx[ice.proto] == 1);
+
+			memcpy(tampered, authenticated_request, sizeof(tampered));
+			tampered[104] ^= 0x01;
+			switch_rtp_pvt_handle_ice(rtp_session, &ice, tampered, sizeof(tampered));
+			fst_check(ice.addr == NULL);
+			fst_check(ice.ice_params->cand_idx[ice.proto] == 1);
+
+			switch_rtp_pvt_handle_ice(rtp_session, &ice, (void *)authenticated_request, sizeof(authenticated_request));
+
+			fst_check(!ice.ready);
+			fst_check(!ice.rready);
+			fst_check(!ice.cand_responsive);
+			fst_check(ice.addr == NULL);
+			fst_check(ice.ice_params->cand_idx[ice.proto] == 1);
+			fst_check(ice.ice_params->chosen[ice.proto] == 0);
+
+			switch_channel_set_variable(channel, "rtp_ice_prflx_bootstrap_require_use_candidate", "false");
+			ice.prflx_bootstrap_cached = 0;
+			switch_rtp_pvt_handle_ice(rtp_session, &ice, (void *)authenticated_request, sizeof(authenticated_request));
+			fst_check(ice.ready);
+			fst_check(ice.rready);
+			fst_check(ice.cand_responsive);
+			fst_check(ice.addr != NULL);
+			fst_check(ice.ice_params->cand_idx[ice.proto] == 2);
+			fst_check(ice.ice_params->chosen[ice.proto] == 1);
 
 			switch_rtp_destroy(&rtp_session);
 			switch_core_session_rwunlock(session);
