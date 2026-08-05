@@ -1448,6 +1448,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 	switch_port_t from_port = 0;
 	char faddr_buf[80] = "";
 	int got_use_candidate = 0;
+	int got_use_candidate_covered = 0;
 	int got_message_integrity = 0;
 	int got_fingerprint = 0;
 	uint32_t prflx_bootstrap_ms = 0;
@@ -1455,6 +1456,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 	switch_bool_t provisional_ice = SWITCH_FALSE;
 	switch_bool_t stun_auth_valid = SWITCH_FALSE;
 	switch_bool_t trusted_use_candidate = SWITCH_FALSE;
+	switch_bool_t authenticated_vanilla_use_candidate = SWITCH_FALSE;
 	switch_bool_t direct_username_match = SWITCH_FALSE;
 
 	if (is_rtcp) {
@@ -1528,6 +1530,9 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 		switch (attr->type) {
 		case SWITCH_STUN_ATTR_USE_CAND:
 			got_use_candidate = 1;
+			if (!got_message_integrity) {
+				got_use_candidate_covered = 1;
+			}
 			break;
 		case SWITCH_STUN_ATTR_MESSAGE_INTEGRITY:
 			got_message_integrity = 1;
@@ -1611,8 +1616,9 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 	} while (xlen <= packet->header.length);
 
 	if (got_use_candidate) {
-		trusted_use_candidate = (!(ice->type & ICE_VANILLA) ||
-			(got_message_integrity && got_fingerprint && stun_auth_valid)) ? SWITCH_TRUE : SWITCH_FALSE;
+		authenticated_vanilla_use_candidate = ((ice->type & ICE_VANILLA) && got_use_candidate_covered &&
+			got_message_integrity && got_fingerprint && stun_auth_valid) ? SWITCH_TRUE : SWITCH_FALSE;
+		trusted_use_candidate = (!(ice->type & ICE_VANILLA) || authenticated_vanilla_use_candidate) ? SWITCH_TRUE : SWITCH_FALSE;
 	}
 
 	if ((ice->type & ICE_GOOGLE_JINGLE) && ok) {
@@ -1943,7 +1949,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 							(uint32_t)((now - ice->inbound_media_us) / 1000) <= nomination_fresh_ms;
 					}
 					if (fresh_nomination && trusted_use_candidate &&
-						((media_unhealthy && rtp_session->elapsed_stun >= mid_call_failover_ms) || nominated_media_recent || peer_candidate)) {
+						((media_unhealthy && rtp_session->elapsed_stun >= mid_call_failover_ms) || nominated_media_recent || (authenticated_vanilla_use_candidate && peer_candidate))) {
 						allow_mid_call_failover = SWITCH_TRUE;
 					}
 				}
@@ -1956,10 +1962,10 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 				if (ice->addr && !switch_cmp_addr(from_addr, ice->addr, SWITCH_TRUE)) {
 					if (dtls_ready) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), allow_mid_call_failover ? SWITCH_LOG_DEBUG : SWITCH_LOG_DEBUG5,
-							"USE-CANDIDATE: DTLS already READY, %s %s nomination from %s:%d (elapsed_stun=%u, elapsed_media=%u, mid_call_failover_ms=%u, controlled=%d, known_candidate=%d, fresh_nomination=%d, nomination_age_ms=%u, media_unhealthy=%d, nominated_media_recent=%d, trusted_use=%d, rtcp_mux=%d)\n",
+							"USE-CANDIDATE: DTLS already READY, %s %s nomination from %s:%d (elapsed_stun=%u, elapsed_media=%u, mid_call_failover_ms=%u, controlled=%d, known_candidate=%d, fresh_nomination=%d, nomination_age_ms=%u, media_unhealthy=%d, nominated_media_recent=%d, trusted_use=%d, vanilla_auth_use=%d, rtcp_mux=%d)\n",
 							allow_mid_call_failover ? "accepted" : "ignoring", rtp_type(rtp_session), from_host, from_port, rtp_session->elapsed_stun, rtp_session->elapsed_media, mid_call_failover_ms,
 							!!(ice->type & ICE_CONTROLLED), peer_candidate, fresh_nomination, nomination_age_ms, media_unhealthy, nominated_media_recent,
-							trusted_use_candidate, !!rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX]);
+							trusted_use_candidate, authenticated_vanilla_use_candidate, !!rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX]);
 					} else if (preserve_dtls_tuple) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
 							"USE-CANDIDATE: preserving active %s DTLS tuple %s:%d during handshake, ignoring nomination from %s:%d\n",
@@ -2142,11 +2148,11 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 						(uint32_t)((now - ice->inbound_media_us) / 1000) <= nomination_fresh_ms;
 				}
 				if (fresh_nomination && trusted_use_candidate &&
-					((media_unhealthy && rtp_session->elapsed_stun >= mid_call_failover_ms) || nominated_media_recent || cur_idx > -1)) {
+					((media_unhealthy && rtp_session->elapsed_stun >= mid_call_failover_ms) || nominated_media_recent || (authenticated_vanilla_use_candidate && cur_idx > -1))) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE,
-						"%s %s %s ICE mid-call failover accepting freshly nominated %s:%d (elapsed_stun=%u, elapsed_media=%u, nomination_age_ms=%u, nominated_media_recent=%d, trusted_use=%d, current: %s:%d typ: %s)\n",
+						"%s %s %s ICE mid-call failover accepting freshly nominated %s:%d (elapsed_stun=%u, elapsed_media=%u, nomination_age_ms=%u, nominated_media_recent=%d, trusted_use=%d, vanilla_auth_use=%d, current: %s:%d typ: %s)\n",
 						switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp", from_host, from_port, rtp_session->elapsed_stun,
-						rtp_session->elapsed_media, nomination_age_ms, nominated_media_recent, trusted_use_candidate,
+						rtp_session->elapsed_media, nomination_age_ms, nominated_media_recent, trusted_use_candidate, authenticated_vanilla_use_candidate,
 						ice_candidate_addr_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]),
 						ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].con_port,
 						ice_candidate_type_safe(&ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto]));

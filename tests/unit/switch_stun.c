@@ -89,7 +89,15 @@ FST_TEARDOWN_END()
 		};
 		/* RFC 5769 Section 2.1 request vector. */
 		static const char password[] = "VOkJxbRl1RmTxUk/WvJxBt";
+		static const char generated_password[] = "test-local-ice-password";
 		uint8_t tampered[sizeof(authenticated_request)];
+		uint8_t late_use_candidate[128];
+		switch_size_t late_use_candidate_len;
+		switch_size_t fingerprint_offset;
+		uint16_t attribute_type;
+		uint16_t attribute_length = 0;
+		uint16_t message_length;
+		uint32_t fingerprint;
 
 		fst_check(switch_stun_packet_validate_auth(authenticated_request, sizeof(authenticated_request), password));
 		fst_check(!switch_stun_packet_validate_auth(authenticated_request, sizeof(authenticated_request), "wrong-password"));
@@ -101,6 +109,22 @@ FST_TEARDOWN_END()
 		memcpy(tampered, authenticated_request, sizeof(tampered));
 		tampered[104] ^= 0x01;
 		fst_check(!switch_stun_packet_validate_auth(tampered, sizeof(tampered), password));
+
+		late_use_candidate_len = build_authenticated_request(late_use_candidate, sizeof(late_use_candidate), "remote:local", generated_password, SWITCH_FALSE);
+		fst_check(switch_stun_packet_validate_auth(late_use_candidate, (uint32_t)late_use_candidate_len, generated_password));
+
+		fingerprint_offset = late_use_candidate_len - 8;
+		memmove(late_use_candidate + fingerprint_offset + 4, late_use_candidate + fingerprint_offset, 8);
+		attribute_type = htons(SWITCH_STUN_ATTR_USE_CAND);
+		memcpy(late_use_candidate + fingerprint_offset, &attribute_type, sizeof(attribute_type));
+		memcpy(late_use_candidate + fingerprint_offset + 2, &attribute_length, sizeof(attribute_length));
+		memcpy(&message_length, late_use_candidate + 2, sizeof(message_length));
+		message_length = htons((uint16_t)(ntohs(message_length) + 4));
+		memcpy(late_use_candidate + 2, &message_length, sizeof(message_length));
+		late_use_candidate_len += 4;
+		fingerprint = htonl(switch_crc32_8bytes(late_use_candidate, (uint32_t)fingerprint_offset + 4) ^ 0x5354554e);
+		memcpy(late_use_candidate + fingerprint_offset + 8, &fingerprint, sizeof(fingerprint));
+		fst_check(!switch_stun_packet_validate_auth(late_use_candidate, (uint32_t)late_use_candidate_len, generated_password));
 	}
 	FST_TEST_END()
 		FST_SESSION_BEGIN(test_stun_msg)
