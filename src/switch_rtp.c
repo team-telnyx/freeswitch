@@ -1398,17 +1398,22 @@ static switch_status_t ice_out(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 }
 
 SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_get_ice_state(switch_rtp_t *rtp_session, ice_proto_t proto,
-	char *ice_user, switch_size_t ice_user_len, switch_bool_t *has_addr)
+	char *ice_user, switch_size_t ice_user_len, char *local_pwd, switch_size_t local_pwd_len,
+	char *remote_pwd, switch_size_t remote_pwd_len, switch_bool_t *has_addr)
 {
 	switch_rtp_ice_t *ice;
 
-	if (!rtp_session || (proto != IPR_RTP && proto != IPR_RTCP) || !ice_user || !ice_user_len || !has_addr) {
+	if (!rtp_session || (proto != IPR_RTP && proto != IPR_RTCP) ||
+		!ice_user || !ice_user_len || !local_pwd || !local_pwd_len ||
+		!remote_pwd || !remote_pwd_len || !has_addr) {
 		return SWITCH_STATUS_FALSE;
 	}
 
 	switch_mutex_lock(rtp_session->ice_mutex);
 	ice = proto == IPR_RTP ? &rtp_session->ice : &rtp_session->rtcp_ice;
 	switch_snprintf(ice_user, ice_user_len, "%s", ice->ice_user ? ice->ice_user : "");
+	switch_snprintf(local_pwd, local_pwd_len, "%s", ice->pass ? ice->pass : "");
+	switch_snprintf(remote_pwd, remote_pwd_len, "%s", ice->rpass ? ice->rpass : "");
 	*has_addr = ice->addr ? SWITCH_TRUE : SWITCH_FALSE;
 	switch_mutex_unlock(rtp_session->ice_mutex);
 

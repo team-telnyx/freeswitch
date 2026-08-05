@@ -210,6 +210,8 @@ struct switch_rtp_engine_s {
 	switch_thread_id_t thread_write_lock;
 	uint8_t new_ice;
 	uint8_t ice_restart_pending;
+	char *ice_restart_remote_ufrag;
+	char *ice_restart_remote_pwd;
 	uint8_t new_dtls;
 	uint32_t sdp_bw;
 	uint32_t orig_bitrate;
@@ -4871,6 +4873,8 @@ static void clear_ice(switch_core_session_t *session, switch_media_type_t type)
 	engine->ice_in.is_chosen[1] = 0;
 	engine->ice_in.cand_idx[0] = 0;
 	engine->ice_in.cand_idx[1] = 0;
+	engine->ice_restart_remote_ufrag = engine->ice_in.ufrag;
+	engine->ice_restart_remote_pwd = engine->ice_in.pwd;
 	memset(&engine->ice_in, 0, sizeof(engine->ice_in));
 	engine->remote_rtcp_port = 0;
 
@@ -5404,6 +5408,12 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 				} else if (engine->ice_in.ufrag && !strcmp(engine->ice_in.ufrag, attr->a_value)) {
 					engine->new_ice = 0;
 				} else {
+					if (engine->ice_restart_pending &&
+						(!engine->ice_restart_remote_ufrag || strcmp(engine->ice_restart_remote_ufrag, attr->a_value))) {
+						/* Both peers need fresh credentials for a new ICE generation. */
+						engine->ice_out.ufrag = NULL;
+						engine->ice_out.pwd = NULL;
+					}
 					engine->ice_in.ufrag = switch_core_session_strdup(smh->session, attr->a_value);
 					engine->new_ice = 1;
 				}
@@ -5413,6 +5423,11 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
 						"ice-pwd: skipping update during trickle recheck\n");
 				} else if (!engine->ice_in.pwd || strcmp(engine->ice_in.pwd, attr->a_value)) {
+					if (engine->ice_restart_pending &&
+						(!engine->ice_restart_remote_pwd || strcmp(engine->ice_restart_remote_pwd, attr->a_value))) {
+						engine->ice_out.ufrag = NULL;
+						engine->ice_out.pwd = NULL;
+					}
 					engine->ice_in.pwd = switch_core_session_strdup(smh->session, attr->a_value);
 				}
 			} else if (!strcasecmp(attr->a_name, "ice-options") && !zstr(attr->a_value)) {
@@ -11345,6 +11360,8 @@ static switch_status_t activate_audio_ice(switch_core_session_t *session, switch
 
 	if (status == SWITCH_STATUS_SUCCESS) {
 		engine->ice_restart_pending = 0;
+		engine->ice_restart_remote_ufrag = NULL;
+		engine->ice_restart_remote_pwd = NULL;
 		if (provisional) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
 							  "Armed Audio ICE for peer-reflexive bootstrap\n");
@@ -11574,6 +11591,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 		has_remote_ice = !zstr(a_engine->ice_in.ufrag) && !zstr(a_engine->ice_in.pwd) ? SWITCH_TRUE : SWITCH_FALSE;
 		if (!has_remote_ice) {
 			a_engine->ice_restart_pending = 0;
+			a_engine->ice_restart_remote_ufrag = NULL;
+			a_engine->ice_restart_remote_pwd = NULL;
 		}
 		provisional_audio_ice = !candidate_ready && switch_channel_var_true(session->channel, "rtp_ice_prflx_bootstrap");
 		reactivate_audio_ice = a_engine->ice_restart_pending && has_remote_ice &&

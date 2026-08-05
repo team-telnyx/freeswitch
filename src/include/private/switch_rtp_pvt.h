@@ -45,7 +45,8 @@ typedef struct {
 
 SWITCH_DECLARE(void) switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *data, switch_size_t len);
 SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_get_ice_state(switch_rtp_t *rtp_session, ice_proto_t proto,
-	char *ice_user, switch_size_t ice_user_len, switch_bool_t *has_addr);
+	char *ice_user, switch_size_t ice_user_len, char *local_pwd, switch_size_t local_pwd_len,
+	char *remote_pwd, switch_size_t remote_pwd_len, switch_bool_t *has_addr);
 
 #endif /* __SWITCH_RTP_PVT_H__ */
 
