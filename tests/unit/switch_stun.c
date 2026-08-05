@@ -9,6 +9,31 @@ static switch_port_t rx_port = 1234;
 static const char *tx_host = "127.0.0.1";
 static switch_port_t tx_port = 54320;
 
+static switch_size_t build_authenticated_request(uint8_t *buf, switch_size_t buflen, const char *username,
+												 const char *password, switch_bool_t use_candidate)
+{
+	switch_stun_packet_t *packet;
+	switch_size_t bytes;
+
+	switch_assert(buf);
+	switch_assert(buflen >= 128);
+	memset(buf, 0, buflen);
+	packet = switch_stun_packet_build_header(SWITCH_STUN_BINDING_REQUEST, NULL, buf);
+	switch_stun_packet_attribute_add_priority(packet, 0x6e0001ff);
+	if (username) {
+		switch_stun_packet_attribute_add_username(packet, (char *)username, (uint16_t)strlen(username));
+	}
+	if (use_candidate) {
+		switch_stun_packet_attribute_add_use_candidate(packet);
+	}
+	switch_stun_packet_attribute_add_integrity(packet, password);
+	switch_stun_packet_attribute_add_fingerprint(packet);
+	bytes = switch_stun_packet_length(packet);
+	switch_assert(bytes <= buflen);
+
+	return bytes;
+}
+
 static void fsctl_debug(switch_core_session_t *session) 
 {
 		switch_stream_handle_t stream = { 0 };
@@ -224,6 +249,12 @@ FST_TEARDOWN_END()
 			const char *err = NULL;
 			ice_t ice_params = { 0 };
 			uint8_t tampered[sizeof(authenticated_request)];
+			uint8_t missing_username[128];
+			uint8_t wrong_username[128];
+			switch_size_t missing_username_len;
+			switch_size_t wrong_username_len;
+			int initial_cand_idx;
+			int initial_chosen;
 
 			switch_core_new_memory_pool(&pool);
 			status = switch_ivr_originate(NULL, &session, &cause, "null/+15553334444", 2, NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL);
@@ -253,17 +284,46 @@ FST_TEARDOWN_END()
 			ice.ice_params->cand_idx[ice.proto] = 1;
 			ice.ice_params->cands[0][ice.proto].priority = 0x6e0001ff;
 
+			ice.missed_count = 7;
+			initial_cand_idx = ice.ice_params->cand_idx[ice.proto];
+			initial_chosen = ice.ice_params->chosen[ice.proto];
+			missing_username_len = build_authenticated_request(missing_username, sizeof(missing_username), NULL, ice.pass, SWITCH_TRUE);
+			fst_check(switch_stun_packet_validate_auth(missing_username, (uint32_t)missing_username_len, ice.pass));
+			switch_rtp_pvt_handle_ice(rtp_session, &ice, missing_username, missing_username_len);
+			fst_check(!ice.ready);
+			fst_check(!ice.rready);
+			fst_check(!ice.cand_responsive);
+			fst_check(ice.addr == NULL);
+			fst_check(ice.ice_params->cand_idx[ice.proto] == initial_cand_idx);
+			fst_check(ice.ice_params->chosen[ice.proto] == initial_chosen);
+			fst_check(ice.missed_count == 7);
+
+			wrong_username_len = build_authenticated_request(wrong_username, sizeof(wrong_username), "wrong:username", ice.pass, SWITCH_TRUE);
+			fst_check(switch_stun_packet_validate_auth(wrong_username, (uint32_t)wrong_username_len, ice.pass));
+			switch_rtp_pvt_handle_ice(rtp_session, &ice, wrong_username, wrong_username_len);
+			fst_check(!ice.ready);
+			fst_check(!ice.rready);
+			fst_check(!ice.cand_responsive);
+			fst_check(ice.addr == NULL);
+			fst_check(ice.ice_params->cand_idx[ice.proto] == initial_cand_idx);
+			fst_check(ice.ice_params->chosen[ice.proto] == initial_chosen);
+			fst_check(ice.missed_count == 7);
+
 			memcpy(tampered, authenticated_request, sizeof(tampered));
 			tampered[80] ^= 0x01;
 			switch_rtp_pvt_handle_ice(rtp_session, &ice, tampered, sizeof(tampered));
 			fst_check(ice.addr == NULL);
-			fst_check(ice.ice_params->cand_idx[ice.proto] == 1);
+			fst_check(ice.ice_params->cand_idx[ice.proto] == initial_cand_idx);
+			fst_check(ice.ice_params->chosen[ice.proto] == initial_chosen);
+			fst_check(ice.missed_count == 7);
 
 			memcpy(tampered, authenticated_request, sizeof(tampered));
 			tampered[104] ^= 0x01;
 			switch_rtp_pvt_handle_ice(rtp_session, &ice, tampered, sizeof(tampered));
 			fst_check(ice.addr == NULL);
-			fst_check(ice.ice_params->cand_idx[ice.proto] == 1);
+			fst_check(ice.ice_params->cand_idx[ice.proto] == initial_cand_idx);
+			fst_check(ice.ice_params->chosen[ice.proto] == initial_chosen);
+			fst_check(ice.missed_count == 7);
 
 			switch_rtp_pvt_handle_ice(rtp_session, &ice, (void *)authenticated_request, sizeof(authenticated_request));
 
@@ -271,8 +331,9 @@ FST_TEARDOWN_END()
 			fst_check(!ice.rready);
 			fst_check(!ice.cand_responsive);
 			fst_check(ice.addr == NULL);
-			fst_check(ice.ice_params->cand_idx[ice.proto] == 1);
-			fst_check(ice.ice_params->chosen[ice.proto] == 0);
+			fst_check(ice.ice_params->cand_idx[ice.proto] == initial_cand_idx);
+			fst_check(ice.ice_params->chosen[ice.proto] == initial_chosen);
+			fst_check(ice.missed_count == 7);
 
 			switch_channel_set_variable(channel, "rtp_ice_prflx_bootstrap_require_use_candidate", "false");
 			ice.prflx_bootstrap_cached = 0;
@@ -283,6 +344,7 @@ FST_TEARDOWN_END()
 			fst_check(ice.addr != NULL);
 			fst_check(ice.ice_params->cand_idx[ice.proto] == 2);
 			fst_check(ice.ice_params->chosen[ice.proto] == 1);
+			fst_check(ice.missed_count == 0);
 
 			switch_rtp_destroy(&rtp_session);
 			switch_core_session_rwunlock(session);
