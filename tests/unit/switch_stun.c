@@ -141,6 +141,7 @@ FST_TEARDOWN_END()
 				ice.ice_user = "ice_user";
 
 				ice.type = ICE_VANILLA;
+				ice.addr = switch_rtp_session_get_remote_addr(rtp_session);
 				switch_rtp_pvt_handle_ice(rtp_session, &ice, incoming, sizeof(incoming));
 
 				fst_check(ice.rready);
@@ -251,8 +252,14 @@ FST_TEARDOWN_END()
 			uint8_t tampered[sizeof(authenticated_request)];
 			uint8_t missing_username[128];
 			uint8_t wrong_username[128];
+			uint8_t successful_request[128];
+			char bootstrap_host[80] = { 0 };
+			char learned_host[80] = { 0 };
+			char remote_host[80] = { 0 };
 			switch_size_t missing_username_len;
 			switch_size_t wrong_username_len;
+			switch_size_t successful_request_len;
+			switch_sockaddr_t *remote_addr;
 			int initial_cand_idx;
 			int initial_chosen;
 
@@ -267,7 +274,9 @@ FST_TEARDOWN_END()
 			switch_channel_set_variable(channel, "rtp_ice_prflx_bootstrap_ms", "5000");
 
 			switch_core_memory_pool_set_data(pool, "__session", session);
-			rtp_session = switch_rtp_new(rx_host, rx_port, tx_host, tx_port, TEST_PT, 8000, 20 * 1000, flags, "soft", &err, pool);
+			fst_xcheck(switch_find_local_ip(bootstrap_host, sizeof(bootstrap_host), NULL, AF_INET) == SWITCH_STATUS_SUCCESS, "switch_find_local_ip()");
+			fst_xcheck(strncmp(bootstrap_host, "127.", 4), "non-loopback bootstrap host");
+			rtp_session = switch_rtp_new(bootstrap_host, rx_port, tx_host, tx_port, TEST_PT, 8000, 20 * 1000, flags, "soft", &err, pool);
 			fst_xcheck(rtp_session != NULL, "switch_rtp_new()");
 			fst_check(switch_rtp_ready(rtp_session));
 			switch_core_media_set_rtp_session(session, SWITCH_MEDIA_TYPE_AUDIO, rtp_session);
@@ -325,7 +334,9 @@ FST_TEARDOWN_END()
 			fst_check(ice.ice_params->chosen[ice.proto] == initial_chosen);
 			fst_check(ice.missed_count == 7);
 
-			switch_rtp_pvt_handle_ice(rtp_session, &ice, (void *)authenticated_request, sizeof(authenticated_request));
+			memcpy(tampered, authenticated_request, sizeof(tampered));
+			fst_check(switch_stun_packet_validate_auth(tampered, sizeof(tampered), ice.pass));
+			switch_rtp_pvt_handle_ice(rtp_session, &ice, tampered, sizeof(tampered));
 
 			fst_check(!ice.ready);
 			fst_check(!ice.rready);
@@ -335,9 +346,9 @@ FST_TEARDOWN_END()
 			fst_check(ice.ice_params->chosen[ice.proto] == initial_chosen);
 			fst_check(ice.missed_count == 7);
 
-			switch_channel_set_variable(channel, "rtp_ice_prflx_bootstrap_require_use_candidate", "false");
-			ice.prflx_bootstrap_cached = 0;
-			switch_rtp_pvt_handle_ice(rtp_session, &ice, (void *)authenticated_request, sizeof(authenticated_request));
+			successful_request_len = build_authenticated_request(successful_request, sizeof(successful_request), ice.user_ice, ice.pass, SWITCH_TRUE);
+			fst_check(switch_stun_packet_validate_auth(successful_request, (uint32_t)successful_request_len, ice.pass));
+			switch_rtp_pvt_handle_ice(rtp_session, &ice, successful_request, successful_request_len);
 			fst_check(ice.ready);
 			fst_check(ice.rready);
 			fst_check(ice.cand_responsive);
@@ -345,6 +356,30 @@ FST_TEARDOWN_END()
 			fst_check(ice.ice_params->cand_idx[ice.proto] == 2);
 			fst_check(ice.ice_params->chosen[ice.proto] == 1);
 			fst_check(ice.missed_count == 0);
+			if (ice.addr) {
+				fst_check(!strcmp(switch_get_addr(learned_host, sizeof(learned_host), ice.addr), bootstrap_host));
+				fst_check(switch_sockaddr_get_port(ice.addr) == rx_port);
+			}
+			remote_addr = switch_rtp_session_get_remote_addr(rtp_session);
+			fst_check(remote_addr != NULL);
+			if (remote_addr) {
+				fst_check(!strcmp(switch_get_addr(remote_host, sizeof(remote_host), remote_addr), bootstrap_host));
+				fst_check(switch_sockaddr_get_port(remote_addr) == rx_port);
+			}
+			if (ice.ice_params->cand_idx[ice.proto] == 2) {
+				fst_check(ice.ice_params->cands[1][ice.proto].con_addr != NULL);
+				if (ice.ice_params->cands[1][ice.proto].con_addr) {
+					fst_check(!strcmp(ice.ice_params->cands[1][ice.proto].con_addr, bootstrap_host));
+				}
+				fst_check(ice.ice_params->cands[1][ice.proto].con_port == rx_port);
+				fst_check(ice.ice_params->cands[1][ice.proto].cand_type != NULL);
+				if (ice.ice_params->cands[1][ice.proto].cand_type) {
+					fst_check(!strcmp(ice.ice_params->cands[1][ice.proto].cand_type, "prflx"));
+				}
+				fst_check(ice.ice_params->cands[1][ice.proto].responsive);
+				fst_check(ice.ice_params->cands[1][ice.proto].ready);
+				fst_check(ice.ice_params->cands[1][ice.proto].use_candidate);
+			}
 
 			switch_rtp_destroy(&rtp_session);
 			switch_core_session_rwunlock(session);
