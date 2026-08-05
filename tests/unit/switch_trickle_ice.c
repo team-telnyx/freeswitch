@@ -1,6 +1,7 @@
 #include <switch.h>
 #include <switch_rtp.h>
 #include <test/switch_test.h>
+#include <private/switch_rtp_pvt.h>
 #include "switch_telnyx.h"
 #include <sofia-sip/sdp.h>
 
@@ -329,6 +330,76 @@ FCT_BGN()
 			if (telnyx_pool) { switch_core_destroy_memory_pool(&telnyx_pool); telnyx_pool = NULL; }
 		}
 		FCT_TEARDOWN_END();
+
+		FCT_TEST_BGN(restart_ice_rearms_unchanged_media)
+		{
+			switch_core_session_t *session = NULL;
+			switch_channel_t *channel = NULL;
+			switch_rtp_t *rtp = NULL;
+			switch_status_t status;
+			const char *err = NULL;
+			char ice_user[256] = "";
+			switch_bool_t has_addr = SWITCH_FALSE;
+			ice_t old_ice;
+			uint8_t match;
+			uint8_t proceed = 0;
+			const char *restart_sdp =
+				"v=0\n"
+				"o=- 1683118194 1683118196 IN IP4 0.0.0.0\n"
+				"s=-\n"
+				"t=0 0\n"
+				"a=group:BUNDLE 0\n"
+				"m=audio 9 UDP/TLS/RTP/SAVPF 0\n"
+				"c=IN IP4 0.0.0.0\n"
+				"a=ice-ufrag:restartRemoteUfrag\n"
+				"a=ice-pwd:restartRemotePassword123456\n"
+				"a=ice-options:trickle\n"
+				"a=rtcp-mux\n"
+				"a=setup:active\n"
+				"a=rtpmap:0 PCMU/8000\n"
+				"a=sendrecv\n"
+				"a=fingerprint:sha-256 17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4\n"
+				"a=mid:0\n";
+
+			memset(&old_ice, 0, sizeof(old_ice));
+			old_ice.cands[0][IPR_RTP].priority = 1;
+			old_ice.cands[0][IPR_RTP].con_addr = "0.0.0.0";
+			old_ice.cands[0][IPR_RTP].con_port = 9;
+			old_ice.cands[0][IPR_RTP].ready = 1;
+
+			status = make_session_and_rtp_with_sdp(&session, &rtp, NULL, NULL);
+			fst_requires(status == SWITCH_STATUS_SUCCESS && session && rtp);
+			channel = switch_core_session_get_channel(session);
+			fst_requires(channel != NULL);
+
+			status = switch_rtp_set_remote_address(rtp, "0.0.0.0", 9, 0, SWITCH_FALSE, &err);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			status = switch_rtp_activate_ice(rtp, "oldRemoteUfrag", "oldLocalUfrag",
+				"oldLocalPassword", "oldRemotePassword", IPR_RTP, ICE_VANILLA, &old_ice);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			status = switch_rtp_pvt_get_ice_state(rtp, IPR_RTP, ice_user, sizeof(ice_user), &has_addr);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			fst_check_string_equals(ice_user, "oldRemoteUfrag:oldLocalUfrag");
+			fst_check(has_addr == SWITCH_TRUE);
+
+			switch_core_media_clear_ice(session);
+			switch_channel_set_flag(channel, CF_REINVITE);
+			switch_channel_set_variable(channel, "rtp_ice_prflx_bootstrap", "true");
+			match = switch_core_media_negotiate_sdp(session, restart_sdp, &proceed, SDP_OFFER);
+			fst_requires(match != 0);
+			status = switch_core_media_activate_rtp(session);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+
+			memset(ice_user, 0, sizeof(ice_user));
+			has_addr = SWITCH_TRUE;
+			status = switch_rtp_pvt_get_ice_state(rtp, IPR_RTP, ice_user, sizeof(ice_user), &has_addr);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			fst_check(strstr(ice_user, "restartRemoteUfrag") != NULL);
+			fst_check(has_addr == SWITCH_FALSE);
+
+			cleanup_session_and_media(session);
+		}
+		FCT_TEST_END();
 
 		/* 1) Registration toggles + candidate emit */
 		FCT_TEST_BGN(registration_and_emit_basic)

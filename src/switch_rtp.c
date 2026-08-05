@@ -1397,6 +1397,24 @@ static switch_status_t ice_out(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 	return status;
 }
 
+SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_get_ice_state(switch_rtp_t *rtp_session, ice_proto_t proto,
+	char *ice_user, switch_size_t ice_user_len, switch_bool_t *has_addr)
+{
+	switch_rtp_ice_t *ice;
+
+	if (!rtp_session || (proto != IPR_RTP && proto != IPR_RTCP) || !ice_user || !ice_user_len || !has_addr) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	switch_mutex_lock(rtp_session->ice_mutex);
+	ice = proto == IPR_RTP ? &rtp_session->ice : &rtp_session->rtcp_ice;
+	switch_snprintf(ice_user, ice_user_len, "%s", ice->ice_user ? ice->ice_user : "");
+	*has_addr = ice->addr ? SWITCH_TRUE : SWITCH_FALSE;
+	switch_mutex_unlock(rtp_session->ice_mutex);
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
 int icecmp(const char *them, switch_rtp_ice_t *ice)
 {
 	if (strchr(them, ':')) {
@@ -1682,7 +1700,8 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 			}
 		}
 		if (provisional_ice) {
-			ok = direct_username_match;
+			ok = direct_username_match && pri &&
+				(!ice->prflx_bootstrap_require_use_candidate || got_use_candidate);
 		}
 
 		if (ok && !provisional_ice) {

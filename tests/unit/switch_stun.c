@@ -87,6 +87,7 @@ FST_TEARDOWN_END()
 			0xc1, 0xb5, 0x71, 0xa2, 0x80, 0x28, 0x00, 0x04,
 			0xe5, 0x7a, 0x3b, 0xcf
 		};
+		/* RFC 5769 Section 2.1 request vector. */
 		static const char password[] = "VOkJxbRl1RmTxUk/WvJxBt";
 		uint8_t tampered[sizeof(authenticated_request)];
 
@@ -223,22 +224,6 @@ FST_TEARDOWN_END()
 		FST_SESSION_END()
 		FST_SESSION_BEGIN(test_provisional_ice_requires_explicit_bootstrap)
 		{
-			static const uint8_t authenticated_request[] = {
-				0x00, 0x01, 0x00, 0x58, 0x21, 0x12, 0xa4, 0x42,
-				0xb7, 0xe7, 0xa7, 0x01, 0xbc, 0x34, 0xd6, 0x86,
-				0xfa, 0x87, 0xdf, 0xae, 0x80, 0x22, 0x00, 0x10,
-				0x53, 0x54, 0x55, 0x4e, 0x20, 0x74, 0x65, 0x73,
-				0x74, 0x20, 0x63, 0x6c, 0x69, 0x65, 0x6e, 0x74,
-				0x00, 0x24, 0x00, 0x04, 0x6e, 0x00, 0x01, 0xff,
-				0x80, 0x29, 0x00, 0x08, 0x93, 0x2f, 0xf9, 0xb1,
-				0x51, 0x26, 0x3b, 0x36, 0x00, 0x06, 0x00, 0x09,
-				0x65, 0x76, 0x74, 0x6a, 0x3a, 0x68, 0x36, 0x76,
-				0x59, 0x20, 0x20, 0x20, 0x00, 0x08, 0x00, 0x14,
-				0x9a, 0xea, 0xa7, 0x0c, 0xbf, 0xd8, 0xcb, 0x56,
-				0x78, 0x1e, 0xf2, 0xb5, 0xb2, 0xd3, 0xf2, 0x49,
-				0xc1, 0xb5, 0x71, 0xa2, 0x80, 0x28, 0x00, 0x04,
-				0xe5, 0x7a, 0x3b, 0xcf
-			};
 			switch_core_session_t *session = NULL;
 			switch_channel_t *channel = NULL;
 			switch_status_t status;
@@ -249,7 +234,7 @@ FST_TEARDOWN_END()
 			static switch_rtp_flag_t flags[SWITCH_RTP_FLAG_INVALID] = { 0 };
 			const char *err = NULL;
 			ice_t ice_params = { 0 };
-			uint8_t tampered[sizeof(authenticated_request)];
+			uint8_t tampered[128];
 			uint8_t missing_username[128];
 			uint8_t wrong_username[128];
 			uint8_t successful_request[128];
@@ -259,6 +244,7 @@ FST_TEARDOWN_END()
 			switch_size_t missing_username_len;
 			switch_size_t wrong_username_len;
 			switch_size_t successful_request_len;
+			switch_size_t no_use_candidate_len;
 			switch_sockaddr_t *remote_addr;
 			int initial_cand_idx;
 			int initial_chosen;
@@ -282,12 +268,13 @@ FST_TEARDOWN_END()
 			switch_core_media_set_rtp_session(session, SWITCH_MEDIA_TYPE_AUDIO, rtp_session);
 
 			ice.ice_params = &ice_params;
-			ice.user_ice = "evtj:h6vY";
-			ice.ice_user = "h6vY:evtj";
-			ice.pass = "VOkJxbRl1RmTxUk/WvJxBt";
-			ice.rpass = "remote-pass";
+			ice.user_ice = "remoteUfrag:localUfrag";
+			ice.ice_user = "localUfrag:remoteUfrag";
+			ice.pass = "test-local-ice-password";
+			ice.rpass = "test-remote-ice-password";
 			ice.type = ICE_VANILLA | ICE_CONTROLLED;
 			ice.proto = IPR_RTP;
+			ice.prflx_bootstrap_require_use_candidate = 1;
 			ice.initializing = 1;
 			ice.ice_params->chosen[ice.proto] = 0;
 			ice.ice_params->cand_idx[ice.proto] = 1;
@@ -318,25 +305,26 @@ FST_TEARDOWN_END()
 			fst_check(ice.ice_params->chosen[ice.proto] == initial_chosen);
 			fst_check(ice.missed_count == 7);
 
-			memcpy(tampered, authenticated_request, sizeof(tampered));
-			tampered[80] ^= 0x01;
-			switch_rtp_pvt_handle_ice(rtp_session, &ice, tampered, sizeof(tampered));
+			successful_request_len = build_authenticated_request(successful_request, sizeof(successful_request), ice.user_ice, ice.pass, SWITCH_TRUE);
+			memcpy(tampered, successful_request, successful_request_len);
+			tampered[successful_request_len - 28] ^= 0x01;
+			switch_rtp_pvt_handle_ice(rtp_session, &ice, tampered, successful_request_len);
 			fst_check(ice.addr == NULL);
 			fst_check(ice.ice_params->cand_idx[ice.proto] == initial_cand_idx);
 			fst_check(ice.ice_params->chosen[ice.proto] == initial_chosen);
 			fst_check(ice.missed_count == 7);
 
-			memcpy(tampered, authenticated_request, sizeof(tampered));
-			tampered[104] ^= 0x01;
-			switch_rtp_pvt_handle_ice(rtp_session, &ice, tampered, sizeof(tampered));
+			memcpy(tampered, successful_request, successful_request_len);
+			tampered[successful_request_len - 4] ^= 0x01;
+			switch_rtp_pvt_handle_ice(rtp_session, &ice, tampered, successful_request_len);
 			fst_check(ice.addr == NULL);
 			fst_check(ice.ice_params->cand_idx[ice.proto] == initial_cand_idx);
 			fst_check(ice.ice_params->chosen[ice.proto] == initial_chosen);
 			fst_check(ice.missed_count == 7);
 
-			memcpy(tampered, authenticated_request, sizeof(tampered));
-			fst_check(switch_stun_packet_validate_auth(tampered, sizeof(tampered), ice.pass));
-			switch_rtp_pvt_handle_ice(rtp_session, &ice, tampered, sizeof(tampered));
+			no_use_candidate_len = build_authenticated_request(tampered, sizeof(tampered), ice.user_ice, ice.pass, SWITCH_FALSE);
+			fst_check(switch_stun_packet_validate_auth(tampered, (uint32_t)no_use_candidate_len, ice.pass));
+			switch_rtp_pvt_handle_ice(rtp_session, &ice, tampered, no_use_candidate_len);
 
 			fst_check(!ice.ready);
 			fst_check(!ice.rready);
@@ -346,7 +334,6 @@ FST_TEARDOWN_END()
 			fst_check(ice.ice_params->chosen[ice.proto] == initial_chosen);
 			fst_check(ice.missed_count == 7);
 
-			successful_request_len = build_authenticated_request(successful_request, sizeof(successful_request), ice.user_ice, ice.pass, SWITCH_TRUE);
 			fst_check(switch_stun_packet_validate_auth(successful_request, (uint32_t)successful_request_len, ice.pass));
 			switch_rtp_pvt_handle_ice(rtp_session, &ice, successful_request, successful_request_len);
 			fst_check(ice.ready);

@@ -209,6 +209,7 @@ struct switch_rtp_engine_s {
 	switch_thread_id_t thread_id;
 	switch_thread_id_t thread_write_lock;
 	uint8_t new_ice;
+	uint8_t ice_restart_pending;
 	uint8_t new_dtls;
 	uint32_t sdp_bw;
 	uint32_t orig_bitrate;
@@ -4874,7 +4875,10 @@ static void clear_ice(switch_core_session_t *session, switch_media_type_t type)
 	engine->remote_rtcp_port = 0;
 
 	if (engine->rtp_session) {
+		engine->ice_restart_pending = type == SWITCH_MEDIA_TYPE_AUDIO;
 		switch_rtp_reset(engine->rtp_session);
+	} else {
+		engine->ice_restart_pending = 0;
 	}
 
 }
@@ -11307,6 +11311,51 @@ SWITCH_DECLARE(void) switch_core_session_wake_video_thread(switch_core_session_t
 	}
 }
 
+static switch_status_t activate_audio_ice(switch_core_session_t *session, switch_rtp_engine_t *engine, int provisional)
+{
+	switch_status_t status;
+
+	if (!session || !engine || !engine->rtp_session) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	gen_ice(session, SWITCH_MEDIA_TYPE_AUDIO, NULL, 0);
+
+	if (zstr(engine->ice_in.ufrag) || zstr(engine->ice_in.pwd) ||
+		zstr(engine->ice_out.ufrag) || zstr(engine->ice_out.pwd)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+						  "Cannot activate Audio ICE without complete credentials\n");
+		return SWITCH_STATUS_FALSE;
+	}
+
+	status = switch_rtp_activate_ice(engine->rtp_session,
+								 engine->ice_in.ufrag,
+								 engine->ice_out.ufrag,
+								 engine->ice_out.pwd,
+								 engine->ice_in.pwd,
+								 IPR_RTP,
+#ifdef GOOGLE_ICE
+								 ICE_GOOGLE_JINGLE,
+								 NULL
+#else
+								 switch_determine_ice_type(engine, session),
+								 &engine->ice_in
+#endif
+								 );
+
+	if (status == SWITCH_STATUS_SUCCESS) {
+		engine->ice_restart_pending = 0;
+		if (provisional) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+							  "Armed Audio ICE for peer-reflexive bootstrap\n");
+		} else {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Activating Audio ICE\n");
+		}
+	}
+
+	return status;
+}
+
 static void check_dtls_reinvite(switch_core_session_t *session, switch_rtp_engine_t *engine)
 {
 	if (switch_channel_test_flag(session->channel, CF_REINVITE) && engine->new_dtls) {
@@ -11359,6 +11408,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 	switch_media_handle_t *smh;
 	int is_reinvite = 0;
 	int provisional_audio_ice = 0;
+	int reactivate_audio_ice = 0;
 
 #ifdef HAVE_OPENSSL_DTLSv1_2_method
 			uint8_t want_DTLSv1_2 = 1;
@@ -11517,11 +11567,35 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 		//const char *port = switch_channel_get_variable(session->channel, SWITCH_LOCAL_MEDIA_PORT_VARIABLE);
 		char *remote_host = switch_rtp_get_remote_host(a_engine->rtp_session);
 		switch_port_t remote_port = switch_rtp_get_remote_port(a_engine->rtp_session);
+		switch_bool_t candidate_ready;
+		switch_bool_t has_remote_ice;
+
+		candidate_ready = a_engine->ice_in.cands[a_engine->ice_in.chosen[0]][0].ready ? SWITCH_TRUE : SWITCH_FALSE;
+		has_remote_ice = !zstr(a_engine->ice_in.ufrag) && !zstr(a_engine->ice_in.pwd) ? SWITCH_TRUE : SWITCH_FALSE;
+		if (!has_remote_ice) {
+			a_engine->ice_restart_pending = 0;
+		}
+		provisional_audio_ice = !candidate_ready && switch_channel_var_true(session->channel, "rtp_ice_prflx_bootstrap");
+		reactivate_audio_ice = a_engine->ice_restart_pending && has_remote_ice &&
+			(candidate_ready || provisional_audio_ice);
 
 		if (remote_host && remote_port && !strcmp(remote_host, a_engine->cur_payload_map->remote_sdp_ip) &&
 			remote_port == a_engine->cur_payload_map->remote_sdp_port) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Audio params are unchanged for %s.\n",
-							  switch_channel_get_name(session->channel));
+			if (reactivate_audio_ice) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+								  "Audio params are unchanged for %s; reactivating ICE.\n",
+								  switch_channel_get_name(session->channel));
+				audio_ice_status = activate_audio_ice(session, a_engine, provisional_audio_ice);
+				if (audio_ice_status == SWITCH_STATUS_SUCCESS) {
+					a_engine->new_ice = 0;
+				} else {
+					status = audio_ice_status;
+					goto end;
+				}
+			} else {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Audio params are unchanged for %s.\n",
+								  switch_channel_get_name(session->channel));
+			}
 			a_engine->cur_payload_map->negotiated = 1;
 
 			if (session && a_engine) {
@@ -11786,35 +11860,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 			switch_channel_var_true(session->channel, "rtp_ice_prflx_bootstrap");
 
 		if (a_engine->ice_in.cands[a_engine->ice_in.chosen[0]][0].ready || provisional_audio_ice) {
-
-			gen_ice(session, SWITCH_MEDIA_TYPE_AUDIO, NULL, 0);
-
-
-			audio_ice_status = switch_rtp_activate_ice(a_engine->rtp_session,
-									a_engine->ice_in.ufrag,
-									a_engine->ice_out.ufrag,
-									a_engine->ice_out.pwd,
-									a_engine->ice_in.pwd,
-									IPR_RTP,
-#ifdef GOOGLE_ICE
-									ICE_GOOGLE_JINGLE,
-									NULL
-#else
-									switch_determine_ice_type(a_engine, session),
-									&a_engine->ice_in
-#endif
-									);
-			if (audio_ice_status == SWITCH_STATUS_SUCCESS) {
-				if (a_engine->ice_in.cands[a_engine->ice_in.chosen[0]][0].ready) {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Activating Audio ICE\n");
-				} else {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-						"Armed Audio ICE for peer-reflexive bootstrap\n");
-				}
-			}
-
-
-
+			audio_ice_status = activate_audio_ice(session, a_engine, provisional_audio_ice);
 		}
 
 		if ((val = switch_channel_get_variable(session->channel, "rtcp_audio_interval_msec")) || (val = smh->mparams->rtcp_audio_interval_msec)) {
