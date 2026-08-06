@@ -1788,6 +1788,11 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 							switch_core_session_reset(session, SWITCH_TRUE, SWITCH_TRUE);
 						}
 						send_record_stop_event(channel, &read_impl, rh);
+
+						if (rh->file && switch_channel_get_private(channel, rh->file) == bug) {
+							switch_channel_set_private(channel, rh->file, NULL);
+						}
+
 						record_helper_destroy(&rh, session);
 
 						return SWITCH_FALSE;
@@ -1841,6 +1846,15 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 
 			send_record_stop_event(channel, &read_impl, rh);
 			record_helper_post_process(rh, session);
+
+			/* Drop the channel-private handle if it still points at this bug,
+			 * so a stopped/closed recording never leaves a dangling handle
+			 * behind (which would both crash by-name operations and block
+			 * re-recording the same file on this channel). */
+			if (rh->file && switch_channel_get_private(channel, rh->file) == bug) {
+				switch_channel_set_private(channel, rh->file, NULL);
+			}
+
 			record_helper_destroy(&rh, session);
 		}
 
@@ -2089,8 +2103,15 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_stop_record_session(switch_core_sessi
 	if (!strcasecmp(file, "all")) {
 		return switch_core_media_bug_remove_callback(session, record_callback);
 	} else if ((bug = switch_channel_get_private(channel, file))) {
-		switch_core_media_bug_remove(session, &bug);
-		return SWITCH_STATUS_SUCCESS;
+		/* Propagate the real status: with a stale handle (e.g. after the
+		 * recording was transferred to another session) the bug is not in this
+		 * session's list and nothing is removed - reporting SUCCESS here used
+		 * to hide that. Clear the handle once the bug is actually gone. */
+		switch_status_t status = switch_core_media_bug_remove(session, &bug);
+		if (status == SWITCH_STATUS_SUCCESS) {
+			switch_channel_set_private(channel, file, NULL);
+		}
+		return status;
 	}
 	return SWITCH_STATUS_FALSE;
 }

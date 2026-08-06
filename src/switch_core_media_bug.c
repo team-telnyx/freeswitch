@@ -1168,6 +1168,15 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_transfer_callback(switch_c
 			if ((switch_core_media_bug_add(new_session, cur->function, cur->target, cur->callback,
 										   user_data_dup_func(new_session, cur->user_data),
 										   cur->stop_time, cur->flags, &new_bug) == SWITCH_STATUS_SUCCESS)) {
+				/* Move the channel-private handle along with the bug. The old
+				 * bug is destroyed below, so a handle left on the old channel
+				 * would dangle (and block re-recording the same file there),
+				 * while the new owner would have no handle at all - making the
+				 * recording unaddressable by name (stop/pause/mask). */
+				if (!zstr(cur->target)) {
+					switch_channel_set_private(orig_session->channel, cur->target, NULL);
+					switch_channel_set_private(new_session->channel, cur->target, new_bug);
+				}
 				switch_core_media_bug_destroy(&cur);
 				total++;
 			} else {
