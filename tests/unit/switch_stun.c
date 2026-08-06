@@ -127,6 +127,78 @@ FST_TEARDOWN_END()
 		fst_check(!switch_stun_packet_validate_auth(late_use_candidate, (uint32_t)late_use_candidate_len, generated_password));
 	}
 	FST_TEST_END()
+	FST_TEST_BEGIN(test_restart_prflx_requires_explicit_authenticated_current_generation)
+	{
+		switch_rtp_ice_t ice = { 0 };
+		switch_time_t now = 10000000;
+
+		fst_check(!switch_rtp_pvt_restart_prflx_allowed(&ice, DS_READY, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE,
+			SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, 5000, now));
+
+		ice.restart_provisional = 1;
+		ice.restart_provisional_us = now - 1000;
+		fst_check(switch_rtp_pvt_restart_prflx_allowed(&ice, DS_READY, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE,
+			SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, 5000, now));
+		fst_check(!switch_rtp_pvt_restart_prflx_allowed(&ice, DS_HANDSHAKE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE,
+			SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, 5000, now));
+		fst_check(!switch_rtp_pvt_restart_prflx_allowed(&ice, DS_READY, SWITCH_FALSE, SWITCH_TRUE, SWITCH_TRUE,
+			SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, 5000, now));
+		fst_check(!switch_rtp_pvt_restart_prflx_allowed(&ice, DS_READY, SWITCH_TRUE, SWITCH_FALSE, SWITCH_TRUE,
+			SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, 5000, now));
+		fst_check(!switch_rtp_pvt_restart_prflx_allowed(&ice, DS_READY, SWITCH_TRUE, SWITCH_TRUE, SWITCH_FALSE,
+			SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, 5000, now));
+		fst_check(!switch_rtp_pvt_restart_prflx_allowed(&ice, DS_READY, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE,
+			SWITCH_FALSE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, 5000, now));
+		fst_check(!switch_rtp_pvt_restart_prflx_allowed(&ice, DS_READY, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE,
+			SWITCH_TRUE, SWITCH_FALSE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, 5000, now));
+		fst_check(!switch_rtp_pvt_restart_prflx_allowed(&ice, DS_READY, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE,
+			SWITCH_TRUE, SWITCH_TRUE, SWITCH_FALSE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, 5000, now));
+		fst_check(!switch_rtp_pvt_restart_prflx_allowed(&ice, DS_READY, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE,
+			SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_FALSE, SWITCH_TRUE, SWITCH_TRUE, 5000, now));
+		fst_check(!switch_rtp_pvt_restart_prflx_allowed(&ice, DS_READY, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE,
+			SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_FALSE, SWITCH_TRUE, 5000, now));
+		fst_check(!switch_rtp_pvt_restart_prflx_allowed(&ice, DS_READY, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE,
+			SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_FALSE, 5000, now));
+
+		ice.restart_provisional_us = now - 6000000;
+		fst_check(!switch_rtp_pvt_restart_prflx_allowed(&ice, DS_READY, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE,
+			SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, 5000, now));
+		fst_check(!ice.restart_provisional);
+		fst_check(!ice.restart_provisional_us);
+
+		ice.restart_provisional = 1;
+		ice.restart_provisional_us = now + 1;
+		fst_check(!switch_rtp_pvt_restart_prflx_allowed(&ice, DS_READY, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE,
+			SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, 5000, now));
+		fst_check(!ice.restart_provisional);
+		fst_check(!ice.restart_provisional_us);
+	}
+	FST_TEST_END()
+	FST_TEST_BEGIN(test_preserve_active_dtls_tuple_requires_exact_current_peer)
+	{
+		switch_memory_pool_t *pool = NULL;
+		switch_sockaddr_t *current_addr = NULL;
+		switch_sockaddr_t *different_port_addr = NULL;
+		switch_sockaddr_t *handshake_peer_addr = NULL;
+
+		fst_xcheck(switch_core_new_memory_pool(&pool) == SWITCH_STATUS_SUCCESS, "switch_core_new_memory_pool()");
+		fst_xcheck(switch_sockaddr_info_get(&current_addr, "192.0.2.10", SWITCH_UNSPEC, 40000, 0, pool) == SWITCH_STATUS_SUCCESS,
+			"current address");
+		fst_xcheck(switch_sockaddr_info_get(&different_port_addr, "192.0.2.10", SWITCH_UNSPEC, 40002, 0, pool) == SWITCH_STATUS_SUCCESS,
+			"different-port address");
+		fst_xcheck(switch_sockaddr_info_get(&handshake_peer_addr, "192.0.2.10", SWITCH_UNSPEC, 40000, 0, pool) == SWITCH_STATUS_SUCCESS,
+			"handshake peer address");
+
+		fst_check(switch_rtp_pvt_should_preserve_active_dtls_tuple(current_addr, handshake_peer_addr, DS_HANDSHAKE, SWITCH_TRUE, SWITCH_FALSE));
+		fst_check(!switch_rtp_pvt_should_preserve_active_dtls_tuple(different_port_addr, handshake_peer_addr, DS_HANDSHAKE, SWITCH_TRUE, SWITCH_FALSE));
+		fst_check(!switch_rtp_pvt_should_preserve_active_dtls_tuple(current_addr, handshake_peer_addr, DS_OFF, SWITCH_TRUE, SWITCH_FALSE));
+		fst_check(!switch_rtp_pvt_should_preserve_active_dtls_tuple(current_addr, handshake_peer_addr, DS_READY, SWITCH_TRUE, SWITCH_FALSE));
+		fst_check(!switch_rtp_pvt_should_preserve_active_dtls_tuple(current_addr, handshake_peer_addr, DS_HANDSHAKE, SWITCH_FALSE, SWITCH_FALSE));
+		fst_check(!switch_rtp_pvt_should_preserve_active_dtls_tuple(current_addr, handshake_peer_addr, DS_HANDSHAKE, SWITCH_TRUE, SWITCH_TRUE));
+
+		switch_core_destroy_memory_pool(&pool);
+	}
+	FST_TEST_END()
 		FST_SESSION_BEGIN(test_stun_msg)
 		{
 				/* Binding Success Response */

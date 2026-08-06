@@ -41,12 +41,22 @@ typedef struct {
 		uint32_t prflx_bootstrap_ms;
 		int prflx_bootstrap_idx;
 		switch_time_t prflx_bootstrap_us;
+		uint8_t restart_pending;
+		uint8_t restart_provisional;
+		switch_time_t restart_provisional_us;
 } switch_rtp_ice_t;
 
 SWITCH_DECLARE(void) switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *data, switch_size_t len);
 SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_get_ice_state(switch_rtp_t *rtp_session, ice_proto_t proto,
 	char *ice_user, switch_size_t ice_user_len, char *local_pwd, switch_size_t local_pwd_len,
 	char *remote_pwd, switch_size_t remote_pwd_len, switch_bool_t *has_addr);
+SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_should_preserve_active_dtls_tuple(switch_sockaddr_t *current_addr,
+	switch_sockaddr_t *handshake_peer_addr, dtls_state_t dtls_state, switch_bool_t handshake_peer_set, switch_bool_t is_rtcp);
+SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_restart_prflx_allowed(switch_rtp_ice_t *ice, dtls_state_t dtls_state,
+	switch_bool_t provisional_ice, switch_bool_t direct_username_match, switch_bool_t stun_auth_valid,
+	switch_bool_t got_message_integrity, switch_bool_t got_fingerprint, switch_bool_t got_use_candidate,
+	switch_bool_t got_use_candidate_covered, switch_bool_t has_priority, switch_bool_t within_bootstrap_window,
+	uint32_t bootstrap_ms, switch_time_t now);
 
 #endif /* __SWITCH_RTP_PVT_H__ */
 

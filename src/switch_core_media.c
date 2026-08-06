@@ -11334,6 +11334,7 @@ static switch_status_t activate_media_ice(switch_core_session_t *session, switch
 	const char *media_name;
 	switch_status_t status;
 	switch_bool_t activate_rtcp_ice;
+	switch_bool_t explicit_restart;
 
 	if (!session || !engine || !engine->rtp_session ||
 		(type != SWITCH_MEDIA_TYPE_AUDIO && type != SWITCH_MEDIA_TYPE_VIDEO)) {
@@ -11341,15 +11342,19 @@ static switch_status_t activate_media_ice(switch_core_session_t *session, switch
 	}
 
 	media_name = type == SWITCH_MEDIA_TYPE_AUDIO ? "Audio" : "Video";
+	explicit_restart = engine->ice_restart_pending ? SWITCH_TRUE : SWITCH_FALSE;
 	gen_ice(session, type, NULL, 0);
 
 	if (zstr(engine->ice_in.ufrag) || zstr(engine->ice_in.pwd) ||
 		zstr(engine->ice_out.ufrag) || zstr(engine->ice_out.pwd)) {
+		switch_rtp_prepare_ice_restart(engine->rtp_session, IPR_RTP, SWITCH_FALSE);
+		switch_rtp_prepare_ice_restart(engine->rtp_session, IPR_RTCP, SWITCH_FALSE);
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
 						  "Cannot activate %s ICE without complete credentials\n", media_name);
 		return SWITCH_STATUS_FALSE;
 	}
 
+	switch_rtp_prepare_ice_restart(engine->rtp_session, IPR_RTP, explicit_restart);
 	status = switch_rtp_activate_ice(engine->rtp_session,
 								 engine->ice_in.ufrag,
 								 engine->ice_out.ufrag,
@@ -11365,6 +11370,8 @@ static switch_status_t activate_media_ice(switch_core_session_t *session, switch
 #endif
 								 );
 	if (status != SWITCH_STATUS_SUCCESS) {
+		switch_rtp_prepare_ice_restart(engine->rtp_session, IPR_RTP, SWITCH_FALSE);
+		switch_rtp_prepare_ice_restart(engine->rtp_session, IPR_RTCP, SWITCH_FALSE);
 		return status;
 	}
 
@@ -11373,6 +11380,7 @@ static switch_status_t activate_media_ice(switch_core_session_t *session, switch
 		(engine->ice_in.cands[engine->ice_in.chosen[1]][1].ready ||
 		 switch_channel_var_true(session->channel, "rtp_ice_prflx_bootstrap"));
 	if (activate_rtcp_ice) {
+		switch_rtp_prepare_ice_restart(engine->rtp_session, IPR_RTCP, explicit_restart);
 		status = switch_rtp_activate_ice(engine->rtp_session,
 									 engine->ice_in.ufrag,
 									 engine->ice_out.ufrag,
@@ -11388,8 +11396,12 @@ static switch_status_t activate_media_ice(switch_core_session_t *session, switch
 #endif
 									 );
 		if (status != SWITCH_STATUS_SUCCESS) {
+			switch_rtp_prepare_ice_restart(engine->rtp_session, IPR_RTP, SWITCH_FALSE);
+			switch_rtp_prepare_ice_restart(engine->rtp_session, IPR_RTCP, SWITCH_FALSE);
 			return status;
 		}
+	} else {
+		switch_rtp_prepare_ice_restart(engine->rtp_session, IPR_RTCP, SWITCH_FALSE);
 	}
 
 	engine->ice_restart_pending = 0;
