@@ -9566,11 +9566,13 @@ static switch_status_t perform_write(switch_core_session_t *session, switch_fram
 		}
 	}
 
-	if (session->bugs && !(frame->flags & SFF_NOT_AUDIO)) {
+	if (!(frame->flags & SFF_NOT_AUDIO)) {
 		switch_media_bug_t *bp;
 		switch_bool_t ok = SWITCH_TRUE;
 		int prune = 0;
 
+		/* The list head is only read under bug_rwlock; the old bare peek
+		 * raced link/unlink on the transfer path (TELCORE-339). */
 		switch_thread_rwlock_rdlock(session->bug_rwlock);
 
 		for (bp = session->bugs; bp; bp = bp->next) {
@@ -19335,9 +19337,16 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 		need_codec = TRUE;
 	}
 
-	if (session->bugs && !need_codec && !switch_test_flag(session, SSF_MEDIA_BUG_TAP_ONLY)) {
-		do_bugs = TRUE;
-		need_codec = TRUE;
+	if (!need_codec) {
+		/* Gate under bug_rwlock: the bare-pointer peek raced bug link/unlink
+		 * (switch_core_media_bug_add/transfer_callback) and the tap-only flag
+		 * update; TSan flagged both pairs (TELCORE-339). */
+		switch_thread_rwlock_rdlock(session->bug_rwlock);
+		if (session->bugs && !session->bug_tap_only) {
+			do_bugs = TRUE;
+			need_codec = TRUE;
+		}
+		switch_thread_rwlock_unlock(session->bug_rwlock);
 	}
 
 	if (frame->codec->implementation->actual_samples_per_second != session->write_impl.actual_samples_per_second) {
@@ -19554,10 +19563,12 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 
 
 
-	if (session->bugs) {
+	{
 		switch_media_bug_t *bp;
 		int prune = 0;
 
+		/* No bare peek at session->bugs: the head is only read under
+		 * bug_rwlock (raced link/unlink on the transfer path, TELCORE-339). */
 		switch_thread_rwlock_rdlock(session->bug_rwlock);
 		for (bp = session->bugs; bp; bp = bp->next) {
 			switch_bool_t ok = SWITCH_TRUE;
