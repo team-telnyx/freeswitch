@@ -380,13 +380,14 @@ static void *SWITCH_THREAD_FUNC teardown_thread(switch_thread_t *thread, void *o
 		void *rh_before = peek_record_helper(x->a);
 		void *left_a, *left_b;
 		const char *file;
+		int stopped = 0;
 
 		if (!rh_before) {
 			rh_before = peek_record_helper(x->b);
 		}
 
-		if (switch_ivr_stop_record_session(x->a, "all") == SWITCH_STATUS_SUCCESS) x->stops++;
-		if (switch_ivr_stop_record_session(x->b, "all") == SWITCH_STATUS_SUCCESS) x->stops++;
+		if (switch_ivr_stop_record_session(x->a, "all") == SWITCH_STATUS_SUCCESS) { x->stops++; stopped = 1; }
+		if (switch_ivr_stop_record_session(x->b, "all") == SWITCH_STATUS_SUCCESS) { x->stops++; stopped = 1; }
 
 		/* Build-independent oracle. The helper behind rh_before has just been
 		 * freed by record_helper_destroy(). No new helper can exist yet - only
@@ -396,7 +397,11 @@ static void *SWITCH_THREAD_FUNC teardown_thread(switch_thread_t *thread, void *o
 		 * dereference freed memory at switch_ivr_async.c:1551. */
 		left_a = peek_record_helper(x->a);
 		left_b = peek_record_helper(x->b);
-		if (rh_before && (left_a == rh_before || left_b == rh_before)) {
+		/* Only meaningful if a stop actually destroyed something: when the bug
+		 * was mid-transfer, BOTH stops miss it, nothing is freed, and the
+		 * helper legitimately survives - counting that as dangling is a false
+		 * positive (seen once under TSan timing). */
+		if (stopped && rh_before && (left_a == rh_before || left_b == rh_before)) {
 			x->dangling++;
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
 							  "[TEST] DANGLING: helper %p was destroyed but a live bug still "
