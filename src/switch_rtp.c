@@ -1452,6 +1452,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 	int got_message_integrity = 0;
 	int got_fingerprint = 0;
 	uint32_t prflx_bootstrap_ms = 0;
+	uint32_t stun_packet_len = 0;
 	uint16_t raw_packet_type = 0;
 	switch_bool_t provisional_ice = SWITCH_FALSE;
 	switch_bool_t stun_auth_valid = SWITCH_FALSE;
@@ -1518,7 +1519,11 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 
 	calc_elapsed(rtp_session, ice);
 
-	end_buf = buf + ((sizeof(buf) > packet->header.length) ? packet->header.length : sizeof(buf));
+	stun_packet_len = sizeof(switch_stun_packet_header_t) + packet->header.length;
+	if (stun_packet_len > cpylen) {
+		stun_packet_len = (uint32_t)cpylen;
+	}
+	end_buf = buf + stun_packet_len;
 
 	switch_stun_packet_first_attribute(packet, attr);
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG8, "%s STUN PACKET TYPE: %s\n",
