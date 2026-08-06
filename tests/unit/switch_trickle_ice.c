@@ -511,7 +511,7 @@ FCT_BGN()
 		}
 		FCT_TEST_END();
 
-		FCT_TEST_BGN(local_answer_restart_rearms_rtp_and_rtcp_with_unchanged_remote_credentials)
+		FCT_TEST_BGN(local_answer_recovery_with_ready_candidates_avoids_duplicate_ice_activation)
 		{
 			switch_core_session_t *session = NULL;
 			switch_channel_t *channel = NULL;
@@ -556,6 +556,23 @@ FCT_BGN()
 				"a=sendrecv\n"
 				"a=fingerprint:sha-256 17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4\n"
 				"a=mid:0\n";
+			const char *recovery_remote_sdp =
+				"v=0\n"
+				"o=- 1683118194 1683118199 IN IP4 0.0.0.0\n"
+				"s=-\n"
+				"t=0 0\n"
+				"m=audio 18215 UDP/TLS/RTP/SAVPF 0\n"
+				"c=IN IP4 127.0.0.1\n"
+				"a=ice-ufrag:stableRemoteUfrag\n"
+				"a=ice-pwd:stableRemotePassword123456\n"
+				"a=candidate:1 1 udp 2130706431 127.0.0.1 18215 typ host\n"
+				"a=candidate:2 2 udp 2130706430 127.0.0.1 18216 typ host\n"
+				"a=rtcp:18216 IN IP4 127.0.0.1\n"
+				"a=setup:active\n"
+				"a=rtpmap:0 PCMU/8000\n"
+				"a=sendrecv\n"
+				"a=fingerprint:sha-256 18:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4\n"
+				"a=mid:0\n";
 
 			status = make_session_and_rtp_with_sdp_ex(&session, &rtp, &sdp_session, &parser,
 				same_remote_sdp, "PCMU", SWITCH_FALSE, SWITCH_TRUE);
@@ -589,7 +606,7 @@ FCT_BGN()
 			switch_core_media_clear_ice(session);
 			switch_channel_set_flag(channel, CF_REINVITE);
 			switch_channel_set_flag(channel, CF_RECOVERING);
-			match = switch_core_media_negotiate_sdp(session, same_remote_sdp, &proceed, SDP_ANSWER);
+			match = switch_core_media_negotiate_sdp(session, recovery_remote_sdp, &proceed, SDP_ANSWER);
 			fst_requires(match != 0);
 			status = switch_core_media_activate_rtp(session);
 			fst_requires(status == SWITCH_STATUS_SUCCESS);
@@ -623,7 +640,7 @@ FCT_BGN()
 		}
 		FCT_TEST_END();
 
-		FCT_TEST_BGN(restart_ice_rotates_credentials_and_rearms_unchanged_media)
+		FCT_TEST_BGN(recovery_with_provisional_candidates_rearms_prflx_bootstrap)
 		{
 			switch_core_session_t *session = NULL;
 			switch_channel_t *channel = NULL;
@@ -661,7 +678,7 @@ FCT_BGN()
 				"a=setup:active\n"
 				"a=rtpmap:0 PCMU/8000\n"
 				"a=sendrecv\n"
-				"a=fingerprint:sha-256 17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4\n"
+				"a=fingerprint:sha-256 18:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4\n"
 				"a=mid:0\n";
 
 			status = make_session_and_rtp_with_sdp(&session, &rtp, &sdp_session, &parser);
@@ -690,6 +707,7 @@ FCT_BGN()
 
 			switch_core_media_clear_ice(session);
 			switch_channel_set_flag(channel, CF_REINVITE);
+			switch_channel_set_flag(channel, CF_RECOVERING);
 			switch_channel_set_variable(channel, "rtp_ice_prflx_bootstrap", "true");
 			match = switch_core_media_negotiate_sdp(session, restart_sdp, &proceed, SDP_OFFER);
 			fst_requires(match != 0);
@@ -723,7 +741,7 @@ FCT_BGN()
 		}
 		FCT_TEST_END();
 
-		FCT_TEST_BGN(unbundled_video_ready_restart_rearms_rtp_and_rtcp)
+		FCT_TEST_BGN(unbundled_video_ready_recovery_avoids_duplicate_ice_activation)
 		{
 			switch_core_session_t *session = NULL;
 			switch_channel_t *channel = NULL;
@@ -818,6 +836,7 @@ FCT_BGN()
 			switch_channel_clear_flag(channel, CF_VIDEO);
 			switch_core_media_clear_ice(session);
 			switch_channel_set_flag(channel, CF_REINVITE);
+			switch_channel_set_flag(channel, CF_RECOVERING);
 			match = switch_core_media_negotiate_sdp(session, restart_sdp, &proceed, SDP_OFFER);
 			fst_requires(match != 0);
 			switch_core_media_gen_local_sdp(session, SDP_ANSWER, NULL, 0, NULL, 0);
@@ -858,7 +877,7 @@ FCT_BGN()
 		}
 		FCT_TEST_END();
 
-		FCT_TEST_BGN(unbundled_video_provisional_restart_rearms_rtp_and_rtcp)
+		FCT_TEST_BGN(unbundled_video_provisional_recovery_rearms_prflx_bootstrap)
 		{
 			switch_core_session_t *session = NULL;
 			switch_channel_t *channel = NULL;
@@ -946,6 +965,7 @@ FCT_BGN()
 			switch_channel_clear_flag(channel, CF_VIDEO);
 			switch_core_media_clear_ice(session);
 			switch_channel_set_flag(channel, CF_REINVITE);
+			switch_channel_set_flag(channel, CF_RECOVERING);
 			switch_channel_set_variable(channel, "rtp_ice_prflx_bootstrap", "true");
 			match = switch_core_media_negotiate_sdp(session, restart_sdp, &proceed, SDP_OFFER);
 			fst_requires(match != 0);

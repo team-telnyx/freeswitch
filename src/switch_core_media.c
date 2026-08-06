@@ -11643,6 +11643,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 		switch_port_t remote_port = switch_rtp_get_remote_port(a_engine->rtp_session);
 		switch_bool_t candidate_ready;
 		switch_bool_t has_remote_ice;
+		switch_bool_t skip_recovery_audio_ice;
 
 		candidate_ready = a_engine->ice_in.cands[a_engine->ice_in.chosen[0]][0].ready ? SWITCH_TRUE : SWITCH_FALSE;
 		has_remote_ice = !zstr(a_engine->ice_in.ufrag) && !zstr(a_engine->ice_in.pwd) ? SWITCH_TRUE : SWITCH_FALSE;
@@ -11652,8 +11653,16 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 			a_engine->ice_restart_remote_pwd = NULL;
 		}
 		provisional_audio_ice = !candidate_ready && switch_channel_var_true(session->channel, "rtp_ice_prflx_bootstrap");
+		/* Avoid duplicate ICE activation while recovery restarts DTLS. */
+		skip_recovery_audio_ice = a_engine->new_dtls && candidate_ready &&
+			switch_channel_test_flag(session->channel, CF_RECOVERING);
+		if (skip_recovery_audio_ice && a_engine->ice_restart_pending) {
+			a_engine->ice_restart_pending = 0;
+			a_engine->ice_restart_remote_ufrag = NULL;
+			a_engine->ice_restart_remote_pwd = NULL;
+		}
 		reactivate_audio_ice = a_engine->ice_restart_pending && has_remote_ice &&
-			!(a_engine->new_dtls && switch_channel_test_flag(session->channel, CF_RECOVERING)) &&
+			!skip_recovery_audio_ice &&
 			(candidate_ready || provisional_audio_ice);
 
 		if (remote_host && remote_port && !strcmp(remote_host, a_engine->cur_payload_map->remote_sdp_ip) &&
@@ -12473,6 +12482,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 				switch_port_t remote_port = switch_rtp_get_remote_port(v_engine->rtp_session);
 				switch_bool_t candidate_ready;
 				switch_bool_t has_remote_ice;
+				switch_bool_t skip_recovery_video_ice;
 
 				candidate_ready = v_engine->ice_in.cands[v_engine->ice_in.chosen[0]][0].ready ? SWITCH_TRUE : SWITCH_FALSE;
 				has_remote_ice = !zstr(v_engine->ice_in.ufrag) && !zstr(v_engine->ice_in.pwd) ? SWITCH_TRUE : SWITCH_FALSE;
@@ -12483,8 +12493,16 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 				}
 				provisional_video_ice = !candidate_ready &&
 					switch_channel_var_true(session->channel, "rtp_ice_prflx_bootstrap");
+				/* Avoid duplicate ICE activation while recovery restarts DTLS. */
+				skip_recovery_video_ice = v_engine->new_dtls && candidate_ready &&
+					switch_channel_test_flag(session->channel, CF_RECOVERING);
+				if (skip_recovery_video_ice && v_engine->ice_restart_pending) {
+					v_engine->ice_restart_pending = 0;
+					v_engine->ice_restart_remote_ufrag = NULL;
+					v_engine->ice_restart_remote_pwd = NULL;
+				}
 				reactivate_video_ice = v_engine->ice_restart_pending && !v_engine->bundled_with_audio &&
-					has_remote_ice && !(v_engine->new_dtls && switch_channel_test_flag(session->channel, CF_RECOVERING)) &&
+					has_remote_ice && !skip_recovery_video_ice &&
 					(candidate_ready || provisional_video_ice);
 
 				if (remote_host && remote_port && !strcmp(remote_host, v_engine->cur_payload_map->remote_sdp_ip) && remote_port == v_engine->cur_payload_map->remote_sdp_port) {
