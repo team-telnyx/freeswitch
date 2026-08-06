@@ -11652,7 +11652,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 			a_engine->ice_restart_remote_pwd = NULL;
 		}
 		provisional_audio_ice = !candidate_ready && switch_channel_var_true(session->channel, "rtp_ice_prflx_bootstrap");
-		reactivate_audio_ice = a_engine->ice_restart_pending && has_remote_ice && !a_engine->new_dtls &&
+		reactivate_audio_ice = a_engine->ice_restart_pending && has_remote_ice &&
+			!(a_engine->new_dtls && switch_channel_test_flag(session->channel, CF_RECOVERING)) &&
 			(candidate_ready || provisional_audio_ice);
 
 		if (remote_host && remote_port && !strcmp(remote_host, a_engine->cur_payload_map->remote_sdp_ip) &&
@@ -12483,7 +12484,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 				provisional_video_ice = !candidate_ready &&
 					switch_channel_var_true(session->channel, "rtp_ice_prflx_bootstrap");
 				reactivate_video_ice = v_engine->ice_restart_pending && !v_engine->bundled_with_audio &&
-					has_remote_ice && !v_engine->new_dtls && (candidate_ready || provisional_video_ice);
+					has_remote_ice && !(v_engine->new_dtls && switch_channel_test_flag(session->channel, CF_RECOVERING)) &&
+					(candidate_ready || provisional_video_ice);
 
 				if (remote_host && remote_port && !strcmp(remote_host, v_engine->cur_payload_map->remote_sdp_ip) && remote_port == v_engine->cur_payload_map->remote_sdp_port) {
 					if (reactivate_video_ice) {
