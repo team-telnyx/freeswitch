@@ -39,6 +39,44 @@ static switch_status_t copy_sdp_attribute(const char *sdp, const char *attribute
 	return SWITCH_STATUS_SUCCESS;
 }
 
+static switch_status_t copy_sdp_media_attribute(const char *sdp, const char *media, const char *attribute,
+		char *value, switch_size_t value_len)
+{
+	char media_needle[64];
+	char attr_needle[64];
+	const char *section;
+	const char *next_section;
+	const char *start;
+	const char *end;
+	switch_size_t len;
+
+	if (zstr(sdp) || zstr(media) || zstr(attribute) || !value || !value_len) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	switch_snprintf(media_needle, sizeof(media_needle), "m=%s ", media);
+	if (!(section = strstr(sdp, media_needle))) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	next_section = strstr(section + strlen(media_needle), "\nm=");
+	switch_snprintf(attr_needle, sizeof(attr_needle), "a=%s:", attribute);
+	if (!(start = strstr(section, attr_needle)) || (next_section && start > next_section)) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	start += strlen(attr_needle);
+	end = strpbrk(start, "\r\n");
+	len = end ? (switch_size_t)(end - start) : strlen(start);
+	if (!len || len >= value_len) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	memcpy(value, start, len);
+	value[len] = '\0';
+	return SWITCH_STATUS_SUCCESS;
+}
+
 typedef struct trickle_captured_s {
 	int called;
 	int last_mline;
@@ -140,14 +178,14 @@ static void cleanup_session_and_media(switch_core_session_t *session)
 
 	if (!session) return;
 
-	/* Clean up media handle and RTP sessions to free DTLS contexts */
+	switch_channel_clear_flag(switch_core_session_get_channel(session), CF_VIDEO_PASSIVE);
+	switch_core_session_wake_video_thread(session);
+	switch_channel_hangup(switch_core_session_get_channel(session), SWITCH_CAUSE_NORMAL_CLEARING);
 	smh = switch_core_session_get_media_handle(session);
 	if (smh) {
-		/* Deactivate RTP which will call switch_rtp_destroy internally */
 		switch_core_media_deactivate_rtp(session);
 	}
 
-	switch_channel_hangup(switch_core_session_get_channel(session), SWITCH_CAUSE_NORMAL_CLEARING);
 	switch_core_session_rwunlock(session);
 }
 
@@ -160,10 +198,14 @@ static void cleanup_session_media_and_sdp(switch_core_session_t *session, void *
 	cleanup_session_and_media(session);
 }
 
-static switch_status_t make_session_and_rtp_with_sdp(switch_core_session_t **out_session,
-                                                      switch_rtp_t **out_rtp,
-                                                      void **out_sdp_session,
-                                                      sdp_parser_t **out_parser)
+static switch_status_t make_session_and_rtp_with_sdp_ex(switch_core_session_t **out_session,
+                                                         switch_rtp_t **out_rtp,
+                                                         void **out_sdp_session,
+                                                         sdp_parser_t **out_parser,
+                                                         const char *offer_sdp,
+                                                         const char *codec_string,
+                                                         switch_bool_t use_bundle,
+                                                         switch_bool_t activate_rtp)
 {
 	switch_status_t st;
 	switch_call_cause_t cause = SWITCH_CAUSE_NONE, cancel = SWITCH_CAUSE_NONE;
@@ -174,6 +216,7 @@ static switch_status_t make_session_and_rtp_with_sdp(switch_core_session_t **out
 	switch_channel_t *chan = NULL;
 	char *r_sdp;
 	uint8_t match = 0, p = 0;
+	const char *selected_codec = zstr(codec_string) ? "PCMU" : codec_string;
 
 	const char *br = "{"
 		"absolute_codec_string=PCMU,"
@@ -206,8 +249,8 @@ static switch_status_t make_session_and_rtp_with_sdp(switch_core_session_t **out
 	chan = switch_core_session_get_channel(session);
 
 	mparams = switch_core_session_alloc(session, sizeof(switch_core_media_params_t));
-	mparams->inbound_codec_string = switch_core_session_strdup(session, "PCMU");
-	mparams->outbound_codec_string = switch_core_session_strdup(session, "PCMU");
+	mparams->inbound_codec_string = switch_core_session_strdup(session, selected_codec);
+	mparams->outbound_codec_string = switch_core_session_strdup(session, selected_codec);
 	mparams->rtpip = switch_core_session_strdup(session, (char *)rx_host);
 	mparams->rtpip4 = switch_core_session_strdup(session, (char *)rx_host);
 
@@ -217,7 +260,8 @@ static switch_status_t make_session_and_rtp_with_sdp(switch_core_session_t **out
 		return SWITCH_STATUS_FALSE;
 	}
 
-	switch_channel_set_variable(chan, "absolute_codec_string", "PCMU");
+	switch_channel_set_variable(chan, "absolute_codec_string", selected_codec);
+	switch_channel_set_variable(chan, "rtp_use_bundle", use_bundle ? "true" : "false");
 	switch_channel_set_variable(chan, "send_silence_when_idle", "-1");
 	switch_channel_set_variable(chan, "rtp_timer_name", "soft");
 	switch_channel_set_variable(chan, "media_timeout", "1000");
@@ -249,6 +293,10 @@ static switch_status_t make_session_and_rtp_with_sdp(switch_core_session_t **out
 			"a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid\n"
 			"a=msid:de61dc02-51d0-4164-9d7a-b74141a4548e 9dc86822-54a5-4506-8476-9be2238be778\n"
 			"a=rtcp-rsize\n");
+
+	if (!zstr(offer_sdp)) {
+		r_sdp = switch_core_session_strdup(session, offer_sdp);
+	}
 
 	if (switch_core_media_prepare_codecs(session, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to prepare codecs\n");
@@ -293,14 +341,14 @@ static switch_status_t make_session_and_rtp_with_sdp(switch_core_session_t **out
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to choose ports\n");
 		goto fail;
 	}
-	if (switch_core_media_activate_rtp(session) != SWITCH_STATUS_SUCCESS) {
+	if (activate_rtp && switch_core_media_activate_rtp(session) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to activate RTP\n");
 		goto fail;
 	}
 
 	*out_session = session;
-	*out_rtp = switch_core_media_get_rtp_session(session, SWITCH_MEDIA_TYPE_AUDIO);
-	if (!*out_rtp) {
+	*out_rtp = activate_rtp ? switch_core_media_get_rtp_session(session, SWITCH_MEDIA_TYPE_AUDIO) : NULL;
+	if (activate_rtp && !*out_rtp) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to get RTP session\n");
 		goto fail;
 	}
@@ -311,6 +359,15 @@ fail:
 	switch_channel_hangup(switch_core_session_get_channel(session), SWITCH_CAUSE_NORMAL_CLEARING);
 	switch_core_session_rwunlock(session);
 	return SWITCH_STATUS_FALSE;
+}
+
+static switch_status_t make_session_and_rtp_with_sdp(switch_core_session_t **out_session,
+                                                      switch_rtp_t **out_rtp,
+                                                      void **out_sdp_session,
+                                                      sdp_parser_t **out_parser)
+{
+	return make_session_and_rtp_with_sdp_ex(out_session, out_rtp, out_sdp_session, out_parser,
+		NULL, "PCMU", SWITCH_TRUE, SWITCH_TRUE);
 }
 
 static volatile int trickle_ev_seen = 0;
@@ -359,9 +416,10 @@ FCT_BGN()
 		}
 		FCT_TEARDOWN_END();
 
-		FCT_TEST_BGN(same_generation_trickle_preserves_credentials)
+		FCT_TEST_BGN(same_generation_clear_preserves_credentials_and_rearms_unchanged_media)
 		{
 			switch_core_session_t *session = NULL;
+			switch_channel_t *channel = NULL;
 			switch_media_handle_t *smh = NULL;
 			switch_rtp_t *rtp = NULL;
 			switch_status_t status;
@@ -370,15 +428,41 @@ FCT_BGN()
 			char initial_ice_user[256] = "";
 			char initial_local_pwd[256] = "";
 			char initial_remote_pwd[256] = "";
-			char trickled_ice_user[256] = "";
-			char trickled_local_pwd[256] = "";
-			char trickled_remote_pwd[256] = "";
+			char rearmed_ice_user[256] = "";
+			char rearmed_local_pwd[256] = "";
+			char rearmed_remote_pwd[256] = "";
+			char answer_local_ufrag[256] = "";
+			char answer_local_pwd[256] = "";
+			const char *initial_local_ufrag;
+			const char *rearmed_local_ufrag;
+			const char *local_sdp;
 			switch_bool_t has_addr = SWITCH_FALSE;
+			uint8_t match;
+			uint8_t proceed = 0;
+			const char *same_generation_sdp =
+				"v=0\n"
+				"o=- 1683118194 1683118197 IN IP4 0.0.0.0\n"
+				"s=-\n"
+				"t=0 0\n"
+				"a=group:BUNDLE 0\n"
+				"m=audio 18215 UDP/TLS/RTP/SAVPF 0\n"
+				"c=IN IP4 50.114.144.39\n"
+				"a=ice-ufrag:aZJpsl00bYnjrOZtkCFMtKhFC/CHAfcv\n"
+				"a=ice-pwd:aNniSnLLp43SSsJrz6TNPty1zPrxZNzh\n"
+				"a=ice-options:trickle\n"
+				"a=candidate:265031753 1 udp 1685921533 50.114.144.39 18215 typ srflx raddr 100.69.211.204 rport 54081\n"
+				"a=rtcp-mux\n"
+				"a=setup:active\n"
+				"a=rtpmap:0 PCMU/8000\n"
+				"a=sendrecv\n"
+				"a=fingerprint:sha-256 17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4\n"
+				"a=mid:0\n";
 
 			status = make_session_and_rtp_with_sdp(&session, &rtp, &sdp_session, &parser);
 			fst_requires(status == SWITCH_STATUS_SUCCESS && session && rtp && sdp_session && parser);
+			channel = switch_core_session_get_channel(session);
 			smh = switch_core_session_get_media_handle(session);
-			fst_requires(smh != NULL);
+			fst_requires(channel != NULL && smh != NULL);
 
 			status = switch_core_media_trickle_remote_candidate_and_recheck(
 				session, smh, sdp_session, SDP_TYPE_REQUEST, "0", 0,
@@ -389,24 +473,151 @@ FCT_BGN()
 				initial_local_pwd, sizeof(initial_local_pwd),
 				initial_remote_pwd, sizeof(initial_remote_pwd), &has_addr);
 			fst_requires(status == SWITCH_STATUS_SUCCESS);
-			fst_requires(initial_ice_user[0] != '\0' && initial_local_pwd[0] != '\0' && initial_remote_pwd[0] != '\0');
+			initial_local_ufrag = strchr(initial_ice_user, ':');
+			fst_requires(initial_local_ufrag != NULL && initial_local_ufrag[1] != '\0');
+			initial_local_ufrag++;
 			fst_check(has_addr == SWITCH_TRUE);
 
-			status = switch_core_media_trickle_remote_candidate_and_recheck(
-				session, smh, sdp_session, SDP_TYPE_REQUEST, "0", 0,
-				"candidate:265031754 1 udp 1685921534 50.114.144.40 18216 typ srflx raddr 100.69.211.204 rport 54081", 0);
+			switch_core_media_clear_ice(session);
+			switch_channel_set_flag(channel, CF_REINVITE);
+			match = switch_core_media_negotiate_sdp(session, same_generation_sdp, &proceed, SDP_OFFER);
+			fst_requires(match != 0);
+			switch_core_media_gen_local_sdp(session, SDP_ANSWER, NULL, 0, NULL, 0);
+			local_sdp = switch_channel_get_variable(channel, "rtp_local_sdp_str");
+			fst_requires(copy_sdp_attribute(local_sdp, "ice-ufrag", answer_local_ufrag,
+				sizeof(answer_local_ufrag)) == SWITCH_STATUS_SUCCESS);
+			fst_requires(copy_sdp_attribute(local_sdp, "ice-pwd", answer_local_pwd,
+				sizeof(answer_local_pwd)) == SWITCH_STATUS_SUCCESS);
+			status = switch_core_media_activate_rtp(session);
 			fst_requires(status == SWITCH_STATUS_SUCCESS);
 
 			has_addr = SWITCH_FALSE;
 			status = switch_rtp_pvt_get_ice_state(rtp, IPR_RTP,
-				trickled_ice_user, sizeof(trickled_ice_user),
-				trickled_local_pwd, sizeof(trickled_local_pwd),
-				trickled_remote_pwd, sizeof(trickled_remote_pwd), &has_addr);
+				rearmed_ice_user, sizeof(rearmed_ice_user),
+				rearmed_local_pwd, sizeof(rearmed_local_pwd),
+				rearmed_remote_pwd, sizeof(rearmed_remote_pwd), &has_addr);
 			fst_requires(status == SWITCH_STATUS_SUCCESS);
-			fst_check_string_equals(trickled_ice_user, initial_ice_user);
-			fst_check_string_equals(trickled_local_pwd, initial_local_pwd);
-			fst_check_string_equals(trickled_remote_pwd, initial_remote_pwd);
+			rearmed_local_ufrag = strchr(rearmed_ice_user, ':');
+			fst_requires(rearmed_local_ufrag != NULL && rearmed_local_ufrag[1] != '\0');
+			rearmed_local_ufrag++;
+			fst_check_string_equals(rearmed_ice_user, initial_ice_user);
+			fst_check_string_equals(rearmed_local_pwd, initial_local_pwd);
+			fst_check_string_equals(rearmed_remote_pwd, initial_remote_pwd);
+			fst_check_string_equals(answer_local_ufrag, initial_local_ufrag);
+			fst_check_string_equals(answer_local_pwd, initial_local_pwd);
 			fst_check(has_addr == SWITCH_TRUE);
+
+			cleanup_session_media_and_sdp(session, sdp_session, parser);
+		}
+		FCT_TEST_END();
+
+		FCT_TEST_BGN(local_answer_restart_rearms_rtp_and_rtcp_with_unchanged_remote_credentials)
+		{
+			switch_core_session_t *session = NULL;
+			switch_channel_t *channel = NULL;
+			switch_rtp_t *rtp = NULL;
+			void *sdp_session = NULL;
+			sdp_parser_t *parser = NULL;
+			switch_status_t status;
+			uint8_t match;
+			uint8_t proceed = 0;
+			char initial_rtp_user[256] = "";
+			char initial_rtp_local_pwd[256] = "";
+			char initial_rtp_remote_pwd[256] = "";
+			char initial_rtcp_user[256] = "";
+			char initial_rtcp_local_pwd[256] = "";
+			char initial_rtcp_remote_pwd[256] = "";
+			char offered_local_ufrag[256] = "";
+			char offered_local_pwd[256] = "";
+			char restarted_rtp_user[256] = "";
+			char restarted_rtp_local_pwd[256] = "";
+			char restarted_rtp_remote_pwd[256] = "";
+			char restarted_rtcp_user[256] = "";
+			char restarted_rtcp_local_pwd[256] = "";
+			char restarted_rtcp_remote_pwd[256] = "";
+			const char *initial_local_ufrag;
+			const char *restarted_local_ufrag;
+			const char *local_sdp;
+			switch_bool_t has_addr = SWITCH_FALSE;
+			const char *same_remote_sdp =
+				"v=0\n"
+				"o=- 1683118194 1683118198 IN IP4 0.0.0.0\n"
+				"s=-\n"
+				"t=0 0\n"
+				"m=audio 18215 UDP/TLS/RTP/SAVPF 0\n"
+				"c=IN IP4 127.0.0.1\n"
+				"a=ice-ufrag:stableRemoteUfrag\n"
+				"a=ice-pwd:stableRemotePassword123456\n"
+				"a=candidate:1 1 udp 2130706431 127.0.0.1 18215 typ host\n"
+				"a=candidate:2 2 udp 2130706430 127.0.0.1 18216 typ host\n"
+				"a=rtcp:18216 IN IP4 127.0.0.1\n"
+				"a=setup:active\n"
+				"a=rtpmap:0 PCMU/8000\n"
+				"a=sendrecv\n"
+				"a=fingerprint:sha-256 17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4\n"
+				"a=mid:0\n";
+
+			status = make_session_and_rtp_with_sdp_ex(&session, &rtp, &sdp_session, &parser,
+				same_remote_sdp, "PCMU", SWITCH_FALSE, SWITCH_TRUE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS && session && rtp && sdp_session && parser);
+			channel = switch_core_session_get_channel(session);
+			fst_requires(channel != NULL);
+
+			status = switch_rtp_pvt_get_ice_state(rtp, IPR_RTP,
+				initial_rtp_user, sizeof(initial_rtp_user), initial_rtp_local_pwd, sizeof(initial_rtp_local_pwd),
+				initial_rtp_remote_pwd, sizeof(initial_rtp_remote_pwd), &has_addr);
+			fst_requires(status == SWITCH_STATUS_SUCCESS && has_addr == SWITCH_TRUE);
+			initial_local_ufrag = strchr(initial_rtp_user, ':');
+			fst_requires(initial_local_ufrag != NULL && initial_local_ufrag[1] != '\0');
+			initial_local_ufrag++;
+			has_addr = SWITCH_FALSE;
+			status = switch_rtp_pvt_get_ice_state(rtp, IPR_RTCP,
+				initial_rtcp_user, sizeof(initial_rtcp_user), initial_rtcp_local_pwd, sizeof(initial_rtcp_local_pwd),
+				initial_rtcp_remote_pwd, sizeof(initial_rtcp_remote_pwd), &has_addr);
+			fst_requires(status == SWITCH_STATUS_SUCCESS && has_addr == SWITCH_TRUE);
+
+			switch_core_session_stop_media(session);
+			switch_core_media_gen_local_sdp(session, SDP_OFFER, NULL, 0, NULL, 0);
+			local_sdp = switch_channel_get_variable(channel, "rtp_local_sdp_str");
+			fst_requires(copy_sdp_attribute(local_sdp, "ice-ufrag", offered_local_ufrag,
+				sizeof(offered_local_ufrag)) == SWITCH_STATUS_SUCCESS);
+			fst_requires(copy_sdp_attribute(local_sdp, "ice-pwd", offered_local_pwd,
+				sizeof(offered_local_pwd)) == SWITCH_STATUS_SUCCESS);
+			fst_check(strcmp(offered_local_ufrag, initial_local_ufrag) != 0);
+			fst_check(strcmp(offered_local_pwd, initial_rtp_local_pwd) != 0);
+
+			switch_core_media_clear_ice(session);
+			switch_channel_set_flag(channel, CF_REINVITE);
+			switch_channel_set_flag(channel, CF_RECOVERING);
+			match = switch_core_media_negotiate_sdp(session, same_remote_sdp, &proceed, SDP_ANSWER);
+			fst_requires(match != 0);
+			status = switch_core_media_activate_rtp(session);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+
+			has_addr = SWITCH_FALSE;
+			status = switch_rtp_pvt_get_ice_state(rtp, IPR_RTP,
+				restarted_rtp_user, sizeof(restarted_rtp_user), restarted_rtp_local_pwd, sizeof(restarted_rtp_local_pwd),
+				restarted_rtp_remote_pwd, sizeof(restarted_rtp_remote_pwd), &has_addr);
+			fst_requires(status == SWITCH_STATUS_SUCCESS && has_addr == SWITCH_TRUE);
+			restarted_local_ufrag = strchr(restarted_rtp_user, ':');
+			fst_requires(restarted_local_ufrag != NULL && restarted_local_ufrag[1] != '\0');
+			restarted_local_ufrag++;
+			fst_check(!strncmp(restarted_rtp_user, "stableRemoteUfrag:", strlen("stableRemoteUfrag:")));
+			fst_check_string_equals(restarted_rtp_remote_pwd, "stableRemotePassword123456");
+			fst_check_string_equals(restarted_local_ufrag, offered_local_ufrag);
+			fst_check_string_equals(restarted_rtp_local_pwd, offered_local_pwd);
+
+			has_addr = SWITCH_FALSE;
+			status = switch_rtp_pvt_get_ice_state(rtp, IPR_RTCP,
+				restarted_rtcp_user, sizeof(restarted_rtcp_user), restarted_rtcp_local_pwd, sizeof(restarted_rtcp_local_pwd),
+				restarted_rtcp_remote_pwd, sizeof(restarted_rtcp_remote_pwd), &has_addr);
+			fst_requires(status == SWITCH_STATUS_SUCCESS && has_addr == SWITCH_TRUE);
+			fst_check_string_equals(restarted_rtcp_user, restarted_rtp_user);
+			fst_check_string_equals(restarted_rtcp_local_pwd, offered_local_pwd);
+			fst_check_string_equals(restarted_rtcp_remote_pwd, "stableRemotePassword123456");
+			fst_check(strcmp(restarted_rtcp_user, initial_rtcp_user) != 0);
+			fst_check(strcmp(restarted_rtcp_local_pwd, initial_rtcp_local_pwd) != 0);
+			fst_check_string_equals(initial_rtp_remote_pwd, initial_rtcp_remote_pwd);
 
 			cleanup_session_media_and_sdp(session, sdp_session, parser);
 		}
@@ -507,6 +718,268 @@ FCT_BGN()
 			fst_check_string_equals(restarted_sdp_local_ufrag, restarted_local_ufrag);
 			fst_check_string_equals(restarted_sdp_local_pwd, restarted_local_pwd);
 			fst_check(has_addr == SWITCH_FALSE);
+
+			cleanup_session_media_and_sdp(session, sdp_session, parser);
+		}
+		FCT_TEST_END();
+
+		FCT_TEST_BGN(unbundled_video_ready_restart_rearms_rtp_and_rtcp)
+		{
+			switch_core_session_t *session = NULL;
+			switch_channel_t *channel = NULL;
+			switch_rtp_t *audio_rtp = NULL;
+			switch_rtp_t *video_rtp = NULL;
+			void *sdp_session = NULL;
+			sdp_parser_t *parser = NULL;
+			switch_status_t status;
+			uint8_t match;
+			uint8_t proceed = 0;
+			char initial_video_user[256] = "";
+			char initial_video_pwd[256] = "";
+			char initial_video_remote_pwd[256] = "";
+			char offered_video_ufrag[256] = "";
+			char offered_video_pwd[256] = "";
+			char restarted_video_user[256] = "";
+			char restarted_video_pwd[256] = "";
+			char restarted_video_remote_pwd[256] = "";
+			char restarted_video_rtcp_user[256] = "";
+			char restarted_video_rtcp_pwd[256] = "";
+			char restarted_video_rtcp_remote_pwd[256] = "";
+			const char *initial_video_local_ufrag;
+			const char *restarted_video_local_ufrag;
+			const char *local_sdp;
+			switch_bool_t has_addr = SWITCH_FALSE;
+			const char *audio_video_sdp =
+				"v=0\n"
+				"o=- 1683118194 1683118195 IN IP4 0.0.0.0\n"
+				"s=-\n"
+				"t=0 0\n"
+				"m=audio 18215 UDP/TLS/RTP/SAVPF 0\n"
+				"c=IN IP4 127.0.0.1\n"
+				"a=ice-ufrag:audioStableUfrag\n"
+				"a=ice-pwd:audioStablePassword123456\n"
+				"a=candidate:1 1 udp 2130706431 127.0.0.1 18215 typ host\n"
+				"a=candidate:2 2 udp 2130706430 127.0.0.1 18216 typ host\n"
+				"a=rtcp:18216 IN IP4 127.0.0.1\n"
+				"a=rtpmap:0 PCMU/8000\n"
+				"a=sendrecv\n"
+				"a=mid:0\n"
+				"m=video 18217 UDP/TLS/RTP/SAVPF 96\n"
+				"c=IN IP4 127.0.0.1\n"
+				"a=ice-ufrag:videoStableUfrag\n"
+				"a=ice-pwd:videoStablePassword123456\n"
+				"a=candidate:3 1 udp 2130706431 127.0.0.1 18217 typ host\n"
+				"a=candidate:4 2 udp 2130706430 127.0.0.1 18218 typ host\n"
+				"a=rtcp:18218 IN IP4 127.0.0.1\n"
+				"a=rtpmap:96 VP8/90000\n"
+				"a=sendrecv\n"
+				"a=mid:1\n";
+			const char *restart_sdp =
+				"v=0\n"
+				"o=- 1683118194 1683118196 IN IP4 0.0.0.0\n"
+				"s=-\n"
+				"t=0 0\n"
+				"m=audio 18215 UDP/TLS/RTP/SAVPF 0\n"
+				"c=IN IP4 127.0.0.1\n"
+				"a=ice-ufrag:audioStableUfrag\n"
+				"a=ice-pwd:audioStablePassword123456\n"
+				"a=candidate:1 1 udp 2130706431 127.0.0.1 18215 typ host\n"
+				"a=candidate:2 2 udp 2130706430 127.0.0.1 18216 typ host\n"
+				"a=rtcp:18216 IN IP4 127.0.0.1\n"
+				"a=rtpmap:0 PCMU/8000\n"
+				"a=sendrecv\n"
+				"a=mid:0\n"
+				"m=video 18217 UDP/TLS/RTP/SAVPF 96\n"
+				"c=IN IP4 127.0.0.1\n"
+				"a=ice-ufrag:videoRestartUfrag\n"
+				"a=ice-pwd:videoRestartPassword123456\n"
+				"a=candidate:3 1 udp 2130706431 127.0.0.1 18217 typ host\n"
+				"a=candidate:4 2 udp 2130706430 127.0.0.1 18218 typ host\n"
+				"a=rtcp:18218 IN IP4 127.0.0.1\n"
+				"a=rtpmap:96 VP8/90000\n"
+				"a=sendrecv\n"
+				"a=mid:1\n";
+
+			status = make_session_and_rtp_with_sdp_ex(&session, &audio_rtp, &sdp_session, &parser,
+				audio_video_sdp, "PCMU,VP8", SWITCH_FALSE, SWITCH_TRUE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS && session && audio_rtp && sdp_session && parser);
+			channel = switch_core_session_get_channel(session);
+			video_rtp = switch_core_media_get_rtp_session(session, SWITCH_MEDIA_TYPE_VIDEO);
+			fst_requires(channel != NULL && video_rtp != NULL);
+
+			status = switch_rtp_pvt_get_ice_state(video_rtp, IPR_RTP,
+				initial_video_user, sizeof(initial_video_user), initial_video_pwd, sizeof(initial_video_pwd),
+				initial_video_remote_pwd, sizeof(initial_video_remote_pwd), &has_addr);
+			fst_requires(status == SWITCH_STATUS_SUCCESS && has_addr == SWITCH_TRUE);
+			initial_video_local_ufrag = strchr(initial_video_user, ':');
+			fst_requires(initial_video_local_ufrag != NULL && initial_video_local_ufrag[1] != '\0');
+			initial_video_local_ufrag++;
+
+			switch_channel_clear_flag(channel, CF_VIDEO);
+			switch_core_media_clear_ice(session);
+			switch_channel_set_flag(channel, CF_REINVITE);
+			match = switch_core_media_negotiate_sdp(session, restart_sdp, &proceed, SDP_OFFER);
+			fst_requires(match != 0);
+			switch_core_media_gen_local_sdp(session, SDP_ANSWER, NULL, 0, NULL, 0);
+			local_sdp = switch_channel_get_variable(channel, "rtp_local_sdp_str");
+			fst_requires(copy_sdp_media_attribute(local_sdp, "video", "ice-ufrag", offered_video_ufrag,
+				sizeof(offered_video_ufrag)) == SWITCH_STATUS_SUCCESS);
+			fst_requires(copy_sdp_media_attribute(local_sdp, "video", "ice-pwd", offered_video_pwd,
+				sizeof(offered_video_pwd)) == SWITCH_STATUS_SUCCESS);
+			fst_check(strcmp(offered_video_ufrag, initial_video_local_ufrag) != 0);
+			fst_check(strcmp(offered_video_pwd, initial_video_pwd) != 0);
+			status = switch_core_media_activate_rtp(session);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+
+			has_addr = SWITCH_FALSE;
+			status = switch_rtp_pvt_get_ice_state(video_rtp, IPR_RTP,
+				restarted_video_user, sizeof(restarted_video_user), restarted_video_pwd, sizeof(restarted_video_pwd),
+				restarted_video_remote_pwd, sizeof(restarted_video_remote_pwd), &has_addr);
+			fst_requires(status == SWITCH_STATUS_SUCCESS && has_addr == SWITCH_TRUE);
+			restarted_video_local_ufrag = strchr(restarted_video_user, ':');
+			fst_requires(restarted_video_local_ufrag != NULL && restarted_video_local_ufrag[1] != '\0');
+			restarted_video_local_ufrag++;
+			fst_check(!strncmp(restarted_video_user, "videoRestartUfrag:", strlen("videoRestartUfrag:")));
+			fst_check_string_equals(restarted_video_local_ufrag, offered_video_ufrag);
+			fst_check_string_equals(restarted_video_pwd, offered_video_pwd);
+			fst_check_string_equals(restarted_video_remote_pwd, "videoRestartPassword123456");
+
+			has_addr = SWITCH_FALSE;
+			status = switch_rtp_pvt_get_ice_state(video_rtp, IPR_RTCP,
+				restarted_video_rtcp_user, sizeof(restarted_video_rtcp_user), restarted_video_rtcp_pwd,
+				sizeof(restarted_video_rtcp_pwd), restarted_video_rtcp_remote_pwd,
+				sizeof(restarted_video_rtcp_remote_pwd), &has_addr);
+			fst_requires(status == SWITCH_STATUS_SUCCESS && has_addr == SWITCH_TRUE);
+			fst_check_string_equals(restarted_video_rtcp_user, restarted_video_user);
+			fst_check_string_equals(restarted_video_rtcp_pwd, offered_video_pwd);
+			fst_check_string_equals(restarted_video_rtcp_remote_pwd, "videoRestartPassword123456");
+
+			cleanup_session_media_and_sdp(session, sdp_session, parser);
+		}
+		FCT_TEST_END();
+
+		FCT_TEST_BGN(unbundled_video_provisional_restart_rearms_rtp_and_rtcp)
+		{
+			switch_core_session_t *session = NULL;
+			switch_channel_t *channel = NULL;
+			switch_rtp_t *audio_rtp = NULL;
+			switch_rtp_t *video_rtp = NULL;
+			void *sdp_session = NULL;
+			sdp_parser_t *parser = NULL;
+			switch_status_t status;
+			uint8_t match;
+			uint8_t proceed = 0;
+			char initial_video_user[256] = "";
+			char initial_video_pwd[256] = "";
+			char initial_video_remote_pwd[256] = "";
+			char offered_video_ufrag[256] = "";
+			char offered_video_pwd[256] = "";
+			char restarted_video_user[256] = "";
+			char restarted_video_pwd[256] = "";
+			char restarted_video_remote_pwd[256] = "";
+			char restarted_video_rtcp_user[256] = "";
+			char restarted_video_rtcp_pwd[256] = "";
+			char restarted_video_rtcp_remote_pwd[256] = "";
+			const char *restarted_video_local_ufrag;
+			const char *local_sdp;
+			switch_bool_t has_addr = SWITCH_FALSE;
+			const char *initial_sdp =
+				"v=0\n"
+				"o=- 1683118194 1683118195 IN IP4 0.0.0.0\n"
+				"s=-\n"
+				"t=0 0\n"
+				"m=audio 18215 UDP/TLS/RTP/SAVPF 0\n"
+				"c=IN IP4 127.0.0.1\n"
+				"a=ice-ufrag:audioInitialUfrag\n"
+				"a=ice-pwd:audioInitialPassword123456\n"
+				"a=candidate:1 1 udp 2130706431 127.0.0.1 18215 typ host\n"
+				"a=candidate:2 2 udp 2130706430 127.0.0.1 18216 typ host\n"
+				"a=rtcp:18216 IN IP4 127.0.0.1\n"
+				"a=rtpmap:0 PCMU/8000\n"
+				"a=sendrecv\n"
+				"a=mid:0\n"
+				"m=video 18217 UDP/TLS/RTP/SAVPF 96\n"
+				"c=IN IP4 127.0.0.1\n"
+				"a=ice-ufrag:videoInitialUfrag\n"
+				"a=ice-pwd:videoInitialPassword123456\n"
+				"a=candidate:3 1 udp 2130706431 127.0.0.1 18217 typ host\n"
+				"a=candidate:4 2 udp 2130706430 127.0.0.1 18218 typ host\n"
+				"a=rtcp:18218 IN IP4 127.0.0.1\n"
+				"a=rtpmap:96 VP8/90000\n"
+				"a=sendrecv\n"
+				"a=mid:1\n";
+			const char *restart_sdp =
+				"v=0\n"
+				"o=- 1683118194 1683118196 IN IP4 0.0.0.0\n"
+				"s=-\n"
+				"t=0 0\n"
+				"m=audio 18215 UDP/TLS/RTP/SAVPF 0\n"
+				"c=IN IP4 127.0.0.1\n"
+				"a=ice-ufrag:audioInitialUfrag\n"
+				"a=ice-pwd:audioInitialPassword123456\n"
+				"a=candidate:1 1 udp 2130706431 127.0.0.1 18215 typ host\n"
+				"a=candidate:2 2 udp 2130706430 127.0.0.1 18216 typ host\n"
+				"a=rtcp:18216 IN IP4 127.0.0.1\n"
+				"a=rtpmap:0 PCMU/8000\n"
+				"a=sendrecv\n"
+				"a=mid:0\n"
+				"m=video 18217 UDP/TLS/RTP/SAVPF 96\n"
+				"c=IN IP4 127.0.0.1\n"
+				"a=ice-ufrag:videoRestartUfrag\n"
+				"a=ice-pwd:videoRestartPassword123456\n"
+				"a=rtcp:18218 IN IP4 127.0.0.1\n"
+				"a=rtpmap:96 VP8/90000\n"
+				"a=sendrecv\n"
+				"a=mid:1\n";
+
+			status = make_session_and_rtp_with_sdp_ex(&session, &audio_rtp, &sdp_session, &parser,
+				initial_sdp, "PCMU,VP8", SWITCH_FALSE, SWITCH_TRUE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS && session && audio_rtp && sdp_session && parser);
+			channel = switch_core_session_get_channel(session);
+			video_rtp = switch_core_media_get_rtp_session(session, SWITCH_MEDIA_TYPE_VIDEO);
+			fst_requires(channel != NULL && video_rtp != NULL);
+			status = switch_rtp_pvt_get_ice_state(video_rtp, IPR_RTP,
+				initial_video_user, sizeof(initial_video_user), initial_video_pwd, sizeof(initial_video_pwd),
+				initial_video_remote_pwd, sizeof(initial_video_remote_pwd), &has_addr);
+			fst_requires(status == SWITCH_STATUS_SUCCESS && has_addr == SWITCH_TRUE);
+
+			switch_channel_clear_flag(channel, CF_VIDEO);
+			switch_core_media_clear_ice(session);
+			switch_channel_set_flag(channel, CF_REINVITE);
+			switch_channel_set_variable(channel, "rtp_ice_prflx_bootstrap", "true");
+			match = switch_core_media_negotiate_sdp(session, restart_sdp, &proceed, SDP_OFFER);
+			fst_requires(match != 0);
+			switch_core_media_gen_local_sdp(session, SDP_ANSWER, NULL, 0, NULL, 0);
+			local_sdp = switch_channel_get_variable(channel, "rtp_local_sdp_str");
+			fst_requires(copy_sdp_media_attribute(local_sdp, "video", "ice-ufrag", offered_video_ufrag,
+				sizeof(offered_video_ufrag)) == SWITCH_STATUS_SUCCESS);
+			fst_requires(copy_sdp_media_attribute(local_sdp, "video", "ice-pwd", offered_video_pwd,
+				sizeof(offered_video_pwd)) == SWITCH_STATUS_SUCCESS);
+			status = switch_core_media_activate_rtp(session);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+
+			has_addr = SWITCH_TRUE;
+			status = switch_rtp_pvt_get_ice_state(video_rtp, IPR_RTP,
+				restarted_video_user, sizeof(restarted_video_user), restarted_video_pwd, sizeof(restarted_video_pwd),
+				restarted_video_remote_pwd, sizeof(restarted_video_remote_pwd), &has_addr);
+			fst_requires(status == SWITCH_STATUS_SUCCESS && has_addr == SWITCH_FALSE);
+			restarted_video_local_ufrag = strchr(restarted_video_user, ':');
+			fst_requires(restarted_video_local_ufrag != NULL && restarted_video_local_ufrag[1] != '\0');
+			restarted_video_local_ufrag++;
+			fst_check(!strncmp(restarted_video_user, "videoRestartUfrag:", strlen("videoRestartUfrag:")));
+			fst_check_string_equals(restarted_video_local_ufrag, offered_video_ufrag);
+			fst_check_string_equals(restarted_video_pwd, offered_video_pwd);
+			fst_check_string_equals(restarted_video_remote_pwd, "videoRestartPassword123456");
+
+			has_addr = SWITCH_TRUE;
+			status = switch_rtp_pvt_get_ice_state(video_rtp, IPR_RTCP,
+				restarted_video_rtcp_user, sizeof(restarted_video_rtcp_user), restarted_video_rtcp_pwd,
+				sizeof(restarted_video_rtcp_pwd), restarted_video_rtcp_remote_pwd,
+				sizeof(restarted_video_rtcp_remote_pwd), &has_addr);
+			fst_requires(status == SWITCH_STATUS_SUCCESS && has_addr == SWITCH_FALSE);
+			fst_check_string_equals(restarted_video_rtcp_user, restarted_video_user);
+			fst_check_string_equals(restarted_video_rtcp_pwd, offered_video_pwd);
+			fst_check_string_equals(restarted_video_rtcp_remote_pwd, "videoRestartPassword123456");
 
 			cleanup_session_media_and_sdp(session, sdp_session, parser);
 		}
