@@ -27,5 +27,4 @@ jobs:
         uses: team-telnyx/reviewpr-internal@main
         with:
           openai_api_key: ${{ secrets.OPENAI_API_KEY }}
-          model: gpt-5.2-codex
           github_event_number: ${{ github.event.inputs.github_event_number || '' }}

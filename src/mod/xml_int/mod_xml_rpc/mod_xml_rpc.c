@@ -120,6 +120,9 @@ static switch_status_t do_config(void)
 	globals.virtual_host = SWITCH_TRUE;
 	globals.addr = 0;
 
+	set_throttled_api_calls(NULL);
+	set_min_idle_cpu_watermark("0");
+
 	if ((settings = switch_xml_child(cfg, "settings"))) {
 		for (param = switch_xml_child(settings, "param"); param; param = param->next) {
 			char *var = (char *) switch_xml_attr_soft(param, "name");
@@ -1310,6 +1313,7 @@ static xmlrpc_value *freeswitch_batch(xmlrpc_env * const envP, xmlrpc_value * co
 	for (i = 0; i < commandSize; i++) {
 		xmlrpc_value *command = NULL;
 		xmlrpc_value *value = NULL;
+		char *response = NULL;
 		
 		xmlrpc_array_read_item(envP, commands, i, &command);
 		if (envP->fault_occurred) {
@@ -1325,6 +1329,46 @@ static xmlrpc_value *freeswitch_batch(xmlrpc_env * const envP, xmlrpc_value * co
 		}
 
 		xmlrpc_array_append_item(envP, commandResults, value);
+		if (envP->fault_occurred) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to append command result to array!\n");
+			xmlrpc_DECREF(command);
+			xmlrpc_DECREF(value);
+			break;
+		}
+
+		xmlrpc_read_string(envP, value, &response);
+		if (envP->fault_occurred) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to read command response!\n");
+			xmlrpc_DECREF(command);
+			xmlrpc_DECREF(value);
+			break;
+		}
+
+		if (is_api_response_error(response)) {
+			unsigned int j = 0;
+
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Stopping XML-RPC batch after failed command response: [%s].\n", response);
+			for (j = i + 1; j < commandSize; j++) {
+				xmlrpc_value *not_completed = xmlrpc_build_value(envP, "s", "-ERR: Not Completed");
+				if (envP->fault_occurred) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to build skipped command response!\n");
+					break;
+				}
+
+				xmlrpc_array_append_item(envP, commandResults, not_completed);
+				xmlrpc_DECREF(not_completed);
+				if (envP->fault_occurred) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to append skipped command response!\n");
+					break;
+				}
+			}
+			switch_safe_free(response);
+			xmlrpc_DECREF(command);
+			xmlrpc_DECREF(value);
+			break;
+		}
+
+		switch_safe_free(response);
 		xmlrpc_DECREF(command);
 		xmlrpc_DECREF(value);
 	}

@@ -713,6 +713,11 @@ typedef struct conference_obj {
 	int auto_recording;
 	char *recording_metadata;
 	int record_count;
+	/* TELCORE-223: record threads that have been launched but have not yet taken
+	 * their conference rwlock read lock. Guarded by flag_mutex. Teardown drains
+	 * this to zero before freeing the conference so a late-arriving record thread
+	 * cannot acquire its read lock after the write-lock drain. */
+	int record_thread_count;
 	uint32_t min_recording_participants;
 	int ivr_dtmf_timeout;
 	int ivr_input_timeout;

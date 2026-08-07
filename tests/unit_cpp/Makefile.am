@@ -7,7 +7,12 @@ AM_LDFLAGS  += -avoid-version -no-undefined $(SWITCH_AM_LDFLAGS) $(openssl_LIBS)
 AM_LDFLAGS  += $(FREESWITCH_LIBS) $(switch_builddir)/libfreeswitch.la $(CORE_LIBS) $(APR_LIBS)
 AM_LDFLAGS  += $(CARES_LIBS) -lboost_system -lpthread
 
-noinst_PROGRAMS = test_web_server_registry
+# Regression test for ZMQ wrapper timeouts (always built, no extra deps)
+noinst_PROGRAMS = test_zmqsocket_timeouts
+test_zmqsocket_timeouts_SOURCES = test_zmqsocket_timeouts.cpp
+test_zmqsocket_timeouts_LDADD   = -lzmq -lstdc++
+
+noinst_PROGRAMS += test_web_server_registry
 test_web_server_registry_SOURCES = test_web_server_registry.cpp
 
 if HAVE_CARES

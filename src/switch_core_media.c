@@ -2553,12 +2553,65 @@ SWITCH_DECLARE(void) switch_core_media_sync_stats(switch_core_session_t *session
 
 }
 
+static void set_jb_stats(switch_core_session_t *session, switch_media_type_t type)
+{
+	switch_media_handle_t *smh;
+	switch_rtp_engine_t *engine;
+	switch_jb_t *jb;
+	const char *type_str = (type == SWITCH_MEDIA_TYPE_AUDIO) ? "audio" :
+	                       (type == SWITCH_MEDIA_TYPE_VIDEO) ? "video" : "text";
+
+	if (!(smh = session->media_handle)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+			"set_jb_stats(%s): no media handle\n", type_str);
+		return;
+	}
+
+	engine = &smh->engines[type];
+	if (!engine->rtp_session) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+			"set_jb_stats(%s): no rtp_session\n", type_str);
+		return;
+	}
+
+	/* Use _for_stats variant which bypasses switch_rtp_ready() check
+	 * since RTP session may not be "ready" during hangup but JB still exists */
+	jb = switch_rtp_get_jitter_buffer_for_stats(engine->rtp_session);
+	if (jb) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+			"set_jb_stats(%s): exporting JB stats\n", type_str);
+		switch_jb_export_stats(jb);
+	} else {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+			"set_jb_stats(%s): no jitter buffer\n", type_str);
+	}
+}
+
+SWITCH_DECLARE(void) switch_core_media_export_jb_stats(switch_core_session_t *session)
+{
+	if (!session->media_handle) {
+		return;
+	}
+
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+		"switch_core_media_export_jb_stats() exporting JB stats before hangup handlers\n");
+
+	/* Export jitter buffer stats so they're available in hangup hooks */
+	set_jb_stats(session, SWITCH_MEDIA_TYPE_AUDIO);
+	set_jb_stats(session, SWITCH_MEDIA_TYPE_VIDEO);
+	set_jb_stats(session, SWITCH_MEDIA_TYPE_TEXT);
+}
+
 SWITCH_DECLARE(void) switch_core_media_set_stats(switch_core_session_t *session)
 {
+	switch_channel_t *channel = switch_core_session_get_channel(session);
 
 	if (!session->media_handle) {
 		return;
 	}
+
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+		"[%s] switch_core_media_set_stats() called\n", switch_channel_get_name(channel));
 
 	switch_core_media_sync_stats(session);
 
@@ -4838,6 +4891,18 @@ SWITCH_DECLARE(void) switch_core_media_clear_ice(switch_core_session_t *session)
 	channel = switch_core_session_get_channel(session);
 	if (channel) {
 		switch_channel_set_variable(channel, "sip_trickle_accept", NULL);
+
+		/* Clear stale EOC (End-of-Candidates) and PAC timer variables so that
+		   a subsequent trickle ICE negotiation (e.g. modify/updateMedia) starts
+		   with a clean slate instead of seeing leftover state from the initial
+		   attach.  Without this, check_ice() sees rtp_in_session_eoc=true from
+		   the previous negotiation, falls through the PAC timer, and punts with
+		   "no suitable candidates found" before any trickled candidates arrive. */
+		switch_channel_set_variable(channel, "rtp_in_session_eoc", NULL);
+		switch_channel_set_variable(channel, "rtp_in_audio_eoc", NULL);
+		switch_channel_set_variable(channel, "rtp_in_video_eoc", NULL);
+		switch_channel_set_variable(channel, "rtp_in_text_eoc", NULL);
+		switch_channel_set_variable(channel, "rtp_ice_pac_until_us", NULL);
 	}
 }
 
@@ -5825,6 +5890,12 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_ERROR,
 						"%s RTP REPORTS ERROR: [%s]\n", type2str(type), err);
 				}
+			}
+
+			/* Trickle-recheck can race the SDP-answer path; ensure local ufrag/pwd
+			   exist before activating ICE so outbound STUN is signed correctly. */
+			if (zstr(engine->ice_out.ufrag) || zstr(engine->ice_out.pwd)) {
+				gen_ice(smh->session, type, NULL, 0);
 			}
 
 			switch_rtp_activate_ice(engine->rtp_session,
@@ -9713,17 +9784,22 @@ static void *SWITCH_THREAD_FUNC text_helper_thread(switch_thread_t *thread, void
 	while (switch_channel_up_nosig(channel)) {
 
 		if (t_engine->engine_function) {
-			int run = 0;
+			switch_engine_function_t run_fn = NULL;
+			void *run_data = NULL;
 
 			switch_mutex_lock(smh->control_mutex);
-			if (t_engine->engine_function_running == 0) {
+			/* Latch the job under the lock and re-check engine_function: it may
+			 * have been cancelled by end_engine_function() since the unlocked
+			 * test above. */
+			if (t_engine->engine_function && t_engine->engine_function_running == 0) {
 				t_engine->engine_function_running = 1;
-				run = 1;
+				run_fn = t_engine->engine_function;
+				run_data = t_engine->engine_user_data;
 			}
 			switch_mutex_unlock(smh->control_mutex);
 
-			if (run) {
-				t_engine->engine_function(session, t_engine->engine_user_data);
+			if (run_fn) {
+				run_fn(session, run_data);
 				switch_mutex_lock(smh->control_mutex);
 				t_engine->engine_function = NULL;
 				t_engine->engine_user_data = NULL;
@@ -9921,17 +9997,22 @@ static void *SWITCH_THREAD_FUNC video_helper_thread(switch_thread_t *thread, voi
 		}
 
 		if (v_engine->engine_function) {
-			int run = 0;
+			switch_engine_function_t run_fn = NULL;
+			void *run_data = NULL;
 
 			switch_mutex_lock(smh->control_mutex);
-			if (v_engine->engine_function_running == 0) {
+			/* Latch the job under the lock and re-check engine_function: it may
+			 * have been cancelled by end_engine_function() since the unlocked
+			 * test above. */
+			if (v_engine->engine_function && v_engine->engine_function_running == 0) {
 				v_engine->engine_function_running = 1;
-				run = 1;
+				run_fn = v_engine->engine_function;
+				run_data = v_engine->engine_user_data;
 			}
 			switch_mutex_unlock(smh->control_mutex);
 
-			if (run) {
-				v_engine->engine_function(session, v_engine->engine_user_data);
+			if (run_fn) {
+				run_fn(session, run_data);
 				switch_mutex_lock(smh->control_mutex);
 				v_engine->engine_function = NULL;
 				v_engine->engine_user_data = NULL;
@@ -10078,7 +10159,14 @@ SWITCH_DECLARE(int) switch_core_media_check_engine_function(switch_core_session_
 	engine = &smh->engines[type];
 
 	switch_mutex_lock(smh->control_mutex);
-	r = (engine->engine_function_running > 0);
+	/* An outstanding job exists as soon as it has been submitted (engine_function
+	 * set), not only once the media thread has actually started running it
+	 * (engine_function_running > 0). Reporting only the "running" state opened a
+	 * window where a caller (the bridge) that submitted a job pointing at a
+	 * stack-allocated context would skip switch_core_media_end_engine_function()
+	 * and let that stack go out of scope while the job was still pending, so the
+	 * media thread later invoked it with a dangling user_data. */
+	r = (engine->engine_function_running > 0 || engine->engine_function != NULL);
 	switch_mutex_unlock(smh->control_mutex);
 
 	return r;
@@ -10097,7 +10185,16 @@ SWITCH_DECLARE(void) switch_core_media_end_engine_function(switch_core_session_t
 
 	switch_mutex_lock(smh->control_mutex);
 	if (engine->engine_function_running > 0) {
+		/* Already running: ask it to stop and wait below for the media thread
+		 * to clear engine_function_running back to 0 when the job returns. */
 		engine->engine_function_running = -1;
+	} else if (engine->engine_function) {
+		/* Submitted but the media thread has not picked it up yet. Cancel it in
+		 * place so the thread never runs it against a user_data whose lifetime is
+		 * ending. The media thread's pickup re-checks engine_function under the
+		 * control_mutex, so clearing it here is safe against a concurrent start. */
+		engine->engine_function = NULL;
+		engine->engine_user_data = NULL;
 	}
 	switch_mutex_unlock(smh->control_mutex);
 
@@ -11545,7 +11642,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 											   a_engine->read_impl.samples_per_second * (a_engine->read_impl.microseconds_per_packet / 1000) / 1000,
 											   codec_ms,
 											   flags, timer_name, &err, switch_core_session_get_pool(session));
-		{
+		if (switch_rtp_ready(a_engine->rtp_session)) {
 			const char *val = NULL;
 			if (((val = switch_channel_get_variable(session->channel, "telnyx_voicemail")) && switch_true(val))) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE, "Turning SWITCH_RTP_FLAG_AUTOADJ on, as required by telnyx_voicemail\n");
@@ -11563,7 +11660,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 		}
 		
 		/* Enable ignore-rtp-during-dtmf if channel variable or sofia profile sets it */
-		{
+		if (switch_rtp_ready(a_engine->rtp_session)) {
 			const char *val = NULL;
 			int timeout;
 
@@ -13306,6 +13403,27 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 			}
 		}
 		switch_core_session_parse_crypto_prefs(session);
+
+		/*
+		 * Inbound 3PCC calls default to CRYPTO_MODE_OPTIONAL (parse_crypto_prefs
+		 * line 2056-2057), which sets CF_SECURE and produces a dual SAVP+AVP SDP
+		 * offer.  Some carriers (e.g. AT&T) reject multi-m=line SDP in 3PCC flows.
+		 * When no explicit rtp_secure_media preference is set and the offer_both
+		 * flag is not enabled, force FORBIDDEN so we emit a single RTP/AVP line.
+		 * Explicit rtp_secure_media=optional/mandatory is always honored.
+		 */
+		if (!is_outbound &&
+		    sdp_type == SDP_OFFER &&
+		    switch_channel_test_flag(session->channel, CF_3PCC) &&
+		    !switch_channel_test_flag(session->channel, CF_RECOVERING) &&
+		    smh->crypto_mode == CRYPTO_MODE_OPTIONAL &&
+		    !switch_channel_var_true(session->channel, "rtp_secure_media_3pcc_offer_both")) {
+			const char *rsm = switch_channel_get_variable(session->channel, "rtp_secure_media_inbound");
+			if (!rsm) rsm = switch_channel_get_variable(session->channel, "rtp_secure_media");
+			if (!rsm) {
+				smh->crypto_mode = CRYPTO_MODE_FORBIDDEN;
+			}
+		}
 
 		// Skip generating new crypto keys if this is a recovering call - keys were already restored
 		if (!switch_channel_test_flag(session->channel, CF_RECOVERING)) {
@@ -19107,6 +19225,10 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 	switch_frame_t *enc_frame = NULL, *write_frame = frame;
 	unsigned int flag = 0, need_codec = 0, perfect = 0, do_bugs = 0, do_write = 0, do_resample = 0, ptime_mismatch = 0, pass_cng = 0, resample = 0;
 	int did_write_resample = 0;
+	int16_t *resample_tmp = NULL;
+	uint8_t *orig_frame_data = frame->data;
+	uint32_t orig_frame_buflen = frame->buflen;
+	switch_mutex_t *write_codec_mutex = NULL, *frame_codec_mutex = NULL;
 
 	switch_assert(session != NULL);
 	switch_assert(frame != NULL);
@@ -19174,8 +19296,20 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 		return SWITCH_STATUS_FALSE;
 	}
 
-	switch_mutex_lock(session->write_codec->mutex);
-	switch_mutex_lock(frame->codec->mutex);
+	/* Snapshot the codec mutexes so the same objects are locked and unlocked.
+	 * frame->codec may be a codec owned by another session (e.g. the peer codec
+	 * setup_ringback() passes during originate ringback / bridge_early_media);
+	 * our session->codec_write_mutex does not protect its lifetime, so it can be
+	 * torn down concurrently, leaving its mutex NULL. Bail rather than fault. */
+	write_codec_mutex = session->write_codec->mutex;
+	frame_codec_mutex = frame->codec->mutex;
+	if (!write_codec_mutex || !frame_codec_mutex) {
+		switch_mutex_unlock(session->codec_write_mutex);
+		return SWITCH_STATUS_FALSE;
+	}
+
+	switch_mutex_lock(write_codec_mutex);
+	switch_mutex_lock(frame_codec_mutex);
 
 	if (!(switch_core_codec_ready(session->write_codec) && switch_core_codec_ready(frame->codec))) goto error;
 
@@ -19375,20 +19509,37 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 		switch_mutex_lock(session->resample_mutex);
 		if (session->write_resampler) {
 
-			if (switch_resample_calc_buffer_size(session->write_resampler->to_rate, session->write_resampler->from_rate,
-												 write_frame->datalen / 2 / session->write_resampler->channels) > SWITCH_RECOMMENDED_BUFFER_SIZE) {
+			uint32_t out_bytes = switch_resample_calc_buffer_size(
+				session->write_resampler->to_rate,
+				session->write_resampler->from_rate,
+				write_frame->datalen / 2 / session->write_resampler->channels)
+				* session->write_resampler->channels;
 
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_CRIT, "%s not enough buffer space for required resample operation!\n",
-								  switch_channel_get_name(session->channel));
-				switch_channel_hangup(session->channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
-				switch_mutex_unlock(session->resample_mutex);
-				goto error;
+			switch_resample_process(session->write_resampler, data,
+				write_frame->datalen / 2 / session->write_resampler->channels);
+
+			if (out_bytes > write_frame->buflen) {
+				/* Resampled output exceeds the fixed write buffer. Use a temp buffer
+				 * to avoid losing the frame — the ptime mismatch path downstream will
+				 * chunk it into properly-sized encode passes. */
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+					"%s resample output %u exceeds buffer %u (to=%d from=%d datalen=%d ch=%d)\n",
+					switch_channel_get_name(session->channel),
+					out_bytes, write_frame->buflen,
+					session->write_resampler->to_rate,
+					session->write_resampler->from_rate,
+					write_frame->datalen,
+					session->write_resampler->channels);
+
+				switch_malloc(resample_tmp, out_bytes);
+				memcpy(resample_tmp, session->write_resampler->to,
+					session->write_resampler->to_len * 2 * session->write_resampler->channels);
+				write_frame->data = (uint8_t *)resample_tmp;
+				write_frame->buflen = out_bytes;
+			} else {
+				memcpy(data, session->write_resampler->to,
+					session->write_resampler->to_len * 2 * session->write_resampler->channels);
 			}
-
-
-			switch_resample_process(session->write_resampler, data, write_frame->datalen / 2 / session->write_resampler->channels);
-
-			memcpy(data, session->write_resampler->to, session->write_resampler->to_len * 2 * session->write_resampler->channels);
 
 			write_frame->samples = session->write_resampler->to_len;
 			write_frame->channels = session->write_resampler->channels;
@@ -19745,8 +19896,38 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 					short *data = write_frame->data;
 					switch_mutex_lock(session->resample_mutex);
 					if (session->read_resampler) {
-						switch_resample_process(session->read_resampler, data, write_frame->datalen / 2 / session->read_resampler->channels);
-						memcpy(data, session->read_resampler->to, session->read_resampler->to_len * 2 * session->read_resampler->channels);
+						uint32_t out_bytes = switch_resample_calc_buffer_size(
+							session->read_resampler->to_rate,
+							session->read_resampler->from_rate,
+							write_frame->datalen / 2 / session->read_resampler->channels)
+							* session->read_resampler->channels;
+
+						switch_resample_process(session->read_resampler, data,
+							write_frame->datalen / 2 / session->read_resampler->channels);
+
+						if (out_bytes > write_frame->buflen) {
+							/* Resampled output exceeds the fixed write buffer. Use a temp buffer
+							 * to avoid losing the frame — the ptime mismatch path downstream will
+							 * chunk it into properly-sized encode passes. */
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+								"%s read resample output %u exceeds buffer %u (to=%d from=%d datalen=%d ch=%d)\n",
+								switch_channel_get_name(session->channel),
+								out_bytes, write_frame->buflen,
+								session->read_resampler->to_rate,
+								session->read_resampler->from_rate,
+								write_frame->datalen,
+								session->read_resampler->channels);
+
+							switch_malloc(resample_tmp, out_bytes);
+							memcpy(resample_tmp, session->read_resampler->to,
+								session->read_resampler->to_len * 2 * session->read_resampler->channels);
+							write_frame->data = (uint8_t *)resample_tmp;
+							write_frame->buflen = out_bytes;
+						} else {
+							memcpy(data, session->read_resampler->to,
+								session->read_resampler->to_len * 2 * session->read_resampler->channels);
+						}
+
 						write_frame->samples = session->read_resampler->to_len;
 						write_frame->channels = session->read_resampler->channels;
 						write_frame->datalen = session->read_resampler->to_len * 2 * session->read_resampler->channels;
@@ -19766,6 +19947,17 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 
 				if ((status = perform_write(session, write_frame, flags, stream_id)) != SWITCH_STATUS_SUCCESS) {
 					break;
+				}
+
+				if (resample_tmp) {
+					free(resample_tmp);
+					resample_tmp = NULL;
+					session->raw_write_frame.data = session->raw_write_buf;
+					session->raw_write_frame.buflen = sizeof(session->raw_write_buf);
+					session->enc_write_frame.data = session->enc_write_buf;
+					session->enc_write_frame.buflen = sizeof(session->enc_write_buf);
+					frame->data = orig_frame_data;
+					frame->buflen = orig_frame_buflen;
 				}
 
 			}
@@ -19790,8 +19982,23 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 
   error:
 
-	switch_mutex_unlock(session->write_codec->mutex);
-	switch_mutex_unlock(frame->codec->mutex);
+	/* Free temp buffer if the resampler overflowed the fixed write buffer.
+	 * Restore both raw_write_frame and enc_write_frame since the read resampler
+	 * may have redirected either one's data pointer to the temp allocation. */
+	if (resample_tmp) {
+		free(resample_tmp);
+		session->raw_write_frame.data = session->raw_write_buf;
+		session->raw_write_frame.buflen = sizeof(session->raw_write_buf);
+		session->enc_write_frame.data = session->enc_write_buf;
+		session->enc_write_frame.buflen = sizeof(session->enc_write_buf);
+	}
+
+	frame->data = orig_frame_data;
+	frame->buflen = orig_frame_buflen;
+
+	/* Unlock the same mutex objects we locked above (see snapshot rationale). */
+	switch_mutex_unlock(frame_codec_mutex);
+	switch_mutex_unlock(write_codec_mutex);
 	switch_mutex_unlock(session->codec_write_mutex);
 
 	return status;

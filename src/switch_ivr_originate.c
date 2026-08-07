@@ -1323,10 +1323,21 @@ static switch_status_t setup_ringback(originate_global_t *oglobals, originate_st
 				if (read_impl.impl_id == write_impl.impl_id &&
 					read_impl.microseconds_per_packet == write_impl.microseconds_per_packet &&
 					read_impl.actual_samples_per_second == write_impl.actual_samples_per_second) {
-						ringback->asis++;
-						write_frame->codec = switch_core_session_get_write_codec(originate_status[0].peer_session);
-						write_frame->datalen = write_frame->codec->implementation->decoded_bytes_per_packet;
-						switch_log_printf(SWITCH_CHANNEL_CHANNEL_LOG(caller_channel), SWITCH_LOG_DEBUG, "bridge_early_media: passthrough enabled\n");
+						/* Passthrough: the peer-read and caller-write impls are identical, so use
+						 * the CALLER's own write codec rather than borrowing the peer session's.
+						 * write_frame() locks frame->codec->mutex; a peer-owned codec can be torn
+						 * down concurrently (the peer leg dies mid-originate), leaving a dangling
+						 * mutex and crashing write_frame(). The caller's own codec shares the
+						 * caller's lifetime and is guarded by its codec_write_mutex. */
+						switch_codec_t *caller_write_codec = switch_core_session_get_write_codec(oglobals->session);
+						if (caller_write_codec && switch_core_codec_ready(caller_write_codec) && caller_write_codec->implementation) {
+							ringback->asis++;
+							write_frame->codec = caller_write_codec;
+							write_frame->datalen = write_impl.decoded_bytes_per_packet;
+							switch_log_printf(SWITCH_CHANNEL_CHANNEL_LOG(caller_channel), SWITCH_LOG_DEBUG, "bridge_early_media: passthrough enabled\n");
+						} else {
+							switch_log_printf(SWITCH_CHANNEL_CHANNEL_LOG(caller_channel), SWITCH_LOG_DEBUG, "bridge_early_media: caller write codec not ready, passthrough disabled\n");
+						}
 					} else {
 						switch_log_printf(SWITCH_CHANNEL_CHANNEL_LOG(caller_channel), SWITCH_LOG_DEBUG, "bridge_early_media: codecs don't match (%s@%uh@%di / %s@%uh@%di)\n",
 							read_impl.iananame, read_impl.actual_samples_per_second, read_impl.microseconds_per_packet / 1000,
