@@ -344,7 +344,7 @@ static abyss_bool user_attributes(const char *user, const char *domain_name,
 static abyss_bool is_authorized(const TSession * r, const char *command)
 {
 	char *user = NULL, *domain_name = NULL;
-	char *allowed_commands = NULL;
+	const char *allowed_commands = NULL;
 	char *dp;
 	char *dup = NULL;
 	char *argv[256] = { 0 };
@@ -959,7 +959,7 @@ abyss_bool handler_hook(TSession * r)
 				if (len > 0) {
 					int succeeded = TRUE;
 					char *qp = qbuf;
-					char *readError;
+					const char *readError;
 
 					do {
 						int blen = r->connP->buffersize - r->connP->bufferpos;
