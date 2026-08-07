@@ -1384,7 +1384,12 @@ SWITCH_MODULE_RUNTIME_FUNCTION(mod_xml_rpc_runtime)
 	switch_hash_index_t *hi;
 	const void *var;
 	void *val;
-	in_addr_t addr;
+	// The bundled xmlrpc-c's ServerCreate() takes `struct in_addr *` for the
+	// bind-address arg; the original telnyx fork patch (cf68bd0164a, 2019)
+	// declared this as `in_addr_t` (a uint32_t). gcc <= 13 reported it as a
+	// -Wincompatible-pointer-types warning; gcc 14 (Debian Trixie default)
+	// makes it a hard error.
+	struct in_addr addr;
 
 	//
 	// Lock the global mutex.  ssl_init is not threadsafe
@@ -1397,7 +1402,7 @@ SWITCH_MODULE_RUNTIME_FUNCTION(mod_xml_rpc_runtime)
 	globals.registryP = xmlrpc_registry_new(&env);
 	
 	if (globals.addr) {
-		addr = inet_addr(globals.addr);
+		addr.s_addr = inet_addr(globals.addr);
 	}
 
 	/* TODO why twice and why add_method for freeswitch.api and add_method2 for freeswitch.management ? */
