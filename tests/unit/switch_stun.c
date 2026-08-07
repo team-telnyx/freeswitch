@@ -199,6 +199,110 @@ FST_TEARDOWN_END()
 		switch_core_destroy_memory_pool(&pool);
 	}
 	FST_TEST_END()
+	FST_TEST_BEGIN(test_recovery_dtls_nomination_proof_requires_authenticated_direct_request)
+	{
+		fst_check(switch_rtp_pvt_recovery_dtls_nomination_proof(SWITCH_FALSE, SWITCH_FALSE) ==
+			SWITCH_RTP_RECOVERY_NOMINATION_NONE);
+		fst_check(switch_rtp_pvt_recovery_dtls_nomination_proof(SWITCH_FALSE, SWITCH_TRUE) ==
+			SWITCH_RTP_RECOVERY_NOMINATION_NONE);
+		fst_check(switch_rtp_pvt_recovery_dtls_nomination_proof(SWITCH_TRUE, SWITCH_FALSE) ==
+			SWITCH_RTP_RECOVERY_NOMINATION_NONE);
+		fst_check(switch_rtp_pvt_recovery_dtls_nomination_proof(SWITCH_TRUE, SWITCH_TRUE) ==
+			SWITCH_RTP_RECOVERY_NOMINATION_AUTHENTICATED_CURRENT);
+	}
+	FST_TEST_END()
+	FST_TEST_BEGIN(test_recovery_dtls_restart_tuple_mutation_policy)
+	{
+		switch_memory_pool_t *pool = NULL;
+		switch_sockaddr_t *current_addr = NULL;
+		switch_sockaddr_t *same_addr = NULL;
+		switch_sockaddr_t *different_port_addr = NULL;
+		switch_sockaddr_t *relay_addr = NULL;
+		switch_rtp_recovery_nomination_proof_t trusted_proof;
+
+		fst_xcheck(switch_core_new_memory_pool(&pool) == SWITCH_STATUS_SUCCESS, "switch_core_new_memory_pool()");
+		fst_xcheck(switch_sockaddr_info_get(&current_addr, "198.51.100.10", SWITCH_UNSPEC, 40000, 0, pool) == SWITCH_STATUS_SUCCESS,
+			"current address");
+		fst_xcheck(switch_sockaddr_info_get(&same_addr, "198.51.100.10", SWITCH_UNSPEC, 40000, 0, pool) == SWITCH_STATUS_SUCCESS,
+			"same address");
+		fst_xcheck(switch_sockaddr_info_get(&different_port_addr, "198.51.100.10", SWITCH_UNSPEC, 40002, 0, pool) == SWITCH_STATUS_SUCCESS,
+			"different-port address");
+		fst_xcheck(switch_sockaddr_info_get(&relay_addr, "198.51.100.20", SWITCH_UNSPEC, 50000, 0, pool) == SWITCH_STATUS_SUCCESS,
+			"relay address");
+
+		trusted_proof = switch_rtp_pvt_recovery_dtls_nomination_proof(SWITCH_TRUE, SWITCH_TRUE);
+		fst_check(switch_rtp_pvt_should_guard_recovery_dtls_tuple(current_addr, relay_addr, DS_HANDSHAKE,
+			SWITCH_FALSE, SWITCH_TRUE, SWITCH_RTP_RECOVERY_NOMINATION_NONE));
+		fst_check(switch_rtp_pvt_should_guard_recovery_dtls_tuple(current_addr, different_port_addr, DS_SETUP,
+			SWITCH_FALSE, SWITCH_TRUE, SWITCH_RTP_RECOVERY_NOMINATION_NONE));
+		fst_check(!switch_rtp_pvt_should_guard_recovery_dtls_tuple(current_addr, relay_addr, DS_HANDSHAKE,
+			SWITCH_FALSE, SWITCH_TRUE, trusted_proof));
+		/* DTLS packets cannot renew persisted nomination proof. */
+		fst_check(switch_rtp_pvt_should_guard_recovery_dtls_tuple(current_addr, relay_addr, DS_HANDSHAKE,
+			SWITCH_FALSE, SWITCH_TRUE, SWITCH_RTP_RECOVERY_NOMINATION_PERSISTED));
+		/* A moved ICE tuple needs no off-current bypass. */
+		fst_check(!switch_rtp_pvt_should_guard_recovery_dtls_tuple(current_addr, same_addr, DS_HANDSHAKE,
+			SWITCH_FALSE, SWITCH_TRUE, SWITCH_RTP_RECOVERY_NOMINATION_NONE));
+
+		switch_core_destroy_memory_pool(&pool);
+	}
+	FST_TEST_END()
+	FST_TEST_BEGIN(test_recovery_dtls_candidate_response_and_fallback_policy)
+	{
+		switch_memory_pool_t *pool = NULL;
+		switch_sockaddr_t *current_addr = NULL;
+		switch_sockaddr_t *candidate_addr = NULL;
+		switch_rtp_recovery_nomination_proof_t trusted_proof;
+
+		fst_xcheck(switch_core_new_memory_pool(&pool) == SWITCH_STATUS_SUCCESS, "switch_core_new_memory_pool()");
+		fst_xcheck(switch_sockaddr_info_get(&current_addr, "203.0.113.10", SWITCH_UNSPEC, 41000, 0, pool) == SWITCH_STATUS_SUCCESS,
+			"current address");
+		fst_xcheck(switch_sockaddr_info_get(&candidate_addr, "203.0.113.20", SWITCH_UNSPEC, 51000, 0, pool) == SWITCH_STATUS_SUCCESS,
+			"candidate address");
+
+		trusted_proof = switch_rtp_pvt_recovery_dtls_nomination_proof(SWITCH_TRUE, SWITCH_TRUE);
+		/* Binding responses cannot prove current-generation nomination. */
+		fst_check(switch_rtp_pvt_should_guard_recovery_dtls_tuple(current_addr, candidate_addr, DS_HANDSHAKE,
+			SWITCH_FALSE, SWITCH_TRUE, SWITCH_RTP_RECOVERY_NOMINATION_NONE));
+		fst_check(switch_rtp_pvt_should_guard_recovery_dtls_tuple(current_addr, candidate_addr, DS_SETUP,
+			SWITCH_FALSE, SWITCH_TRUE, SWITCH_RTP_RECOVERY_NOMINATION_PERSISTED));
+		/* Missed-candidate fallback may use only proof from this request. */
+		fst_check(switch_rtp_pvt_should_guard_recovery_dtls_tuple(current_addr, candidate_addr, DS_HANDSHAKE,
+			SWITCH_FALSE, SWITCH_TRUE, SWITCH_RTP_RECOVERY_NOMINATION_PERSISTED));
+		fst_check(!switch_rtp_pvt_should_guard_recovery_dtls_tuple(current_addr, candidate_addr, DS_HANDSHAKE,
+			SWITCH_FALSE, SWITCH_TRUE, trusted_proof));
+
+		switch_core_destroy_memory_pool(&pool);
+	}
+	FST_TEST_END()
+	FST_TEST_BEGIN(test_recovery_dtls_tuple_policy_leaves_other_paths_unchanged)
+	{
+		switch_memory_pool_t *pool = NULL;
+		switch_sockaddr_t *current_addr = NULL;
+		switch_sockaddr_t *candidate_addr = NULL;
+
+		fst_xcheck(switch_core_new_memory_pool(&pool) == SWITCH_STATUS_SUCCESS, "switch_core_new_memory_pool()");
+		fst_xcheck(switch_sockaddr_info_get(&current_addr, "192.0.2.10", SWITCH_UNSPEC, 42000, 0, pool) == SWITCH_STATUS_SUCCESS,
+			"current address");
+		fst_xcheck(switch_sockaddr_info_get(&candidate_addr, "192.0.2.20", SWITCH_UNSPEC, 52000, 0, pool) == SWITCH_STATUS_SUCCESS,
+			"candidate address");
+
+		fst_check(!switch_rtp_pvt_should_guard_recovery_dtls_tuple(current_addr, candidate_addr, DS_OFF,
+			SWITCH_FALSE, SWITCH_TRUE, SWITCH_RTP_RECOVERY_NOMINATION_PERSISTED));
+		fst_check(!switch_rtp_pvt_should_guard_recovery_dtls_tuple(current_addr, candidate_addr, DS_READY,
+			SWITCH_FALSE, SWITCH_TRUE, SWITCH_RTP_RECOVERY_NOMINATION_PERSISTED));
+		fst_check(!switch_rtp_pvt_should_guard_recovery_dtls_tuple(current_addr, candidate_addr, DS_HANDSHAKE,
+			SWITCH_FALSE, SWITCH_FALSE, SWITCH_RTP_RECOVERY_NOMINATION_NONE));
+		fst_check(!switch_rtp_pvt_should_guard_recovery_dtls_tuple(current_addr, candidate_addr, DS_HANDSHAKE,
+			SWITCH_TRUE, SWITCH_TRUE, SWITCH_RTP_RECOVERY_NOMINATION_NONE));
+		fst_check(!switch_rtp_pvt_should_guard_recovery_dtls_tuple(NULL, candidate_addr, DS_HANDSHAKE,
+			SWITCH_FALSE, SWITCH_TRUE, SWITCH_RTP_RECOVERY_NOMINATION_NONE));
+		fst_check(!switch_rtp_pvt_should_guard_recovery_dtls_tuple(current_addr, NULL, DS_HANDSHAKE,
+			SWITCH_FALSE, SWITCH_TRUE, SWITCH_RTP_RECOVERY_NOMINATION_NONE));
+
+		switch_core_destroy_memory_pool(&pool);
+	}
+	FST_TEST_END()
 		FST_SESSION_BEGIN(test_stun_msg)
 		{
 				/* Binding Success Response */

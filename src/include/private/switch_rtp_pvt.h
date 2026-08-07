@@ -46,12 +46,23 @@ typedef struct {
 		switch_time_t restart_provisional_us;
 } switch_rtp_ice_t;
 
+typedef enum {
+	SWITCH_RTP_RECOVERY_NOMINATION_NONE = 0,
+	SWITCH_RTP_RECOVERY_NOMINATION_PERSISTED,
+	SWITCH_RTP_RECOVERY_NOMINATION_AUTHENTICATED_CURRENT
+} switch_rtp_recovery_nomination_proof_t;
+
 SWITCH_DECLARE(void) switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *data, switch_size_t len);
 SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_get_ice_state(switch_rtp_t *rtp_session, ice_proto_t proto,
 	char *ice_user, switch_size_t ice_user_len, char *local_pwd, switch_size_t local_pwd_len,
 	char *remote_pwd, switch_size_t remote_pwd_len, switch_bool_t *has_addr);
 SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_should_preserve_active_dtls_tuple(switch_sockaddr_t *current_addr,
 	switch_sockaddr_t *handshake_peer_addr, dtls_state_t dtls_state, switch_bool_t handshake_peer_set, switch_bool_t is_rtcp);
+SWITCH_DECLARE(switch_rtp_recovery_nomination_proof_t) switch_rtp_pvt_recovery_dtls_nomination_proof(
+	switch_bool_t authenticated_vanilla_use_candidate, switch_bool_t direct_username_match);
+SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_should_guard_recovery_dtls_tuple(switch_sockaddr_t *current_addr,
+	switch_sockaddr_t *packet_addr, dtls_state_t dtls_state, switch_bool_t is_rtcp,
+	switch_bool_t recovering, switch_rtp_recovery_nomination_proof_t nomination_proof);
 SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_restart_prflx_allowed(switch_rtp_ice_t *ice, dtls_state_t dtls_state,
 	switch_bool_t provisional_ice, switch_bool_t direct_username_match, switch_bool_t stun_auth_valid,
 	switch_bool_t got_message_integrity, switch_bool_t got_fingerprint, switch_bool_t got_use_candidate,
