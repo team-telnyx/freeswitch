@@ -2048,7 +2048,14 @@ static switch_status_t t38_gateway_on_soft_execute(switch_core_session_t *sessio
 		}
 
 		if (switch_test_flag(read_frame, SFF_UDPTL_PACKET)) {
-			if (udptl_rx_packet(pvt->udptl_state, read_frame->packet, read_frame->packetlen) < 0) {
+			int udptl_status;
+			/* pvt->mutex serializes access to the shared t38_gateway_state against the audio leg
+			   (t38_gateway_on_consume_media -> t38_gateway_rx/tx). udptl_rx_packet feeds
+			   t38_core_rx_ifp_packet, which can reinitialise the rx modem. See TELCORE-226. */
+			switch_mutex_lock(pvt->mutex);
+			udptl_status = udptl_rx_packet(pvt->udptl_state, read_frame->packet, read_frame->packetlen);
+			switch_mutex_unlock(pvt->mutex);
+			if (udptl_status < 0) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s Error decoding UDPTL (%u bytes)\n", switch_channel_get_name(channel), read_frame->packetlen);
                         }
 		}
@@ -2225,20 +2232,30 @@ static switch_status_t t38_gateway_on_consume_media(switch_core_session_t *sessi
 		if (switch_test_flag(read_frame, SFF_CNG)) {
 			/* We have no real signal data for the FAX software, but we have a space in time if we have a CNG indication.
 			   Do a fill-in operation in the FAX machine, to keep things rolling along. */
+			/* pvt->mutex serializes access to the shared t38_gateway_state against the T.38 leg
+			   (t38_gateway_on_soft_execute -> udptl_rx_packet). See TELCORE-226. */
+			switch_mutex_lock(pvt->mutex);
 			t38_gateway_rx_fillin(pvt->t38_gateway_state, read_impl.samples_per_packet);
+			switch_mutex_unlock(pvt->mutex);
 		} else {
 			if (read_fd != FAX_INVALID_SOCKET) {
 				switch_ssize_t rv;
 				do { rv = write(read_fd, read_frame->data, read_frame->datalen); } while (rv == -1 && errno == EINTR);
 			}
 			switch_telnyx_set_current_trace_message(uuid);
+			switch_mutex_lock(pvt->mutex);
 			if (t38_gateway_rx(pvt->t38_gateway_state, (int16_t *) read_frame->data, read_frame->samples)) {
+					switch_mutex_unlock(pvt->mutex);
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "fax_rx reported an error\n");
 					goto end_unlock;
 			}
+			switch_mutex_unlock(pvt->mutex);
 		}
 
-		if ((tx = t38_gateway_tx(pvt->t38_gateway_state, buf, write_codec.implementation->samples_per_packet)) < 0) {
+		switch_mutex_lock(pvt->mutex);
+		tx = t38_gateway_tx(pvt->t38_gateway_state, buf, write_codec.implementation->samples_per_packet);
+		switch_mutex_unlock(pvt->mutex);
+		if (tx < 0) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "fax_tx reported an error\n");
 			goto end_unlock;
 		}

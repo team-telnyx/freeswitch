@@ -573,6 +573,148 @@ FST_TEARDOWN_END()
 		fst_check(got_media_timeout);
 	}
 	FST_TEST_END()
+
+	FST_TEST_BEGIN(test_rtp_header_extension_passthrough_length_edge_cases)
+	{
+		switch_core_session_t *session = NULL;
+		switch_status_t status;
+		switch_socket_t *sock_rtp = NULL;
+		switch_sockaddr_t *sock_addr = NULL;
+		const char *str_err = NULL;
+		switch_frame_t rframe = { 0 };
+		const int payload_len = 20;
+		int cases[] = { 1, 0, 3, 0, 2, 0 };   /* mixed extension sizes; 1->0 and 3->0 catch a length derived from stale per-session state */
+		int ncases = (int)(sizeof(cases) / sizeof(cases[0]));
+		uint16_t seq = 0x200;
+		uint32_t tsv = 960;
+		int ci, x, fail = 0;
+
+		status = rtp_test_start_call(&session);
+		fst_requires(status == SWITCH_STATUS_SUCCESS);
+		fst_requires(session);
+		rtp_session = switch_core_media_get_rtp_session(session, SWITCH_MEDIA_TYPE_AUDIO);
+		fst_requires(rtp_session);
+		switch_rtp_clear_flag(rtp_session, SWITCH_RTP_FLAG_PAUSE);
+
+		if (switch_socket_create(&sock_rtp, AF_INET, SOCK_DGRAM, 0, switch_core_session_get_pool(session)) != SWITCH_STATUS_SUCCESS) {
+			fst_requires(0);
+		}
+		switch_sockaddr_new(&sock_addr, rx_host, audio_rx_port, switch_core_session_get_pool(session));
+		fst_requires(sock_addr);
+		switch_rtp_set_remote_address(rtp_session, tx_host, switch_sockaddr_get_port(sock_addr), 0, SWITCH_FALSE, &str_err);
+		switch_rtp_reset(rtp_session);
+
+		for (ci = 0; ci < ncases; ci++) {
+			int ew = cases[ci];
+			int extlen = 4 + ew * 4;                 /* 0xbede header(4) + ew words of data */
+			int full = 12 + extlen + payload_len;
+			unsigned char pkt[12 + 4 + 64 * 4 + 20];
+			switch_size_t tmp_len;
+			int n = 0, i, got = 0;
+
+			memset(pkt, 0, sizeof(pkt));
+			pkt[0] = 0x90; pkt[1] = 0x00;            /* V=2, X=1, pt=0 */
+			pkt[2] = (seq >> 8) & 0xff; pkt[3] = seq & 0xff;
+			pkt[4] = (tsv >> 24) & 0xff; pkt[5] = (tsv >> 16) & 0xff; pkt[6] = (tsv >> 8) & 0xff; pkt[7] = tsv & 0xff;
+			pkt[8] = 0x61; pkt[9] = 0x5a; pkt[10] = 0xe1; pkt[11] = 0x37;
+			n = 12;
+			pkt[n++] = 0xbe; pkt[n++] = 0xde; pkt[n++] = (ew >> 8) & 0xff; pkt[n++] = ew & 0xff;
+			for (i = 0; i < ew * 4; i++) pkt[n++] = (i == 0) ? 0x10 : (unsigned char)(0x40 + i);
+			for (i = 0; i < payload_len; i++) pkt[n++] = (unsigned char)(0x80 + i);
+			seq++; tsv += 160;
+
+			for (x = 0; x < 100 && !got; x++) {
+				tmp_len = full;
+				if (switch_socket_sendto(sock_rtp, sock_addr, MSG_CONFIRM, (const char *)pkt, &tmp_len) != SWITCH_STATUS_SUCCESS) {
+					fst_requires(0);
+				}
+				memset(&rframe, 0, sizeof(rframe));
+				if (switch_rtp_zerocopy_read_frame(rtp_session, &rframe, io_flags) == SWITCH_STATUS_SUCCESS
+					&& rframe.datalen == (uint32_t)payload_len) {
+					got = 1;
+				} else {
+					switch_yield(20000);
+				}
+			}
+			if (!got || rframe.packetlen != (uint32_t)full) {
+				fail++;
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+					"ext_words=%d full=%d got=%d datalen=%u packetlen=%u (expected %d)\n",
+					ew, full, got, rframe.datalen, rframe.packetlen, full);
+			}
+		}
+
+		fst_xcheck(fail == 0, "packetlen must equal full wire length for all extension sizes (0/1/2/3 words incl. stale-state sequence)");
+
+		rtp_test_end_call(&session);
+	}
+	FST_TEST_END()
+
+	FST_TEST_BEGIN(test_rtp_header_extension_passthrough_length_csrc)
+	{
+		switch_core_session_t *session = NULL;
+		switch_status_t status;
+		switch_socket_t *sock_rtp = NULL;
+		switch_sockaddr_t *sock_addr = NULL;
+		const char *str_err = NULL;
+		switch_frame_t rframe = { 0 };
+		const int payload_len = 20;
+		const int cc = 2;
+		const int csrc_len = cc * 4;                          /* 8 */
+		const int ext_len = 8;                               /* 0xbede, 1 word */
+		const int full_len = 12 + csrc_len + ext_len + payload_len;   /* 48 */
+		const int exp_datalen = csrc_len + payload_len;      /* current read leaves CSRC in datalen */
+		unsigned char pkt[12 + 8 + 8 + 20];
+		switch_size_t tmp_len;
+		int n = 0, i, x, got = 0;
+
+		status = rtp_test_start_call(&session);
+		fst_requires(status == SWITCH_STATUS_SUCCESS);
+		fst_requires(session);
+		rtp_session = switch_core_media_get_rtp_session(session, SWITCH_MEDIA_TYPE_AUDIO);
+		fst_requires(rtp_session);
+		switch_rtp_clear_flag(rtp_session, SWITCH_RTP_FLAG_PAUSE);
+
+		if (switch_socket_create(&sock_rtp, AF_INET, SOCK_DGRAM, 0, switch_core_session_get_pool(session)) != SWITCH_STATUS_SUCCESS) {
+			fst_requires(0);
+		}
+		switch_sockaddr_new(&sock_addr, rx_host, audio_rx_port, switch_core_session_get_pool(session));
+		fst_requires(sock_addr);
+		switch_rtp_set_remote_address(rtp_session, tx_host, switch_sockaddr_get_port(sock_addr), 0, SWITCH_FALSE, &str_err);
+		switch_rtp_reset(rtp_session);
+
+		memset(pkt, 0, sizeof(pkt));
+		pkt[0] = 0x92; pkt[1] = 0x00;                        /* V=2, X=1, CC=2, pt=0 */
+		pkt[2] = 0x03; pkt[3] = 0x00;                        /* seq */
+		pkt[4] = 0x00; pkt[5] = 0x00; pkt[6] = 0x1e; pkt[7] = 0x00; /* ts */
+		pkt[8] = 0x61; pkt[9] = 0x5a; pkt[10] = 0xe1; pkt[11] = 0x37; /* ssrc */
+		n = 12;
+		for (i = 0; i < csrc_len; i++) pkt[n++] = (unsigned char)(0xa0 + i);   /* 2 CSRC */
+		pkt[n++] = 0xbe; pkt[n++] = 0xde; pkt[n++] = 0x00; pkt[n++] = 0x01;    /* ext: 1 word */
+		pkt[n++] = 0x10; pkt[n++] = 0x64; pkt[n++] = 0x00; pkt[n++] = 0x00;
+		for (i = 0; i < payload_len; i++) pkt[n++] = (unsigned char)(0x80 + i);
+
+		for (x = 0; x < 100 && !got; x++) {
+			tmp_len = full_len;
+			if (switch_socket_sendto(sock_rtp, sock_addr, MSG_CONFIRM, (const char *)pkt, &tmp_len) != SWITCH_STATUS_SUCCESS) {
+				fst_requires(0);
+			}
+			memset(&rframe, 0, sizeof(rframe));
+			if (switch_rtp_zerocopy_read_frame(rtp_session, &rframe, io_flags) == SWITCH_STATUS_SUCCESS
+				&& rframe.datalen == (uint32_t)exp_datalen) {
+				got = 1;
+			} else {
+				switch_yield(20000);
+			}
+		}
+
+		fst_xcheck(got == 1, "received the injected RTP packet with CSRC + extension");
+		fst_xcheck(rframe.packetlen == (uint32_t)full_len,
+			"packetlen must equal full wire length with CSRC + extension (must not double-count CSRC)");
+
+		rtp_test_end_call(&session);
+	}
+	FST_TEST_END()
 }
 FST_SUITE_END()
 }

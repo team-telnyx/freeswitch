@@ -6120,6 +6120,12 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 							sofia_clear_pflag(profile, PFLAG_3PCC_EARLY_OFFER);
 							sofia_clear_pflag(profile, PFLAG_3PCC_EARLY_OFFER_DIALPLAN);
 						}
+					} else if (!strcasecmp(var, "rtp-secure-media-3pcc-offer-both")) {
+						if (switch_true(val)) {
+							sofia_set_pflag(profile, PFLAG_RTP_SECURE_MEDIA_3PCC_OFFER_BOTH);
+						} else {
+							sofia_clear_pflag(profile, PFLAG_RTP_SECURE_MEDIA_3PCC_OFFER_BOTH);
+						}
 					} else if (!strcasecmp(var, "accept-blind-auth")) {
 						if (switch_true(val)) {
 							sofia_set_pflag(profile, PFLAG_BLIND_AUTH);
@@ -12012,6 +12018,20 @@ void sofia_handle_sip_i_invite(switch_core_session_t *session, nua_t *nua, sofia
 			   callback (sofia_handle_sip_i_state) where sip->sip_supported is not reliably
 			   populated, so the early-offer dialplan-mode deferral reads this instead. */
 			switch_channel_set_variable(channel, "sip_remote_supports_100rel", "true");
+		}
+	}
+
+	/*
+	 * Normalize the offer_both channel variable from the profile pflag default.
+	 * Placed outside the 100rel guard because the regular 3PCC offer-in-200 path
+	 * also sets CF_3PCC and needs this. Explicit channel variable wins.
+	 */
+	{
+		const char *offer_both = switch_channel_get_variable(channel, "rtp_secure_media_3pcc_offer_both");
+		if (offer_both) {
+			switch_channel_set_variable(channel, "rtp_secure_media_3pcc_offer_both", switch_true(offer_both) ? "true" : "false");
+		} else if (sofia_test_pflag(profile, PFLAG_RTP_SECURE_MEDIA_3PCC_OFFER_BOTH)) {
+			switch_channel_set_variable(channel, "rtp_secure_media_3pcc_offer_both", "true");
 		}
 	}
 

@@ -48,6 +48,8 @@ switch_core_media
 switch_sip
 switch_rtp_pcap
 test_tts_format
+switch_mod_lumenvox
+conf_lumenvox/[0-9]*/**
 .deps/
 Makefile
 conf/*/
