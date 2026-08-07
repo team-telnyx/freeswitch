@@ -33,6 +33,7 @@
 
 #if APR_HAVE_STDLIB_H
 #include <stdlib.h>     /* for malloc, free and abort */
+#include <stdio.h>      /* for fprintf(stderr) cycle-detection warning */
 #endif
 
 #if APR_HAVE_UNISTD_H
@@ -2036,10 +2037,35 @@ APR_DECLARE(void) fspr_pool_cleanup_register(fspr_pool_t *p, const void *data,
     }
 }
 
+/* Read-only Floyd cycle check. Concurrent register/kill without a shared lock can
+ * corrupt the singly-linked cleanup list into a cycle. */
+static int cleanup_list_is_cyclic(cleanup_t *c)
+{
+    cleanup_t *slow = c, *fast = c;
+
+    while (fast && fast->next) {
+        slow = slow->next;
+        fast = fast->next->next;
+        if (slow == fast) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void log_cleanup_cycle(const char *where)
+{
+    fprintf(stderr,
+        "APR: cyclic pool cleanup list detected in %s; skipping to avoid "
+        "double-free/spin\n", where);
+}
+
 APR_DECLARE(void) fspr_pool_cleanup_kill(fspr_pool_t *p, const void *data,
                       fspr_status_t (*cleanup_fn)(void *))
 {
     cleanup_t *c, **lastp;
+    cleanup_t *slow;    /* tortoise for Floyd cycle detection */
+    int parity = 0;
 
 #if APR_POOL_DEBUG
     fspr_pool_check_integrity(p);
@@ -2050,6 +2076,7 @@ APR_DECLARE(void) fspr_pool_cleanup_kill(fspr_pool_t *p, const void *data,
 
     c = p->cleanups;
     lastp = &p->cleanups;
+    slow = p->cleanups;
     while (c) {
         if (c->data == data && c->plain_cleanup_fn == cleanup_fn) {
             *lastp = c->next;
@@ -2060,12 +2087,18 @@ APR_DECLARE(void) fspr_pool_cleanup_kill(fspr_pool_t *p, const void *data,
         }
 
         lastp = &c->next;
+        c = c->next;
 
-		if (c == c->next) {
-			c = NULL;
-		} else {
-			c = c->next;
-		}
+        /* Floyd tortoise/hare: break on a cyclic list instead of spinning. The
+         * previous `c == c->next` guard only caught 1-node self-loops. */
+        parity ^= 1;
+        if (parity == 0) {
+            slow = slow->next;
+            if (c == slow) {
+                log_cleanup_cycle("fspr_pool_cleanup_kill");
+                break;
+            }
+        }
     }
 }
 
@@ -2104,6 +2137,13 @@ static void run_cleanups(cleanup_t **cref)
 {
     cleanup_t *c = *cref;
 
+    /* Never run a cyclic list: it would re-invoke cleanups repeatedly
+     * (double-free) or spin forever. Leaking the tail is the safer outcome. */
+    if (cleanup_list_is_cyclic(c)) {
+        log_cleanup_cycle("run_cleanups");
+        return;
+    }
+
     while (c) {
         *cref = c->next;
         (*c->plain_cleanup_fn)((void *)c->data);
@@ -2114,6 +2154,12 @@ static void run_cleanups(cleanup_t **cref)
 static void run_child_cleanups(cleanup_t **cref)
 {
     cleanup_t *c = *cref;
+
+    /* Same cycle guard as run_cleanups (this path runs on fork). */
+    if (cleanup_list_is_cyclic(c)) {
+        log_cleanup_cycle("run_child_cleanups");
+        return;
+    }
 
     while (c) {
         *cref = c->next;

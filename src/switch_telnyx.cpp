@@ -83,6 +83,13 @@ void switch_telnyx_on_set_variable(switch_channel_t* channel, const char* name, 
 	}
 }
 
+void switch_telnyx_track_session(const char* uuid, switch_time_t base_time)
+{
+	if (_event_dispatch.switch_telnyx_track_session) {
+		_event_dispatch.switch_telnyx_track_session(uuid, base_time);
+	}
+}
+
 int switch_telnyx_call_recover(switch_core_session_t* session)
 {
 	if (_event_dispatch.switch_telnyx_call_recover) {

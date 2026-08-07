@@ -43,6 +43,8 @@ switch_xml
 switch_estimators
 switch_jitter_buffer
 test_sofia
+switch_mod_lumenvox
+conf_lumenvox/[0-9]*/**
 .deps/
 Makefile
 conf/*/
