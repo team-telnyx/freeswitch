@@ -211,6 +211,58 @@ FST_TEARDOWN_END()
 			SWITCH_RTP_RECOVERY_NOMINATION_AUTHENTICATED_CURRENT);
 	}
 	FST_TEST_END()
+	FST_TEST_BEGIN(test_authenticated_recovery_nomination_syncs_nonmux_ice_addr)
+	{
+		switch_memory_pool_t *pool = NULL;
+		switch_sockaddr_t *current_addr = NULL;
+		switch_sockaddr_t *remote_addr = NULL;
+		switch_sockaddr_t *nominated_addr = NULL;
+		switch_sockaddr_t *other_addr = NULL;
+		switch_sockaddr_t *ice_addr = NULL;
+
+		fst_xcheck(switch_core_new_memory_pool(&pool) == SWITCH_STATUS_SUCCESS, "switch_core_new_memory_pool()");
+		fst_xcheck(switch_sockaddr_info_get(&current_addr, "198.51.100.10", SWITCH_UNSPEC, 40000, 0, pool) == SWITCH_STATUS_SUCCESS,
+			"current address");
+		fst_xcheck(switch_sockaddr_info_get(&remote_addr, "198.51.100.20", SWITCH_UNSPEC, 50000, 0, pool) == SWITCH_STATUS_SUCCESS,
+			"remote address");
+		fst_xcheck(switch_sockaddr_info_get(&nominated_addr, "198.51.100.20", SWITCH_UNSPEC, 50000, 0, pool) == SWITCH_STATUS_SUCCESS,
+			"nominated address");
+		fst_xcheck(switch_sockaddr_info_get(&other_addr, "198.51.100.20", SWITCH_UNSPEC, 50002, 0, pool) == SWITCH_STATUS_SUCCESS,
+			"other address");
+
+		ice_addr = current_addr;
+		fst_check(switch_rtp_pvt_sync_authenticated_recovery_ice_addr(&ice_addr, remote_addr, nominated_addr,
+			DS_HANDSHAKE, SWITCH_FALSE, SWITCH_FALSE, SWITCH_TRUE,
+			SWITCH_RTP_RECOVERY_NOMINATION_AUTHENTICATED_CURRENT));
+		fst_check(ice_addr == remote_addr);
+		fst_check(!switch_rtp_pvt_should_guard_recovery_dtls_tuple(ice_addr, nominated_addr, DS_HANDSHAKE,
+			SWITCH_FALSE, SWITCH_TRUE, SWITCH_RTP_RECOVERY_NOMINATION_NONE));
+
+		ice_addr = current_addr;
+		fst_check(!switch_rtp_pvt_sync_authenticated_recovery_ice_addr(&ice_addr, remote_addr, nominated_addr,
+			DS_HANDSHAKE, SWITCH_FALSE, SWITCH_FALSE, SWITCH_TRUE, SWITCH_RTP_RECOVERY_NOMINATION_PERSISTED));
+		fst_check(ice_addr == current_addr);
+		fst_check(!switch_rtp_pvt_sync_authenticated_recovery_ice_addr(&ice_addr, remote_addr, other_addr,
+			DS_HANDSHAKE, SWITCH_FALSE, SWITCH_FALSE, SWITCH_TRUE,
+			SWITCH_RTP_RECOVERY_NOMINATION_AUTHENTICATED_CURRENT));
+		fst_check(ice_addr == current_addr);
+		fst_check(!switch_rtp_pvt_sync_authenticated_recovery_ice_addr(&ice_addr, remote_addr, nominated_addr,
+			DS_HANDSHAKE, SWITCH_TRUE, SWITCH_FALSE, SWITCH_TRUE,
+			SWITCH_RTP_RECOVERY_NOMINATION_AUTHENTICATED_CURRENT));
+		fst_check(!switch_rtp_pvt_sync_authenticated_recovery_ice_addr(&ice_addr, remote_addr, nominated_addr,
+			DS_HANDSHAKE, SWITCH_FALSE, SWITCH_TRUE, SWITCH_TRUE,
+			SWITCH_RTP_RECOVERY_NOMINATION_AUTHENTICATED_CURRENT));
+		fst_check(!switch_rtp_pvt_sync_authenticated_recovery_ice_addr(&ice_addr, remote_addr, nominated_addr,
+			DS_READY, SWITCH_FALSE, SWITCH_FALSE, SWITCH_TRUE,
+			SWITCH_RTP_RECOVERY_NOMINATION_AUTHENTICATED_CURRENT));
+		fst_check(!switch_rtp_pvt_sync_authenticated_recovery_ice_addr(&ice_addr, remote_addr, nominated_addr,
+			DS_SETUP, SWITCH_FALSE, SWITCH_FALSE, SWITCH_FALSE,
+			SWITCH_RTP_RECOVERY_NOMINATION_AUTHENTICATED_CURRENT));
+		fst_check(ice_addr == current_addr);
+
+		switch_core_destroy_memory_pool(&pool);
+	}
+	FST_TEST_END()
 	FST_TEST_BEGIN(test_recovery_dtls_restart_tuple_mutation_policy)
 	{
 		switch_memory_pool_t *pool = NULL;

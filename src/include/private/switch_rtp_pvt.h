@@ -63,6 +63,10 @@ SWITCH_DECLARE(switch_rtp_recovery_nomination_proof_t) switch_rtp_pvt_recovery_d
 SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_should_guard_recovery_dtls_tuple(switch_sockaddr_t *current_addr,
 	switch_sockaddr_t *packet_addr, dtls_state_t dtls_state, switch_bool_t is_rtcp,
 	switch_bool_t recovering, switch_rtp_recovery_nomination_proof_t nomination_proof);
+SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_sync_authenticated_recovery_ice_addr(switch_sockaddr_t **ice_addr,
+	switch_sockaddr_t *remote_addr, switch_sockaddr_t *nominated_addr, dtls_state_t dtls_state,
+	switch_bool_t is_rtcp, switch_bool_t rtcp_mux, switch_bool_t recovering,
+	switch_rtp_recovery_nomination_proof_t nomination_proof);
 SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_restart_prflx_allowed(switch_rtp_ice_t *ice, dtls_state_t dtls_state,
 	switch_bool_t provisional_ice, switch_bool_t direct_username_match, switch_bool_t stun_auth_valid,
 	switch_bool_t got_message_integrity, switch_bool_t got_fingerprint, switch_bool_t got_use_candidate,

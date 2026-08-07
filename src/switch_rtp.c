@@ -848,6 +848,22 @@ SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_should_guard_recovery_dtls_tuple(sw
 	return nomination_proof == SWITCH_RTP_RECOVERY_NOMINATION_AUTHENTICATED_CURRENT ? SWITCH_FALSE : SWITCH_TRUE;
 }
 
+SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_sync_authenticated_recovery_ice_addr(switch_sockaddr_t **ice_addr,
+	switch_sockaddr_t *remote_addr, switch_sockaddr_t *nominated_addr, dtls_state_t dtls_state,
+	switch_bool_t is_rtcp, switch_bool_t rtcp_mux, switch_bool_t recovering,
+	switch_rtp_recovery_nomination_proof_t nomination_proof)
+{
+	if (!ice_addr || !remote_addr || !nominated_addr || is_rtcp || rtcp_mux || !recovering ||
+		(dtls_state != DS_HANDSHAKE && dtls_state != DS_SETUP) ||
+		nomination_proof != SWITCH_RTP_RECOVERY_NOMINATION_AUTHENTICATED_CURRENT ||
+		!switch_cmp_addr(remote_addr, nominated_addr, SWITCH_FALSE)) {
+		return SWITCH_FALSE;
+	}
+
+	*ice_addr = remote_addr;
+	return SWITCH_TRUE;
+}
+
 static switch_bool_t ice_should_preserve_active_dtls_tuple(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, switch_dtls_t *dtls, switch_bool_t is_rtcp)
 {
 	if (!rtp_session || !ice || !dtls) {
@@ -2089,6 +2105,10 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 							"USE-CANDIDATE: switching %s ice dest from current to nominated %s:%d\n",
 							rtp_type(rtp_session), from_host, from_port);
 						switch_rtp_change_ice_dest(rtp_session, ice, from_host, from_port);
+						switch_rtp_pvt_sync_authenticated_recovery_ice_addr(&ice->addr, rtp_session->remote_addr, from_addr,
+							dtls ? dtls->state : DS_OFF, is_rtcp ? SWITCH_TRUE : SWITCH_FALSE,
+							rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX] ? SWITCH_TRUE : SWITCH_FALSE,
+							recovering, nomination_proof);
 
 						/* Update DTLS remote addr for future DTLS writes. */
 						if (dtls && dtls->remote_addr) {
