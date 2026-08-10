@@ -253,6 +253,8 @@ SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_fingerprint(switch_stun
 SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_use_candidate(switch_stun_packet_t *packet);
 SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_controlling(switch_stun_packet_t *packet);
 SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_controlled(switch_stun_packet_t *packet);
+SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_controlling_value(switch_stun_packet_t *packet, const char *tie_breaker);
+SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_controlled_value(switch_stun_packet_t *packet, const char *tie_breaker);
 SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_priority(switch_stun_packet_t *packet, uint32_t priority);
 
 /*!

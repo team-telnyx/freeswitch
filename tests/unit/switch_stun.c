@@ -133,28 +133,204 @@ FST_TEARDOWN_END()
 		static const char probe_id[13] = "probe-id-123";
 		static const char nomination_id[13] = "nominate-123";
 		static const char wrong_id[13] = "wrong-id-123";
+		switch_socket_t *local_socket = (switch_socket_t *)&ice;
+		switch_socket_t *other_socket = (switch_socket_t *)&probe_id;
 
 		ice.controlling_failover_idx = 3;
 		ice.controlling_failover_state = SWITCH_RTP_ICE_CONTROLLING_FAILOVER_PROBING;
+		ice.controlling_failover_local_port = 27018;
+		ice.controlling_failover_local_family = AF_INET;
+		ice.controlling_failover_socket = local_socket;
 		memcpy(ice.controlling_failover_probe_id, probe_id, 12);
 		memcpy(ice.controlling_failover_nomination_id, nomination_id, 12);
 
 		fst_check(!switch_rtp_pvt_controlling_failover_response_matches(&ice,
-			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_PROBING, 3, probe_id, SWITCH_FALSE));
+			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_PROBING, 3, probe_id, SWITCH_FALSE,
+			local_socket, 27018, AF_INET));
 		fst_check(!switch_rtp_pvt_controlling_failover_response_matches(&ice,
-			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_PROBING, 2, probe_id, SWITCH_TRUE));
+			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_PROBING, 2, probe_id, SWITCH_TRUE,
+			local_socket, 27018, AF_INET));
 		fst_check(!switch_rtp_pvt_controlling_failover_response_matches(&ice,
-			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_PROBING, 3, wrong_id, SWITCH_TRUE));
+			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_PROBING, 3, wrong_id, SWITCH_TRUE,
+			local_socket, 27018, AF_INET));
 		fst_check(!switch_rtp_pvt_controlling_failover_response_matches(&ice,
-			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_NOMINATING, 3, nomination_id, SWITCH_TRUE));
+			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_NOMINATING, 3, nomination_id, SWITCH_TRUE,
+			local_socket, 27018, AF_INET));
+		fst_check(!switch_rtp_pvt_controlling_failover_response_matches(&ice,
+			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_PROBING, 3, probe_id, SWITCH_TRUE,
+			other_socket, 27018, AF_INET));
+		fst_check(!switch_rtp_pvt_controlling_failover_response_matches(&ice,
+			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_PROBING, 3, probe_id, SWITCH_TRUE,
+			local_socket, 27019, AF_INET));
+		fst_check(!switch_rtp_pvt_controlling_failover_response_matches(&ice,
+			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_PROBING, 3, probe_id, SWITCH_TRUE,
+			local_socket, 27018, AF_INET6));
 		fst_check(switch_rtp_pvt_controlling_failover_response_matches(&ice,
-			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_PROBING, 3, probe_id, SWITCH_TRUE));
+			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_PROBING, 3, probe_id, SWITCH_TRUE,
+			local_socket, 27018, AF_INET));
 
 		ice.controlling_failover_state = SWITCH_RTP_ICE_CONTROLLING_FAILOVER_NOMINATING;
 		fst_check(!switch_rtp_pvt_controlling_failover_response_matches(&ice,
-			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_NOMINATING, 3, probe_id, SWITCH_TRUE));
+			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_NOMINATING, 3, probe_id, SWITCH_TRUE,
+			local_socket, 27018, AF_INET));
 		fst_check(switch_rtp_pvt_controlling_failover_response_matches(&ice,
-			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_NOMINATING, 3, nomination_id, SWITCH_TRUE));
+			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_NOMINATING, 3, nomination_id, SWITCH_TRUE,
+			local_socket, 27018, AF_INET));
+	}
+	FST_TEST_END()
+	FST_TEST_BEGIN(test_role_conflict_requires_authenticated_exact_transaction_and_tuple)
+	{
+		switch_memory_pool_t *pool = NULL;
+		switch_sockaddr_t *current_addr = NULL;
+		switch_sockaddr_t *alternative_addr = NULL;
+		switch_rtp_ice_t ice = { 0 };
+		static const char selected_id[13] = "selected-123";
+		static const char probe_id[13] = "probe-id-123";
+		static const char wrong_id[13] = "wrong-id-123";
+		switch_socket_t *local_socket = (switch_socket_t *)&ice;
+		switch_bool_t sent_controlling = SWITCH_FALSE;
+
+		fst_xcheck(switch_core_new_memory_pool(&pool) == SWITCH_STATUS_SUCCESS, "switch_core_new_memory_pool()");
+		fst_xcheck(switch_sockaddr_info_get(&current_addr, "192.0.2.10", SWITCH_UNSPEC, 40000, 0, pool) ==
+			SWITCH_STATUS_SUCCESS, "current address");
+		fst_xcheck(switch_sockaddr_info_get(&alternative_addr, "192.0.2.20", SWITCH_UNSPEC, 50000, 0, pool) ==
+			SWITCH_STATUS_SUCCESS, "alternative address");
+
+		ice.addr = current_addr;
+		memcpy(ice.selected_pair_check_ids[0], selected_id, 12);
+		ice.selected_pair_check_controlling[0] = 1;
+		ice.selected_pair_check_remote_addr[0] = current_addr;
+		ice.selected_pair_check_count = 1;
+		ice.selected_pair_check_socket = local_socket;
+		ice.selected_pair_check_local_port = 27018;
+		ice.selected_pair_check_local_family = AF_INET;
+		fst_check(!switch_rtp_pvt_ice_role_conflict_response_matches(&ice, current_addr, 0,
+			selected_id, SWITCH_FALSE, local_socket, 27018, AF_INET, &sent_controlling));
+		/* A destination migration must not make the old transaction match the
+		 * new current tuple; it remains correlated to its request destination. */
+		ice.addr = alternative_addr;
+		fst_check(!switch_rtp_pvt_ice_role_conflict_response_matches(&ice, alternative_addr, 1,
+			selected_id, SWITCH_TRUE, local_socket, 27018, AF_INET, &sent_controlling));
+		fst_check(!switch_rtp_pvt_ice_role_conflict_response_matches(&ice, current_addr, 0,
+			wrong_id, SWITCH_TRUE, local_socket, 27018, AF_INET, &sent_controlling));
+		fst_check(switch_rtp_pvt_ice_role_conflict_response_matches(&ice, current_addr, 0,
+			selected_id, SWITCH_TRUE, local_socket, 27018, AF_INET, &sent_controlling));
+		fst_check(sent_controlling);
+		fst_check(!switch_rtp_pvt_ice_role_conflict_response_matches(&ice, current_addr, 0,
+			selected_id, SWITCH_TRUE, local_socket, 27018, AF_INET, &sent_controlling));
+
+		/* Apply the role carried by the matched request, even if current state
+		 * changed while that transaction was in flight. */
+		ice.type = ICE_VANILLA | ICE_CONTROLLED;
+		switch_rtp_pvt_ice_role_conflict_apply(&ice, SWITCH_TRUE);
+		fst_check(ice.type & ICE_CONTROLLED);
+		ice.type = ICE_VANILLA;
+		switch_rtp_pvt_ice_role_conflict_apply(&ice, SWITCH_FALSE);
+		fst_check(!(ice.type & ICE_CONTROLLED));
+
+		ice.controlling_failover_state = SWITCH_RTP_ICE_CONTROLLING_FAILOVER_PROBING;
+		ice.controlling_failover_idx = 1;
+		ice.controlling_failover_local_port = 27018;
+		ice.controlling_failover_local_family = AF_INET;
+		ice.controlling_failover_socket = local_socket;
+		memcpy(ice.controlling_failover_probe_id, probe_id, 12);
+		fst_check(!switch_rtp_pvt_ice_role_conflict_response_matches(&ice, alternative_addr, 1,
+			probe_id, SWITCH_TRUE, local_socket, 27019, AF_INET, &sent_controlling));
+		fst_check(switch_rtp_pvt_ice_role_conflict_response_matches(&ice, alternative_addr, 1,
+			probe_id, SWITCH_TRUE, local_socket, 27018, AF_INET, &sent_controlling));
+		fst_check(sent_controlling);
+		fst_check(!switch_rtp_pvt_ice_role_conflict_response_matches(&ice, alternative_addr, 1,
+			probe_id, SWITCH_TRUE, local_socket, 27018, AF_INET, &sent_controlling));
+
+		switch_core_destroy_memory_pool(&pool);
+	}
+	FST_TEST_END()
+	FST_TEST_BEGIN(test_role_conflict_cancels_transactions_and_rotates_tie_breaker)
+	{
+		switch_rtp_ice_t rtp_ice = { 0 };
+		switch_rtp_ice_t rtcp_ice = { 0 };
+		char tie_breaker[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+		char old_tie_breaker[8];
+
+		rtp_ice.controlling_failover_state = SWITCH_RTP_ICE_CONTROLLING_FAILOVER_PROBING;
+		rtp_ice.controlling_failover_idx = 2;
+		memcpy(rtp_ice.controlling_failover_probe_id, "probe-id-123", 12);
+		memcpy(rtp_ice.selected_pair_check_ids[0], "selected-123", 12);
+		rtp_ice.selected_pair_check_controlling[0] = 1;
+		rtp_ice.selected_pair_check_remote_addr[0] = (switch_sockaddr_t *)&rtp_ice;
+		rtp_ice.selected_pair_check_count = 1;
+		memcpy(rtp_ice.last_sent_id, "selected-123", 12);
+		memcpy(rtcp_ice.selected_pair_check_ids[0], "rtcp-check12", 12);
+		rtcp_ice.selected_pair_check_count = 1;
+
+		switch_rtp_pvt_ice_role_conflict_cancel(&rtp_ice);
+		switch_rtp_pvt_ice_role_conflict_cancel(&rtcp_ice);
+		fst_check(rtp_ice.controlling_failover_state == SWITCH_RTP_ICE_CONTROLLING_FAILOVER_IDLE);
+		fst_check(rtp_ice.controlling_failover_idx == -1);
+		fst_check(!rtp_ice.selected_pair_check_count);
+		fst_check(!rtcp_ice.selected_pair_check_count);
+		fst_check(!rtp_ice.selected_pair_check_ids[0][0]);
+		fst_check(!rtp_ice.selected_pair_check_remote_addr[0]);
+		fst_check(!rtcp_ice.selected_pair_check_ids[0][0]);
+		fst_check(!rtp_ice.last_sent_id[0]);
+
+		memcpy(old_tie_breaker, tie_breaker, sizeof(tie_breaker));
+		switch_rtp_pvt_ice_role_conflict_rotate_tie_breaker(tie_breaker);
+		fst_check(memcmp(tie_breaker, old_tie_breaker, sizeof(tie_breaker)));
+	}
+	FST_TEST_END()
+	FST_TEST_BEGIN(test_local_prflx_priority_uses_component_id)
+	{
+		fst_check(switch_rtp_pvt_ice_local_prflx_priority(SWITCH_FALSE, SWITCH_FALSE) == 0x6effffffU);
+		fst_check(switch_rtp_pvt_ice_local_prflx_priority(SWITCH_TRUE, SWITCH_TRUE) == 0x6effffffU);
+		fst_check(switch_rtp_pvt_ice_local_prflx_priority(SWITCH_TRUE, SWITCH_FALSE) == 0x6efffffeU);
+	}
+	FST_TEST_END()
+	FST_TEST_BEGIN(test_controlling_failover_retransmission_timer)
+	{
+		switch_time_t started_us = 1000000;
+
+		fst_check(switch_rtp_pvt_controlling_failover_timer_action(
+			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_IDLE, 0, 0, 0, started_us) ==
+			SWITCH_RTP_ICE_CONTROLLING_TIMER_NONE);
+		fst_check(switch_rtp_pvt_controlling_failover_timer_action(
+			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_PROBING, started_us, started_us, 1,
+			started_us + 999000) == SWITCH_RTP_ICE_CONTROLLING_TIMER_NONE);
+		fst_check(switch_rtp_pvt_controlling_failover_timer_action(
+			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_PROBING, started_us, started_us, 1,
+			started_us + 1000000) == SWITCH_RTP_ICE_CONTROLLING_TIMER_RETRANSMIT);
+		fst_check(switch_rtp_pvt_controlling_failover_timer_action(
+			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_NOMINATING, started_us, started_us + 3000000, 4,
+			started_us + 3999000) == SWITCH_RTP_ICE_CONTROLLING_TIMER_NONE);
+		fst_check(switch_rtp_pvt_controlling_failover_timer_action(
+			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_NOMINATING, started_us, started_us + 3000000, 4,
+			started_us + 4000000) == SWITCH_RTP_ICE_CONTROLLING_TIMER_EXPIRE);
+		fst_check(switch_rtp_pvt_controlling_failover_timer_action(
+			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_PROBING, started_us, started_us + 4000000, 2,
+			started_us + 5000000) == SWITCH_RTP_ICE_CONTROLLING_TIMER_EXPIRE);
+	}
+	FST_TEST_END()
+	FST_TEST_BEGIN(test_ice_role_attributes_accept_stable_tie_breaker)
+	{
+		uint8_t buf[128] = { 0 };
+		static const char tie_breaker[8] = { 0x01, 0x23, 0x45, 0x67, 0x11, 0x22, 0x33, 0x44 };
+		switch_stun_packet_t *packet;
+		switch_stun_packet_attribute_t *attribute;
+
+		packet = switch_stun_packet_build_header(SWITCH_STUN_BINDING_REQUEST, NULL, buf);
+		fst_check(switch_stun_packet_attribute_add_controlling_value(packet, tie_breaker));
+		attribute = (switch_stun_packet_attribute_t *)&packet->first_attribute;
+		fst_check(ntohs(attribute->type) == SWITCH_STUN_ATTR_CONTROLLING);
+		fst_check(ntohs(attribute->length) == sizeof(tie_breaker));
+		fst_check(!memcmp(attribute->value, tie_breaker, sizeof(tie_breaker)));
+
+		memset(buf, 0, sizeof(buf));
+		packet = switch_stun_packet_build_header(SWITCH_STUN_BINDING_REQUEST, NULL, buf);
+		fst_check(switch_stun_packet_attribute_add_controlled_value(packet, tie_breaker));
+		attribute = (switch_stun_packet_attribute_t *)&packet->first_attribute;
+		fst_check(ntohs(attribute->type) == SWITCH_STUN_ATTR_CONTROLLED);
+		fst_check(ntohs(attribute->length) == sizeof(tie_breaker));
+		fst_check(!memcmp(attribute->value, tie_breaker, sizeof(tie_breaker)));
 	}
 	FST_TEST_END()
 	FST_TEST_BEGIN(test_restart_prflx_requires_explicit_authenticated_current_generation)

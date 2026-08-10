@@ -703,30 +703,48 @@ SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_use_candidate(switch_st
 
 SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_controlling(switch_stun_packet_t *packet)
 {
-	switch_stun_packet_attribute_t *attribute;
 	char buf[8];
 
 	switch_stun_random_string(buf, 8, NULL);
+	return switch_stun_packet_attribute_add_controlling_value(packet, buf);
+}
+
+SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_controlling_value(switch_stun_packet_t *packet, const char *tie_breaker)
+{
+	switch_stun_packet_attribute_t *attribute;
+
+	if (!packet || !tie_breaker) {
+		return 0;
+	}
 
 	attribute = (switch_stun_packet_attribute_t *) ((uint8_t *) & packet->first_attribute + ntohs(packet->header.length));
 	attribute->type = htons(SWITCH_STUN_ATTR_CONTROLLING);
 	attribute->length = htons(8);
-	memcpy(attribute->value, buf, 8);
+	memcpy(attribute->value, tie_breaker, 8);
 	packet->header.length += htons(sizeof(switch_stun_packet_attribute_t)) + attribute->length;
 	return 1;
 }
 
 SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_controlled(switch_stun_packet_t *packet)
 {
-	switch_stun_packet_attribute_t *attribute;
 	char buf[8];
 
 	switch_stun_random_string(buf, 8, NULL);
+	return switch_stun_packet_attribute_add_controlled_value(packet, buf);
+}
+
+SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_controlled_value(switch_stun_packet_t *packet, const char *tie_breaker)
+{
+	switch_stun_packet_attribute_t *attribute;
+
+	if (!packet || !tie_breaker) {
+		return 0;
+	}
 
 	attribute = (switch_stun_packet_attribute_t *) ((uint8_t *) & packet->first_attribute + ntohs(packet->header.length));
 	attribute->type = htons(SWITCH_STUN_ATTR_CONTROLLED);
 	attribute->length = htons(8);
-	memcpy(attribute->value, buf, 8);
+	memcpy(attribute->value, tie_breaker, 8);
 	packet->header.length += htons(sizeof(switch_stun_packet_attribute_t)) + attribute->length;
 	return 1;
 }
