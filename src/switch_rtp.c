@@ -1548,7 +1548,13 @@ static switch_status_t ice_out(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 
 	ice->next_run = now + RTP_STUN_FREQ;
 	if (!force) {
+		/* RTP read, write, and ping paths can all drive the periodic ICE timer.
+		 * Serialize the controlling-side failover state machine independently of
+		 * the pre-existing next_run best-effort gate.  The mutex is nested because
+		 * the tick may send a probe through ice_send_controlling_check(). */
+		switch_mutex_lock(rtp_session->ice_mutex);
 		ice_controlling_failover_tick(rtp_session, ice, now);
+		switch_mutex_unlock(rtp_session->ice_mutex);
 	}
 
 	/* Non-DTLS ICE-CONTROLLED peers that never send USE-CANDIDATE hang media
@@ -1623,8 +1629,10 @@ static switch_status_t ice_out(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 	packet = switch_stun_packet_build_header(SWITCH_STUN_BINDING_REQUEST, NULL, buf);
 	switch_stun_packet_attribute_add_username(packet, ice->ice_user, (uint16_t)strlen(ice->ice_user));
 
+	switch_mutex_lock(rtp_session->ice_mutex);
 	memcpy(ice->last_sent_id, packet->header.id, 12);
 	ice_selected_pair_check_record(ice, packet->header.id);
+	switch_mutex_unlock(rtp_session->ice_mutex);
 
 	//if (ice->pass && ice->type == ICE_GOOGLE_JINGLE) {
 	//	switch_stun_packet_attribute_add_password(packet, ice->pass, (uint16_t)strlen(ice->pass));
@@ -1820,6 +1828,7 @@ static void ice_controlling_failover_commit(switch_rtp_t *rtp_session, switch_rt
 	}
 	ice->ice_params->cands[candidate_idx][ice->proto].use_candidate = 1;
 	ice->ice_params->chosen[ice->proto] = candidate_idx;
+	ice->ice_params->is_chosen[ice->proto] = 1;
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE,
 		"ICE controlling failover: nomination succeeded, switching %s from %s:%u to %s:%u idx:%d\n",
@@ -1863,6 +1872,10 @@ static switch_bool_t ice_controlling_failover_handle_response(switch_rtp_t *rtp_
 	switch_bool_t current_tuple;
 
 	current_tuple = ice->addr && switch_cmp_addr(from_addr, ice->addr, SWITCH_FALSE) ? SWITCH_TRUE : SWITCH_FALSE;
+	/* A selected pair is live only after an authenticated response matches a
+	 * check that we sent to that pair.  RTP or an unauthenticated STUN packet
+	 * proves neither bidirectional consent nor current-generation ownership and
+	 * must not suppress a controlling-side failover attempt. */
 	if (current_tuple && authenticated_response && ice_selected_pair_response_matches(ice, transaction_id)) {
 		ice->selected_pair_last_response_us = now;
 		ice_controlling_failover_reset(ice, SWITCH_TRUE);
