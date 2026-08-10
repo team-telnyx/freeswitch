@@ -127,6 +127,36 @@ FST_TEARDOWN_END()
 		fst_check(!switch_stun_packet_validate_auth(late_use_candidate, (uint32_t)late_use_candidate_len, generated_password));
 	}
 	FST_TEST_END()
+	FST_TEST_BEGIN(test_controlling_failover_requires_exact_authenticated_response)
+	{
+		switch_rtp_ice_t ice = { 0 };
+		static const char probe_id[13] = "probe-id-123";
+		static const char nomination_id[13] = "nominate-123";
+		static const char wrong_id[13] = "wrong-id-123";
+
+		ice.controlling_failover_idx = 3;
+		ice.controlling_failover_state = SWITCH_RTP_ICE_CONTROLLING_FAILOVER_PROBING;
+		memcpy(ice.controlling_failover_probe_id, probe_id, 12);
+		memcpy(ice.controlling_failover_nomination_id, nomination_id, 12);
+
+		fst_check(!switch_rtp_pvt_controlling_failover_response_matches(&ice,
+			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_PROBING, 3, probe_id, SWITCH_FALSE));
+		fst_check(!switch_rtp_pvt_controlling_failover_response_matches(&ice,
+			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_PROBING, 2, probe_id, SWITCH_TRUE));
+		fst_check(!switch_rtp_pvt_controlling_failover_response_matches(&ice,
+			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_PROBING, 3, wrong_id, SWITCH_TRUE));
+		fst_check(!switch_rtp_pvt_controlling_failover_response_matches(&ice,
+			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_NOMINATING, 3, nomination_id, SWITCH_TRUE));
+		fst_check(switch_rtp_pvt_controlling_failover_response_matches(&ice,
+			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_PROBING, 3, probe_id, SWITCH_TRUE));
+
+		ice.controlling_failover_state = SWITCH_RTP_ICE_CONTROLLING_FAILOVER_NOMINATING;
+		fst_check(!switch_rtp_pvt_controlling_failover_response_matches(&ice,
+			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_NOMINATING, 3, probe_id, SWITCH_TRUE));
+		fst_check(switch_rtp_pvt_controlling_failover_response_matches(&ice,
+			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_NOMINATING, 3, nomination_id, SWITCH_TRUE));
+	}
+	FST_TEST_END()
 	FST_TEST_BEGIN(test_restart_prflx_requires_explicit_authenticated_current_generation)
 	{
 		switch_rtp_ice_t ice = { 0 };
