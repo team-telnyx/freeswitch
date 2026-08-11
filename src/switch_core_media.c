@@ -8220,6 +8220,25 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 							a_engine->reset_codec = 0;
 							switch_clear_flag(&a_engine->read_codec, SWITCH_CODEC_FLAG_RESET_PENDING);
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Not resetting codec. We stick to %s\n", a_engine->read_impl.iananame);
+
+							/*
+							 * A re-offer carrying a different fmtp than the one we stored fails
+							 * fmtp_check_match() and allocates a fresh payload map, and only
+							 * switch_core_media_set_codec() ever fills in fmtp_out. Keeping the
+							 * codec means it is not called, so the answer would advertise the
+							 * codec with no a=fmtp at all. Carry the fmtp of the codec we are
+							 * keeping over to the new payload map.
+							 */
+							if (a_engine->cur_payload_map && zstr(a_engine->cur_payload_map->fmtp_out) &&
+								switch_core_codec_ready(&a_engine->write_codec) && !zstr(a_engine->write_codec.fmtp_out) &&
+								a_engine->write_codec.implementation &&
+								a_engine->write_codec.implementation->ianacode == selected_imp->ianacode &&
+								!strcasecmp(a_engine->write_codec.implementation->iananame, selected_imp->iananame)) {
+								a_engine->cur_payload_map->fmtp_out = switch_core_session_strdup(session, a_engine->write_codec.fmtp_out);
+								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+												  "Keeping fmtp [%s] for %s on the new payload map\n",
+												  a_engine->cur_payload_map->fmtp_out, a_engine->read_impl.iananame);
+							}
 						} else {
 							/*
 							 * The implementation changed. Reset here rather than leaving it to
