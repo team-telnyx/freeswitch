@@ -6052,6 +6052,20 @@ struct matches {
 #define MIN(a,b) (((a) < (b)) ? (a) : (b))
 #endif
 
+/*
+ * Whether an implementation is interchangeable with one already negotiated.
+ * Comparing iananame alone is not enough: AMR, AMR-WB, G7221, SILK and iLBC each
+ * register several implementations under a single name, and an offer that omits
+ * a=ptime matches every implementation a codec has registered.
+ */
+static int same_codec_impl(const switch_codec_implementation_t *imp, const switch_codec_implementation_t *ref)
+{
+	return imp && ref && imp->ianacode == ref->ianacode &&
+		imp->iananame && ref->iananame && !strcasecmp(imp->iananame, ref->iananame) &&
+		imp->microseconds_per_packet == ref->microseconds_per_packet &&
+		imp->samples_per_second == ref->samples_per_second;
+}
+
 static void greedy_sort(switch_media_handle_t *smh, struct matches *matches, int m_idx, const switch_codec_implementation_t **codec_array, int total_codecs)
 {
 	int j = 0, f = 0, g;
@@ -7400,6 +7414,14 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 			int ice = 0;
 			int last_pt = 0;
 			int changed_pt = 0;
+			/*
+			 * When set, a previously negotiated codec is only re-selected if the offered
+			 * implementation is the same one. Codecs such as AMR/AMR-WB register several
+			 * implementations under a single iananame, so matching by name alone cannot
+			 * tell them apart. Off by default.
+			 */
+			int strict_codec_match = switch_true(switch_channel_get_variable(session->channel, "telnyx-strict-codec-match"));
+			int found_prev = 0;
 
 			nm_idx = 0;
 			m_idx = 0;
@@ -8066,7 +8088,12 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 					/*
 					 * Prioritize previously negotiated codec
 					 */
-					if (a_engine->read_impl.iananame && switch_core_codec_ready(&a_engine->read_codec) && strcasecmp(pmap->iananame, a_engine->read_impl.iananame) == 0) {
+					if (a_engine->read_impl.iananame && switch_core_codec_ready(&a_engine->read_codec) && strcasecmp(pmap->iananame, a_engine->read_impl.iananame) == 0 &&
+						(!strict_codec_match || (!found_prev && same_codec_impl(matches[j].imp, &a_engine->read_impl)))) {
+						if (strict_codec_match) {
+							/* Latch, so a later match on the same name cannot overwrite the exact one. */
+							found_prev = 1;
+						}
 						if (a_engine->cur_payload_map) {
 							a_engine->cur_payload_map->current = 0;
 						}
