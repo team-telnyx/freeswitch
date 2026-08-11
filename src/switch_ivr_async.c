@@ -1393,13 +1393,27 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 	rh->start_event_sent = 0;
 }
 
-static void send_record_error_event(switch_channel_t *channel, const char* file, const char* error)
+static void send_record_error_event(switch_channel_t *channel, const char* file, const char* error, switch_file_handle_t *fh)
 {
 	switch_event_t *event;
 	if (switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, "record_session_error") == SWITCH_STATUS_SUCCESS) {
 		switch_channel_event_set_data(channel, event);
 		switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Record-File-Path", file);
 		switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Record-Error", error);
+		/* TELCORE-355: forward the concrete open-error detail stashed by the file
+		 * format module (e.g. mod_av) so consumers can distinguish an rw_timeout
+		 * (recorder-server timeout) from other open failures. Absent for file
+		 * modules that don't populate it. */
+		if (fh && fh->event) {
+			const char *detail = switch_event_get_header(fh->event, "Record-Open-Error-Detail");
+			const char *timeout = switch_event_get_header(fh->event, "Record-Open-Timeout");
+			if (detail) {
+				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Record-Error-Detail", detail);
+			}
+			if (timeout) {
+				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Record-Open-Timeout", timeout);
+			}
+		}
 		switch_event_fire(&event);
 	}
 }
@@ -3737,7 +3751,10 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 				switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
 				switch_core_session_reset(session, SWITCH_TRUE, SWITCH_TRUE);
 			}
-			send_record_error_event(channel, file_open_path, "Error opening file");
+			send_record_error_event(channel, file_open_path, "Error opening file", fh);
+			if (fh->event) {
+				switch_event_destroy(&fh->event);
+			}
 			set_completion_cause(rh, "uri-failure");
 			switch_goto_status(SWITCH_STATUS_GENERR, err);
 		}
@@ -3791,7 +3808,10 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 				switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
 				switch_core_session_reset(session, SWITCH_TRUE, SWITCH_TRUE);
 			}
-			send_record_error_event(channel, in_file, "Error opening file");
+			send_record_error_event(channel, in_file, "Error opening file", &rh->in_fh);
+			if (rh->in_fh.event) {
+				switch_event_destroy(&rh->in_fh.event);
+			}
 			set_completion_cause(rh, "uri-failure");
 			switch_goto_status(SWITCH_STATUS_GENERR, err);
 		}
@@ -3803,7 +3823,10 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 				switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
 				switch_core_session_reset(session, SWITCH_TRUE, SWITCH_TRUE);
 			}
-			send_record_error_event(channel, out_file, "Error opening file");
+			send_record_error_event(channel, out_file, "Error opening file", &rh->out_fh);
+			if (rh->out_fh.event) {
+				switch_event_destroy(&rh->out_fh.event);
+			}
 			set_completion_cause(rh, "uri-failure");
 			switch_goto_status(SWITCH_STATUS_GENERR, err);
 		}
