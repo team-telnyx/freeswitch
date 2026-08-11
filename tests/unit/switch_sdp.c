@@ -676,6 +676,125 @@ FST_CORE_BEGIN("./conf_sdp")
 		}
 		}
 		FST_SESSION_END()
+
+		/*
+		 * AMR-WB registers a bandwidth efficient and an octet aligned implementation
+		 * under the single iananame AMR-WB, so codec selection that compares names
+		 * alone cannot tell them apart. With telnyx-strict-codec-match
+		 * set, a re-INVITE must not flip between them, and the answer must keep
+		 * advertising the fmtp of whichever one is in use.
+		 */
+		FST_SESSION_BEGIN(sdp_amrwb_strict_codec_match)
+		{
+			switch_status_t status;
+			switch_media_handle_t *media_handle;
+			switch_core_media_params_t *mparams;
+			switch_codec_implementation_t impl = { 0 };
+			switch_payload_t initial_ianacode;
+			const char *local_sdp;
+			uint8_t match = 0, p = 0;
+
+			/* Both variants offered: PT 104 bandwidth efficient, PT 110 octet aligned. */
+			const char *offer_both =
+				"v=0\r\n"
+				"o=- 1 1 IN IP4 198.51.100.1\r\n"
+				"s=-\r\n"
+				"t=0 0\r\n"
+				"m=audio 56210 RTP/AVP 104 110\r\n"
+				"c=IN IP4 198.51.100.1\r\n"
+				"a=rtpmap:104 AMR-WB/16000\r\n"
+				"a=fmtp:104 mode-set=2\r\n"
+				"a=rtpmap:110 AMR-WB/16000\r\n"
+				"a=fmtp:110 octet-align=1; mode-set=2\r\n"
+				"a=sendrecv\r\n";
+
+			/*
+			 * Hold re-offer: bandwidth efficient only, with a different number of fmtp
+			 * fields so that fmtp_check_match() fails and a fresh payload map is built.
+			 */
+			const char *offer_be_only =
+				"v=0\r\n"
+				"o=- 1 2 IN IP4 198.51.100.1\r\n"
+				"s=-\r\n"
+				"t=0 0\r\n"
+				"m=audio 56210 RTP/AVP 104\r\n"
+				"c=IN IP4 198.51.100.1\r\n"
+				"a=rtpmap:104 AMR-WB/16000\r\n"
+				"a=fmtp:104 mode-set=2; mode-change-capability=2; max-red=0\r\n"
+				"a=sendrecv\r\n";
+
+			/* Re-offer carrying only the octet aligned variant. */
+			const char *offer_oa_only =
+				"v=0\r\n"
+				"o=- 1 3 IN IP4 198.51.100.1\r\n"
+				"s=-\r\n"
+				"t=0 0\r\n"
+				"m=audio 56210 RTP/AVP 110\r\n"
+				"c=IN IP4 198.51.100.1\r\n"
+				"a=rtpmap:110 AMR-WB/16000\r\n"
+				"a=fmtp:110 octet-align=1; mode-set=2\r\n"
+				"a=sendrecv\r\n";
+
+			switch_channel_set_variable(fst_channel, "telnyx-strict-codec-match", "true");
+
+			mparams = switch_core_session_alloc(fst_session, sizeof(switch_core_media_params_t));
+			mparams->inbound_codec_string = switch_core_session_strdup(fst_session, "AMR-WB");
+			mparams->outbound_codec_string = switch_core_session_strdup(fst_session, "AMR-WB");
+			mparams->rtpip = switch_core_session_strdup(fst_session, (char *)rx_host);
+
+			status = switch_media_handle_create(&media_handle, fst_session, mparams);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+
+			status = switch_core_media_prepare_codecs(fst_session, SWITCH_FALSE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+
+			/* Initial negotiation settles on one of the two implementations. */
+			match = switch_core_media_negotiate_sdp(fst_session, offer_both, &p, SDP_OFFER);
+			fst_requires(match == 1);
+			fst_requires(switch_core_session_get_read_impl(fst_session, &impl) == SWITCH_STATUS_SUCCESS);
+			fst_check(!strcasecmp(impl.iananame, "AMR-WB"));
+			initial_ianacode = impl.ianacode;
+
+			switch_core_media_gen_local_sdp(fst_session, SDP_ANSWER, rx_host, 12345, NULL, 1);
+			local_sdp = switch_channel_get_variable(fst_channel, "rtp_local_sdp_str");
+			fst_requires(local_sdp);
+			fst_xcheck(strstr(local_sdp, "a=fmtp:") != NULL, "initial answer carries an fmtp");
+
+			/* Re-offering the same list must not flip to the other implementation. */
+			match = switch_core_media_negotiate_sdp(fst_session, offer_both, &p, SDP_OFFER);
+			fst_requires(match == 1);
+			fst_requires(switch_core_session_get_read_impl(fst_session, &impl) == SWITCH_STATUS_SUCCESS);
+			fst_xcheck(impl.ianacode == initial_ianacode, "re-offer of the same list keeps the implementation");
+
+			/*
+			 * Same implementation, different fmtp. The payload map is rebuilt and the
+			 * codec is not reset, so nothing repopulates fmtp_out; the answer used to
+			 * come out with no a=fmtp line at all.
+			 */
+			match = switch_core_media_negotiate_sdp(fst_session, offer_be_only, &p, SDP_OFFER);
+			fst_requires(match == 1);
+			switch_core_media_gen_local_sdp(fst_session, SDP_ANSWER, rx_host, 12345, NULL, 1);
+			local_sdp = switch_channel_get_variable(fst_channel, "rtp_local_sdp_str");
+			fst_requires(local_sdp);
+			fst_xcheck(strstr(local_sdp, "a=fmtp:104") != NULL, "answer keeps the fmtp when only the fmtp changed");
+			fst_requires(switch_core_session_get_read_impl(fst_session, &impl) == SWITCH_STATUS_SUCCESS);
+			fst_xcheck(impl.ianacode == initial_ianacode, "codec unchanged when only the fmtp changed");
+
+			/*
+			 * Only the other implementation is offered. The codec has to actually change,
+			 * and the answer still has to carry an fmtp: deferring the reset to the read
+			 * loop would generate the SDP before the payload map is repopulated.
+			 */
+			match = switch_core_media_negotiate_sdp(fst_session, offer_oa_only, &p, SDP_OFFER);
+			fst_requires(match == 1);
+			switch_core_media_gen_local_sdp(fst_session, SDP_ANSWER, rx_host, 12345, NULL, 1);
+			local_sdp = switch_channel_get_variable(fst_channel, "rtp_local_sdp_str");
+			fst_requires(local_sdp);
+			fst_xcheck(strstr(local_sdp, "a=fmtp:110") != NULL, "answer carries an fmtp after switching implementation");
+			fst_requires(switch_core_session_get_read_impl(fst_session, &impl) == SWITCH_STATUS_SUCCESS);
+			fst_xcheck(impl.ianacode != initial_ianacode, "codec follows an offer carrying only the other implementation");
+		}
+		FST_SESSION_END()
 	}
 	FST_SUITE_END()
 }
