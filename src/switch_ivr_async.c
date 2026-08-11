@@ -1400,7 +1400,7 @@ static void send_record_error_event(switch_channel_t *channel, const char* file,
 		switch_channel_event_set_data(channel, event);
 		switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Record-File-Path", file);
 		switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Record-Error", error);
-		/* TELCORE-355: forward the concrete open-error detail stashed by the file
+		/* Forward the concrete open-error detail stashed by the file
 		 * format module (e.g. mod_av) so consumers can distinguish an rw_timeout
 		 * (recorder-server timeout) from other open failures. Absent for file
 		 * modules that don't populate it. */

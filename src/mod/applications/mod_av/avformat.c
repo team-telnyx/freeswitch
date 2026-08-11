@@ -2330,7 +2330,7 @@ static switch_status_t av_file_open(switch_file_handle_t *handle, const char *pa
 			char ebuf[255] = "";
 			get_error_text(ret, ebuf, sizeof(ebuf));
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Could not open '%s': %s\n", file, ebuf);
-			/* TELCORE-355: stash the concrete open error on handle->event so the
+			/* Stash the concrete open error on handle->event so the
 			 * recording layer (switch_ivr_async.c send_record_error_event) can
 			 * distinguish an rw_timeout (recorder-server timeout) from other open
 			 * failures. handle->event is otherwise unused on this path; the
