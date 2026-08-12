@@ -795,6 +795,78 @@ FST_CORE_BEGIN("./conf_sdp")
 			fst_xcheck(impl.ianacode != initial_ianacode, "codec follows an offer carrying only the other implementation");
 		}
 		FST_SESSION_END()
+
+		/*
+		 * The hold case on its own: one re-offer of the implementation already in use,
+		 * carrying a different fmtp so that a fresh payload map is allocated. Kept
+		 * separate from the sequence above because a preceding implementation change
+		 * forces a codec reset, which repopulates the fmtp and hides the defect.
+		 */
+		FST_SESSION_BEGIN(sdp_amrwb_fmtp_kept_on_reoffer)
+		{
+			switch_status_t status;
+			switch_media_handle_t *media_handle;
+			switch_core_media_params_t *mparams;
+			const char *local_sdp;
+			uint8_t match = 0, p = 0;
+
+			const char *offer_both =
+				"v=0\r\n"
+				"o=- 2 1 IN IP4 198.51.100.1\r\n"
+				"s=-\r\n"
+				"t=0 0\r\n"
+				"m=audio 56210 RTP/AVP 104 110\r\n"
+				"c=IN IP4 198.51.100.1\r\n"
+				"a=rtpmap:104 AMR-WB/16000\r\n"
+				"a=fmtp:104 mode-set=2\r\n"
+				"a=rtpmap:110 AMR-WB/16000\r\n"
+				"a=fmtp:110 octet-align=1; mode-set=2\r\n"
+				"a=sendrecv\r\n";
+
+			/* Same payload type, three fmtp fields instead of one. */
+			const char *offer_hold =
+				"v=0\r\n"
+				"o=- 2 2 IN IP4 198.51.100.1\r\n"
+				"s=-\r\n"
+				"t=0 0\r\n"
+				"m=audio 56210 RTP/AVP 104\r\n"
+				"c=IN IP4 198.51.100.1\r\n"
+				"a=rtpmap:104 AMR-WB/16000\r\n"
+				"a=fmtp:104 mode-set=2; mode-change-capability=2; max-red=0\r\n"
+				"a=sendonly\r\n";
+
+			switch_channel_set_variable(fst_channel, "telnyx-strict-codec-match", "true");
+
+			mparams = switch_core_session_alloc(fst_session, sizeof(switch_core_media_params_t));
+			mparams->inbound_codec_string = switch_core_session_strdup(fst_session, "AMR-WB");
+			mparams->outbound_codec_string = switch_core_session_strdup(fst_session, "AMR-WB");
+			mparams->rtpip = switch_core_session_strdup(fst_session, (char *)rx_host);
+
+			status = switch_media_handle_create(&media_handle, fst_session, mparams);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+
+			status = switch_core_media_prepare_codecs(fst_session, SWITCH_FALSE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+
+			match = switch_core_media_negotiate_sdp(fst_session, offer_both, &p, SDP_OFFER);
+			fst_requires(match == 1);
+			switch_core_media_gen_local_sdp(fst_session, SDP_ANSWER, rx_host, 12345, NULL, 1);
+			local_sdp = switch_channel_get_variable(fst_channel, "rtp_local_sdp_str");
+			fst_requires(local_sdp);
+			fst_xcheck(strstr(local_sdp, "a=fmtp:104") != NULL, "initial answer carries the AMR-WB fmtp");
+
+			/*
+			 * No implementation change, so nothing resets the codec and nothing else
+			 * repopulates fmtp_out on the payload map this re-offer allocates.
+			 */
+			match = switch_core_media_negotiate_sdp(fst_session, offer_hold, &p, SDP_OFFER);
+			fst_requires(match == 1);
+			switch_core_media_gen_local_sdp(fst_session, SDP_ANSWER, rx_host, 12345, NULL, 1);
+			local_sdp = switch_channel_get_variable(fst_channel, "rtp_local_sdp_str");
+			fst_requires(local_sdp);
+			fst_xcheck(strstr(local_sdp, "a=fmtp:104") != NULL, "hold answer still carries the AMR-WB fmtp");
+		}
+		FST_SESSION_END()
 	}
 	FST_SUITE_END()
 }
