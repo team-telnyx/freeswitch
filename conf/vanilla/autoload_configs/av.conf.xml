@@ -163,5 +163,21 @@ enum AVColorRange {
 <configuration name="avformat.conf" description="AVFormat Config">
   <settings>
       <param name="colorspace" value="1"/>
+
+      <!-- Timeouts for network outputs (rtmp/rtmps/rtsp), in milliseconds.
+           0 (the default) disables them: an unreachable or overloaded server can
+           then block the opening/writing thread indefinitely.
+
+           network-rw-timeout      read/write timeout applied when the record command
+                                   does not carry its own rw_timeout file parameter.
+           network-max-rw-timeout  upper bound applied to a caller-supplied rw_timeout,
+                                   so an over-generous caller value cannot defeat this.
+           network-connect-timeout timeout for establishing the connection.
+
+           NOTE: the rw_timeout file parameter is in microseconds (ffmpeg's own unit);
+           these settings are in milliseconds. -->
+      <!-- <param name="network-rw-timeout" value="2000"/> -->
+      <!-- <param name="network-max-rw-timeout" value="5000"/> -->
+      <!-- <param name="network-connect-timeout" value="2000"/> -->
   </settings>
 </configuration>

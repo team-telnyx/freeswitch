@@ -84,6 +84,12 @@ GCC_DIAG_ON(deprecated-declarations)
 
 struct avformat_globals {
 	enum AVColorSpace colorspace;
+	/* Timeouts for network outputs (rtmp/rtmps/rtsp/youtube), in microseconds to match
+	 * ffmpeg's own units; configured in milliseconds.  0 disables, preserving the
+	 * historical behaviour of an unbounded blocking open/write. */
+	int64_t default_rw_timeout_us;
+	int64_t max_rw_timeout_us;
+	int64_t connect_timeout_us;
 };
 
 struct avformat_globals avformat_globals = { 0 };
@@ -3467,6 +3473,28 @@ static char *supported_formats[SWITCH_MAX_CODECS] = { 0 };
 
 static const char modname[] = "mod_av";
 
+/* Parse a millisecond timeout setting into microseconds.  Returns 0 (disabled) for
+ * anything unparseable or negative, so a bad config can never be more aggressive
+ * than the historical unbounded behaviour. */
+static int64_t parse_timeout_ms_to_us(const char *name, const char *val)
+{
+	int ms;
+
+	if (zstr(val)) {
+		return 0;
+	}
+
+	ms = atoi(val);
+
+	if (ms < 0) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+						  "Ignoring negative %s '%s', leaving it disabled\n", name, val);
+		return 0;
+	}
+
+	return (int64_t) ms * 1000;
+}
+
 static switch_status_t load_config(void)
 {
 	char *cf = "avformat.conf";
@@ -3490,8 +3518,22 @@ static switch_status_t load_config(void)
 				if (avformat_globals.colorspace > AVCOL_SPC_NB) {
 					avformat_globals.colorspace = AVCOL_SPC_RGB;
 				}
+			} else if (!strcasecmp(var, "network-rw-timeout")) {
+				avformat_globals.default_rw_timeout_us = parse_timeout_ms_to_us(var, val);
+			} else if (!strcasecmp(var, "network-max-rw-timeout")) {
+				avformat_globals.max_rw_timeout_us = parse_timeout_ms_to_us(var, val);
+			} else if (!strcasecmp(var, "network-connect-timeout")) {
+				avformat_globals.connect_timeout_us = parse_timeout_ms_to_us(var, val);
 			}
 		}
+	}
+
+	if (avformat_globals.default_rw_timeout_us || avformat_globals.max_rw_timeout_us || avformat_globals.connect_timeout_us) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE,
+						  "Network output timeouts: rw default %lldms, rw max %lldms, connect %lldms (0 = disabled)\n",
+						  (long long) (avformat_globals.default_rw_timeout_us / 1000),
+						  (long long) (avformat_globals.max_rw_timeout_us / 1000),
+						  (long long) (avformat_globals.connect_timeout_us / 1000));
 	}
 
 	switch_xml_free(xml);
