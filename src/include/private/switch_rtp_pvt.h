@@ -4,7 +4,8 @@
 typedef enum {
 	SWITCH_RTP_ICE_CONTROLLING_FAILOVER_IDLE = 0,
 	SWITCH_RTP_ICE_CONTROLLING_FAILOVER_PROBING,
-	SWITCH_RTP_ICE_CONTROLLING_FAILOVER_NOMINATING
+	SWITCH_RTP_ICE_CONTROLLING_FAILOVER_NOMINATING,
+	SWITCH_RTP_ICE_CONTROLLING_STARTUP_NOMINATING
 } switch_rtp_ice_controlling_failover_state_t;
 
 typedef enum {
@@ -122,6 +123,8 @@ SWITCH_DECLARE(void) switch_rtp_pvt_ice_role_conflict_apply(switch_rtp_ice_t *ic
 SWITCH_DECLARE(void) switch_rtp_pvt_ice_role_conflict_cancel(switch_rtp_ice_t *ice);
 SWITCH_DECLARE(void) switch_rtp_pvt_ice_role_conflict_rotate_tie_breaker(char tie_breaker[8]);
 SWITCH_DECLARE(uint32_t) switch_rtp_pvt_ice_local_prflx_priority(switch_bool_t is_rtcp, switch_bool_t rtcp_mux);
+SWITCH_DECLARE(int) switch_rtp_pvt_reuse_pending_startup_prflx_candidate(switch_rtp_t *rtp_session,
+	switch_rtp_ice_t *ice, const char *host, switch_port_t port, uint32_t priority);
 
 #endif /* __SWITCH_RTP_PVT_H__ */
 
