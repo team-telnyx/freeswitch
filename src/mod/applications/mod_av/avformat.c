@@ -194,6 +194,8 @@ struct av_file_context {
 	switch_time_t io_deadline;
 	int io_timed_out;
 	int io_timeout_logged;
+	/* Set from another thread via SCFC_ABORT_IO to break out of a blocked read/write. */
+	int abort_io;
 	/* Resolved once at open, so the write path does not have to re-derive them. */
 	switch_bool_t io_is_network;
 	int64_t io_write_timeout_us;
@@ -442,7 +444,7 @@ static int interrupt_cb(void *cp)
 		return 0;
 	}
 
-	if (context->closed) {
+	if (context->closed || context->abort_io) {
 		return 1;
 	}
 
@@ -2775,6 +2777,11 @@ static switch_status_t av_file_write(switch_file_handle_t *handle, void *data, s
 		return SWITCH_STATUS_FALSE;
 	}
 
+	/* Once aborted, fail fast rather than blocking again on the same dead peer. */
+	if (context->abort_io) {
+		return SWITCH_STATUS_FALSE;
+	}
+
 	if (!context->has_audio) {
 		return SWITCH_STATUS_SUCCESS;
 	}
@@ -3067,6 +3074,16 @@ static switch_status_t av_file_command(switch_file_handle_t *handle, switch_file
 		context->vid_ready = 0;
 		context->eh.record_timer_paused = switch_micro_time_now();
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "%s pause write\n", handle->file_path);
+		break;
+	case SCFC_ABORT_IO:
+		/* Deliberately not context->closed: that flag also drives read and video-ready
+		 * logic elsewhere in this file.  interrupt_cb picks this up from whichever
+		 * thread is currently blocked inside ffmpeg. */
+		context->abort_io = 1;
+		/* DEBUG, not WARNING: whoever asked for the abort is expected to say why, and
+		 * during a recorder stall this would otherwise double every such report. */
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Aborting I/O on %s\n",
+						  handle->file_path ? handle->file_path : "(unknown)");
 		break;
 	case SCFC_RESUME_WRITE:
 		if (context->eh.record_timer_paused) {
