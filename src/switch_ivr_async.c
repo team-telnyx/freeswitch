@@ -1393,13 +1393,17 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 	rh->start_event_sent = 0;
 }
 
-static void send_record_error_event(switch_channel_t *channel, const char* file, const char* error)
+static void send_record_error_event(switch_channel_t *channel, const char* file, const char* error, switch_status_t open_status)
 {
 	switch_event_t *event;
 	if (switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, "record_session_error") == SWITCH_STATUS_SUCCESS) {
 		switch_channel_event_set_data(channel, event);
 		switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Record-File-Path", file);
 		switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Record-Error", error);
+		/* Report whether the open failed on an I/O timeout (a recorder-server
+		 * timeout for rtmp:// targets) so consumers can alert on it. */
+		switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Record-Open-Timeout",
+									   open_status == SWITCH_STATUS_TIMEOUT ? "true" : "false");
 		switch_event_fire(&event);
 	}
 }
@@ -3407,6 +3411,9 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 	const char *file_open_path = file;
 	switch_event_t *file_params = NULL;
 	int have_recording_file_param_override = 0;
+	/* File-module status of the failing open, so record_session_error can
+	 * report a recorder-server timeout distinctly. */
+	switch_status_t open_status = SWITCH_STATUS_SUCCESS;
 
 	if ((p = get_recording_var(channel, vars, "RECORD_HANGUP_ON_ERROR"))) {
 		hangup_on_error = switch_true(p);
@@ -3731,13 +3738,13 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 			file_flags |= SWITCH_FILE_FLAG_VIDEO;
 		}
 
-		if (switch_core_file_open(fh, file_open_path, channels, read_impl.actual_samples_per_second, file_flags, NULL) != SWITCH_STATUS_SUCCESS) {
+		if ((open_status = switch_core_file_open(fh, file_open_path, channels, read_impl.actual_samples_per_second, file_flags, NULL)) != SWITCH_STATUS_SUCCESS) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error opening %s\n", file_open_path);
 			if (hangup_on_error) {
 				switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
 				switch_core_session_reset(session, SWITCH_TRUE, SWITCH_TRUE);
 			}
-			send_record_error_event(channel, file_open_path, "Error opening file");
+			send_record_error_event(channel, file_open_path, "Error opening file", open_status);
 			set_completion_cause(rh, "uri-failure");
 			switch_goto_status(SWITCH_STATUS_GENERR, err);
 		}
@@ -3785,25 +3792,25 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 		switch_set_flag(&rh->in_fh, SWITCH_FILE_NATIVE);
 		switch_set_flag(&rh->out_fh, SWITCH_FILE_NATIVE);
 
-		if (switch_core_file_open(&rh->in_fh, in_file, channels, read_impl.actual_samples_per_second, file_flags, NULL) != SWITCH_STATUS_SUCCESS) {
+		if ((open_status = switch_core_file_open(&rh->in_fh, in_file, channels, read_impl.actual_samples_per_second, file_flags, NULL)) != SWITCH_STATUS_SUCCESS) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error opening %s\n", in_file);
 			if (hangup_on_error) {
 				switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
 				switch_core_session_reset(session, SWITCH_TRUE, SWITCH_TRUE);
 			}
-			send_record_error_event(channel, in_file, "Error opening file");
+			send_record_error_event(channel, in_file, "Error opening file", open_status);
 			set_completion_cause(rh, "uri-failure");
 			switch_goto_status(SWITCH_STATUS_GENERR, err);
 		}
 
-		if (switch_core_file_open(&rh->out_fh, out_file, channels, read_impl.actual_samples_per_second, file_flags, NULL) != SWITCH_STATUS_SUCCESS) {
+		if ((open_status = switch_core_file_open(&rh->out_fh, out_file, channels, read_impl.actual_samples_per_second, file_flags, NULL)) != SWITCH_STATUS_SUCCESS) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error opening %s\n", out_file);
 			switch_core_file_close(&rh->in_fh);
 			if (hangup_on_error) {
 				switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
 				switch_core_session_reset(session, SWITCH_TRUE, SWITCH_TRUE);
 			}
-			send_record_error_event(channel, out_file, "Error opening file");
+			send_record_error_event(channel, out_file, "Error opening file", open_status);
 			set_completion_cause(rh, "uri-failure");
 			switch_goto_status(SWITCH_STATUS_GENERR, err);
 		}

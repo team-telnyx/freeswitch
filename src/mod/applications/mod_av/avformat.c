@@ -2329,7 +2329,10 @@ static switch_status_t av_file_open(switch_file_handle_t *handle, const char *pa
 		if (ret < 0) {
 			char ebuf[255] = "";
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Could not open '%s': %s\n", file, get_error_text(ret, ebuf, sizeof(ebuf)));
-			switch_goto_status(SWITCH_STATUS_GENERR, end);
+			/* Report rw_timeout expiry distinctly: switch_core_file_open()
+			 * returns this status unchanged, so callers can tell a
+			 * recorder-server timeout from any other open failure. */
+			switch_goto_status(ret == AVERROR(ETIMEDOUT) ? SWITCH_STATUS_TIMEOUT : SWITCH_STATUS_GENERR, end);
 		}
 	} else {
 		avformat_network_init();
