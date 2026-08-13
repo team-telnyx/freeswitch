@@ -1393,13 +1393,75 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 	rh->start_event_sent = 0;
 }
 
-static void send_record_error_event(switch_channel_t *channel, const char* file, const char* error)
+#define RECORD_OPEN_METADATA_REQUEST_HEADER "FreeSWITCH-Record-Open-Metadata"
+
+/*
+ * Give file modules a scratch event for open-error metadata without exposing
+ * the caller-owned fh->event to mutation or destruction.  On success the
+ * scratch event is discarded; on failure its ownership is returned to the
+ * caller for event forwarding.
+ */
+static switch_status_t open_recording_file(switch_file_handle_t *fh,
+	const char *path,
+	uint32_t channels,
+	uint32_t rate,
+	unsigned int flags,
+	switch_event_t **error_metadata)
+{
+	switch_event_t *original_event = fh->event;
+	switch_event_t *metadata = NULL;
+	switch_status_t status;
+
+	switch_assert(error_metadata);
+	*error_metadata = NULL;
+
+	if (original_event) {
+		switch_event_dup(&metadata, original_event);
+	} else {
+		switch_event_create_plain(&metadata, SWITCH_EVENT_CHANNEL_DATA);
+	}
+
+	if (metadata) {
+		switch_event_del_header(metadata, RECORD_OPEN_METADATA_REQUEST_HEADER);
+		switch_event_add_header_string(metadata, SWITCH_STACK_BOTTOM,
+			RECORD_OPEN_METADATA_REQUEST_HEADER, "true");
+		fh->event = metadata;
+	}
+
+	status = switch_core_file_open(fh, path, channels, rate, flags, NULL);
+
+	if (metadata) {
+		fh->event = original_event;
+		if (status == SWITCH_STATUS_SUCCESS) {
+			switch_event_destroy(&metadata);
+		} else {
+			*error_metadata = metadata;
+		}
+	}
+
+	return status;
+}
+
+static void send_record_error_event(switch_channel_t *channel,
+	const char *file,
+	const char *error,
+	switch_event_t *error_metadata)
 {
 	switch_event_t *event;
 	if (switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, "record_session_error") == SWITCH_STATUS_SUCCESS) {
 		switch_channel_event_set_data(channel, event);
 		switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Record-File-Path", file);
 		switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Record-Error", error);
+		if (error_metadata) {
+			const char *detail = switch_event_get_header(error_metadata, "Record-Open-Error-Detail");
+			const char *timeout = switch_event_get_header(error_metadata, "Record-Open-Timeout");
+			if (detail) {
+				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Record-Error-Detail", detail);
+			}
+			if (timeout) {
+				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Record-Open-Timeout", timeout);
+			}
+		}
 		switch_event_fire(&event);
 	}
 }
@@ -3406,6 +3468,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 	 * include effective writer params used only for switch_core_file_open(). */
 	const char *file_open_path = file;
 	switch_event_t *file_params = NULL;
+	switch_event_t *open_error_metadata = NULL;
 	int have_recording_file_param_override = 0;
 
 	if ((p = get_recording_var(channel, vars, "RECORD_HANGUP_ON_ERROR"))) {
@@ -3731,13 +3794,15 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 			file_flags |= SWITCH_FILE_FLAG_VIDEO;
 		}
 
-		if (switch_core_file_open(fh, file_open_path, channels, read_impl.actual_samples_per_second, file_flags, NULL) != SWITCH_STATUS_SUCCESS) {
+		if (open_recording_file(fh, file_open_path, channels, read_impl.actual_samples_per_second,
+			file_flags, &open_error_metadata) != SWITCH_STATUS_SUCCESS) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error opening %s\n", file_open_path);
 			if (hangup_on_error) {
 				switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
 				switch_core_session_reset(session, SWITCH_TRUE, SWITCH_TRUE);
 			}
-			send_record_error_event(channel, file_open_path, "Error opening file");
+			send_record_error_event(channel, file_open_path, "Error opening file", open_error_metadata);
+			switch_event_safe_destroy(open_error_metadata);
 			set_completion_cause(rh, "uri-failure");
 			switch_goto_status(SWITCH_STATUS_GENERR, err);
 		}
@@ -3785,25 +3850,29 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 		switch_set_flag(&rh->in_fh, SWITCH_FILE_NATIVE);
 		switch_set_flag(&rh->out_fh, SWITCH_FILE_NATIVE);
 
-		if (switch_core_file_open(&rh->in_fh, in_file, channels, read_impl.actual_samples_per_second, file_flags, NULL) != SWITCH_STATUS_SUCCESS) {
+		if (open_recording_file(&rh->in_fh, in_file, channels, read_impl.actual_samples_per_second,
+			file_flags, &open_error_metadata) != SWITCH_STATUS_SUCCESS) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error opening %s\n", in_file);
 			if (hangup_on_error) {
 				switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
 				switch_core_session_reset(session, SWITCH_TRUE, SWITCH_TRUE);
 			}
-			send_record_error_event(channel, in_file, "Error opening file");
+			send_record_error_event(channel, in_file, "Error opening file", open_error_metadata);
+			switch_event_safe_destroy(open_error_metadata);
 			set_completion_cause(rh, "uri-failure");
 			switch_goto_status(SWITCH_STATUS_GENERR, err);
 		}
 
-		if (switch_core_file_open(&rh->out_fh, out_file, channels, read_impl.actual_samples_per_second, file_flags, NULL) != SWITCH_STATUS_SUCCESS) {
+		if (open_recording_file(&rh->out_fh, out_file, channels, read_impl.actual_samples_per_second,
+			file_flags, &open_error_metadata) != SWITCH_STATUS_SUCCESS) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error opening %s\n", out_file);
 			switch_core_file_close(&rh->in_fh);
 			if (hangup_on_error) {
 				switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
 				switch_core_session_reset(session, SWITCH_TRUE, SWITCH_TRUE);
 			}
-			send_record_error_event(channel, out_file, "Error opening file");
+			send_record_error_event(channel, out_file, "Error opening file", open_error_metadata);
+			switch_event_safe_destroy(open_error_metadata);
 			set_completion_cause(rh, "uri-failure");
 			switch_goto_status(SWITCH_STATUS_GENERR, err);
 		}
