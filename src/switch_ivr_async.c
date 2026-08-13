@@ -1159,6 +1159,12 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_displace_session(switch_core_session_
  * so such a value is refused outright as a misconfiguration. */
 #define RECORD_BUFFER_MIN_MS 100
 
+/* 24h.  An upper bound matters as much as the lower one: without it a value beyond
+ * INT_MAX truncates on the way into an int and can land on a small positive number,
+ * turning a fat-fingered setting into an aggressively short timeout rather than a
+ * disabled one. */
+#define RECORD_TIMEOUT_MAX_MS 86400000
+
 struct record_helper {
 	switch_media_bug_t *bug;
 	switch_memory_pool_t *helper_pool;
@@ -1191,6 +1197,10 @@ struct record_helper {
 	switch_size_t buffer_max_bytes;
 	switch_size_t buffer_dropped_bytes;
 	switch_time_t last_drop_log;
+	/* Set by the recording thread as it exits, so the close path can tell "still
+	 * flushing" from "wedged" without an untimed join. */
+	int thread_done;
+	int close_timeout_ms;
 	switch_thread_t *thread;
 	switch_mutex_t *buffer_mutex;
 	int thread_ready;
@@ -1508,6 +1518,10 @@ static void *SWITCH_THREAD_FUNC recording_thread(switch_thread_t *thread, void *
 
 	switch_core_session_rwunlock(session);
 
+	/* Last thing before exiting: the close path polls this to decide whether the thread
+	 * is still flushing normally or is stuck and needs its I/O aborted. */
+	rh->thread_done = 1;
+
 	return NULL;
 }
 
@@ -1774,6 +1788,28 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 					switch_mutex_lock(rh->cond_mutex);
 					switch_thread_cond_signal(rh->cond);
 					switch_mutex_unlock(rh->cond_mutex);
+
+					/* The join is what lets the recording thread flush whatever is still
+					 * queued, so it must not be cut short in the normal case.  But if that
+					 * thread is blocked writing to an unresponsive recorder, an untimed
+					 * join holds up the hangup for as long as the write blocks.  Give it a
+					 * budget, then abort its I/O so the join can complete. */
+					if (rh->close_timeout_ms > 0) {
+						int waited_ms = 0;
+
+						while (!rh->thread_done && waited_ms < rh->close_timeout_ms) {
+							switch_yield(10000);
+							waited_ms += 10;
+						}
+
+						if (!rh->thread_done) {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+											  "Recording thread for %s still busy after %dms; aborting its I/O so the channel can go down\n",
+											  rh->file, rh->close_timeout_ms);
+							set_completion_cause(rh, "uri-failure");
+							switch_core_file_command(rh->fh, SCFC_ABORT_IO);
+						}
+					}
 
 					switch_thread_join(&st, rh->thread);
 				}
@@ -3943,15 +3979,35 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 		/* Strict: atoi("2s") would yield 2, i.e. a 2ms ceiling that discards audio on
 		 * every frame for the whole call while looking like a working recording.  A
 		 * typo here has to be refused, not silently honoured. */
-		if (!endptr || *endptr != '\0' || tmp < RECORD_BUFFER_MIN_MS) {
+		if (!endptr || *endptr != '\0' || tmp < RECORD_BUFFER_MIN_MS || tmp > RECORD_TIMEOUT_MAX_MS) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-							  "Ignoring RECORD_BUFFER_MAX_MS '%s' (expected at least %d ms as a plain integer); "
-							  "recording buffer stays unbounded\n", p, RECORD_BUFFER_MIN_MS);
+							  "Ignoring RECORD_BUFFER_MAX_MS '%s' (expected %d-%d ms as a plain integer); "
+							  "recording buffer stays unbounded\n", p, RECORD_BUFFER_MIN_MS, RECORD_TIMEOUT_MAX_MS);
 		} else {
 			/* ms of 16-bit samples at the rate and channel count we actually write.
 			 * Multiply before dividing so rates that are not a multiple of 1000 are
 			 * not truncated away. */
 			rh->buffer_max_bytes = (switch_size_t) tmp * read_impl.actual_samples_per_second / 1000 * 2 * channels;
+		}
+	}
+
+	/* How long the close path waits for the recording thread to finish flushing before
+	 * aborting its I/O.  Unset means wait indefinitely, as before. */
+	if (!(p = get_recording_var(channel, vars, "RECORD_CLOSE_TIMEOUT_MS"))) {
+		p = switch_core_get_variable_pdup("record_close_timeout_ms", rh->helper_pool);
+	}
+
+	if (!zstr(p)) {
+		char *endptr = NULL;
+		long tmp = strtol(p, &endptr, 10);
+
+		if (!endptr || *endptr != '\0' || tmp < 0 || tmp > RECORD_TIMEOUT_MAX_MS) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+							  "Ignoring RECORD_CLOSE_TIMEOUT_MS '%s' (expected 0-%d milliseconds as a plain integer); "
+							  "close will wait indefinitely\n", p, RECORD_TIMEOUT_MAX_MS);
+		} else {
+			/* Rounded up to the 10ms polling granularity below. */
+			rh->close_timeout_ms = (int) tmp;
 		}
 	}
 
