@@ -1155,6 +1155,10 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_displace_session(switch_core_session_
 }
 
 
+/* Below this a ceiling would discard audio continuously rather than absorb a stall,
+ * so such a value is refused outright as a misconfiguration. */
+#define RECORD_BUFFER_MIN_MS 100
+
 struct record_helper {
 	switch_media_bug_t *bug;
 	switch_memory_pool_t *helper_pool;
@@ -1182,6 +1186,11 @@ struct record_helper {
 	switch_codec_implementation_t read_impl;
 	switch_bool_t speech_detected;
 	switch_buffer_t *thread_buffer;
+	/* Ceiling on thread_buffer, in bytes; 0 means unbounded (the historical behaviour).
+	 * Guards against a stalled writer letting the queue grow for the whole call. */
+	switch_size_t buffer_max_bytes;
+	switch_size_t buffer_dropped_bytes;
+	switch_time_t last_drop_log;
 	switch_thread_t *thread;
 	switch_mutex_t *buffer_mutex;
 	int thread_ready;
@@ -1873,9 +1882,50 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 					len = (switch_size_t) frame.datalen / 2 / frame.channels;
 
 					if (rh->thread_buffer) {
+						switch_size_t dropped = 0;
+
 						switch_mutex_lock(rh->buffer_mutex);
+
+						/* If the recording thread is stalled -- typically blocked writing to
+						 * an unresponsive recorder -- this queue would otherwise grow for the
+						 * rest of the call.  Discard the oldest audio to stay under the
+						 * ceiling: the recording is already damaged, and unbounded growth
+						 * would put the whole box at risk rather than just this call. */
+						if (rh->buffer_max_bytes) {
+							switch_size_t inuse = switch_buffer_inuse(rh->thread_buffer);
+
+							if (inuse + frame.datalen > rh->buffer_max_bytes) {
+								switch_size_t align = 2 * (frame.channels ? frame.channels : 1);
+								switch_size_t excess = (inuse + frame.datalen) - rh->buffer_max_bytes;
+
+								/* Round the discard up to a whole sample frame.  Dropping a
+								 * partial one would byte-shift every sample after it, and
+								 * swap the channels in stereo -- corruption rather than a
+								 * gap.  The arithmetic keeps this aligned today; making it
+								 * explicit stops a later change to the ceiling from
+								 * quietly breaking it. */
+								excess = ((excess + align - 1) / align) * align;
+
+								/* switch_buffer_toss() returns what is left, not what it
+								 * discarded, so work out the loss ourselves: it drops
+								 * min(excess, inuse). */
+								dropped = excess > inuse ? inuse : excess;
+								switch_buffer_toss(rh->thread_buffer, excess);
+								rh->buffer_dropped_bytes += dropped;
+							}
+						}
+
 						switch_buffer_write(rh->thread_buffer, mask ? null_data : data, frame.datalen);
 						switch_mutex_unlock(rh->buffer_mutex);
+
+						/* Rate limited: once a recorder stalls this would fire every frame. */
+						if (dropped && (!rh->last_drop_log || (switch_micro_time_now() - rh->last_drop_log) > 5000000)) {
+							rh->last_drop_log = switch_micro_time_now();
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+											  "Recording buffer for %s is full; discarding oldest audio (%" SWITCH_SIZE_T_FMT " bytes dropped so far)\n",
+											  rh->file, rh->buffer_dropped_bytes);
+						}
+
 						if (switch_mutex_trylock(rh->cond_mutex) == SWITCH_STATUS_SUCCESS) {
 							switch_thread_cond_signal(rh->cond);
 							switch_mutex_unlock(rh->cond_mutex);
@@ -3877,6 +3927,34 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 		rh->stop_write_on_error = SWITCH_FALSE;
 	}
 	
+	/* Ceiling on how much audio may queue for the recording thread.  Per-recording
+	 * variable first, then a global default so it can be set fleet-wide without the
+	 * caller having to know about it; unset means unbounded, as before. */
+	if (!(p = get_recording_var(channel, vars, "RECORD_BUFFER_MAX_MS"))) {
+		/* _pdup, not the plain getter: that one returns the pointer after dropping the
+		 * lock, so a concurrent global_setvar could free it under us. */
+		p = switch_core_get_variable_pdup("record_buffer_max_ms", rh->helper_pool);
+	}
+
+	if (!zstr(p)) {
+		char *endptr = NULL;
+		long tmp = strtol(p, &endptr, 10);
+
+		/* Strict: atoi("2s") would yield 2, i.e. a 2ms ceiling that discards audio on
+		 * every frame for the whole call while looking like a working recording.  A
+		 * typo here has to be refused, not silently honoured. */
+		if (!endptr || *endptr != '\0' || tmp < RECORD_BUFFER_MIN_MS) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+							  "Ignoring RECORD_BUFFER_MAX_MS '%s' (expected at least %d ms as a plain integer); "
+							  "recording buffer stays unbounded\n", p, RECORD_BUFFER_MIN_MS);
+		} else {
+			/* ms of 16-bit samples at the rate and channel count we actually write.
+			 * Multiply before dividing so rates that are not a multiple of 1000 are
+			 * not truncated away. */
+			rh->buffer_max_bytes = (switch_size_t) tmp * read_impl.actual_samples_per_second / 1000 * 2 * channels;
+		}
+	}
+
 	if ((p = get_recording_var(channel, vars, "RECORD_MIN_SEC"))) {
 		int tmp = atoi(p);
 		if (tmp >= 0) {
