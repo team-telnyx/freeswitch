@@ -87,9 +87,9 @@ GCC_DIAG_ON(deprecated-declarations)
 
 struct avformat_globals {
 	enum AVColorSpace colorspace;
-	/* Timeouts for network outputs (rtmp/rtmps/rtsp/youtube), in microseconds to match
-	 * ffmpeg's own units; configured in milliseconds.  0 disables, preserving the
-	 * historical behaviour of an unbounded blocking open/write. */
+	/* Timeouts for RTMP outputs (rtmp/rtmps/youtube), in microseconds to match ffmpeg's
+	 * own units; configured in milliseconds.  0 disables, preserving the historical
+	 * behaviour of an unbounded blocking open/write. */
 	int64_t default_rw_timeout_us;
 	int64_t max_rw_timeout_us;
 	int64_t connect_timeout_us;
@@ -188,10 +188,20 @@ struct av_file_context {
 	/* Microseconds, not milliseconds: switch_time_now()/1000 overflows 32 bits. */
 	switch_time_t connect_start_time;
 	const char *rw_timeout;
-	/* Absolute deadline (switch_time_now units) for the I/O currently in flight;
-	 * 0 means no deadline.  Read by interrupt_cb from inside ffmpeg. */
+	/* Absolute deadline (monotonic microseconds) for the I/O currently in flight;
+	 * 0 means no deadline.  Read by interrupt_cb from inside ffmpeg.  Only ever armed
+	 * by the thread performing that I/O, so it needs no lock of its own. */
 	switch_time_t io_deadline;
 	int io_timed_out;
+	int io_timeout_logged;
+	/* Resolved once at open, so the write path does not have to re-derive them. */
+	switch_bool_t io_is_network;
+	int64_t io_write_timeout_us;
+	int64_t io_connect_timeout_us;
+	int64_t io_armed_timeout_us;
+	/* Option string handed to ffmpeg, and the storage it may point at. */
+	const char *rw_timeout_opt;
+	char rw_timeout_buf[32];
 
 	switch_bool_t no_video_decode;
 	switch_queue_t *video_pkt_queue;
@@ -519,15 +529,81 @@ error:
 	return ret;
 }
 
-static int write_frame(AVFormatContext *fmt_ctx, const AVRational *time_base, AVStream *st, AVPacket *pkt)
+/* Arm the deadline that interrupt_cb enforces for the call about to be made.  Only
+ * network outputs get one: aborting a local file write would corrupt an otherwise
+ * healthy recording to no purpose, since a slow disk is not a stuck peer. */
+static void io_deadline_arm(av_file_context_t *context, int64_t timeout_us)
 {
+	context->io_timed_out = 0;
+	context->io_armed_timeout_us = timeout_us;
+
+	if (context->io_is_network && timeout_us > 0) {
+		context->io_deadline = switch_mono_micro_time_now() + timeout_us;
+	} else {
+		context->io_deadline = 0;
+	}
+}
+
+static void io_deadline_disarm(av_file_context_t *context)
+{
+	context->io_deadline = 0;
+}
+
+/* Report the first timeout on a handle and stay quiet afterwards: once a recorder
+ * stalls every subsequent frame would repeat the same line. */
+static void io_deadline_report(av_file_context_t *context, const char *what)
+{
+	if (!context->io_timed_out || context->io_timeout_logged) {
+		return;
+	}
+
+	context->io_timeout_logged = 1;
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+					  "Timed out after %lldms during %s on '%s'; the recording will be stopped\n",
+					  (long long) (context->io_armed_timeout_us / 1000), what,
+					  context->handle && context->handle->file_path ? context->handle->file_path : "(unknown)");
+}
+
+/* The header goes out over the connection avio_open2 already established, so it carries
+ * the ordinary write budget, falling back to the connect budget when only that is set. */
+static int write_header_with_deadline(av_file_context_t *context)
+{
+	int64_t timeout_us = context->io_write_timeout_us ? context->io_write_timeout_us : context->io_connect_timeout_us;
+	int ret;
+
+	io_deadline_arm(context, timeout_us);
+	ret = avformat_write_header(context->fc, NULL);
+	io_deadline_disarm(context);
+
+	io_deadline_report(context, "the header write");
+
+	return ret;
+}
+
+static int write_frame(av_file_context_t *context, AVFormatContext *fmt_ctx, const AVRational *time_base, AVStream *st, AVPacket *pkt)
+{
+	int ret;
+
 	/* rescale output packet timestamp values from codec to stream timebase */
 	av_packet_rescale_ts(pkt, *time_base, st->time_base);
 	pkt->stream_index = st->index;
 
 	/* Write the compressed frame to the media file. */
 	log_packet(fmt_ctx, pkt);
-	return av_interleaved_write_frame(fmt_ctx, pkt);
+
+	/* Only bound the write when this is the sole writer.  With video present the video
+	 * thread writes to this same muxer under a *different* mutex (eh.mutex vs mutex), so
+	 * a context-wide deadline would be armed and disarmed by both threads; rather than
+	 * ship a bound that silently races, leave video outputs to ffmpeg's own rw_timeout,
+	 * which is still set on the handle. */
+	io_deadline_arm(context, context->has_video ? 0 : context->io_write_timeout_us);
+	ret = av_interleaved_write_frame(fmt_ctx, pkt);
+	io_deadline_disarm(context);
+
+	io_deadline_report(context, "a frame write");
+
+	return ret;
 }
 
 /* Add an output stream. */
@@ -1160,7 +1236,7 @@ GCC_DIAG_ON(deprecated-declarations)
 #endif
 
 			switch_mutex_lock(context->eh.mutex);
-			write_frame(context->eh.fc, &c->time_base, context->eh.video_st->st, pkt);
+			write_frame(context, context->eh.fc, &c->time_base, context->eh.video_st->st, pkt);
 			switch_mutex_unlock(context->eh.mutex);
 		}
 
@@ -1221,9 +1297,9 @@ GCC_DIAG_ON(deprecated-declarations)
 #endif
 			switch_mutex_lock(context->eh.mutex);
 #if (LIBAVCODEC_VERSION_MAJOR < LIBAVCODEC_V)
-			ret = write_frame(context->eh.fc, &c->time_base, context->eh.video_st->st, pkt);
+			ret = write_frame(context, context->eh.fc, &c->time_base, context->eh.video_st->st, pkt);
 #else
-			wret = write_frame(context->eh.fc, &c->time_base, context->eh.video_st->st, pkt);
+			wret = write_frame(context, context->eh.fc, &c->time_base, context->eh.video_st->st, pkt);
 #endif
 			switch_mutex_unlock(context->eh.mutex);
 #if (LIBAVCODEC_VERSION_MAJOR < LIBAVCODEC_V)
@@ -2169,7 +2245,11 @@ static switch_bool_t parse_int64_strict(const char *str, int64_t *out)
 	return SWITCH_TRUE;
 }
 
-/* Network outputs are the ones that can block on an unreachable or overloaded peer. */
+/* RTMP outputs are the ones that can block on an unreachable or overloaded recorder.
+ * "youtube" is included because it is RTMP too: it builds an rtmp:// URL and uses the
+ * flv muxer.  RTSP is deliberately excluded -- its muxer is AVFMT_NOFILE and connects
+ * from a different place, and we have no recording traffic on it to justify changing
+ * that path.  Covering it is a follow-up, not a prerequisite. */
 static switch_bool_t is_network_stream_name(const char *stream_name)
 {
 	if (zstr(stream_name)) {
@@ -2177,7 +2257,7 @@ static switch_bool_t is_network_stream_name(const char *stream_name)
 	}
 
 	return (!strcasecmp(stream_name, "rtmp") || !strcasecmp(stream_name, "rtmps") ||
-			!strcasecmp(stream_name, "rtsp") || !strcasecmp(stream_name, "youtube")) ? SWITCH_TRUE : SWITCH_FALSE;
+			!strcasecmp(stream_name, "youtube")) ? SWITCH_TRUE : SWITCH_FALSE;
 }
 
 static switch_status_t av_file_open(switch_file_handle_t *handle, const char *path)
@@ -2371,16 +2451,15 @@ static switch_status_t av_file_open(switch_file_handle_t *handle, const char *pa
 		switch_clear_flag(handle, SWITCH_FILE_FLAG_VIDEO);
 	}
 
-	/* open the output file, if needed */
-	if (!(fmt->flags & AVFMT_NOFILE)) {
-		switch_bool_t is_network = is_network_stream_name(handle->stream_name);
-		int64_t connect_timeout_us = is_network ? avformat_globals.connect_timeout_us : 0;
-		const char *rw_timeout_opt = NULL;
-		char rw_timeout_buf[32] = "";
-		AVIOInterruptCB cb = {
-			.callback = interrupt_cb,
-			.opaque = context,
-		};
+	/* Resolve the timeouts before the AVFMT_NOFILE split: muxers that open no file of
+	 * their own (rtsp) still establish their session inside the header write, and the
+	 * write path needs these regardless of which branch opens the connection. */
+	{
+		const char *rw_timeout_opt_resolved = NULL;
+		int64_t effective_rw_us = 0;
+
+		context->io_is_network = is_network_stream_name(handle->stream_name);
+		context->io_connect_timeout_us = context->io_is_network ? avformat_globals.connect_timeout_us : 0;
 
 		/* A caller-supplied rw_timeout still wins, and is passed through verbatim so
 		 * ffmpeg's own suffixed forms ("5M") keep working; it is only rewritten when we
@@ -2389,10 +2468,15 @@ static switch_status_t av_file_open(switch_file_handle_t *handle, const char *pa
 		if (!zstr(context->rw_timeout)) {
 			int64_t caller_us = 0;
 
-			rw_timeout_opt = context->rw_timeout;
+			rw_timeout_opt_resolved = context->rw_timeout;
 
 			if (!parse_int64_strict(context->rw_timeout, &caller_us)) {
-				if (is_network && avformat_globals.max_rw_timeout_us) {
+				/* Unparseable here only means we cannot reason about it ourselves;
+				 * ffmpeg may still understand it, so hand it over untouched and fall
+				 * back to the configured default for our own deadlines. */
+				effective_rw_us = avformat_globals.default_rw_timeout_us;
+
+				if (context->io_is_network && avformat_globals.max_rw_timeout_us) {
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
 									  "rw_timeout '%s' is not a plain integer; passing it through unclamped for '%s'\n",
 									  context->rw_timeout, file);
@@ -2400,20 +2484,39 @@ static switch_status_t av_file_open(switch_file_handle_t *handle, const char *pa
 			} else if (caller_us <= 0) {
 				/* Explicit 0/negative means "no timeout"; treat it as unset so a
 				 * configured default can still protect a network output. */
-				rw_timeout_opt = NULL;
-			} else if (is_network && avformat_globals.max_rw_timeout_us && caller_us > avformat_globals.max_rw_timeout_us) {
+				rw_timeout_opt_resolved = NULL;
+			} else if (context->io_is_network && avformat_globals.max_rw_timeout_us && caller_us > avformat_globals.max_rw_timeout_us) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
 								  "Clamping rw_timeout %lldus to configured maximum %lldus for '%s'\n",
 								  (long long) caller_us, (long long) avformat_globals.max_rw_timeout_us, file);
-				switch_snprintf(rw_timeout_buf, sizeof(rw_timeout_buf), "%lld", (long long) avformat_globals.max_rw_timeout_us);
-				rw_timeout_opt = rw_timeout_buf;
+				switch_snprintf(context->rw_timeout_buf, sizeof(context->rw_timeout_buf), "%lld",
+								(long long) avformat_globals.max_rw_timeout_us);
+				rw_timeout_opt_resolved = context->rw_timeout_buf;
+				effective_rw_us = avformat_globals.max_rw_timeout_us;
+			} else {
+				effective_rw_us = caller_us;
 			}
 		}
 
-		if (!rw_timeout_opt && is_network && avformat_globals.default_rw_timeout_us > 0) {
-			switch_snprintf(rw_timeout_buf, sizeof(rw_timeout_buf), "%lld", (long long) avformat_globals.default_rw_timeout_us);
-			rw_timeout_opt = rw_timeout_buf;
+		if (!rw_timeout_opt_resolved && context->io_is_network && avformat_globals.default_rw_timeout_us > 0) {
+			switch_snprintf(context->rw_timeout_buf, sizeof(context->rw_timeout_buf), "%lld",
+							(long long) avformat_globals.default_rw_timeout_us);
+			rw_timeout_opt_resolved = context->rw_timeout_buf;
+			effective_rw_us = avformat_globals.default_rw_timeout_us;
 		}
+
+		context->io_write_timeout_us = effective_rw_us;
+		context->rw_timeout_opt = rw_timeout_opt_resolved;
+	}
+
+	/* open the output file, if needed */
+	if (!(fmt->flags & AVFMT_NOFILE)) {
+		int64_t connect_timeout_us = context->io_connect_timeout_us;
+		const char *rw_timeout_opt = context->rw_timeout_opt;
+		AVIOInterruptCB cb = {
+			.callback = interrupt_cb,
+			.opaque = context,
+		};
 
 		if (rw_timeout_opt) {
 			av_dict_set(&dict, "rw_timeout", rw_timeout_opt, 0);
@@ -2423,23 +2526,17 @@ static switch_status_t av_file_open(switch_file_handle_t *handle, const char *pa
 		 * reach, which would restore the very hang this exists to prevent. */
 		context->connect_start_time = switch_mono_micro_time_now();
 
-		/* Cleared before arming, not after the call: the error path below reads it to
-		 * tell a timeout apart from an ordinary failure. */
-		context->io_timed_out = 0;
-
 		/* ffmpeg's own rw_timeout does not reliably bound the connect and handshake
 		 * across protocols and versions, so enforce the connect budget ourselves via the
-		 * interrupt callback.  Cleared once open returns; bounding the writes that follow
-		 * is handled separately. */
-		if (connect_timeout_us > 0) {
-			context->io_deadline = context->connect_start_time + connect_timeout_us;
-		}
+		 * interrupt callback.  Disarmed once open returns: the writes that follow carry
+		 * their own deadline. */
+		io_deadline_arm(context, connect_timeout_us);
 
 		/* Always via avio_open2, even with no timeout configured: it installs the
 		 * interrupt callback, without which a close cannot abort an open in flight. */
 		ret = avio_open2(&context->fc->pb, file, AVIO_FLAG_WRITE, &cb, &dict);
 
-		context->io_deadline = 0;
+		io_deadline_disarm(context);
 
 		/* Options left in the dict after a *successful* open were not recognised by this
 		 * ffmpeg build for this protocol -- i.e. the timeout we asked for is not actually
@@ -2687,7 +2784,7 @@ static switch_status_t av_file_write(switch_file_handle_t *handle, void *data, s
 			switch_buffer_zero(context->audio_buffer);
 			return status;
 		} else if (!context->aud_ready) { // audio only recording
-			int ret = avformat_write_header(context->fc, NULL);
+			int ret = write_header_with_deadline(context);
 			if (ret < 0) {
 				char ebuf[255] = "";
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Error occurred when opening output file: %s\n", get_error_text(ret, ebuf, sizeof(ebuf)));
@@ -2862,7 +2959,7 @@ GCC_DIAG_ON(deprecated-declarations)
 
 				if (context->mutex) switch_mutex_lock(context->mutex);
 
-				ret = write_frame(context->fc, &c->time_base, context->audio_st[j].st, pkt[j]);
+				ret = write_frame(context, context->fc, &c->time_base, context->audio_st[j].st, pkt[j]);
 
 				if (context->mutex) switch_mutex_unlock(context->mutex);
 
@@ -2909,7 +3006,7 @@ GCC_DIAG_ON(deprecated-declarations)
 					continue;
 				}
 
-				ret = write_frame(context->fc, &c->time_base, context->audio_st[j].st, pkt[j]);
+				ret = write_frame(context, context->fc, &c->time_base, context->audio_st[j].st, pkt[j]);
 
 				if (context->mutex) switch_mutex_unlock(context->mutex);
 
@@ -3521,7 +3618,7 @@ static switch_status_t av_file_write_video(switch_file_handle_t *handle, switch_
 
 			// av_dump_format(context->fc, 0, "/tmp/av.mp4", 1);
 
-			ret = avformat_write_header(context->fc, NULL);
+			ret = write_header_with_deadline(context);
 			if (ret < 0) {
 				char ebuf[255] = "";
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Error occurred when opening output file: %s\n", get_error_text(ret, ebuf, sizeof(ebuf)));
