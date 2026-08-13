@@ -164,9 +164,9 @@ enum AVColorRange {
   <settings>
       <param name="colorspace" value="1"/>
 
-      <!-- Timeouts for network outputs (rtmp/rtmps/rtsp), in milliseconds.
-           0 (the default) disables them: an unreachable or overloaded server can
-           then block the opening/writing thread indefinitely.
+      <!-- Timeouts for network outputs, in milliseconds.  0 (the default) disables
+           them: an unreachable or overloaded server can then block the opening or
+           writing thread indefinitely.
 
            network-rw-timeout      read/write timeout applied when the record command
                                    does not carry its own rw_timeout file parameter.
@@ -175,7 +175,11 @@ enum AVColorRange {
            network-connect-timeout timeout for establishing the connection.
 
            NOTE: the rw_timeout file parameter is in microseconds (ffmpeg's own unit);
-           these settings are in milliseconds. -->
+           these settings are in milliseconds.
+
+           network-connect-timeout applies to protocols whose muxer opens the connection
+           up front (rtmp/rtmps).  It does NOT apply to RTSP: that muxer is AVFMT_NOFILE
+           and sets its session up inside the header write, which nothing bounds yet. -->
       <!-- <param name="network-rw-timeout" value="2000"/> -->
       <!-- <param name="network-max-rw-timeout" value="5000"/> -->
       <!-- <param name="network-connect-timeout" value="2000"/> -->
