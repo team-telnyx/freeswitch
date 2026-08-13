@@ -183,5 +183,17 @@ enum AVColorRange {
       <!-- <param name="network-rw-timeout" value="2000"/> -->
       <!-- <param name="network-max-rw-timeout" value="5000"/> -->
       <!-- <param name="network-connect-timeout" value="2000"/> -->
+
+      <!-- Connect on the writer's thread instead of the caller's, when the caller has
+           a dedicated writer thread (recordings do).  Connecting to an RTMP server
+           takes a TCP handshake plus the RTMP handshake, and doing that on the calling
+           thread stops that call's media until it finishes.  With this on, the caller
+           returns immediately and audio queues (bounded by RECORD_BUFFER_MAX_MS) while
+           the connection is established.
+
+           The trade-off: a recorder that cannot be reached is reported when the first
+           write fails rather than when recording starts, so the failure shows up as a
+           RECORD_STOP with uri-failure instead of an immediate error. -->
+      <!-- <param name="network-async-open" value="true"/> -->
   </settings>
 </configuration>

@@ -1785,9 +1785,17 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 
 					rh->thread_ready = 0;
 
-					switch_mutex_lock(rh->cond_mutex);
-					switch_thread_cond_signal(rh->cond);
-					switch_mutex_unlock(rh->cond_mutex);
+					/* trylock, not lock: the recording thread holds cond_mutex for its
+					 * whole loop and only drops it inside cond_timedwait, so a blocking
+					 * acquire here would wait out the very write we are trying to bound
+					 * -- before reaching the budget below.  Failing to acquire means the
+					 * thread is working rather than waiting, so there is no one to wake;
+					 * it rechecks thread_ready within RECORDING_THREAD_COND_TIMEOUT_US
+					 * anyway.  Same reasoning as the trylock on the READ_PING path. */
+					if (switch_mutex_trylock(rh->cond_mutex) == SWITCH_STATUS_SUCCESS) {
+						switch_thread_cond_signal(rh->cond);
+						switch_mutex_unlock(rh->cond_mutex);
+					}
 
 					/* The join is what lets the recording thread flush whatever is still
 					 * queued, so it must not be cut short in the normal case.  But if that
@@ -3491,6 +3499,9 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 	/* Keep file as the caller-visible recording identity; file_open_path may
 	 * include effective writer params used only for switch_core_file_open(). */
 	const char *file_open_path = file;
+	/* What is actually handed to switch_core_file_open(): file_open_path plus any
+	 * params meant only for the writer, which must not leak into logs or events. */
+	const char *file_open_arg = NULL;
 	switch_event_t *file_params = NULL;
 	int have_recording_file_param_override = 0;
 
@@ -3817,7 +3828,22 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 			file_flags |= SWITCH_FILE_FLAG_VIDEO;
 		}
 
-		if (switch_core_file_open(fh, file_open_path, channels, read_impl.actual_samples_per_second, file_flags, NULL) != SWITCH_STATUS_SUCCESS) {
+		/* Tell the format that writes will be driven by a dedicated thread, so one that
+		 * talks to the network may postpone connecting rather than doing it here, on
+		 * the session thread.  Mirrors the condition record_callback uses when it
+		 * decides whether to create that thread; kept out of file_open_path so log and
+		 * event text still name the recording as the caller wrote it. */
+		{
+			const char *use_thread = get_recording_var(channel, vars, "RECORD_USE_THREAD");
+
+			file_open_arg = file_open_path;
+
+			if (zstr(use_thread) || switch_true(use_thread)) {
+				file_open_arg = switch_core_sprintf(rh->helper_pool, "{writer_thread=true}%s", file_open_path);
+			}
+		}
+
+		if (switch_core_file_open(fh, file_open_arg, channels, read_impl.actual_samples_per_second, file_flags, NULL) != SWITCH_STATUS_SUCCESS) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error opening %s\n", file_open_path);
 			if (hangup_on_error) {
 				switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
