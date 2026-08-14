@@ -1165,6 +1165,11 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_displace_session(switch_core_session_
  * disabled one. */
 #define RECORD_TIMEOUT_MAX_MS 86400000
 
+/* How long a run of consecutive write failures is tolerated before the recording is
+ * abandoned.  Long enough to ride out a hiccup, short enough that a dead destination
+ * does not spin at frame rate for the rest of the call. */
+#define RECORD_WRITE_ERROR_GRACE_MS 1000
+
 struct record_helper {
 	switch_media_bug_t *bug;
 	switch_memory_pool_t *helper_pool;
@@ -1201,6 +1206,10 @@ struct record_helper {
 	 * flushing" from "wedged" without an untimed join. */
 	int thread_done;
 	int close_timeout_ms;
+	/* Consecutive write failures, and when the run of them began. */
+	uint32_t write_errors;
+	switch_time_t first_write_error;
+	switch_time_t last_write_error_log;
 	switch_thread_t *thread;
 	switch_mutex_t *buffer_mutex;
 	int thread_ready;
@@ -1497,20 +1506,45 @@ static void *SWITCH_THREAD_FUNC recording_thread(switch_thread_t *thread, void *
 		switch_mutex_unlock(rh->buffer_mutex);
 
 		if (switch_core_file_write(rh->fh, data, &samples) != SWITCH_STATUS_SUCCESS) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error writing %s\n", rh->file);
+			switch_time_t now = switch_micro_time_now();
+
+			rh->write_errors++;
+
+			if (!rh->first_write_error) {
+				rh->first_write_error = now;
+			}
+
+			/* Rate limited.  A write that fails immediately -- an unreachable recorder,
+			 * rather than one that blocks -- would otherwise log once per frame, about
+			 * fifty lines a second for every affected recording. */
+			if (rh->write_errors == 1 || (now - rh->last_write_error_log) > 5000000) {
+				rh->last_write_error_log = now;
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+								  "Error writing %s (%u consecutive)\n", rh->file, rh->write_errors);
+			}
+
 			/* File write failed */
 			set_completion_cause(rh, "uri-failure");
 			if (rh->hangup_on_error) {
 				switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
 				switch_core_session_reset(session, SWITCH_TRUE, SWITCH_TRUE);
 			}
-			
-			/* We might need to consider a threshold counter that we need to exceed first before
-			 * we prune it.  In the meantime, the chanvar will serve to just enable or disable it 
-			 */
-			if(rh->stop_write_on_error) {
+
+			/* Give up once the failure is plainly not transient.  While writes could
+			 * only fail slowly this loop just blocked; now that a dead destination
+			 * fails instantly, carrying on would spin at frame rate for the rest of
+			 * the call.  The grace period still rides out a brief hiccup. */
+			if (rh->stop_write_on_error || (now - rh->first_write_error) >= RECORD_WRITE_ERROR_GRACE_MS * 1000) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+								  "Giving up on %s after %u write errors; stopping this recording\n",
+								  rh->file, rh->write_errors);
 				switch_set_flag(bug, SMBF_PRUNE);
+				break;
 			}
+		} else {
+			/* Consecutive, so a recovered write clears the tally. */
+			rh->write_errors = 0;
+			rh->first_write_error = 0;
 		}
 	}
 
