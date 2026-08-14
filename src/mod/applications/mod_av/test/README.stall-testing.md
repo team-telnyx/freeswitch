@@ -28,6 +28,7 @@ Core-side, in `vars.xml` or per recording:
 | --- | --- |
 | `record_buffer_max_ms` / `RECORD_BUFFER_MAX_MS` | ceiling on audio queued for the recording thread |
 | `record_close_timeout_ms` / `RECORD_CLOSE_TIMEOUT_MS` | how long the recording thread may make *no progress* at close before its I/O is aborted. A thread still draining its queue keeps the budget alive, so a slow-but-working recorder is not cut off; an overall cap of ten times this value stops trickling progress holding the channel up |
+| `record_write_error_grace_ms` / `RECORD_WRITE_ERROR_GRACE_MS` | how long consecutive write failures are tolerated before the recording is abandoned. Defaults to 1000ms rather than off, because the alternative is retrying a dead destination on every frame. 0 gives up on the first failure; a value larger than any call effectively never gives up |
 
 ## Running it
 

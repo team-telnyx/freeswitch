@@ -1165,9 +1165,11 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_displace_session(switch_core_session_
  * disabled one. */
 #define RECORD_TIMEOUT_MAX_MS 86400000
 
-/* How long a run of consecutive write failures is tolerated before the recording is
- * abandoned.  Long enough to ride out a hiccup, short enough that a dead destination
- * does not spin at frame rate for the rest of the call. */
+/* Default for how long a run of consecutive write failures is tolerated before the
+ * recording is abandoned.  Long enough to ride out a hiccup, short enough that a dead
+ * destination does not spin at frame rate for the rest of the call.  Overridable per
+ * recording or globally; 0 gives up on the first failure, and a large value effectively
+ * never gives up (which is the pre-existing behaviour, spin included). */
 #define RECORD_WRITE_ERROR_GRACE_MS 1000
 
 struct record_helper {
@@ -1210,6 +1212,7 @@ struct record_helper {
 	uint32_t write_errors;
 	switch_time_t first_write_error;
 	switch_time_t last_write_error_log;
+	int write_error_grace_ms;
 	switch_thread_t *thread;
 	switch_mutex_t *buffer_mutex;
 	int thread_ready;
@@ -1548,10 +1551,11 @@ static void *SWITCH_THREAD_FUNC recording_thread(switch_thread_t *thread, void *
 			 * only fail slowly this loop just blocked; now that a dead destination
 			 * fails instantly, carrying on would spin at frame rate for the rest of
 			 * the call.  The grace period still rides out a brief hiccup. */
-			if (rh->stop_write_on_error || (now - rh->first_write_error) >= RECORD_WRITE_ERROR_GRACE_MS * 1000) {
+			if (rh->stop_write_on_error || (now - rh->first_write_error) >= (switch_time_t) rh->write_error_grace_ms * 1000) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-								  "Giving up on %s after %u write errors; stopping this recording\n",
-								  rh->file, rh->write_errors);
+								  "Giving up on %s after %u write errors over %dms (grace %dms); stopping this recording\n",
+								  rh->file, rh->write_errors, (int) ((now - rh->first_write_error) / 1000),
+								  rh->write_error_grace_ms);
 				switch_set_flag(bug, SMBF_PRUNE);
 				break;
 			}
@@ -4082,6 +4086,29 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 			 * Multiply before dividing so rates that are not a multiple of 1000 are
 			 * not truncated away. */
 			rh->buffer_max_bytes = (switch_size_t) tmp * read_impl.actual_samples_per_second / 1000 * 2 * channels;
+		}
+	}
+
+	/* How long a run of consecutive write failures is tolerated before this recording is
+	 * abandoned.  Unlike the other settings this one has a working default rather than
+	 * being off, because the alternative is retrying a dead destination on every frame;
+	 * it is configurable so a deployment that would rather wait longer can. */
+	rh->write_error_grace_ms = RECORD_WRITE_ERROR_GRACE_MS;
+
+	if (!(p = get_recording_var(channel, vars, "RECORD_WRITE_ERROR_GRACE_MS"))) {
+		p = switch_core_get_variable_pdup("record_write_error_grace_ms", rh->helper_pool);
+	}
+
+	if (!zstr(p)) {
+		char *endptr = NULL;
+		long tmp = strtol(p, &endptr, 10);
+
+		if (!endptr || *endptr != '\0' || tmp < 0 || tmp > RECORD_TIMEOUT_MAX_MS) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+							  "Ignoring RECORD_WRITE_ERROR_GRACE_MS '%s' (expected 0-%d milliseconds as a plain integer); "
+							  "keeping the %dms default\n", p, RECORD_TIMEOUT_MAX_MS, rh->write_error_grace_ms);
+		} else {
+			rh->write_error_grace_ms = (int) tmp;
 		}
 	}
 
