@@ -297,9 +297,10 @@ FST_CORE_BEGIN("conf")
 			status = switch_core_file_open(&fh, path, 1, 8000, flags, fst_pool);
 			fst_requires(status == SWITCH_STATUS_SUCCESS);
 
-			/* Comfortably longer than the 1000ms network budget configured above, so a
-			 * budget wrongly applied here would abort partway through. */
-			for (i = 0; i < 100; i++) {
+			/* Paced so the run really does outlast the 1000ms network budget configured
+			 * above; without the pacing these writes complete in microseconds and a
+			 * budget wrongly applied here would never get the chance to expire. */
+			for (i = 0; i < 60; i++) {
 				len = SAMPLES;
 				status = switch_core_file_write(&fh, data, &len);
 				fst_check(status == SWITCH_STATUS_SUCCESS);
@@ -307,9 +308,17 @@ FST_CORE_BEGIN("conf")
 				if (status != SWITCH_STATUS_SUCCESS) {
 					break;
 				}
+
+				switch_yield(20000);
 			}
 
 			switch_core_file_close(&fh);
+
+			/* Deliberately no assertion on the resulting file being playable.  That
+			 * would be the stronger check, but whether mod_av can produce a valid file
+			 * here depends on which encoders the build has, and the sibling read tests
+			 * already fail for that reason -- so such an assertion would report the
+			 * build's codec set rather than anything about the timeouts. */
 		}
 		FST_TEST_END()
 

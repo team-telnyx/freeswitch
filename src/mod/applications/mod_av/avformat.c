@@ -600,9 +600,15 @@ static switch_status_t open_output_avio(av_file_context_t *context, const char *
 	 * their own deadline. */
 	io_deadline_arm(context, context->io_connect_timeout_us);
 
-	/* Always via avio_open2, even with no timeout configured: it installs the interrupt
-	 * callback, without which a close cannot abort an open in flight. */
-	ret = avio_open2(&context->fc->pb, file, AVIO_FLAG_WRITE, &cb, &dict);
+	/* Install the interrupt callback only where it can help -- a network peer that may
+	 * never answer, or a caller who asked for a timeout.  It must NOT go on a plain
+	 * local file: interrupt_cb reports context->closed, av_file_close() sets that before
+	 * it flushes and writes the trailer, and ffmpeg checks the callback on every
+	 * transfer including the file protocol.  The flush would then abort and the file be
+	 * left without its trailer -- for mp4, no moov atom and nothing can play it.
+	 * Upstream passed no callback here, and for local files that is still right. */
+	ret = avio_open2(&context->fc->pb, file, AVIO_FLAG_WRITE,
+					 (context->io_is_network || !zstr(context->rw_timeout)) ? &cb : NULL, &dict);
 
 	io_deadline_disarm(context);
 
@@ -699,12 +705,10 @@ static int write_frame(av_file_context_t *context, AVFormatContext *fmt_ctx, con
 	/* Write the compressed frame to the media file. */
 	log_packet(fmt_ctx, pkt);
 
-	/* Only bound the write when this is the sole writer.  With video present the video
-	 * thread writes to this same muxer under a *different* mutex (eh.mutex vs mutex), so
-	 * a context-wide deadline would be armed and disarmed by both threads; rather than
-	 * ship a bound that silently races, leave video outputs to ffmpeg's own rw_timeout,
-	 * which is still set on the handle. */
-	io_deadline_arm(context, context->has_video ? 0 : context->io_write_timeout_us);
+	/* Safe to arm even with video present: the recording path points eh.mutex at the
+	 * same mutex the audio path uses (av_file_write_video), so the two writers are
+	 * serialised here and the deadline cannot be armed by one while the other holds it. */
+	io_deadline_arm(context, context->io_write_timeout_us);
 	ret = av_interleaved_write_frame(fmt_ctx, pkt);
 	io_deadline_disarm(context);
 
@@ -3030,6 +3034,15 @@ GCC_DIAG_ON(deprecated-declarations)
 
 				if (ret < 0) {
 					context->errs++;
+
+					/* A write that we aborted ourselves -- deadline or explicit abort --
+					 * is not going to recover, and the error code is AVERROR_EXIT rather
+					 * than one of the connection errors checked below.  Fail now instead
+					 * of reporting success for another thousand frames. */
+					if (context->io_timed_out || context->abort_io) {
+						context->errs = 1001;
+					}
+
 					if ((context->errs % 10) == 0) {
 						char ebuf[255] = "";
 
@@ -3077,6 +3090,15 @@ GCC_DIAG_ON(deprecated-declarations)
 
 				if (ret < 0) {
 					context->errs++;
+
+					/* A write that we aborted ourselves -- deadline or explicit abort --
+					 * is not going to recover, and the error code is AVERROR_EXIT rather
+					 * than one of the connection errors checked below.  Fail now instead
+					 * of reporting success for another thousand frames. */
+					if (context->io_timed_out || context->abort_io) {
+						context->errs = 1001;
+					}
+
 					if ((context->errs % 10) == 0) {
 						char ebuf[255] = "";
 						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "[%s] Error while writing audio frame: %s\n", 
@@ -3136,7 +3158,15 @@ static switch_status_t av_file_command(switch_file_handle_t *handle, switch_file
 	case SCFC_ABORT_IO:
 		/* Deliberately not context->closed: that flag also drives read and video-ready
 		 * logic elsewhere in this file.  interrupt_cb picks this up from whichever
-		 * thread is currently blocked inside ffmpeg. */
+		 * thread is currently blocked inside ffmpeg.
+		 *
+		 * Applies to local handles as well as network ones, which looks at odds with
+		 * leaving local writes unbounded elsewhere -- but those are deadlines we impose
+		 * on a healthy write, whereas this is an explicit last-resort abort the caller
+		 * only reaches once the write has stopped making progress.  Refusing it for
+		 * local files would leave a genuinely hung write (a wedged disk or NFS mount)
+		 * with nothing to interrupt it, and the caller waiting on it forever: losing the
+		 * file is the better trade against wedging the channel. */
 		context->abort_io = 1;
 		/* DEBUG, not WARNING: whoever asked for the abort is expected to say why, and
 		 * during a recorder stall this would otherwise double every such report. */
@@ -3209,7 +3239,11 @@ static switch_status_t av_file_close(switch_file_handle_t *handle)
 	}
 
 	if (context->fc) {
-		if ((context->aud_ready || context->has_video) && switch_test_flag(handle, SWITCH_FILE_FLAG_WRITE)) {
+		/* pb is NULL when the output was never opened -- a deferred connect that failed
+		 * leaves has_video already set from the stream setup that preceded it, so the
+		 * flags alone are not enough to conclude there is anything to finalise. */
+		if ((context->aud_ready || context->has_video) && switch_test_flag(handle, SWITCH_FILE_FLAG_WRITE) &&
+			(context->fc->pb || (context->fc->oformat && (context->fc->oformat->flags & AVFMT_NOFILE)))) {
 			av_write_trailer(context->fc);
 		}
 
