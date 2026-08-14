@@ -177,9 +177,10 @@ enum AVColorRange {
            NOTE: the rw_timeout file parameter is in microseconds (ffmpeg's own unit);
            these settings are in milliseconds.
 
-           Coverage: audio RTMP recordings, which is where recorder stalls have hurt.
-           Other protocols (rtsp) and video recordings are unaffected and keep their
-           previous behaviour; for video, ffmpeg's own rw_timeout still applies. -->
+           Coverage: RTMP recordings, which is where recorder stalls have hurt.  Other
+           protocols are unaffected and keep their previous behaviour -- notably rtsp,
+           whose muxer opens no file of its own and connects from elsewhere.  Local file
+           recording is deliberately untouched: a slow disk is not a stuck peer. -->
       <!-- <param name="network-rw-timeout" value="2000"/> -->
       <!-- <param name="network-max-rw-timeout" value="5000"/> -->
       <!-- <param name="network-connect-timeout" value="2000"/> -->

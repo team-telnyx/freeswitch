@@ -27,7 +27,7 @@ Core-side, in `vars.xml` or per recording:
 | variable | effect |
 | --- | --- |
 | `record_buffer_max_ms` / `RECORD_BUFFER_MAX_MS` | ceiling on audio queued for the recording thread |
-| `record_close_timeout_ms` / `RECORD_CLOSE_TIMEOUT_MS` | how long close waits for the recording thread before aborting its I/O |
+| `record_close_timeout_ms` / `RECORD_CLOSE_TIMEOUT_MS` | how long the recording thread may make *no progress* at close before its I/O is aborted. A thread still draining its queue keeps the budget alive, so a slow-but-working recorder is not cut off; an overall cap of ten times this value stops trickling progress holding the channel up |
 
 ## Running it
 
