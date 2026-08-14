@@ -250,6 +250,69 @@ FST_CORE_BEGIN("conf")
 		}
 		FST_TEST_END()
 
+		/* 192.0.2.0/24 is TEST-NET-1 (RFC 5737): guaranteed not routable, so the
+		 * connect either stalls or is refused, never succeeds.  Without a connect
+		 * budget a stalled connect runs to ffmpeg's own 5s tcp default; with one it
+		 * must give up inside the configured window. */
+		FST_TEST_BEGIN(avformat_network_connect_timeout_bounds_open)
+		{
+			switch_file_handle_t fh = { 0 };
+			uint32_t flags = SWITCH_FILE_FLAG_WRITE | SWITCH_FILE_DATA_SHORT;
+			switch_status_t status;
+			switch_time_t start, elapsed_ms;
+
+			start = switch_mono_micro_time_now();
+			status = switch_core_file_open(&fh, "rtmp://192.0.2.1:1935/live/unreachable", 1, 8000, flags, fst_pool);
+			elapsed_ms = (switch_mono_micro_time_now() - start) / 1000;
+
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+							  "unreachable open returned %d after %" SWITCH_INT64_T_FMT "ms\n", status, (int64_t) elapsed_ms);
+
+			/* It must fail, and must not have waited out ffmpeg's default. */
+			fst_check(status != SWITCH_STATUS_SUCCESS);
+			fst_check(elapsed_ms < 4000);
+
+			if (status == SWITCH_STATUS_SUCCESS) {
+				switch_core_file_close(&fh);
+			}
+		}
+		FST_TEST_END()
+
+		/* The network settings must not reach local files: a slow disk is not a stuck
+		 * peer, and aborting a local write would damage a healthy recording. */
+		FST_TEST_BEGIN(avformat_local_file_unaffected_by_network_timeouts)
+		{
+			char path[1024];
+			switch_file_handle_t fh = { 0 };
+			uint32_t flags = SWITCH_FILE_FLAG_WRITE | SWITCH_FILE_DATA_SHORT;
+			uint8_t data[SAMPLES * 2] = { 0 };
+			switch_size_t len = SAMPLES;
+			switch_status_t status;
+			int i;
+
+			/* mod_av's own container rather than wav, which it does not register. */
+			switch_snprintf(path, sizeof(path), "%s%s%s%s", "{av_record_audio_only=true}",
+							SWITCH_GLOBAL_dirs.conf_dir, SWITCH_PATH_SEPARATOR, "../test_local_timeouts.mp4");
+
+			status = switch_core_file_open(&fh, path, 1, 8000, flags, fst_pool);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+
+			/* Comfortably longer than the 1000ms network budget configured above, so a
+			 * budget wrongly applied here would abort partway through. */
+			for (i = 0; i < 100; i++) {
+				len = SAMPLES;
+				status = switch_core_file_write(&fh, data, &len);
+				fst_check(status == SWITCH_STATUS_SUCCESS);
+
+				if (status != SWITCH_STATUS_SUCCESS) {
+					break;
+				}
+			}
+
+			switch_core_file_close(&fh);
+		}
+		FST_TEST_END()
+
 		FST_TEARDOWN_BEGIN()
 		{
 		  //const char *err = NULL;
