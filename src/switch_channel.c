@@ -686,6 +686,23 @@ SWITCH_DECLARE(switch_status_t) switch_channel_queue_dtmf_string(switch_channel_
 	return bad_input ? SWITCH_STATUS_GENERR : SWITCH_STATUS_FALSE;
 }
 
+static const char *dtmf_source_str(switch_dtmf_source_t source)
+{
+	switch(source) {
+	case SWITCH_DTMF_INBAND_AUDIO:	/* From audio */
+		return "INBAND_AUDIO";
+	case SWITCH_DTMF_RTP:			/* From RTP as a telephone event */
+		return "RTP";
+	case SWITCH_DTMF_ENDPOINT:		/* From endpoint signaling */
+		return "ENDPOINT";
+	case SWITCH_DTMF_APP:			/* Injected by application */
+		return "APP";
+	case SWITCH_DTMF_UNKNOWN:		/* Unknown source */
+	default:
+		return "UNKNOWN";
+	}
+}
+
 SWITCH_DECLARE(switch_status_t) switch_channel_dequeue_dtmf(switch_channel_t *channel, switch_dtmf_t *dtmf)
 {
 	switch_event_t *event;
@@ -725,29 +742,10 @@ SWITCH_DECLARE(switch_status_t) switch_channel_dequeue_dtmf(switch_channel_t *ch
 	switch_mutex_unlock(channel->dtmf_mutex);
 
 	if (!event_sensitive && status == SWITCH_STATUS_SUCCESS && switch_event_create(&event, SWITCH_EVENT_DTMF) == SWITCH_STATUS_SUCCESS) {
-		const char *dtmf_source_str = NULL;
 		switch_channel_event_set_data(channel, event);
 		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Digit", "%c", dtmf->digit);
 		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Duration", "%u", dtmf->duration);
-		switch(dtmf->source) {
-			case SWITCH_DTMF_INBAND_AUDIO:	/* From audio */
-				dtmf_source_str = "INBAND_AUDIO";
-				break;
-			case SWITCH_DTMF_RTP:			/* From RTP as a telephone event */
-				dtmf_source_str = "RTP";
-				break;
-			case SWITCH_DTMF_ENDPOINT:		/* From endpoint signaling */
-				dtmf_source_str = "ENDPOINT";
-				break;
-			case SWITCH_DTMF_APP:			/* Injected by application */
-				dtmf_source_str = "APP";
-				break;
-			case SWITCH_DTMF_UNKNOWN:		/* Unknown source */
-			default:
-				dtmf_source_str = "UNKNOWN";
-				break;
-		}
-		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Source", "%s", dtmf_source_str);
+		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Source", "%s", dtmf_source_str(dtmf->source));
 		if (switch_channel_test_flag(channel, CF_DIVERT_EVENTS)) {
 			switch_core_session_queue_event(channel->session, &event);
 		} else {
@@ -756,6 +754,39 @@ SWITCH_DECLARE(switch_status_t) switch_channel_dequeue_dtmf(switch_channel_t *ch
 	}
 
 	return status;
+}
+
+SWITCH_DECLARE(void) switch_channel_fire_dtmf_sent_event(switch_channel_t *channel, const switch_dtmf_t *dtmf,
+														 uint32_t sent_duration, uint32_t samples_per_second, const char *method)
+{
+	switch_event_t *event;
+
+	if (!channel || !dtmf) {
+		return;
+	}
+
+	if (switch_test_flag(dtmf, DTMF_FLAG_SENSITIVE) || switch_test_flag(dtmf, DTMF_FLAG_EVENT_SENSITIVE)) {
+		return;
+	}
+
+	if (switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, SWITCH_EVENT_SUBCLASS_DTMF_SENT) != SWITCH_STATUS_SUCCESS) {
+		return;
+	}
+
+	switch_channel_event_set_data(channel, event);
+	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Digit", "%c", dtmf->digit);
+	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Duration", "%u", dtmf->duration);
+	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Duration-Sent", "%u", sent_duration);
+
+	if (samples_per_second >= 1000) {
+		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Duration-Sent-MS", "%u", sent_duration / (samples_per_second / 1000));
+		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Clock-Rate", "%u", samples_per_second);
+	}
+
+	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Source", "%s", dtmf_source_str(dtmf->source));
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "DTMF-Method", method);
+
+	switch_event_fire(&event);
 }
 
 SWITCH_DECLARE(switch_size_t) switch_channel_dequeue_dtmf_string(switch_channel_t *channel, char *dtmf_str, switch_size_t len)

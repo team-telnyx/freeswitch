@@ -271,6 +271,8 @@ struct switch_rtp_rfc2833_data {
 	unsigned int out_digit_sofar;
 	unsigned int out_digit_sub_sofar;
 	unsigned int out_digit_dur;
+	int32_t out_digit_flags;			/* Kept from the queued digit so the sent event can honour the sensitive flags. */
+	switch_dtmf_source_t out_digit_source;	/* Kept from the queued digit so the sent event can report where it came from. */
 	switch_time_t out_digit_last_progress_us; /* Prevents sub-ptime do_2833() wakeups. */
 	uint16_t in_digit_seq;
 	uint32_t in_digit_ts;
@@ -8531,6 +8533,17 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 				rtp_session->last_write_samplecount = rtp_session->write_timer.samplecount;
 			}
 
+			/* The end packets are on the wire: this digit is done, confirm what we sent. */
+			if (rtp_session->session) {
+				switch_dtmf_t sent_dtmf = { rtp_session->dtmf_data.out_digit,
+											rtp_session->dtmf_data.out_digit_dur,
+											rtp_session->dtmf_data.out_digit_flags,
+											rtp_session->dtmf_data.out_digit_source };
+
+				switch_channel_fire_dtmf_sent_event(switch_core_session_get_channel(rtp_session->session), &sent_dtmf,
+													rtp_session->dtmf_data.out_digit_sofar, rtp_session->samples_per_second, "RFC2833");
+			}
+
 			rtp_session->dtmf_data.out_digit_dur = 0;
 
 			if (rtp_session->interdigit_delay) {
@@ -8604,6 +8617,8 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 			rtp_session->dtmf_data.out_digit_sub_sofar = samples;
 			rtp_session->dtmf_data.out_digit_dur = rdigit->duration;
 			rtp_session->dtmf_data.out_digit = rdigit->digit;
+			rtp_session->dtmf_data.out_digit_flags = rdigit->flags;
+			rtp_session->dtmf_data.out_digit_source = rdigit->source;
 			rtp_session->dtmf_data.out_digit_last_progress_us = switch_micro_time_now(); /* seed gate */
 			rtp_session->dtmf_data.out_digit_packet[0] = (unsigned char) switch_char_to_rfc2833(rdigit->digit);
 			rtp_session->dtmf_data.out_digit_packet[1] = 13;

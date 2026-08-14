@@ -631,6 +631,24 @@ SWITCH_DECLARE(void) switch_channel_flush_dtmf(_In_ switch_channel_t *channel);
 SWITCH_DECLARE(switch_size_t) switch_channel_dequeue_dtmf_string(_In_ switch_channel_t *channel, _Out_opt_bytecapcount_(len)
 																 char *dtmf_str, _In_ switch_size_t len);
 
+/*! Subclass of the CUSTOM event fired once an outbound digit has been transmitted. */
+#define SWITCH_EVENT_SUBCLASS_DTMF_SENT "telnyx::dtmf_sent"
+
+/*!
+  \brief Fire the confirmation event for a digit we finished sending
+  \param channel channel the digit was sent on
+  \param dtmf the digit being sent; its duration is the one we set out to send, which
+              may already have been clamped to the min/max dtmf duration
+  \param sent_duration duration actually transmitted, in samples
+  \param samples_per_second rate both durations are expressed in, 0 if unknown
+  \param method transport the digit was sent with ("RFC2833", "INFO")
+  \note Unlike SWITCH_EVENT_DTMF, which is a receive-side event, this is fired
+        only after the digit has left the switch.
+*/
+SWITCH_DECLARE(void) switch_channel_fire_dtmf_sent_event(_In_ switch_channel_t *channel, _In_ const switch_dtmf_t *dtmf,
+														 _In_ uint32_t sent_duration, _In_ uint32_t samples_per_second,
+														 _In_z_ const char *method);
+
 /*!
   \brief Render the name of the provided state enum
   \param state state to get name of

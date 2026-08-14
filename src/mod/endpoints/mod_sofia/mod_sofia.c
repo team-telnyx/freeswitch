@@ -1620,6 +1620,12 @@ static switch_status_t sofia_send_dtmf(switch_core_session_t *session, const swi
 				switch_mutex_lock(tech_pvt->sofia_mutex);
 				nua_info(tech_pvt->nh, SIPTAG_CONTENT_TYPE_STR("application/dtmf-relay"), SIPTAG_PAYLOAD_STR(message), TAG_END());
 				switch_mutex_unlock(tech_pvt->sofia_mutex);
+
+				/* Confirm the digit we just signalled. Unlike the RFC 2833 path -- where the
+				   event is fired once the end packets are on the wire -- this fires when the
+				   INFO has been handed to the SIP stack, with the duration we advertised in
+				   the body (the INFO body is expressed at 8kHz). */
+				switch_channel_fire_dtmf_sent_event(channel, dtmf, dtmf->duration, 8000, "INFO");
 			}
 		}
 		break;
