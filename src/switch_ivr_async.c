@@ -1228,6 +1228,20 @@ struct record_helper {
 
 static switch_status_t record_helper_destroy(struct record_helper **rh, switch_core_session_t *session);
 
+/* Bytes still queued for the recording thread; 0 when there is no queue at all. */
+static switch_size_t record_buffer_inuse(struct record_helper *rh)
+{
+	switch_size_t inuse = 0;
+
+	if (rh->thread_buffer && rh->buffer_mutex) {
+		switch_mutex_lock(rh->buffer_mutex);
+		inuse = switch_buffer_inuse(rh->thread_buffer);
+		switch_mutex_unlock(rh->buffer_mutex);
+	}
+
+	return inuse;
+}
+
 /**
  * Set the recording completion cause. The cause can only be set once, to minimize the logic in the record_callback.
  * [The completion_cause strings are essentially those of an MRCP Recorder resource.]
@@ -1837,17 +1851,37 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 					 * join holds up the hangup for as long as the write blocks.  Give it a
 					 * budget, then abort its I/O so the join can complete. */
 					if (rh->close_timeout_ms > 0) {
-						int waited_ms = 0;
+						int stalled_ms = 0, total_ms = 0;
+						int max_total_ms = rh->close_timeout_ms * 10;
+						switch_size_t last_inuse = record_buffer_inuse(rh);
 
-						while (!rh->thread_done && waited_ms < rh->close_timeout_ms) {
+						/* The budget measures lack of *progress*, not elapsed time.  A
+						 * thread draining a backlog to a slow-but-working recorder is
+						 * doing exactly what this join exists to allow, and cutting it
+						 * off would discard audio already captured.  Only a queue that
+						 * has stopped shrinking means the writer is wedged.  The total
+						 * cap is the backstop, so trickling progress cannot hold the
+						 * channel up indefinitely either. */
+						while (!rh->thread_done && stalled_ms < rh->close_timeout_ms && total_ms < max_total_ms) {
+							switch_size_t inuse;
+
 							switch_yield(10000);
-							waited_ms += 10;
+							stalled_ms += 10;
+							total_ms += 10;
+
+							inuse = record_buffer_inuse(rh);
+
+							if (inuse < last_inuse) {
+								stalled_ms = 0;
+							}
+
+							last_inuse = inuse;
 						}
 
 						if (!rh->thread_done) {
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-											  "Recording thread for %s still busy after %dms; aborting its I/O so the channel can go down\n",
-											  rh->file, rh->close_timeout_ms);
+											  "Recording thread for %s made no progress for %dms (%dms total); aborting its I/O "
+											  "so the channel can go down\n", rh->file, stalled_ms, total_ms);
 							set_completion_cause(rh, "uri-failure");
 							switch_core_file_command(rh->fh, SCFC_ABORT_IO);
 						}
