@@ -106,11 +106,9 @@ SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_should_preserve_active_dtls_tuple(s
 	switch_sockaddr_t *handshake_peer_addr, dtls_state_t dtls_state, switch_bool_t handshake_peer_set, switch_bool_t is_rtcp);
 SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_should_preserve_trickle_dtls(switch_bool_t new_ice,
 	switch_bool_t rtp_ready, const switch_rtp_pvt_ice_tuple_t *rtp_tuple,
-	switch_bool_t rtcp_muxed, const switch_rtp_pvt_ice_tuple_t *rtcp_tuple,
-	const char *previous_ufrag, const char *previous_pwd, const char *current_ufrag,
-	const char *current_pwd, dtls_state_t dtls_state, switch_bool_t is_trickle_recheck);
-SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_set_rtcp_remote_address(switch_rtp_t *rtp_session,
-	const char *host, switch_port_t port, const char **err);
+	switch_bool_t rtcp_muxed, const char *active_remote_ufrag, const char *active_remote_pwd,
+	const char *engine_remote_ufrag, const char *engine_remote_pwd,
+	dtls_state_t dtls_state, switch_bool_t is_trickle_recheck);
 SWITCH_DECLARE(switch_rtp_recovery_nomination_proof_t) switch_rtp_pvt_recovery_dtls_nomination_proof(
 	switch_bool_t authenticated_vanilla_use_candidate, switch_bool_t direct_username_match);
 SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_should_guard_recovery_dtls_tuple(switch_sockaddr_t *current_addr,
