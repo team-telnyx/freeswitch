@@ -90,12 +90,27 @@ typedef enum {
 	SWITCH_RTP_RECOVERY_NOMINATION_AUTHENTICATED_CURRENT
 } switch_rtp_recovery_nomination_proof_t;
 
+typedef struct {
+	switch_bool_t selected;
+	switch_bool_t ready;
+	const char *transport;
+	switch_sockaddr_t *current_addr;
+	switch_sockaddr_t *selected_addr;
+} switch_rtp_pvt_ice_tuple_t;
+
 SWITCH_DECLARE(void) switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *data, switch_size_t len);
 SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_get_ice_state(switch_rtp_t *rtp_session, ice_proto_t proto,
 	char *ice_user, switch_size_t ice_user_len, char *local_pwd, switch_size_t local_pwd_len,
 	char *remote_pwd, switch_size_t remote_pwd_len, switch_bool_t *has_addr);
 SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_should_preserve_active_dtls_tuple(switch_sockaddr_t *current_addr,
 	switch_sockaddr_t *handshake_peer_addr, dtls_state_t dtls_state, switch_bool_t handshake_peer_set, switch_bool_t is_rtcp);
+SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_should_preserve_trickle_dtls(switch_bool_t new_ice,
+	switch_bool_t rtp_ready, const switch_rtp_pvt_ice_tuple_t *rtp_tuple,
+	switch_bool_t rtcp_muxed, const switch_rtp_pvt_ice_tuple_t *rtcp_tuple,
+	const char *previous_ufrag, const char *previous_pwd, const char *current_ufrag,
+	const char *current_pwd, dtls_state_t dtls_state, switch_bool_t is_trickle_recheck);
+SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_set_rtcp_remote_address(switch_rtp_t *rtp_session,
+	const char *host, switch_port_t port, const char **err);
 SWITCH_DECLARE(switch_rtp_recovery_nomination_proof_t) switch_rtp_pvt_recovery_dtls_nomination_proof(
 	switch_bool_t authenticated_vanilla_use_candidate, switch_bool_t direct_username_match);
 SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_should_guard_recovery_dtls_tuple(switch_sockaddr_t *current_addr,

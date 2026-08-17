@@ -834,6 +834,38 @@ SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_should_preserve_active_dtls_tuple(s
 	return switch_cmp_addr(current_addr, handshake_peer_addr, SWITCH_FALSE) ? SWITCH_TRUE : SWITCH_FALSE;
 }
 
+static switch_bool_t ice_selected_tuple_unchanged(const switch_rtp_pvt_ice_tuple_t *tuple)
+{
+	if (!tuple || !tuple->selected || !tuple->ready || zstr(tuple->transport) ||
+		strcasecmp(tuple->transport, "udp") || !tuple->current_addr || !tuple->selected_addr) {
+		return SWITCH_FALSE;
+	}
+
+	return switch_cmp_addr(tuple->current_addr, tuple->selected_addr, SWITCH_FALSE) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
+SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_should_preserve_trickle_dtls(switch_bool_t new_ice,
+	switch_bool_t rtp_ready, const switch_rtp_pvt_ice_tuple_t *rtp_tuple,
+	switch_bool_t rtcp_muxed, const switch_rtp_pvt_ice_tuple_t *rtcp_tuple,
+	const char *previous_ufrag, const char *previous_pwd, const char *current_ufrag,
+	const char *current_pwd, dtls_state_t dtls_state, switch_bool_t is_trickle_recheck)
+{
+	if (!new_ice || !rtp_ready || !is_trickle_recheck || dtls_state != DS_HANDSHAKE ||
+		zstr(previous_ufrag) || zstr(previous_pwd) || zstr(current_ufrag) || zstr(current_pwd)) {
+		return SWITCH_FALSE;
+	}
+
+	if (strcmp(previous_ufrag, current_ufrag) || strcmp(previous_pwd, current_pwd)) {
+		return SWITCH_FALSE;
+	}
+
+	if (!ice_selected_tuple_unchanged(rtp_tuple)) {
+		return SWITCH_FALSE;
+	}
+
+	return rtcp_muxed || ice_selected_tuple_unchanged(rtcp_tuple) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
 SWITCH_DECLARE(switch_rtp_recovery_nomination_proof_t) switch_rtp_pvt_recovery_dtls_nomination_proof(
 	switch_bool_t authenticated_vanilla_use_candidate, switch_bool_t direct_username_match)
 {
@@ -5458,6 +5490,62 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_set_remote_address(switch_rtp_t *rtp_
 	switch_mutex_unlock(rtp_session->write_mutex);
 
 	return status;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_set_rtcp_remote_address(switch_rtp_t *rtp_session,
+	const char *host, switch_port_t port, const char **err)
+{
+	switch_sockaddr_t *remote_addr = NULL;
+	switch_socket_t *new_sock = NULL;
+	switch_socket_t *old_sock = NULL;
+
+	RTP_SET_ERR(err, "Success");
+
+	if (!rtp_session || zstr(host) || !port ||
+		switch_sockaddr_info_get(&remote_addr, host, SWITCH_UNSPEC, port, 0,
+			rtp_session->pool) != SWITCH_STATUS_SUCCESS || !remote_addr) {
+		RTP_SET_ERR(err, "RTCP Remote Address Error!");
+		return SWITCH_STATUS_FALSE;
+	}
+
+	switch_mutex_lock(rtp_session->write_mutex);
+	if (rtp_session->flags[SWITCH_RTP_FLAG_ENABLE_RTCP]) {
+		if (rtp_session->rtcp_sock_input && rtp_session->rtcp_local_addr &&
+			switch_sockaddr_get_family(remote_addr) == switch_sockaddr_get_family(rtp_session->rtcp_local_addr)) {
+			new_sock = rtp_session->rtcp_sock_input;
+		} else {
+			if (rtp_socket_create(rtp_session, &new_sock,
+					switch_sockaddr_get_family(remote_addr)) != SWITCH_STATUS_SUCCESS) {
+				RTP_SET_ERR(err, "RTCP Socket Error!");
+				if (new_sock) {
+					rtp_socket_close(rtp_session, new_sock);
+				}
+				switch_mutex_unlock(rtp_session->write_mutex);
+				return SWITCH_STATUS_FALSE;
+			}
+		}
+	} else {
+		new_sock = rtp_session->rtcp_sock_output;
+	}
+
+	old_sock = rtp_session->rtcp_sock_output;
+	rtp_session->remote_rtcp_port = port;
+	rtp_session->rtcp_remote_addr = remote_addr;
+	rtp_session->rtcp_sock_output = new_sock;
+
+	switch_mutex_lock(rtp_session->ice_mutex);
+	if (rtp_session->rtcp_dtls) {
+		rtp_session->rtcp_dtls->remote_addr = remote_addr;
+		rtp_session->rtcp_dtls->sock_output = new_sock;
+	}
+	switch_mutex_unlock(rtp_session->ice_mutex);
+
+	if (old_sock && old_sock != new_sock && old_sock != rtp_session->rtcp_sock_input && old_sock != rtp_session->sock_input) {
+		rtp_socket_close(rtp_session, old_sock);
+	}
+	switch_mutex_unlock(rtp_session->write_mutex);
+
+	return SWITCH_STATUS_SUCCESS;
 }
 
 SWITCH_DECLARE(switch_status_t) switch_rtp_fork_set(switch_rtp_t *rtp_session, switch_fork_direction_t direction, const char *host, switch_port_t port, uint32_t ssrc, const char *cmd, const char *codec_iananame)

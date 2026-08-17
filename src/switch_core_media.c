@@ -35,6 +35,7 @@
 #include <switch_stun.h>
 #include <switch_nat.h>
 #include "private/switch_core_pvt.h"
+#include "private/switch_rtp_pvt.h"
 #include <switch_curl.h>
 #include <errno.h>
 #include <sofia-sip/sdp.h>
@@ -5328,6 +5329,15 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 	dtls_state_t check_ice_dtls_state = engine->rtp_session ? switch_rtp_dtls_state(engine->rtp_session, DTLS_TYPE_RTP) : DS_OFF;
 	int check_ice_is_reinvite = switch_channel_test_flag(smh->session->channel, CF_REINVITE) ? 1 : 0;
 	int is_trickle_recheck = (check_ice_dtls_state != DS_OFF) && !check_ice_is_reinvite;
+	const char *check_ice_remote_ufrag = engine->ice_in.ufrag;
+	const char *check_ice_remote_pwd = engine->ice_in.pwd;
+	const icand_t *selected_rtp_ice_candidate = NULL;
+	const icand_t *selected_rtcp_ice_candidate = NULL;
+	switch_rtp_pvt_ice_tuple_t check_ice_rtp_tuple = { 0 };
+	switch_rtp_pvt_ice_tuple_t check_ice_rtcp_tuple = { 0 };
+
+	check_ice_rtp_tuple.current_addr = engine->rtp_session ? switch_rtp_session_get_remote_addr(engine->rtp_session) : NULL;
+	check_ice_rtcp_tuple.current_addr = engine->rtp_session ? switch_rtp_session_get_rtcp_remote_addr(engine->rtp_session) : NULL;
 
 	if (switch_true(switch_channel_get_variable_dup(smh->session->channel, "ignore_sdp_ice", SWITCH_FALSE, -1))) {
 		return SWITCH_STATUS_BREAK;
@@ -5889,6 +5899,47 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 		engine->rtcp_mux = -1;
 	}
 
+	if (engine->ice_in.is_chosen[0]) {
+		selected_rtp_ice_candidate = &engine->ice_in.cands[engine->ice_in.chosen[0]][0];
+		check_ice_rtp_tuple.selected = SWITCH_TRUE;
+		check_ice_rtp_tuple.ready = selected_rtp_ice_candidate->ready ? SWITCH_TRUE : SWITCH_FALSE;
+		check_ice_rtp_tuple.transport = selected_rtp_ice_candidate->transport;
+		if (selected_rtp_ice_candidate->con_addr && selected_rtp_ice_candidate->con_port) {
+			if (switch_sockaddr_info_get(&check_ice_rtp_tuple.selected_addr, selected_rtp_ice_candidate->con_addr,
+				SWITCH_UNSPEC, selected_rtp_ice_candidate->con_port, 0,
+				switch_core_session_get_pool(smh->session)) != SWITCH_STATUS_SUCCESS) {
+				check_ice_rtp_tuple.selected_addr = NULL;
+			}
+		}
+	}
+
+	if (engine->ice_in.is_chosen[1]) {
+		selected_rtcp_ice_candidate = &engine->ice_in.cands[engine->ice_in.chosen[1]][1];
+		check_ice_rtcp_tuple.selected = SWITCH_TRUE;
+		check_ice_rtcp_tuple.ready = selected_rtcp_ice_candidate->ready ? SWITCH_TRUE : SWITCH_FALSE;
+		check_ice_rtcp_tuple.transport = selected_rtcp_ice_candidate->transport;
+		if (selected_rtcp_ice_candidate->con_addr && selected_rtcp_ice_candidate->con_port) {
+			if (switch_sockaddr_info_get(&check_ice_rtcp_tuple.selected_addr, selected_rtcp_ice_candidate->con_addr,
+				SWITCH_UNSPEC, selected_rtcp_ice_candidate->con_port, 0,
+				switch_core_session_get_pool(smh->session)) != SWITCH_STATUS_SUCCESS) {
+				check_ice_rtcp_tuple.selected_addr = NULL;
+			}
+		}
+	}
+
+	if (switch_rtp_pvt_should_preserve_trickle_dtls(engine->new_ice ? SWITCH_TRUE : SWITCH_FALSE,
+		engine->rtp_session && switch_rtp_ready(engine->rtp_session) ? SWITCH_TRUE : SWITCH_FALSE,
+		&check_ice_rtp_tuple, engine->rtcp_mux > 0 ? SWITCH_TRUE : SWITCH_FALSE,
+		&check_ice_rtcp_tuple, check_ice_remote_ufrag, check_ice_remote_pwd,
+		engine->ice_in.ufrag, engine->ice_in.pwd, check_ice_dtls_state,
+		is_trickle_recheck ? SWITCH_TRUE : SWITCH_FALSE)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_INFO,
+			"Preserving %s ICE/DTLS after unchanged late trickle candidate %s:%u\n",
+			type2str(type), selected_rtp_ice_candidate->con_addr,
+			(unsigned)selected_rtp_ice_candidate->con_port);
+		engine->new_ice = 0;
+	}
+
 	if (engine->new_ice) {
 		if (switch_rtp_ready(engine->rtp_session) && engine->ice_in.cands[engine->ice_in.chosen[0]][0].ready) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_INFO, "RE-Activating %s ICE\n", type2str(type));
@@ -5909,6 +5960,20 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 						rtcp_port, SWITCH_TRUE, &err) != SWITCH_STATUS_SUCCESS) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_ERROR,
 						"%s RTP REPORTS ERROR: [%s]\n", type2str(type), err);
+				}
+
+				if (engine->rtcp_mux < 1 && selected_rtcp_ice_candidate && selected_rtcp_ice_candidate->ready &&
+						selected_rtcp_ice_candidate->con_addr && selected_rtcp_ice_candidate->con_port) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_INFO,
+						"Updating %s RTCP remote address for trickle ICE: %s:%d\n", type2str(type),
+						selected_rtcp_ice_candidate->con_addr, selected_rtcp_ice_candidate->con_port);
+
+					if (switch_rtp_pvt_set_rtcp_remote_address(engine->rtp_session,
+							selected_rtcp_ice_candidate->con_addr, selected_rtcp_ice_candidate->con_port,
+							&err) != SWITCH_STATUS_SUCCESS) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_ERROR,
+							"%s RTCP REPORTS ERROR: [%s]\n", type2str(type), err);
+					}
 				}
 			}
 
