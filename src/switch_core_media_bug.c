@@ -1093,14 +1093,12 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_add_ex(switch_core_session
 		}
 	}
 
+	/* Written under bug_rwlock (unlike the SSF_ flag bit it replaces, which
+	 * was set after the unlock with a non-atomic RMW on session->flags). */
+	session->bug_tap_only = tap_only;
+
 	switch_thread_rwlock_unlock(session->bug_rwlock);
 	*new_bug = bug;
-
-	if (tap_only) {
-		switch_set_flag(session, SSF_MEDIA_BUG_TAP_ONLY);
-	} else {
-		switch_clear_flag(session, SSF_MEDIA_BUG_TAP_ONLY);
-	}
 
 	if (switch_test_flag(bug, SMBF_READ_VIDEO_PATCH) && session->video_read_codec) {
 		switch_set_flag(session->video_read_codec, SWITCH_CODEC_FLAG_VIDEO_PATCHING);
@@ -1168,6 +1166,15 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_transfer_callback(switch_c
 			if ((switch_core_media_bug_add(new_session, cur->function, cur->target, cur->callback,
 										   user_data_dup_func(new_session, cur->user_data),
 										   cur->stop_time, cur->flags, &new_bug) == SWITCH_STATUS_SUCCESS)) {
+				/* Move the channel-private handle along with the bug. The old
+				 * bug is destroyed below, so a handle left on the old channel
+				 * would dangle (and block re-recording the same file there),
+				 * while the new owner would have no handle at all - making the
+				 * recording unaddressable by name (stop/pause/mask). */
+				if (!zstr(cur->target)) {
+					switch_channel_set_private(orig_session->channel, cur->target, NULL);
+					switch_channel_set_private(new_session->channel, cur->target, new_bug);
+				}
 				switch_core_media_bug_destroy(&cur);
 				total++;
 			} else {
@@ -1205,23 +1212,23 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_pop(switch_core_session_t 
 {
 	switch_media_bug_t *bp;
 
-	if (orig_session->bugs) {
-		switch_thread_rwlock_wrlock(orig_session->bug_rwlock);
-		for (bp = orig_session->bugs; bp; bp = bp->next) {
-			if (!strcmp(bp->function, function)) {
-				switch_set_flag(bp, SMBF_LOCK);
-				break;
-			}
-		}
-		switch_thread_rwlock_unlock(orig_session->bug_rwlock);
-
-		if (bp) {
-			*pop = bp;
-			return SWITCH_STATUS_SUCCESS;
-		} else {
-			*pop = NULL;
+	/* No bare peek at the list head - it is only read under bug_rwlock
+	 * (raced link/unlink on the transfer path, TELCORE-339). */
+	switch_thread_rwlock_wrlock(orig_session->bug_rwlock);
+	for (bp = orig_session->bugs; bp; bp = bp->next) {
+		if (!strcmp(bp->function, function)) {
+			switch_set_flag(bp, SMBF_LOCK);
+			break;
 		}
 	}
+	switch_thread_rwlock_unlock(orig_session->bug_rwlock);
+
+	if (bp) {
+		*pop = bp;
+		return SWITCH_STATUS_SUCCESS;
+	}
+
+	*pop = NULL;
 
 	return SWITCH_STATUS_FALSE;
 }
@@ -1469,11 +1476,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_remove(switch_core_session
 		}
 	}
 
-	if (tap_only) {
-		switch_set_flag(session, SSF_MEDIA_BUG_TAP_ONLY);
-	} else {
-		switch_clear_flag(session, SSF_MEDIA_BUG_TAP_ONLY);
-	}
+	session->bug_tap_only = tap_only;
 
 	switch_thread_rwlock_unlock(session->bug_rwlock);
 
@@ -1531,6 +1534,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_remove_callback(switch_cor
 {
 	switch_media_bug_t *cur = NULL, *bp = NULL, *last = NULL, *closed = NULL, *next = NULL;
 	int total = 0;
+	int no_bugs_left;
 
 	switch_thread_rwlock_wrlock(session->bug_rwlock);
 	if (session->bugs) {
@@ -1557,8 +1561,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_remove_callback(switch_cor
 			}
 		}
 	}
+	/* Note whether the list drained while still under the lock - the head is
+	 * only read under bug_rwlock (TELCORE-339). */
+	no_bugs_left = (session->bugs == NULL);
 	switch_thread_rwlock_unlock(session->bug_rwlock);
-	
+
 	if (closed) {
 		for (bp = closed; bp; bp = next) {
 			next = bp->next;
@@ -1566,7 +1573,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_remove_callback(switch_cor
 		}
 	}
 
-	if (!session->bugs && switch_core_codec_ready(&session->bug_codec)) {
+	if (no_bugs_left && switch_core_codec_ready(&session->bug_codec)) {
 		switch_core_codec_destroy(&session->bug_codec);
 	}
 

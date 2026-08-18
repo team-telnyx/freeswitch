@@ -1156,11 +1156,11 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_displace_session(switch_core_session_
 
 
 struct record_helper {
-	switch_media_bug_t *bug;
+	switch_media_bug_t *bug;                       /* protected by flag_mutex */
 	switch_memory_pool_t *helper_pool;
-	switch_core_session_t *recording_session;
-	switch_core_session_t *transfer_from_session;
-	uint8_t transfer_complete;
+	switch_core_session_t *recording_session;      /* protected by flag_mutex */
+	switch_core_session_t *transfer_from_session;  /* protected by flag_mutex */
+	uint8_t transfer_complete;                     /* protected by flag_mutex */
 	char *file;
 	switch_file_handle_t *fh;
 	switch_file_handle_t in_fh;
@@ -1179,13 +1179,20 @@ struct record_helper {
 	switch_time_t last_write_time;
 	switch_bool_t hangup_on_error;
 	switch_bool_t stop_write_on_error;
-	switch_codec_implementation_t read_impl;
+	switch_codec_implementation_t read_impl;       /* protected by flag_mutex */
 	switch_bool_t speech_detected;
 	switch_buffer_t *thread_buffer;
 	switch_thread_t *thread;
 	switch_mutex_t *buffer_mutex;
-	int thread_ready;
-	uint8_t thread_needs_transfer;
+	int thread_ready;                              /* protected by flag_mutex */
+	uint8_t thread_needs_transfer;                 /* protected by flag_mutex */
+	/* Serializes the recording-thread transfer handshake and shared ownership
+	 * state between record_callback() (media threads), recording_thread() and
+	 * switch_ivr_record_user_data_dup() (transfer path). Leaf lock: never hold
+	 * it while acquiring any other lock. Formerly these fields were accessed
+	 * bare from three threads - a data race (UB) behind the record_callback
+	 * SEGV at the ownership guard (TELCORE-339). */
+	switch_mutex_t *flag_mutex;
 	uint32_t writes;
 	uint32_t vwrites;
 	const char *completion_cause;
@@ -1413,6 +1420,7 @@ static void *SWITCH_THREAD_FUNC recording_thread(switch_thread_t *thread, void *
 	switch_size_t bsize = SWITCH_RECOMMENDED_BUFFER_SIZE, samples = 0, inuse = 0;
 	unsigned char *data;
 	int channels = 1;
+	switch_buffer_t *thread_buffer = NULL;
 	switch_codec_implementation_t read_impl = { 0 };
 
 	if (switch_core_session_read_lock(session) != SWITCH_STATUS_SUCCESS) {
@@ -1420,32 +1428,69 @@ static void *SWITCH_THREAD_FUNC recording_thread(switch_thread_t *thread, void *
 	}
 
 	rh = switch_core_media_bug_get_user_data(bug);
-	switch_buffer_create_dynamic(&rh->thread_buffer, SWITCH_MAX_L16, SWITCH_MAX_L16, 0);
-	rh->thread_ready = 1;
+	switch_buffer_create_dynamic(&thread_buffer, SWITCH_MAX_L16, SWITCH_MAX_L16, 0);
 
+	/* Publish the buffer and readiness together, so a media-thread callback
+	 * that observes the buffer pointer also observes a fully created buffer. */
+	switch_mutex_lock(rh->flag_mutex);
+	rh->thread_buffer = thread_buffer;
+	rh->thread_ready = 1;
 	channels = switch_core_media_bug_test_flag(bug, SMBF_STEREO) ? 2 : rh->read_impl.number_of_channels;
+	switch_mutex_unlock(rh->flag_mutex);
+
 	data = switch_core_alloc(rh->helper_pool, SWITCH_MAX_L16);
 
-	switch_mutex_lock(rh->cond_mutex);
-
 	while(switch_test_flag(rh->fh, SWITCH_FILE_OPEN)) {
-		if (rh->thread_needs_transfer) {
-			assert(session != rh->recording_session);
+		int thread_ready, needs_transfer;
 
-			if (switch_core_session_read_lock(rh->recording_session) != SWITCH_STATUS_SUCCESS) {
+		switch_mutex_lock(rh->flag_mutex);
+		thread_ready = rh->thread_ready;
+		needs_transfer = rh->thread_needs_transfer;
+		switch_mutex_unlock(rh->flag_mutex);
+
+		if (needs_transfer) {
+			switch_core_session_t *target;
+			switch_media_bug_t *new_bug = NULL;
+			int committed = 0;
+
+			switch_mutex_lock(rh->flag_mutex);
+			target = rh->recording_session;
+			switch_mutex_unlock(rh->flag_mutex);
+
+			if (switch_core_session_read_lock(target) != SWITCH_STATUS_SUCCESS) {
 				/* Wait until recording is reverted to the original session */
+				switch_mutex_lock(rh->cond_mutex);
 				switch_thread_cond_timedwait(rh->cond, rh->cond_mutex, RECORDING_THREAD_COND_TIMEOUT_US);
+				switch_mutex_unlock(rh->cond_mutex);
+				continue;
+			}
+
+			/* Commit the transfer atomically: the offer may have been
+			 * withdrawn by record_callback(INIT)'s sanity timeout while we
+			 * were acquiring the lock - its cancel and our commit are mutually
+			 * exclusive under flag_mutex, so exactly one side wins. */
+			switch_mutex_lock(rh->flag_mutex);
+			if (rh->thread_needs_transfer && rh->recording_session == target) {
+				new_bug = rh->bug;
+				rh->thread_needs_transfer = 0;
+				committed = 1;
+			}
+			switch_mutex_unlock(rh->flag_mutex);
+
+			if (!committed) {
+				/* Offer withdrawn (INIT timed out and reverted); stay put. */
+				switch_core_session_rwunlock(target);
 				continue;
 			}
 
 			switch_core_session_rwunlock(session);
-			session = rh->recording_session;
+			session = target;
 			channel = switch_core_session_get_channel(session);
-			bug = rh->bug;
-			channels = switch_core_media_bug_test_flag(bug, SMBF_STEREO) ? 2 : rh->read_impl.number_of_channels;
+			bug = new_bug;
 
-			/* Tell record_callback that we transferred */
-			rh->thread_needs_transfer = 0;
+			switch_mutex_lock(rh->flag_mutex);
+			channels = switch_core_media_bug_test_flag(bug, SMBF_STEREO) ? 2 : rh->read_impl.number_of_channels;
+			switch_mutex_unlock(rh->flag_mutex);
 
 			/* Erasing the obj variable for safety because we transferred (we are under another bug) */
 			obj = NULL;
@@ -1461,15 +1506,23 @@ static void *SWITCH_THREAD_FUNC recording_thread(switch_thread_t *thread, void *
 		switch_mutex_lock(rh->buffer_mutex);
 		inuse = switch_buffer_inuse(rh->thread_buffer);
 
-		if ((!rh->thread_ready || switch_channel_down_nosig(channel)) && !inuse) {
+		if ((!thread_ready || switch_channel_down_nosig(channel)) && !inuse) {
 			switch_mutex_unlock(rh->buffer_mutex);
 			break;
 		}
 
 		if (!inuse) {
 			switch_mutex_unlock(rh->buffer_mutex);
-			if (rh->thread_ready) {
+			if (thread_ready) {
+				/* Hold cond_mutex only while actually waiting. Holding it
+				 * across the whole loop body (as before) meant a busy drain -
+				 * e.g. slow storage - blocked record_callback(INIT/CLOSE) on
+				 * this mutex indefinitely. Signals sent while we are not
+				 * waiting are compensated by the timedwait timeout and the
+				 * flag re-check at the top of the loop. */
+				switch_mutex_lock(rh->cond_mutex);
 				switch_thread_cond_timedwait(rh->cond, rh->cond_mutex, RECORDING_THREAD_COND_TIMEOUT_US);
+				switch_mutex_unlock(rh->cond_mutex);
 			}
 			continue;
 		}
@@ -1494,8 +1547,6 @@ static void *SWITCH_THREAD_FUNC recording_thread(switch_thread_t *thread, void *
 			}
 		}
 	}
-
-	switch_mutex_unlock(rh->cond_mutex);
 
 	switch_core_session_rwunlock(session);
 
@@ -1546,9 +1597,13 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 	switch_size_t len = 0;
 	int mask = switch_core_media_bug_test_flag(bug, SMBF_MASK);
 	unsigned char null_data[SWITCH_RECOMMENDED_BUFFER_SIZE] = {0};
+	int transferred_away;
 
 	/* Check if the recording was transferred (see recording_follow_transfer) */
-	if (rh->recording_session != session) {
+	switch_mutex_lock(rh->flag_mutex);
+	transferred_away = (rh->recording_session != session);
+	switch_mutex_unlock(rh->flag_mutex);
+	if (transferred_away) {
 		return SWITCH_FALSE;
 	}
 
@@ -1556,57 +1611,105 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 	case SWITCH_ABC_TYPE_INIT:
 		{
 			const char *var = get_recording_var(channel, rh->variables, "RECORD_USE_THREAD");
+			switch_codec_implementation_t read_impl_tmp = { 0 };
+			int transfer_pending, thread_ready;
 
-			switch_core_session_get_read_impl(session, &rh->read_impl);
+			switch_core_session_get_read_impl(session, &read_impl_tmp);
+			switch_mutex_lock(rh->flag_mutex);
+			rh->read_impl = read_impl_tmp;
 
 			/* Check if recording is transferred from another session */
-			if (rh->transfer_from_session && rh->transfer_from_session != rh->recording_session) {
+			transfer_pending = (rh->transfer_from_session && rh->transfer_from_session != rh->recording_session);
+			thread_ready = rh->thread_ready;
+			switch_mutex_unlock(rh->flag_mutex);
+
+			if (transfer_pending) {
 
 				/* If there is a thread, we need to re-initiate it */
-				if (rh->thread_ready) {
-					switch_media_bug_t *oldbug = rh->bug;
+				if (thread_ready) {
+					switch_media_bug_t *oldbug;
 					int sanity = 200;
+					int cancelled = 0;
 
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Re-initiating recording thread for file %s\n", rh->file);
-					
+
+					/* Publish the transfer offer atomically. */
+					switch_mutex_lock(rh->flag_mutex);
+					oldbug = rh->bug;
 					rh->bug = bug;
 					rh->thread_needs_transfer = 1;
+					switch_mutex_unlock(rh->flag_mutex);
 
 					switch_mutex_lock(rh->cond_mutex);
 					switch_thread_cond_signal(rh->cond);
 					switch_mutex_unlock(rh->cond_mutex);
 
-					while (--sanity > 0 && rh->thread_needs_transfer) {
+					while (--sanity > 0) {
+						int pending;
+
+						switch_mutex_lock(rh->flag_mutex);
+						pending = rh->thread_needs_transfer;
+						switch_mutex_unlock(rh->flag_mutex);
+						if (!pending) break;
 						switch_yield(10000);
 					}
 
-					/* Check if the thread reacted on the transfer */
+					/* Withdraw the offer atomically: either we cancel it here
+					 * or the thread commits it in recording_thread() - never
+					 * both. The old bare-field check raced the thread's commit
+					 * (its retries and this timeout are both ~2s), and the
+					 * loser worked with a bug that no longer existed. */
+					switch_mutex_lock(rh->flag_mutex);
 					if (rh->thread_needs_transfer) {
-						/* Thread did not react, assuming it is cond_wait'ing */
 						rh->bug = oldbug;
-						switch_core_session_get_read_impl(rh->transfer_from_session, &rh->read_impl);
 						rh->thread_needs_transfer = 0;
+						cancelled = 1;
+					}
+					switch_mutex_unlock(rh->flag_mutex);
+
+					if (cancelled) {
+						switch_core_session_t *from;
+
+						switch_mutex_lock(rh->flag_mutex);
+						from = rh->transfer_from_session;
+						switch_mutex_unlock(rh->flag_mutex);
+
+						switch_core_session_get_read_impl(from, &read_impl_tmp);
+
+						switch_mutex_lock(rh->flag_mutex);
+						rh->read_impl = read_impl_tmp;
+						switch_mutex_unlock(rh->flag_mutex);
 
 						return SWITCH_FALSE;
 					}
 				}
 
 				if (rh->fh) {
+					uint32_t native_rate;
+
+					switch_mutex_lock(rh->flag_mutex);
+					native_rate = rh->read_impl.actual_samples_per_second;
+					switch_mutex_unlock(rh->flag_mutex);
+
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Record session sample rate: %d -> %d\n", rh->fh->native_rate, rh->fh->samplerate);
-					rh->fh->native_rate = rh->read_impl.actual_samples_per_second;
+					rh->fh->native_rate = native_rate;
 					if (switch_core_file_has_video(rh->fh, SWITCH_TRUE)) {
 						switch_core_media_bug_set_media_params(bug, &rh->fh->mm);
 					}
 				}
 
+				switch_mutex_lock(rh->flag_mutex);
 				rh->transfer_from_session = NULL;
 				rh->transfer_complete = 1;
+				switch_mutex_unlock(rh->flag_mutex);
 
 				break;
 			}
 
 			/* Required for potential record_transfer */
+			switch_mutex_lock(rh->flag_mutex);
 			rh->bug = bug;
+			switch_mutex_unlock(rh->flag_mutex);
 			
 			if (!rh->native && rh->fh && (zstr(var) || switch_true(var))) {
 				switch_threadattr_t *thd_attr = NULL;
@@ -1620,7 +1723,13 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 				switch_threadattr_priority_set(thd_attr, SWITCH_PRI_LOW);
 				switch_thread_create(&rh->thread, thd_attr, recording_thread, bug, rh->helper_pool);
 
-				while(--sanity > 0 && !rh->thread_ready) {
+				while (--sanity > 0) {
+					int ready;
+
+					switch_mutex_lock(rh->flag_mutex);
+					ready = rh->thread_ready;
+					switch_mutex_unlock(rh->flag_mutex);
+					if (ready) break;
 					switch_yield(10000);
 				}
 			}
@@ -1757,16 +1866,23 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 				const char *file_size = NULL;
 				const char *file_trimmed = NULL;
 
-				if (rh->thread_ready) {
+				/* Join whenever a thread was created, not only when it reached
+				 * thread_ready: closing during thread startup used to skip the
+				 * join and then free the helper pool under the starting
+				 * thread's feet. */
+				if (rh->thread) {
 					switch_status_t st;
 
+					switch_mutex_lock(rh->flag_mutex);
 					rh->thread_ready = 0;
+					switch_mutex_unlock(rh->flag_mutex);
 
 					switch_mutex_lock(rh->cond_mutex);
 					switch_thread_cond_signal(rh->cond);
 					switch_mutex_unlock(rh->cond_mutex);
 
 					switch_thread_join(&st, rh->thread);
+					rh->thread = NULL;
 				}
 
 				if (rh->thread_buffer) {
@@ -1788,6 +1904,11 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 							switch_core_session_reset(session, SWITCH_TRUE, SWITCH_TRUE);
 						}
 						send_record_stop_event(channel, &read_impl, rh);
+
+						if (rh->file && switch_channel_get_private(channel, rh->file) == bug) {
+							switch_channel_set_private(channel, rh->file, NULL);
+						}
+
 						record_helper_destroy(&rh, session);
 
 						return SWITCH_FALSE;
@@ -1841,14 +1962,29 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 
 			send_record_stop_event(channel, &read_impl, rh);
 			record_helper_post_process(rh, session);
+
+			/* Drop the channel-private handle if it still points at this bug,
+			 * so a stopped/closed recording never leaves a dangling handle
+			 * behind (which would both crash by-name operations and block
+			 * re-recording the same file on this channel). */
+			if (rh->file && switch_channel_get_private(channel, rh->file) == bug) {
+				switch_channel_set_private(channel, rh->file, NULL);
+			}
+
 			record_helper_destroy(&rh, session);
 		}
 
 		break;
 	case SWITCH_ABC_TYPE_READ_PING:
 
-		if(rh->bug) {
-			if(switch_test_flag(rh->bug, SMBF_PRUNE) == SWITCH_TRUE) {
+		{
+			switch_media_bug_t *cur_bug;
+
+			switch_mutex_lock(rh->flag_mutex);
+			cur_bug = rh->bug;
+			switch_mutex_unlock(rh->flag_mutex);
+
+			if (cur_bug && switch_test_flag(cur_bug, SMBF_PRUNE) == SWITCH_TRUE) {
 				// recording_thread detected failure, need to clean up
 				return SWITCH_FALSE;
 			}
@@ -1870,11 +2006,17 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 				if (status != SWITCH_STATUS_SUCCESS || !frame.datalen) {
 					break;
 				} else {
+					switch_buffer_t *tb;
+
 					len = (switch_size_t) frame.datalen / 2 / frame.channels;
 
-					if (rh->thread_buffer) {
+					switch_mutex_lock(rh->flag_mutex);
+					tb = rh->thread_buffer;
+					switch_mutex_unlock(rh->flag_mutex);
+
+					if (tb) {
 						switch_mutex_lock(rh->buffer_mutex);
-						switch_buffer_write(rh->thread_buffer, mask ? null_data : data, frame.datalen);
+						switch_buffer_write(tb, mask ? null_data : data, frame.datalen);
 						switch_mutex_unlock(rh->buffer_mutex);
 						if (switch_mutex_trylock(rh->cond_mutex) == SWITCH_STATUS_SUCCESS) {
 							switch_thread_cond_signal(rh->cond);
@@ -1957,8 +2099,14 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 
 	case SWITCH_ABC_TYPE_WRITE:
 	case SWITCH_ABC_TYPE_READ:
-		if(rh->bug) {
-			if(switch_test_flag(rh->bug, SMBF_PRUNE) == SWITCH_TRUE) {
+		{
+			switch_media_bug_t *cur_bug;
+
+			switch_mutex_lock(rh->flag_mutex);
+			cur_bug = rh->bug;
+			switch_mutex_unlock(rh->flag_mutex);
+
+			if (cur_bug && switch_test_flag(cur_bug, SMBF_PRUNE) == SWITCH_TRUE) {
 				// recording_thread detected failure, need to clean up
 				return SWITCH_FALSE;
 			}
@@ -2089,8 +2237,15 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_stop_record_session(switch_core_sessi
 	if (!strcasecmp(file, "all")) {
 		return switch_core_media_bug_remove_callback(session, record_callback);
 	} else if ((bug = switch_channel_get_private(channel, file))) {
-		switch_core_media_bug_remove(session, &bug);
-		return SWITCH_STATUS_SUCCESS;
+		/* Propagate the real status: with a stale handle (e.g. after the
+		 * recording was transferred to another session) the bug is not in this
+		 * session's list and nothing is removed - reporting SUCCESS here used
+		 * to hide that. Clear the handle once the bug is actually gone. */
+		switch_status_t status = switch_core_media_bug_remove(session, &bug);
+		if (status == SWITCH_STATUS_SUCCESS) {
+			switch_channel_set_private(channel, file, NULL);
+		}
+		return status;
 	}
 	return SWITCH_STATUS_FALSE;
 }
@@ -2099,6 +2254,7 @@ static void* switch_ivr_record_user_data_dup(switch_core_session_t *session, voi
 {
 	struct record_helper *rh = (struct record_helper *) user_data;
 
+	switch_mutex_lock(rh->flag_mutex);
 	if (!rh->transfer_complete && session == rh->transfer_from_session) {
 		/* Transfer failed and now we are called to put the original session back */
 		rh->recording_session = rh->transfer_from_session;
@@ -2108,6 +2264,7 @@ static void* switch_ivr_record_user_data_dup(switch_core_session_t *session, voi
 		rh->recording_session = session;
 		rh->transfer_complete = 0;
 	}
+	switch_mutex_unlock(rh->flag_mutex);
 
 	return rh;
 }
@@ -3313,6 +3470,7 @@ static switch_status_t record_helper_create(struct record_helper **rh, switch_co
 
 	newrh->helper_pool = pool;
 	newrh->recording_session = session;
+	switch_mutex_init(&newrh->flag_mutex, SWITCH_MUTEX_NESTED, pool);
 
 	*rh = newrh;
 
@@ -3327,8 +3485,16 @@ static switch_status_t record_helper_destroy(struct record_helper **rh, switch_c
 	assert(*rh);
 	assert(session);
 
-	if ((*rh)->recording_session != session) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Destroying a record helper of another session!\n");
+	{
+		int foreign;
+
+		switch_mutex_lock((*rh)->flag_mutex);
+		foreign = ((*rh)->recording_session != session);
+		switch_mutex_unlock((*rh)->flag_mutex);
+
+		if (foreign) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Destroying a record helper of another session!\n");
+		}
 	}
 
 	if ((*rh)->native) {
