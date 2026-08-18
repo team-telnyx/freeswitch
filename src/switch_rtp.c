@@ -834,6 +834,42 @@ SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_should_preserve_active_dtls_tuple(s
 	return switch_cmp_addr(current_addr, handshake_peer_addr, SWITCH_FALSE) ? SWITCH_TRUE : SWITCH_FALSE;
 }
 
+static switch_bool_t ice_selected_tuple_unchanged(const switch_rtp_pvt_ice_tuple_t *tuple)
+{
+	if (!tuple || !tuple->selected || !tuple->ready || zstr(tuple->transport) ||
+		strcasecmp(tuple->transport, "udp") || !tuple->current_addr || !tuple->selected_addr) {
+		return SWITCH_FALSE;
+	}
+
+	return switch_cmp_addr(tuple->current_addr, tuple->selected_addr, SWITCH_FALSE) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
+SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_should_preserve_trickle_dtls(switch_bool_t new_ice,
+	switch_bool_t rtp_ready, const switch_rtp_pvt_ice_tuple_t *rtp_tuple,
+	switch_bool_t rtcp_muxed, const char *active_remote_ufrag, const char *active_remote_pwd,
+	const char *engine_remote_ufrag, const char *engine_remote_pwd,
+	dtls_state_t dtls_state, switch_bool_t is_trickle_recheck)
+{
+	/* Keep separate RTCP on the established reactivation path: its address and
+	 * socket are consumed by senders that do not share one retarget lock. */
+	if (!new_ice || !rtp_ready || !rtcp_muxed || !is_trickle_recheck || dtls_state != DS_HANDSHAKE ||
+		zstr(active_remote_ufrag) || zstr(active_remote_pwd) ||
+		zstr(engine_remote_ufrag) || zstr(engine_remote_pwd)) {
+		return SWITCH_FALSE;
+	}
+
+	if (strcmp(active_remote_ufrag, engine_remote_ufrag) ||
+		strcmp(active_remote_pwd, engine_remote_pwd)) {
+		return SWITCH_FALSE;
+	}
+
+	if (!ice_selected_tuple_unchanged(rtp_tuple)) {
+		return SWITCH_FALSE;
+	}
+
+	return SWITCH_TRUE;
+}
+
 SWITCH_DECLARE(switch_rtp_recovery_nomination_proof_t) switch_rtp_pvt_recovery_dtls_nomination_proof(
 	switch_bool_t authenticated_vanilla_use_candidate, switch_bool_t direct_username_match)
 {

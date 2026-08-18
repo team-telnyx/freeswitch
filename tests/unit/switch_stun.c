@@ -473,6 +473,103 @@ FST_TEARDOWN_END()
 		switch_core_destroy_memory_pool(&pool);
 	}
 	FST_TEST_END()
+	FST_TEST_BEGIN(test_same_generation_late_trickle_preserves_dtls_handshake)
+	{
+		switch_memory_pool_t *pool = NULL;
+		switch_sockaddr_t *current_rtp_addr = NULL;
+		switch_sockaddr_t *same_rtp_addr = NULL;
+		switch_sockaddr_t *different_rtp_addr = NULL;
+		switch_rtp_pvt_ice_tuple_t rtp_tuple = { 0 };
+
+		fst_xcheck(switch_core_new_memory_pool(&pool) == SWITCH_STATUS_SUCCESS, "switch_core_new_memory_pool()");
+		fst_xcheck(switch_sockaddr_info_get(&current_rtp_addr, "198.51.100.10", SWITCH_UNSPEC, 40000, 0, pool) == SWITCH_STATUS_SUCCESS,
+			"current RTP address");
+		fst_xcheck(switch_sockaddr_info_get(&same_rtp_addr, "198.51.100.10", SWITCH_UNSPEC, 40000, 0, pool) == SWITCH_STATUS_SUCCESS,
+			"same RTP address");
+		fst_xcheck(switch_sockaddr_info_get(&different_rtp_addr, "198.51.100.10", SWITCH_UNSPEC, 40002, 0, pool) == SWITCH_STATUS_SUCCESS,
+			"different RTP address");
+
+		rtp_tuple.selected = SWITCH_TRUE;
+		rtp_tuple.ready = SWITCH_TRUE;
+		rtp_tuple.transport = "udp";
+		rtp_tuple.current_addr = current_rtp_addr;
+		rtp_tuple.selected_addr = same_rtp_addr;
+
+		fst_check(switch_rtp_pvt_should_preserve_trickle_dtls(SWITCH_TRUE, SWITCH_TRUE,
+			&rtp_tuple, SWITCH_TRUE,
+			"remoteUfrag", "remotePassword", "remoteUfrag", "remotePassword",
+			DS_HANDSHAKE, SWITCH_TRUE));
+		fst_check(!switch_rtp_pvt_should_preserve_trickle_dtls(SWITCH_TRUE, SWITCH_TRUE,
+			&rtp_tuple, SWITCH_FALSE,
+			"remoteUfrag", "remotePassword", "remoteUfrag", "remotePassword",
+			DS_HANDSHAKE, SWITCH_TRUE));
+		fst_check(!switch_rtp_pvt_should_preserve_trickle_dtls(SWITCH_FALSE, SWITCH_TRUE,
+			&rtp_tuple, SWITCH_TRUE,
+			"remoteUfrag", "remotePassword", "remoteUfrag", "remotePassword",
+			DS_HANDSHAKE, SWITCH_TRUE));
+		fst_check(!switch_rtp_pvt_should_preserve_trickle_dtls(SWITCH_TRUE, SWITCH_FALSE,
+			&rtp_tuple, SWITCH_TRUE,
+			"remoteUfrag", "remotePassword", "remoteUfrag", "remotePassword",
+			DS_HANDSHAKE, SWITCH_TRUE));
+
+		rtp_tuple.selected = SWITCH_FALSE;
+		fst_check(!switch_rtp_pvt_should_preserve_trickle_dtls(SWITCH_TRUE, SWITCH_TRUE,
+			&rtp_tuple, SWITCH_TRUE,
+			"remoteUfrag", "remotePassword", "remoteUfrag", "remotePassword",
+			DS_HANDSHAKE, SWITCH_TRUE));
+		rtp_tuple.selected = SWITCH_TRUE;
+		rtp_tuple.ready = SWITCH_FALSE;
+		fst_check(!switch_rtp_pvt_should_preserve_trickle_dtls(SWITCH_TRUE, SWITCH_TRUE,
+			&rtp_tuple, SWITCH_TRUE,
+			"remoteUfrag", "remotePassword", "remoteUfrag", "remotePassword",
+			DS_HANDSHAKE, SWITCH_TRUE));
+		rtp_tuple.ready = SWITCH_TRUE;
+		rtp_tuple.transport = "tcp";
+		fst_check(!switch_rtp_pvt_should_preserve_trickle_dtls(SWITCH_TRUE, SWITCH_TRUE,
+			&rtp_tuple, SWITCH_TRUE,
+			"remoteUfrag", "remotePassword", "remoteUfrag", "remotePassword",
+			DS_HANDSHAKE, SWITCH_TRUE));
+		rtp_tuple.transport = NULL;
+		fst_check(!switch_rtp_pvt_should_preserve_trickle_dtls(SWITCH_TRUE, SWITCH_TRUE,
+			&rtp_tuple, SWITCH_TRUE,
+			"remoteUfrag", "remotePassword", "remoteUfrag", "remotePassword",
+			DS_HANDSHAKE, SWITCH_TRUE));
+		rtp_tuple.transport = "udp";
+		rtp_tuple.selected_addr = different_rtp_addr;
+		fst_check(!switch_rtp_pvt_should_preserve_trickle_dtls(SWITCH_TRUE, SWITCH_TRUE,
+			&rtp_tuple, SWITCH_TRUE,
+			"remoteUfrag", "remotePassword", "remoteUfrag", "remotePassword",
+			DS_HANDSHAKE, SWITCH_TRUE));
+		rtp_tuple.selected_addr = same_rtp_addr;
+
+		fst_check(!switch_rtp_pvt_should_preserve_trickle_dtls(SWITCH_TRUE, SWITCH_TRUE,
+			&rtp_tuple, SWITCH_TRUE,
+			"remoteUfrag", "remotePassword", "newRemoteUfrag", "remotePassword",
+			DS_HANDSHAKE, SWITCH_TRUE));
+		fst_check(!switch_rtp_pvt_should_preserve_trickle_dtls(SWITCH_TRUE, SWITCH_TRUE,
+			&rtp_tuple, SWITCH_TRUE,
+			"remoteUfrag", "remotePassword", "remoteUfrag", "newRemotePassword",
+			DS_HANDSHAKE, SWITCH_TRUE));
+		fst_check(!switch_rtp_pvt_should_preserve_trickle_dtls(SWITCH_TRUE, SWITCH_TRUE,
+			&rtp_tuple, SWITCH_TRUE,
+			NULL, "remotePassword", "remoteUfrag", "remotePassword",
+			DS_HANDSHAKE, SWITCH_TRUE));
+		fst_check(!switch_rtp_pvt_should_preserve_trickle_dtls(SWITCH_TRUE, SWITCH_TRUE,
+			&rtp_tuple, SWITCH_TRUE,
+			"remoteUfrag", NULL, "remoteUfrag", "remotePassword",
+			DS_HANDSHAKE, SWITCH_TRUE));
+		fst_check(!switch_rtp_pvt_should_preserve_trickle_dtls(SWITCH_TRUE, SWITCH_TRUE,
+			&rtp_tuple, SWITCH_TRUE,
+			"remoteUfrag", "remotePassword", "remoteUfrag", "remotePassword",
+			DS_READY, SWITCH_TRUE));
+		fst_check(!switch_rtp_pvt_should_preserve_trickle_dtls(SWITCH_TRUE, SWITCH_TRUE,
+			&rtp_tuple, SWITCH_TRUE,
+			"remoteUfrag", "remotePassword", "remoteUfrag", "remotePassword",
+			DS_HANDSHAKE, SWITCH_FALSE));
+
+		switch_core_destroy_memory_pool(&pool);
+	}
+	FST_TEST_END()
 	FST_TEST_BEGIN(test_recovery_dtls_nomination_proof_requires_authenticated_direct_request)
 	{
 		fst_check(switch_rtp_pvt_recovery_dtls_nomination_proof(SWITCH_FALSE, SWITCH_FALSE) ==
