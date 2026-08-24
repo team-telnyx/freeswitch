@@ -31,11 +31,14 @@
  *
  */
 #include <switch.h>
+
 #define CMD_BUFLEN 1024 * 1000
 #define MAX_QUEUE_LEN 100000
 #define MAX_MISSED 500
+#define MAX_CONTENT_LENGTH (16 * 1024 * 1024)
 static const int QUEUE_LEN_WARNING_1 = MAX_QUEUE_LEN * .50;
 static const int QUEUE_LEN_WARNING_2 = MAX_QUEUE_LEN * .75;
+
 SWITCH_MODULE_LOAD_FUNCTION(mod_event_socket_load);
 SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_event_socket_shutdown);
 SWITCH_MODULE_RUNTIME_FUNCTION(mod_event_socket_runtime);
@@ -1432,6 +1435,13 @@ static switch_status_t read_packet(listener_t *listener, switch_event_t **event,
 								if (!strcasecmp(var, "content-length")) {
 									clen = atoi(val);
 
+									if (clen < 0 || clen > MAX_CONTENT_LENGTH) {
+										switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+														  "Rejecting Content-Length '%s' (out of range)\n", val);
+										switch_event_destroy(event);
+										switch_goto_status(SWITCH_STATUS_FALSE, end);
+									}
+
 									if (clen > 0) {
 										char *body;
 										char *p;
@@ -1446,6 +1456,7 @@ static switch_status_t read_packet(listener_t *listener, switch_event_t **event,
 
 											if (prefs.done || (!SWITCH_STATUS_IS_BREAK(status) && status != SWITCH_STATUS_SUCCESS)) {
 												free(body);
+												switch_event_destroy(event);
 												switch_goto_status(SWITCH_STATUS_FALSE, end);
 											}
 
