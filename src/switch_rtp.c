@@ -506,6 +506,7 @@ struct switch_rtp {
 	uint8_t bundle_video_frame_in_progress;
 	switch_time_t bundle_video_frame_open_us;
 	uint32_t bundle_audio_pt_restamped_total;
+	uint32_t mid_rewrite_drop_total;
 	switch_payload_t bundle_audio_pt;  /* local egress audio PT, immune to video set_default_payload on shared BUNDLE session */
 	switch_mutex_t *ice_mutex;
 	switch_mutex_t *sock_mutex;
@@ -1333,6 +1334,19 @@ static handle_rfc2833_result_t handle_rfc2833(switch_rtp_t *rtp_session, switch_
 static int rtp_add_extension_header(switch_rtp_t *rtp_session, rtp_msg_t *send_msg, uint8_t score, void *data, switch_size_t *datalen);
 static int rtp_write_ready(switch_rtp_t *rtp_session, uint32_t bytes, int line);
 static int global_init = 0;
+static void rtp_log_mid_rewrite_drop(switch_rtp_t *rtp_session, rtp_msg_t *send_msg, switch_size_t bytes, switch_size_t trusted_payload_offset, const char *path)
+{
+	uint32_t total = ++rtp_session->mid_rewrite_drop_total;
+
+	if (total <= 5 || !(total % 500)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
+			"RTP MID rewrite dropped packet path=%s ext_id=%u mid=%s pt=%u seq=%u ssrc=%u bytes=%" SWITCH_SIZE_T_FMT " trusted_payload_offset=%" SWITCH_SIZE_T_FMT " total=%u\n",
+			switch_str_nil(path), rtp_session->ext_mid.ext_id, switch_str_nil(rtp_session->ext_mid.local_mid),
+			send_msg ? send_msg->header.pt : 0, send_msg ? ntohs(send_msg->header.seq) : 0,
+			send_msg ? ntohl(send_msg->header.ssrc) : 0, bytes, trusted_payload_offset, total);
+	}
+}
+
 static int rtp_common_write(switch_rtp_t *rtp_session,
 							rtp_msg_t *send_msg, void *data, uint32_t datalen, switch_payload_t payload, uint32_t timestamp, switch_frame_flag_t *flags, switch_rtp_write_state_t *write_state, uint32_t ssrc, uint8_t mid_ext_id, const char *mid, switch_bool_t force_video, switch_size_t trusted_payload_offset);
 static int rtp_write_manual_state(switch_rtp_t *rtp_session, switch_rtp_write_state_t *write_state,
@@ -4545,6 +4559,11 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 				ext_hdr->send_ssrc = htonl(rtp_feedback_local_ssrc(rtp_session));
 				ext_hdr->recv_ssrc = htonl(rtp_feedback_remote_ssrc(rtp_session));
 				rtp_session->rtcp_vstats.video_in.pli_count++;
+				if (rtp_session->flags[SWITCH_RTP_FLAG_DEBUG_RTP_WRITE]) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG_CLEAN(rtp_session->session), SWITCH_LOG_CONSOLE,
+						"RTCP feedback send PLI local_ssrc=%u remote_ssrc=%u\n",
+						rtp_feedback_local_ssrc(rtp_session), rtp_feedback_remote_ssrc(rtp_session));
+				}
 				ext_hdr->length = htons((uint8_t)(sizeof(switch_rtcp_ext_hdr_t) / 4) - 1);
 				rtcp_bytes += sizeof(switch_rtcp_ext_hdr_t);
 				rtp_session->pli_count = 0;
@@ -4570,6 +4589,13 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 					p += sizeof(switch_rtcp_ext_hdr_t);
 					nack = (uint32_t *) p;
 					*nack = cur_nack[n];
+					if (rtp_session->flags[SWITCH_RTP_FLAG_DEBUG_RTP_WRITE]) {
+						uint32_t nack_word = ntohl(cur_nack[n]);
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG_CLEAN(rtp_session->session), SWITCH_LOG_CONSOLE,
+							"RTCP feedback send NACK local_ssrc=%u remote_ssrc=%u pid=%u blp=0x%04x\n",
+							rtp_feedback_local_ssrc(rtp_session), rtp_feedback_remote_ssrc(rtp_session),
+							(uint16_t)(nack_word >> 16), (uint16_t)nack_word);
+					}
 
 					rtcp_bytes += sizeof(switch_rtcp_ext_hdr_t) + sizeof(cur_nack[n]);
 					cur_nack[n] = 0;
@@ -4610,6 +4636,11 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 				fir->r1 = fir->r2 = fir->r3 = 0;
 
 				rtp_session->rtcp_vstats.video_in.fir_count++;
+				if (rtp_session->flags[SWITCH_RTP_FLAG_DEBUG_RTP_WRITE]) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG_CLEAN(rtp_session->session), SWITCH_LOG_CONSOLE,
+						"RTCP feedback send FIR local_ssrc=%u remote_ssrc=%u fir_seq=%u\n",
+						rtp_feedback_local_ssrc(rtp_session), rtp_feedback_remote_ssrc(rtp_session), rtp_session->fir_seq);
+				}
 				rtp_session->fir_seq++;
 
 				ext_hdr->length = htons((uint8_t)((sizeof(switch_rtcp_ext_hdr_t) + sizeof(rtcp_fir_t)) / 4) - 1);
@@ -10193,6 +10224,12 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 
 		if (msg->header.type == _RTCP_PT_FIR ||
 			(msg->header.type == _RTCP_PT_PSFB && (extp->header.fmt == _RTCP_PSFB_FIR || extp->header.fmt == _RTCP_PSFB_PLI))) {
+			if (rtp_session->flags[SWITCH_RTP_FLAG_DEBUG_RTP_READ]) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG_CLEAN(rtp_session->session), SWITCH_LOG_CONSOLE,
+					"RTCP feedback recv %s sender_ssrc=%u media_ssrc=%u\n",
+					extp->header.fmt == _RTCP_PSFB_PLI ? "PLI" : "FIR",
+					ntohl(extp->header.send_ssrc), ntohl(extp->header.recv_ssrc));
+			}
 #if 0
 			if (msg->header.type == _RTCP_PT_FIR) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "Ancient FIR Received. Hello from 1996!\n");
@@ -10254,7 +10291,12 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 			uint32_t *nack = (uint32_t *) extp->body;
 			int i;
 
-
+			if (rtp_session->flags[SWITCH_RTP_FLAG_DEBUG_RTP_READ]) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG_CLEAN(rtp_session->session), SWITCH_LOG_CONSOLE,
+					"RTCP feedback recv NACK sender_ssrc=%u media_ssrc=%u entries=%u\n",
+					ntohl(extp->header.send_ssrc), ntohl(extp->header.recv_ssrc),
+					ntohs(extp->header.length) > 2 ? ntohs(extp->header.length) - 2 : 0);
+			}
 
 			for (i = 0; i < ntohs(extp->header.length) - 2; i++) {
 				handle_nack(rtp_session, nack[i]);
@@ -12592,8 +12634,11 @@ fork_done:
 						}
 
 						/* Without a trusted payload boundary, attempting a fallback rewrite can
-						 * move extension bytes into media. Drop the packet instead. */
-						ret = -1;
+						 * move extension bytes into media. Drop only this packet, roll back its
+						 * sequence allocation, and keep the media bridge alive. */
+						rtp_log_mid_rewrite_drop(rtp_session, send_msg, bytes, trusted_payload_offset, "common");
+						*seq -= delta;
+						ret = 0;
 						goto end;
 					}
 				}
@@ -13172,9 +13217,17 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 					if (mid_ext_id > 0 && mid && *mid) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR,
 							"Unable to apply RTP MID extension override id=%u mid=%s on proxy packet\n", mid_ext_id, switch_str_nil(mid));
+						WRITE_DEC(rtp_session);
+						return -1;
+					}
+					rtp_log_mid_rewrite_drop(rtp_session, send_msg, bytes, trusted_payload_offset, "proxy");
+					if (write_state) {
+						write_state->seq--;
+					} else {
+						rtp_session->seq--;
 					}
 					WRITE_DEC(rtp_session);
-					return -1;
+					return 0;
 				}
 			}
 		}
@@ -13400,7 +13453,8 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 	*/
 
 
-	r = rtp_common_write(rtp_session, send_msg, data, len, payload, ts, &frame->flags, write_state, ssrc, mid_ext_id, mid, force_video, trusted_payload_offset);
+	r = rtp_common_write(rtp_session, send_msg, data, len, payload, ts, &frame->flags, write_state, ssrc, mid_ext_id, mid, force_video,
+		fwd ? trusted_payload_offset : 0);
 
 	/* Release per-packet BUNDLE lock after common write path */
 	if (bundle_video_frame_lock_held) {
@@ -13654,8 +13708,12 @@ static int rtp_write_manual_state(switch_rtp_t *rtp_session, switch_rtp_write_st
 			if (mid_ext_id > 0 && mid && *mid) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR,
 					"Unable to apply RTP MID extension override id=%u mid=%s on manual packet\n", mid_ext_id, switch_str_nil(mid));
+				(*seq)--;
+				goto end;
 			}
+			rtp_log_mid_rewrite_drop(rtp_session, &rtp_session->write_msg, bytes, 0, "manual");
 			(*seq)--;
+			ret = 0;
 			goto end;
 		}
 	}

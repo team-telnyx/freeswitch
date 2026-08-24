@@ -202,6 +202,8 @@ static switch_frame_t *find_free_frame(switch_frame_buffer_t *fb, switch_frame_t
 
 		if (!orig->data) {
 			datalen = 0;
+			header_rebuilt = SWITCH_TRUE;
+			payload_truncated = SWITCH_TRUE;
 		}
 
 		if (orig->data && orig_data > orig_packet && (switch_size_t)(orig_data - orig_packet) < SWITCH_RTP_MAX_BUF_LEN) {
@@ -224,8 +226,9 @@ static switch_frame_t *find_free_frame(switch_frame_buffer_t *fb, switch_frame_t
 			switch_rtp_packet_t *rtp_packet = (switch_rtp_packet_t *) packet;
 
 			/* The fallback omits the original CSRC/extension area, so the cloned
-			 * base header must not claim those bytes still exist. If payload bytes
-			 * were truncated, any original padding count is no longer trustworthy. */
+			 * base header must not claim those bytes still exist. If the body is
+			 * unavailable or payload bytes were truncated, any original padding
+			 * count is no longer trustworthy. */
 			rtp_packet->header.cc = 0;
 			rtp_packet->header.x = 0;
 			if (payload_truncated) {

@@ -380,6 +380,36 @@ static switch_bool_t pre_dtls_keyframe_gate(switch_core_session_t *session, swit
 	return SWITCH_FALSE;
 }
 
+static void pre_dtls_track_deferred_write(switch_core_session_t *session, switch_rtp_engine_t *engine, switch_frame_t *frame, const char *path)
+{
+	if (!engine->pre_dtls_buf) {
+		engine->pre_dtls_buf = switch_core_session_alloc(session, sizeof(pre_dtls_video_buf_t));
+		engine->pre_dtls_buf->active = SWITCH_TRUE;
+		engine->pre_dtls_wait_keyframe = SWITCH_FALSE;
+		engine->pre_dtls_wait_keyframe_drops = 0;
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+			"pre-DTLS %s drop tracker allocated: capacity=%d\n",
+			switch_str_nil(path), PRE_DTLS_VIDEO_CAPACITY);
+	} else if (!engine->pre_dtls_buf->active) {
+		/* Re-arm after an ICE candidate switch, DTLS re-handshake, or another
+		 * post-readiness write that produced no packet. */
+		engine->pre_dtls_buf->count = 0;
+		engine->pre_dtls_buf->active = SWITCH_TRUE;
+		engine->pre_dtls_wait_keyframe = SWITCH_FALSE;
+		engine->pre_dtls_wait_keyframe_drops = 0;
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+			"pre-DTLS %s drop tracker re-armed after write 0 seq=%u\n",
+			switch_str_nil(path), frame->seq);
+	}
+
+	engine->pre_dtls_buf->stat_queued++;
+	if (engine->pre_dtls_buf->count < PRE_DTLS_VIDEO_CAPACITY) {
+		engine->pre_dtls_buf->count++;
+	} else {
+		engine->pre_dtls_buf->stat_dropped++;
+	}
+}
+
 #define MAX_REJ_STREAMS 10
 
 struct switch_media_handle_s {
@@ -5446,7 +5476,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 					engine->pre_dtls_wait_keyframe = (switch_bool_t)engine_uses_vp8(engine);
 					engine->pre_dtls_wait_keyframe_drops = 0;
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-						"pre-DTLS video buffer dropped after transport ready: dropped_now=%u dropped_total=%u queued=%u gate_vp8_keyframe=%d - requesting source keyframe\n",
+						"pre-DTLS bundle tracked writes dropped after transport ready: dropped_now=%u dropped_total=%u tracked=%u gate_vp8_keyframe=%d - requesting source keyframe\n",
 						dropped_pre_dtls, engine->pre_dtls_buf->stat_dropped,
 						engine->pre_dtls_buf->stat_queued, engine->pre_dtls_wait_keyframe);
 					request_partner_keyframe(session);
@@ -5484,29 +5514,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 enqueue_pre_dtls_pkt:
 				/* Track the deferred write until transport is writable. The packet
 				 * itself is intentionally not retained or replayed. */
-				if (!engine->pre_dtls_buf) {
-					engine->pre_dtls_buf = switch_core_session_alloc(session, sizeof(pre_dtls_video_buf_t));
-					engine->pre_dtls_buf->active = SWITCH_TRUE;
-					engine->pre_dtls_wait_keyframe = SWITCH_FALSE;
-					engine->pre_dtls_wait_keyframe_drops = 0;
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-						"pre-DTLS drop tracker allocated: capacity=%d\n",
-						PRE_DTLS_VIDEO_CAPACITY);
-				} else if (!engine->pre_dtls_buf->active) {
-					engine->pre_dtls_buf->count = 0;
-					engine->pre_dtls_buf->active = SWITCH_TRUE;
-					engine->pre_dtls_wait_keyframe = SWITCH_FALSE;
-					engine->pre_dtls_wait_keyframe_drops = 0;
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-						"pre-DTLS drop tracker re-armed after post-readiness-drop write 0 seq=%u\n",
-						frame->seq);
-				}
-				engine->pre_dtls_buf->stat_queued++;
-				if (engine->pre_dtls_buf->count < PRE_DTLS_VIDEO_CAPACITY) {
-					engine->pre_dtls_buf->count++;
-				} else {
-					engine->pre_dtls_buf->stat_dropped++;
-				}
+				pre_dtls_track_deferred_write(session, engine, frame, "bundle");
 			}
 		}
 	} else {
@@ -5526,7 +5534,7 @@ enqueue_pre_dtls_pkt:
 					engine->pre_dtls_wait_keyframe = (switch_bool_t)engine_uses_vp8(engine);
 					engine->pre_dtls_wait_keyframe_drops = 0;
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-						"pre-DTLS (non-bundle) video buffer dropped after transport ready: dropped_now=%u dropped_total=%u queued=%u gate_vp8_keyframe=%d - requesting source keyframe\n",
+						"pre-DTLS non-bundle tracked writes dropped after transport ready: dropped_now=%u dropped_total=%u tracked=%u gate_vp8_keyframe=%d - requesting source keyframe\n",
 						dropped_pre_dtls, engine->pre_dtls_buf->stat_dropped,
 						engine->pre_dtls_buf->stat_queued, engine->pre_dtls_wait_keyframe);
 					request_partner_keyframe(session);
@@ -5558,32 +5566,7 @@ enqueue_pre_dtls_pkt:
 			}
 
 			if (nb_do_enqueue) {
-				if (!engine->pre_dtls_buf) {
-					engine->pre_dtls_buf = switch_core_session_alloc(session, sizeof(pre_dtls_video_buf_t));
-					engine->pre_dtls_buf->active = SWITCH_TRUE;
-					engine->pre_dtls_wait_keyframe = SWITCH_FALSE;
-					engine->pre_dtls_wait_keyframe_drops = 0;
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-						"pre-DTLS (non-bundle) drop tracker allocated: capacity=%d\n",
-						PRE_DTLS_VIDEO_CAPACITY);
-				} else if (!engine->pre_dtls_buf->active) {
-					/* Re-arm: write failed after a previous readiness transition,
-					 * e.g. ICE candidate switch / DTLS re-handshake. Reset and
-					 * buffer until DTLS is ready again. */
-					engine->pre_dtls_buf->count = 0;
-					engine->pre_dtls_buf->active = SWITCH_TRUE;
-					engine->pre_dtls_wait_keyframe = SWITCH_FALSE;
-					engine->pre_dtls_wait_keyframe_drops = 0;
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-						"pre-DTLS (non-bundle) drop tracker re-armed after post-readiness-drop write 0 seq=%u\n",
-						frame->seq);
-				}
-				engine->pre_dtls_buf->stat_queued++;
-				if (engine->pre_dtls_buf->count < PRE_DTLS_VIDEO_CAPACITY) {
-					engine->pre_dtls_buf->count++;
-				} else {
-					engine->pre_dtls_buf->stat_dropped++;
-				}
+				pre_dtls_track_deferred_write(session, engine, frame, "non-bundle");
 			}
 
 		} else if (switch_rtp_write_frame(engine->rtp_session, frame) < 0) {
@@ -8267,6 +8250,7 @@ static void switch_core_media_bundle_populate_from_sdp(switch_media_handle_t *sm
 	switch_bundle_policy_t policy;
 	sdp_attribute_t *attr;
 	sdp_media_t *m;
+	switch_status_t bundle_group_status = SWITCH_STATUS_FALSE;
 	int mline_index = 0;
 
 	if (!smh || !smh->session || !sdp) {
@@ -8290,7 +8274,7 @@ static void switch_core_media_bundle_populate_from_sdp(switch_media_handle_t *sm
 		}
 
 		if (!strncasecmp(value, "BUNDLE", 6) && (value[6] == '\0' || value[6] == ' ' || value[6] == '\t')) {
-			switch_bundle_group_set_offered_mids(&smh->bundle, value);
+			bundle_group_status = switch_bundle_group_set_offered_mids(&smh->bundle, value);
 			break;
 		}
 	}
@@ -8371,7 +8355,7 @@ static void switch_core_media_bundle_populate_from_sdp(switch_media_handle_t *sm
 		}
 	}
 
-	if (smh->bundle.offered_mid_count) {
+	if (bundle_group_status == SWITCH_STATUS_SUCCESS) {
 		if (switch_bundle_group_validate(&smh->bundle) == SWITCH_STATUS_SUCCESS) {
 			char mids[(SWITCH_BUNDLE_MAX_MIDS * (SWITCH_BUNDLE_MAX_MID_LEN + 1)) + 1] = "";
 			uint32_t i;

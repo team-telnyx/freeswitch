@@ -33,6 +33,22 @@ FST_SUITE_BEGIN(switch_bundle)
 		fst_check(group.state == SWITCH_BUNDLE_STATE_REJECTED);
 		fst_check(strstr(switch_bundle_group_reject_reason(&group), "maximum length"));
 
+		switch_bundle_group_init(&group, SWITCH_BUNDLE_POLICY_AUTO);
+		fst_check(switch_bundle_group_set_offered_mids(&group,
+			"BUNDLE 0123456789012345678901234567890") == SWITCH_STATUS_SUCCESS);
+		fst_check(group.state == SWITCH_BUNDLE_STATE_OFFERED);
+		fst_check(group.offered_mid_count == 1);
+		fst_check(!strcmp(group.bundle_tag_mid, "0123456789012345678901234567890"));
+		fst_check(!strcmp(group.offered_mids[0], "0123456789012345678901234567890"));
+
+		switch_bundle_group_init(&group, SWITCH_BUNDLE_POLICY_AUTO);
+		fst_check(switch_bundle_group_set_offered_mids(&group,
+			"BUNDLE 0 01234567890123456789012345678901") == SWITCH_STATUS_FALSE);
+		fst_check(group.state == SWITCH_BUNDLE_STATE_REJECTED);
+		fst_check(group.offered_mid_count == 0);
+		fst_check(zstr(group.bundle_tag_mid));
+		fst_check(strstr(switch_bundle_group_reject_reason(&group), "maximum length"));
+
 		memset(oversized_group, 'x', sizeof(oversized_group) - 1);
 		oversized_group[sizeof(oversized_group) - 1] = '\0';
 		switch_bundle_group_init(&group, SWITCH_BUNDLE_POLICY_AUTO);
