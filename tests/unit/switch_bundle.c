@@ -16,6 +16,32 @@ FST_SUITE_BEGIN(switch_bundle)
 	}
 	FST_TEST_END()
 
+	FST_TEST_BEGIN(test_group_mid_limits_reject_instead_of_truncating)
+	{
+		switch_bundle_group_t group;
+		char oversized_group[SWITCH_BUNDLE_MAX_MIDS * (SWITCH_BUNDLE_MAX_MID_LEN + 2) + 1];
+
+		switch_bundle_group_init(&group, SWITCH_BUNDLE_POLICY_AUTO);
+		fst_check(switch_bundle_group_set_offered_mids(&group,
+			"BUNDLE 0 1 2 3 4 5 6 7 8") == SWITCH_STATUS_FALSE);
+		fst_check(group.state == SWITCH_BUNDLE_STATE_REJECTED);
+		fst_check(strstr(switch_bundle_group_reject_reason(&group), "too many"));
+
+		switch_bundle_group_init(&group, SWITCH_BUNDLE_POLICY_AUTO);
+		fst_check(switch_bundle_group_set_offered_mids(&group,
+			"BUNDLE 01234567890123456789012345678901") == SWITCH_STATUS_FALSE);
+		fst_check(group.state == SWITCH_BUNDLE_STATE_REJECTED);
+		fst_check(strstr(switch_bundle_group_reject_reason(&group), "maximum length"));
+
+		memset(oversized_group, 'x', sizeof(oversized_group) - 1);
+		oversized_group[sizeof(oversized_group) - 1] = '\0';
+		switch_bundle_group_init(&group, SWITCH_BUNDLE_POLICY_AUTO);
+		fst_check(switch_bundle_group_set_offered_mids(&group, oversized_group) == SWITCH_STATUS_FALSE);
+		fst_check(group.state == SWITCH_BUNDLE_STATE_REJECTED);
+		fst_check(strstr(switch_bundle_group_reject_reason(&group), "parser limit"));
+	}
+	FST_TEST_END()
+
 	FST_TEST_BEGIN(test_group_first_validation)
 	{
 		switch_bundle_group_t group;

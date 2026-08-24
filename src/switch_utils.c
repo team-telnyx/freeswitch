@@ -194,6 +194,8 @@ static switch_frame_t *find_free_frame(switch_frame_buffer_t *fb, switch_frame_t
 	if (orig->packet) {
 		switch_size_t data_offset = 12;
 		switch_size_t datalen = orig->datalen;
+		switch_bool_t header_rebuilt = SWITCH_FALSE;
+		switch_bool_t payload_truncated = SWITCH_FALSE;
 		uint8_t *packet = (uint8_t *)np->frame->packet;
 		const uint8_t *orig_packet = (const uint8_t *)orig->packet;
 		const uint8_t *orig_data = (const uint8_t *)orig->data;
@@ -204,16 +206,32 @@ static switch_frame_t *find_free_frame(switch_frame_buffer_t *fb, switch_frame_t
 
 		if (orig->data && orig_data > orig_packet && (switch_size_t)(orig_data - orig_packet) < SWITCH_RTP_MAX_BUF_LEN) {
 			data_offset = (switch_size_t)(orig_data - orig_packet);
+		} else if (orig->data) {
+			header_rebuilt = SWITCH_TRUE;
 		}
 
 		if (data_offset + datalen > SWITCH_RTP_MAX_BUF_LEN) {
 			data_offset = 12;
+			header_rebuilt = SWITCH_TRUE;
 			if (data_offset + datalen > SWITCH_RTP_MAX_BUF_LEN) {
 				datalen = SWITCH_RTP_MAX_BUF_LEN - data_offset;
+				payload_truncated = SWITCH_TRUE;
 			}
 		}
 
 		memcpy(packet, orig->packet, data_offset);
+		if (header_rebuilt) {
+			switch_rtp_packet_t *rtp_packet = (switch_rtp_packet_t *) packet;
+
+			/* The fallback omits the original CSRC/extension area, so the cloned
+			 * base header must not claim those bytes still exist. If payload bytes
+			 * were truncated, any original padding count is no longer trustworthy. */
+			rtp_packet->header.cc = 0;
+			rtp_packet->header.x = 0;
+			if (payload_truncated) {
+				rtp_packet->header.p = 0;
+			}
+		}
 		if (datalen) {
 			memcpy(packet + data_offset, orig->data, datalen);
 		}

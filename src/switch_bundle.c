@@ -91,15 +91,27 @@ SWITCH_DECLARE(switch_status_t) switch_bundle_group_set_offered_mids(switch_bund
 	char *argv[SWITCH_BUNDLE_MAX_MIDS + 2] = { 0 };
 	int argc, i, start = 0;
 	if (!group || zstr(value)) return SWITCH_STATUS_FALSE;
+	if (strlen(value) >= sizeof(buf)) {
+		bundle_reject(group, "BUNDLE group line exceeds parser limit");
+		return SWITCH_STATUS_FALSE;
+	}
 	switch_copy_string(buf, value, sizeof(buf));
 	argc = switch_separate_string(buf, ' ', argv, (sizeof(argv) / sizeof(argv[0])));
 	if (argc < 1) return SWITCH_STATUS_FALSE;
 	if (!strcasecmp(argv[0], "BUNDLE")) start = 1;
+	if (argc - start > SWITCH_BUNDLE_MAX_MIDS) {
+		bundle_reject(group, "BUNDLE group contains too many MIDs");
+		return SWITCH_STATUS_FALSE;
+	}
 	group->offered_mid_count = 0;
 	group->bundle_tag_mid[0] = '\0';
 	group->bundle_tag_mline_index = -1;
 	for (i = start; i < argc && group->offered_mid_count < SWITCH_BUNDLE_MAX_MIDS; i++) {
 		if (zstr(argv[i])) continue;
+		if (strlen(argv[i]) >= sizeof(group->offered_mids[group->offered_mid_count])) {
+			bundle_reject(group, "BUNDLE MID exceeds maximum length");
+			return SWITCH_STATUS_FALSE;
+		}
 		switch_copy_string(group->offered_mids[group->offered_mid_count], argv[i], sizeof(group->offered_mids[group->offered_mid_count]));
 		if (!group->offered_mid_count) switch_copy_string(group->bundle_tag_mid, argv[i], sizeof(group->bundle_tag_mid));
 		group->offered_mid_count++;

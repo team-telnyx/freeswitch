@@ -849,6 +849,15 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_enable_mid(switch_rtp_t *rtp_session,
 /* Returns the session-owned MID parsed from the current returned RTP packet, or NULL when that packet did not carry MID. The returned pointer is overwritten by the next RTP read and must not be retained across reads or threads. */
 SWITCH_DECLARE(const char *) switch_rtp_get_received_mid(switch_rtp_t *rtp_session);
 
+#ifdef SWITCH_RTP_TEST_HOOKS
+SWITCH_DECLARE(switch_status_t) switch_rtp_test_rewrite_mid_extension(
+	switch_rtp_packet_t *packet,
+	switch_size_t *bytes,
+	uint8_t ext_id,
+	const char *mid,
+	switch_bool_t drop_peer_extensions,
+	switch_size_t trusted_payload_offset);
+#endif
 
 /* Trickle ICE extensions */
 typedef struct switch_rtp_ice_cand_s {

@@ -177,7 +177,7 @@ FCT_BGN()
 
 			fct_req(make_session_and_rtp(&session, &rtp) == SWITCH_STATUS_SUCCESS && session != NULL);
 			/* Set channel vars for BUNDLE + MIDs */
-			switch_channel_set_variable(switch_core_session_get_channel(session), "rtp_use_bundle", "true");
+			switch_channel_set_variable(switch_core_session_get_channel(session), "rtp-bundle", "auto");
 			switch_channel_set_variable(switch_core_session_get_channel(session), "rtp_audio_mid", "0");
 			switch_channel_set_variable(switch_core_session_get_channel(session), "rtp_video_mid", "1");
 
@@ -190,7 +190,9 @@ FCT_BGN()
 
 
 			/* Now disable bundle and ensure the line disappears */
-			switch_channel_set_variable(switch_core_session_get_channel(session), "rtp_use_bundle", "false");
+			/* Explicit policy is authoritative even if the compatibility request is true. */
+			switch_channel_set_variable(switch_core_session_get_channel(session), "rtp_use_bundle", "true");
+			switch_channel_set_variable(switch_core_session_get_channel(session), "rtp-bundle", "off");
 			switch_core_media_gen_local_sdp(session, SDP_OFFER, "127.0.0.1", 40000, NULL, 1);
 			s = (char *)switch_channel_get_variable(switch_core_session_get_channel(session), "rtp_local_sdp_str");
 			fct_req(s != NULL);
