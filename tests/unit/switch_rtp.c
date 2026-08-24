@@ -224,7 +224,7 @@ static dtls_state_t run_client_cert_verify_case(const char *verify_mode, int pre
 	/* FreeSWITCH binds server_port; its media destination is the client at client_port. The RTP
 	 * session uses the call session's own pool, so rtp_session->session is populated (the pool
 	 * carries the "__session" back-pointer switch_rtp_create() reads). */
-	dtls_rtp = switch_rtp_new(rx_host, server_port, rx_host, client_port, TEST_PT, 8000, 20 * 1000, dtls_flags, "soft", &dtls_err, switch_core_session_get_pool(session), 0, 0);
+	dtls_rtp = switch_rtp_new(rx_host, server_port, rx_host, client_port, TEST_PT, 8000, 20 * 1000, dtls_flags, "soft", &dtls_err, switch_core_session_get_pool(session));
 	if (!dtls_rtp || !switch_rtp_ready(dtls_rtp)) {
 		goto done;
 	}
