@@ -519,6 +519,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_sync_stats(switch_rtp_t *rtp_session)
   \brief Acvite ICE on an RTP session
   \return SWITCH_STATUS_SUCCESS
 */
+SWITCH_DECLARE(void) switch_rtp_prepare_ice_restart(switch_rtp_t *rtp_session, ice_proto_t proto, switch_bool_t explicit_restart);
 SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice(switch_rtp_t *rtp_session, char *login, char *rlogin,
 														const char *password, const char *rpassword, ice_proto_t proto,
 														switch_core_media_ice_type_t type, ice_t *ice_params);
