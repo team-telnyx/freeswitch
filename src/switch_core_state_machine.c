@@ -881,10 +881,9 @@ SWITCH_DECLARE(void) switch_core_session_hangup_state(switch_core_session_t *ses
 	 * playback loop, letting the bridge thread exit and hangup_after_bridge
 	 * take effect. */
 	{
-		const char *partner_uuid = switch_channel_get_partner_uuid(session->channel);
 		switch_core_session_t *partner_session = NULL;
 
-		if (partner_uuid && (partner_session = switch_core_session_locate(partner_uuid))) {
+		if (switch_core_session_get_partner(session, &partner_session) == SWITCH_STATUS_SUCCESS) {
 			switch_channel_t *partner_channel = switch_core_session_get_channel(partner_session);
 
 			if (switch_channel_test_flag(partner_channel, CF_BROADCAST)) {
