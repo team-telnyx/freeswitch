@@ -315,11 +315,12 @@ public:
 
 		std::unique_lock<std::shared_mutex> lock(mu_);
 		if (module_draining_locked(module)) return SWITCH_STATUS_INUSE;
-		/* Deliberately after the draining check but before the conflict scan:
-		   a rejected registration therefore leaves an empty ModuleSlot behind.
-		   Harmless — it is keyed by module name, so it is reused by the next
-		   successful register and swept by unregister_module() — but worth
-		   knowing before someone reads a slot's existence as "has routes". */
+		/* After the draining check, before the conflict scan: a registration
+		   rejected for a CONFLICT therefore leaves an empty ModuleSlot behind.
+		   A GENERR returns above and leaves nothing. Harmless either way — the
+		   slot is keyed by module name, reused by the next successful register
+		   and swept by unregister_module() — but do not read a slot's
+		   existence as "this module has routes". */
 		auto slot = slot_for_locked(module);
 
 		if (is_pattern(path)) {
