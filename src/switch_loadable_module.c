@@ -2373,9 +2373,10 @@ static switch_status_t do_shutdown(switch_loadable_module_t *module, switch_bool
 		   For one that did not, it removes the routes and blocks until any
 		   in-flight handler returns — which is the wait that has to happen
 		   before the dlclose() below, but note what that costs. The wait is
-		   UNBOUNDED, it happens while holding the module interface write
-		   rwlock, it is on the process-shutdown path as well as `unload`, and
-		   `unload -f` does not skip it (fail_if_busy only bypasses the rwlock).
+		   UNBOUNDED, it is on the process-shutdown path as well as `unload`,
+		   and `unload -f` does not skip it (fail_if_busy only controls the
+		   rwlock, which is taken on plain `unload` only — so that one blocks
+		   with the write lock held, the other two without it).
 		   A handler wedged on a lock or a blocking read therefore hangs
 		   `shutdown` with no operator escape short of SIGKILL. The 5s warning
 		   naming the module is the only diagnostic. That trade is deliberate —
