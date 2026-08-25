@@ -543,7 +543,6 @@ struct switch_rtp {
 	uint32_t last_max_vb_frames;
 	int skip_timer;
 	uint32_t prev_nacks_inflight;
-	switch_time_t next_dtmf_send_time;
 	rtcp_probe_func rtcp_probe;
 	uint8_t send_rtp_exts_size;
 	uint8_t send_rtp_exts_written;
@@ -8453,15 +8452,24 @@ SWITCH_DECLARE(void) switch_rtp_clear_flag(switch_rtp_t *rtp_session, switch_rtp
 	}
 }
 
-static void set_dtmf_delay(switch_rtp_t *rtp_session, uint32_t ms)
+static void set_dtmf_delay(switch_rtp_t *rtp_session, uint32_t ms, uint32_t max_ms)
 {
-	int upsamp = ms * (rtp_session->samples_per_second / 1000);
-	rtp_session->queue_delay =  ms * (rtp_session->samples_per_second / 1000);
-	rtp_session->next_dtmf_send_time = switch_micro_time_now() + (ms * 1000);
+	int upsamp, max_upsamp;
+
+	if (!max_ms) max_ms = ms;
+
+	upsamp = ms * (rtp_session->samples_per_second / 1000);
+	max_upsamp = max_ms * (rtp_session->samples_per_second / 1000);
+
 	rtp_session->sending_dtmf = 0;
+	rtp_session->queue_delay = upsamp;
+
 	if (rtp_session->flags[SWITCH_RTP_FLAG_USE_TIMER]) {
+		rtp_session->max_next_write_samplecount = rtp_session->timer.samplecount + max_upsamp;
+		rtp_session->next_write_samplecount = rtp_session->timer.samplecount + upsamp;
 		rtp_session->last_write_ts += upsamp;
 	}
+
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "Queue digit delay of %dms\n", ms);
 }
 
@@ -8570,7 +8578,7 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 			rtp_session->dtmf_data.out_digit_dur = 0;
 
 			if (rtp_session->interdigit_delay) {
-				set_dtmf_delay(rtp_session, rtp_session->interdigit_delay);
+				set_dtmf_delay(rtp_session, rtp_session->interdigit_delay, rtp_session->interdigit_delay * 10);
 			}
 
 			return;
@@ -8579,11 +8587,6 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 
 	if (!rtp_session->dtmf_data.out_digit_dur && rtp_session->dtmf_data.dtmf_queue && switch_queue_size(rtp_session->dtmf_data.dtmf_queue)) {
 		void *pop;
-
-
-		if (rtp_session->queue_delay && rtp_session->next_dtmf_send_time >  switch_micro_time_now()) {
-			return;
-		}
 
 		if (rtp_session->flags[SWITCH_RTP_FLAG_USE_TIMER]) {
 			//switch_core_timer_sync(&rtp_session->write_timer);
@@ -8609,9 +8612,6 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 
 		if (rtp_session->queue_delay) {
 			return;
-		} else {
-			rtp_session->next_dtmf_send_time = 0;
-			rtp_session->queue_delay = 0;
 		}
 
 		if (!rtp_session->sending_dtmf) {
@@ -8624,13 +8624,13 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 			uint32_t shift = 0, new_ts = 0;
 
 			if (rdigit->digit == 'w') {
-				set_dtmf_delay(rtp_session, 500);
+				set_dtmf_delay(rtp_session, 500, 0);
 				free(rdigit);
 				return;
 			}
 
 			if (rdigit->digit == 'W') {
-				set_dtmf_delay(rtp_session, 1000);
+				set_dtmf_delay(rtp_session, 1000, 0);
 				free(rdigit);
 				return;
 			}
