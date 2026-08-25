@@ -84,11 +84,35 @@ SWITCH_DECLARE(const char *)        switch_web_request_query_param(const switch_
 
 /* Response setters. set_body / printf may be called multiple times; the last call wins. */
 SWITCH_DECLARE(void) switch_web_response_set_status(switch_web_response_t *res, int code);
+/*!
+ * \brief Set a response header, replacing any previous value for that name.
+ *
+ * Silently DROPS the header (with a WARNING to the FreeSWITCH log) when it
+ * would corrupt the response:
+ *   - `name` is empty or is not an RFC 9110 token — anything with a space,
+ *     a ':', a separator character, or a byte outside printable ASCII.
+ *   - `value` contains a control character. HTAB is permitted, everything
+ *     below 0x20 plus DEL is not; CR and LF in particular would let a
+ *     caller-supplied value inject extra headers or a body.
+ * A dropped header is not an error the caller can observe, so do not build a
+ * security control (an auth challenge, a CSP) out of an unvalidated string
+ * and assume it reached the wire.
+ *
+ * `name` is matched case-insensitively, as HTTP field names are.
+ */
 SWITCH_DECLARE(void) switch_web_response_set_header(switch_web_response_t *res, const char *name, const char *value);
 SWITCH_DECLARE(void) switch_web_response_set_body(switch_web_response_t *res, const char *body, size_t len);
 SWITCH_DECLARE(void) switch_web_response_printf(switch_web_response_t *res, const char *fmt, ...);
 
 /*
+ * `module_name` MUST be the name this module was loaded as — the `modname`
+ * passed to switch_loadable_module_create_module_interface(). It is the key
+ * routes are indexed by, and the core sweeps a module's routes on unload using
+ * that same loaded name (switch_loadable_module.c, do_shutdown). Register under
+ * anything else and that backstop will not match: a module that also forgets
+ * its own switch_web_server_unregister_module() leaves handlers in the registry
+ * pointing into a dlclose()d .so.
+ *
  * Register a route. `path` is an exact path ("/foo") or a pattern with
  * {name} captures ("/users/{id}"). Captures are read via
  * switch_web_request_param(req, "id").
@@ -126,7 +150,13 @@ SWITCH_DECLARE(void) switch_web_response_printf(switch_web_response_t *res, cons
  *   INUSE    — switch_web_server_unregister_module() is currently draining
  *              this module; registrations are refused until it returns.
  *   GENERR   — invalid arguments: null/empty module_name, null/empty path,
- *              path that does not start with '/', or null handler.
+ *              path that does not start with '/', null handler, or a `method`
+ *              that is not one of the enumerators below. The enum is pinned
+ *              (see above) so a module built against an older header can only
+ *              hit that last case by casting; it is rejected rather than
+ *              registered because an out-of-range verb matches no request and
+ *              conflicts with nothing, i.e. it would be a dead route with no
+ *              diagnostic.
  *
  * Re-registering an existing (method, raw path) swaps handler and user_data
  * in place under the write lock, with NO drain — a dispatcher that already

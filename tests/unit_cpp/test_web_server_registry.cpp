@@ -967,9 +967,11 @@ static void test_allowed_methods()
 	CHECK_EQ(mp.size(), (std::size_t)1);
 	CHECK(mp.count(SWITCH_WEB_METHOD_DELETE) == 1);
 
-	/* An ANY route must be reported as the concrete verbs it actually serves —
-	   "ANY" is not an HTTP method token, and Allow: ANY fails CORS preflight
-	   and is invalid per RFC 9110. */
+	/* An ANY route must be reported as the concrete verbs it actually serves.
+	   "ANY" is not an HTTP method token, so Allow: ANY is invalid per RFC 9110
+	   and tells a client nothing about what it may send. (An earlier version of
+	   this comment said it "fails CORS preflight" — mod_web_server emits no CORS
+	   headers at all, so no preflight ever succeeds here regardless.) */
 	wipe();
 	switch_web_server_register("modA", SWITCH_WEB_METHOD_ANY, "/any",
 	                           SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);

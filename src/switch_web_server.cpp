@@ -13,6 +13,7 @@
 #include <atomic>
 #include <chrono>
 #include <cctype>
+#include <cstring>
 #include <cstdarg>
 #include <cstdio>
 #include <map>
@@ -53,12 +54,45 @@ struct PatternEntry : public Entry {
 	std::vector<PatternToken> tokens;
 };
 
+/* The one list of concrete verbs — insert_method() expands ANY through it,
+   so a verb missing from here is a verb Allow: under-reports for every ANY
+   route while lookup() happily serves it.
+
+   Keeping it in step with the enum is enforced by valid_method() below, not
+   by a static_assert on the array length: an earlier revision asserted
+   `count == SWITCH_WEB_METHOD_PATCH + 1`, which is inert for the case it was
+   written to catch. Appending a verb at 5 does not move PATCH, so the
+   comparison stays 5 == 5 and the assert stays silent — it fires only if
+   someone renumbers PATCH or edits the array, i.e. never in the scenario
+   that matters. */
+constexpr switch_web_method_t kConcreteMethods[] = {
+	SWITCH_WEB_METHOD_GET,
+	SWITCH_WEB_METHOD_POST,
+	SWITCH_WEB_METHOD_PUT,
+	SWITCH_WEB_METHOD_DELETE,
+	SWITCH_WEB_METHOD_PATCH,
+};
+
 /* The enum values are pinned precisely so a module built against an older
    header keeps meaning what it meant. Reject anything outside the set anyway:
    an out-of-range value overlaps nothing, so it would register successfully,
    never match a request, and never conflict with a legitimate route on the
    same path — a dead endpoint with no diagnostic. method_name() would also
-   render it as "?" in the Allow: header. */
+   render it as "?" in the Allow: header.
+
+   Written as a switch over every enumerator with no default: label, so
+   -Wswitch names this function the moment a verb is appended to
+   switch_web_method_t. The pragma is load-bearing rather than decorative: this
+   tree compiles src/ with plain `-g -O2` and no -Wall, so -Wswitch is off and
+   the diagnostic would never appear. Promoting it to an error here — and only
+   here — makes the coupling a build failure instead of a convention.
+   Verified by compiling the construct with a sixth verb added: it fails.
+
+   Adding a case here without adding the verb to kConcreteMethods above still
+   compiles, and makes valid_method() accept a verb that ANY routes will not
+   advertise. Add it in both places. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic error "-Wswitch"
 bool valid_method(switch_web_method_t m)
 {
 	switch (m) {
@@ -72,6 +106,7 @@ bool valid_method(switch_web_method_t m)
 	}
 	return false;
 }
+#pragma GCC diagnostic pop
 
 /* Percent-decode one query token, '+' meaning space. Returns false if the
    token contains %00 — decoding that yields an embedded NUL, and every
@@ -528,8 +563,7 @@ public:
 
 	/* ANY is a registration convenience, not an HTTP method token. A route
 	   registered ANY really is served for every concrete verb, so it must be
-	   reported as those verbs — emitting "Allow: ANY" would both be invalid
-	   per RFC 9110 and fail the CORS preflight this exists to support. Note
+	   reported as those verbs — "Allow: ANY" is invalid per RFC 9110. Note
 	   lookup()'s 405 path never had this problem: it only records a method
 	   when it does NOT match, and ANY always matches. */
 	static void insert_method(std::set<switch_web_method_t> &out, switch_web_method_t m)
@@ -538,11 +572,7 @@ public:
 			out.insert(m);
 			return;
 		}
-		out.insert(SWITCH_WEB_METHOD_GET);
-		out.insert(SWITCH_WEB_METHOD_POST);
-		out.insert(SWITCH_WEB_METHOD_PUT);
-		out.insert(SWITCH_WEB_METHOD_DELETE);
-		out.insert(SWITCH_WEB_METHOD_PATCH);
+		for (auto v : kConcreteMethods) out.insert(v);
 	}
 
 	std::set<switch_web_method_t> allowed_methods(const std::string &path) const
@@ -835,12 +865,16 @@ SWITCH_DECLARE(void) switch_web_response_set_status(switch_web_response_t *res, 
 /* A CR or LF in a header VALUE ends the header and starts a new one, so a
    handler echoing request-derived data into a response header would hand the
    caller full control of the rest of the response — injected headers, injected
-   body. Neither Beast nor this layer validated it. Reject rather than silently
-   strip, so the handler's bug stays visible instead of being quietly reshaped. */
+   body. Neither Beast nor this layer validated it. Drop the whole header
+   rather than silently stripping the offending bytes, so the handler's bug
+   shows up as a missing header and a WARNING rather than as a quietly
+   reshaped value. Note the caller cannot observe the drop: set_header returns
+   void, which the public header now says explicitly. */
 static bool web_header_value_ok(const char *s)
 {
 	for (const unsigned char *p = (const unsigned char *)s; *p; ++p) {
-		if (*p < 0x20 || *p == 0x7f) return false;
+		/* HTAB is permitted between field-vchars (RFC 9110 field-content). */
+		if ((*p < 0x20 && *p != 0x09) || *p == 0x7f) return false;
 	}
 	return true;
 }
@@ -873,8 +907,8 @@ SWITCH_DECLARE(void) switch_web_response_set_header(switch_web_response_t *res, 
 	}
 	if (!web_header_value_ok(value)) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-			"mod_web_server: rejected response header '%s' — control characters "
-			"are not permitted in a header value\n", name);
+			"mod_web_server: rejected response header '%s' — a control character "
+			"other than HTAB is not permitted in a header value\n", name);
 		return;
 	}
 	/* HTTP header names are case-insensitive; lowercase on insert to dedupe
