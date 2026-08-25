@@ -287,6 +287,7 @@ library_include_HEADERS = \
 	src/include/switch_regex.h \
 	src/include/switch_types.h \
 	src/include/switch_utils.h \
+	src/include/switch_web_server.h \
 	src/include/switch_rtp.h \
 	src/include/switch_jitterbuffer.h \
 	src/include/switch_estimators.h \

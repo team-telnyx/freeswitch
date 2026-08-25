@@ -21,18 +21,29 @@
 
 SWITCH_BEGIN_EXTERN_C
 
+/*
+ * Values are pinned. Modules are routinely built separately from the core, so
+ * inserting a verb in the natural place would renumber SWITCH_WEB_METHOD_ANY
+ * and a module compiled against the old header would keep passing the old
+ * number — silently meaning something else. Append new verbs at 5, 6, ...;
+ * ANY sits far above so it never has to move.
+ *
+ * HEAD is deliberately absent: mod_web_server routes a HEAD request as GET
+ * (RFC 9110 §9.3.2) and suppresses the body at write time, so every GET route
+ * answers HEAD without registering anything.
+ */
 typedef enum {
-	SWITCH_WEB_METHOD_GET,
-	SWITCH_WEB_METHOD_POST,
-	SWITCH_WEB_METHOD_PUT,
-	SWITCH_WEB_METHOD_DELETE,
-	SWITCH_WEB_METHOD_PATCH,
-	SWITCH_WEB_METHOD_ANY
+	SWITCH_WEB_METHOD_GET    = 0,
+	SWITCH_WEB_METHOD_POST   = 1,
+	SWITCH_WEB_METHOD_PUT    = 2,
+	SWITCH_WEB_METHOD_DELETE = 3,
+	SWITCH_WEB_METHOD_PATCH  = 4,
+	SWITCH_WEB_METHOD_ANY    = 1000
 } switch_web_method_t;
 
 typedef enum {
-	SWITCH_WEB_DISPATCH_LITE,
-	SWITCH_WEB_DISPATCH_POOL
+	SWITCH_WEB_DISPATCH_LITE = 0,
+	SWITCH_WEB_DISPATCH_POOL = 1
 } switch_web_dispatch_t;
 
 typedef struct switch_web_request_s  switch_web_request_t;
@@ -92,8 +103,15 @@ SWITCH_DECLARE(void) switch_web_response_printf(switch_web_response_t *res, cons
  *   SUCCESS  — inserted, or the same module re-registered the identical
  *              (method, raw path) — handler and mode are updated in place.
  *   FALSE    — route conflict per the overlap rules above.
+ *   INUSE    — switch_web_server_unregister_module() is currently draining
+ *              this module; registrations are refused until it returns.
  *   GENERR   — invalid arguments: null/empty module_name, null/empty path,
  *              path that does not start with '/', or null handler.
+ *
+ * Re-registering an existing (method, raw path) swaps handler and user_data
+ * in place under the write lock, with NO drain — a dispatcher that already
+ * resolved the route may still invoke the OLD handler with the OLD user_data.
+ * Do not free the previous user_data on the strength of a re-register.
  */
 SWITCH_DECLARE(switch_status_t) switch_web_server_register(const char *module_name,
                                                            switch_web_method_t method,
@@ -117,7 +135,28 @@ SWITCH_DECLARE(switch_status_t) switch_web_server_unregister(const char *module_
                                                              switch_web_method_t method,
                                                              const char *path);
 
-/* Drop every route registered by module_name. Call from your module's SHUTDOWN. */
+/*
+ * Drop every route registered by module_name, then block until every handler
+ * of this module that was already in flight has returned. Call it from your
+ * SHUTDOWN function, BEFORE freeing anything your handlers dereference
+ * (including whatever you passed as user_data) — the drain is what makes that
+ * safe.
+ *
+ * The wait is unbounded; a handler that never returns hangs unload, with a
+ * warning every 5s naming the count still outstanding. Two consequences:
+ *
+ *   - NEVER call this from inside a web handler, including for your own
+ *     module. The calling thread holds the in-flight count it is waiting on,
+ *     so it deadlocks against itself with no way out but a restart.
+ *   - Do not reach back into the loadable-module machinery from a handler
+ *     (switch_api_execute() and anything else taking PROTECT_INTERFACE).
+ *     do_shutdown() holds your module_interface write lock across SHUTDOWN,
+ *     so the handler blocks on that lock while this drain waits for the
+ *     handler. Call your implementation function directly instead.
+ *
+ * Registrations for this module are refused with SWITCH_STATUS_INUSE while
+ * the drain is in progress.
+ */
 SWITCH_DECLARE(void) switch_web_server_unregister_module(const char *module_name);
 
 /*
