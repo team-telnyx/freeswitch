@@ -120,7 +120,17 @@ SWITCH_DECLARE(switch_status_t) switch_web_server_unregister(const char *module_
 /* Drop every route registered by module_name. Call from your module's SHUTDOWN. */
 SWITCH_DECLARE(void) switch_web_server_unregister_module(const char *module_name);
 
-/* Cheap probe so consumers can degrade gracefully when mod_web_server is not loaded. */
+/*
+ * Reports whether a mod_web_server listener is currently up.
+ *
+ * This is for logging and operator surfaces ONLY. Do NOT gate registration on
+ * it. The registry lives in libfreeswitch, not in mod_web_server, so
+ * switch_web_server_register() succeeds whether or not the listener module is
+ * loaded, and the route starts being served the moment mod_web_server comes
+ * up. Registering only when this returns TRUE makes your endpoint depend on
+ * module load order and silently drops it forever whenever your module happens
+ * to load first.
+ */
 SWITCH_DECLARE(switch_bool_t) switch_web_server_available(void);
 
 SWITCH_END_EXTERN_C

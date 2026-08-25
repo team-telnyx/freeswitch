@@ -650,6 +650,48 @@ static void test_snapshot()
 	CHECK_EQ(rows.size(), (std::size_t)3);
 }
 
+/* ----- Listener independence (module load order) ----- */
+
+static void test_register_without_listener()
+{
+	std::cout << "[test] registration is independent of the listener / load order\n";
+	wipe();
+	internal::set_listener_present(false);
+
+	/* The consumer-loads-first case. mod_web_server is not up, so
+	   switch_web_server_available() is FALSE — but the registry lives in
+	   libfreeswitch, so registration must still land and the route must
+	   resolve. If this ever stopped holding, gating registration on
+	   availability would become the only correct pattern for consumers. */
+	CHECK(switch_web_server_available() == SWITCH_FALSE);
+
+	auto s = switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/late",
+	                                    SWITCH_WEB_DISPATCH_POOL, dummy_handler, NULL);
+	CHECK_EQ((int)s, (int)SWITCH_STATUS_SUCCESS);
+
+	auto r = internal::lookup(SWITCH_WEB_METHOD_GET, "/late");
+	CHECK_EQ((int)r.outcome, (int)internal::LookupOutcome::Hit);
+	CHECK(r.route.handler == dummy_handler);
+
+	/* Listener comes up afterwards: the same route serves, with no
+	   re-registration and no reload of the consumer module. */
+	internal::set_listener_present(true);
+	CHECK(switch_web_server_available() == SWITCH_TRUE);
+
+	auto r2 = internal::lookup(SWITCH_WEB_METHOD_GET, "/late");
+	CHECK_EQ((int)r2.outcome, (int)internal::LookupOutcome::Hit);
+	CHECK(r2.route.handler == dummy_handler);
+
+	/* Reverse order — listener already up when the consumer registers. */
+	auto s2 = switch_web_server_register("modB", SWITCH_WEB_METHOD_GET, "/early",
+	                                     SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	CHECK_EQ((int)s2, (int)SWITCH_STATUS_SUCCESS);
+	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/early").outcome,
+	         (int)internal::LookupOutcome::Hit);
+
+	internal::set_listener_present(false);
+}
+
 int main()
 {
 	test_exact_basic();
@@ -679,6 +721,7 @@ int main()
 	test_unregister_specific();
 	test_response_printf_long_output();
 	test_snapshot();
+	test_register_without_listener();
 
 	wipe();
 	std::cout << "\n" << g_pass.load() << " passed, " << g_fail.load() << " failed\n";
