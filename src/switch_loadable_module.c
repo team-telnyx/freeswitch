@@ -2367,11 +2367,19 @@ static switch_status_t do_shutdown(switch_loadable_module_t *module, switch_bool
 		   dlclose() — the next request then jumps into freed text. Sweeping
 		   here makes the guarantee structural instead of documentary.
 
-		   Cheap and idempotent: a well-behaved module already drained, so this
-		   finds no slot and returns immediately. For one that did not, it
-		   removes the routes and blocks until any in-flight handler returns,
-		   which is exactly the wait that has to happen before the unload
-		   below. */
+		   Cheap and idempotent for a well-behaved module: it already drained,
+		   so this finds no slot and returns immediately.
+
+		   For one that did not, it removes the routes and blocks until any
+		   in-flight handler returns — which is the wait that has to happen
+		   before the dlclose() below, but note what that costs. The wait is
+		   UNBOUNDED, it happens while holding the module interface write
+		   rwlock, it is on the process-shutdown path as well as `unload`, and
+		   `unload -f` does not skip it (fail_if_busy only bypasses the rwlock).
+		   A handler wedged on a lock or a blocking read therefore hangs
+		   `shutdown` with no operator escape short of SIGKILL. The 5s warning
+		   naming the module is the only diagnostic. That trade is deliberate —
+		   the alternative is jumping into freed text — but it is a trade. */
 		switch_web_server_unregister_module(module->module_interface->module_name);
 	}
 

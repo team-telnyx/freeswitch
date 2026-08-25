@@ -93,7 +93,37 @@ bool valid_method(switch_web_method_t m)
 	}
 	return false;
 }
+
+/* Same reasoning as valid_method, and the consequence is worse. lookup()
+   returns the mode verbatim and the dispatcher tests `mode == POOL`, so ANY
+   unrecognised value silently means LITE — a handler that was written to block
+   then runs on the shared IO strand and stalls every route on every listener.
+   A dead endpoint is recoverable; this is not. */
+bool valid_mode(switch_web_dispatch_t m)
+{
+	switch (m) {
+	case SWITCH_WEB_DISPATCH_LITE:
+	case SWITCH_WEB_DISPATCH_POOL:
+		return true;
+	}
+	return false;
+}
 #pragma GCC diagnostic pop
+
+/* A registrable path is matched against the target with the query string
+   already stripped, so a '?' in it can never match; likewise a space or a
+   control character, neither of which survives a request line. Registering one
+   is a caller bug that would otherwise succeed and produce a route nothing
+   reaches — the "dead endpoint with no diagnostic" the method check exists to
+   prevent. */
+bool valid_reg_path(const std::string &p)
+{
+	if (p.empty() || p[0] != '/') return false;
+	for (unsigned char c : p) {
+		if (c <= 0x20 || c == 0x7f || c == '?' || c == '#') return false;
+	}
+	return true;
+}
 
 /* Percent-decode one query token, '+' meaning space. Returns false if the
    token contains %00 — decoding that yields an embedded NUL, and every
@@ -278,13 +308,18 @@ public:
 	{
 		/* GENERR = malformed call; FALSE = route conflict. Keep them
 		   distinct so callers can log "bad input" vs "shadowed route". */
-		if (module.empty() || path.empty() || path[0] != '/' || !handler ||
-		    !valid_method(method)) {
+		if (module.empty() || !handler || !valid_reg_path(path) ||
+		    !valid_method(method) || !valid_mode(mode)) {
 			return SWITCH_STATUS_GENERR;
 		}
 
 		std::unique_lock<std::shared_mutex> lock(mu_);
 		if (module_draining_locked(module)) return SWITCH_STATUS_INUSE;
+		/* Deliberately after the draining check but before the conflict scan:
+		   a rejected registration therefore leaves an empty ModuleSlot behind.
+		   Harmless — it is keyed by module name, so it is reused by the next
+		   successful register and swept by unregister_module() — but worth
+		   knowing before someone reads a slot's existence as "has routes". */
 		auto slot = slot_for_locked(module);
 
 		if (is_pattern(path)) {
@@ -330,8 +365,8 @@ public:
 	                           switch_web_handler_func handler,
 	                           void *user_data)
 	{
-		if (module.empty() || prefix.empty() || prefix[0] != '/' || !handler ||
-		    !valid_method(method)) {
+		if (module.empty() || !handler || !valid_reg_path(prefix) ||
+		    !valid_method(method) || !valid_mode(mode)) {
 			return SWITCH_STATUS_GENERR;
 		}
 
@@ -768,6 +803,13 @@ const std::string &response_body(const switch_web_response_t *res)
 	return res ? res->body : empty;
 }
 
+/* No default: label, for the same reason valid_method() has none — an appended
+   verb must fail the build here too. With a default: this rendered a new verb
+   as "?" in Allow:, which is the visible half of the same bug the -Wswitch
+   guard exists to catch. The unreachable return keeps the compiler happy for
+   a cast-in out-of-range value, which add() already rejects. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic error "-Wswitch"
 const char *method_name(switch_web_method_t m)
 {
 	switch (m) {
@@ -777,10 +819,10 @@ const char *method_name(switch_web_method_t m)
 	case SWITCH_WEB_METHOD_DELETE: return "DELETE";
 	case SWITCH_WEB_METHOD_PATCH:  return "PATCH";
 	case SWITCH_WEB_METHOD_ANY:    return "ANY";
-	default:                       break;   /* not reachable: add() validates */
 	}
 	return "?";
 }
+#pragma GCC diagnostic pop
 
 } /* namespace switch_web_server_internal */
 
