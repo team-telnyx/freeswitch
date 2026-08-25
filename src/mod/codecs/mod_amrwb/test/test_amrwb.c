@@ -205,6 +205,161 @@ FST_CORE_BEGIN(".")
 		}
 
 		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_rejects_truncated_sid)
+		{
+			switch_codec_t source_be = { 0 };
+			switch_codec_t source_oa = { 0 };
+			switch_codec_t target_oa = { 0 };
+			switch_codec_settings_t codec_settings = {{ 0 }};
+			switch_status_t status;
+			uint32_t flags = 0;
+			uint32_t rate = 16000;
+			unsigned char decoded[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
+			unsigned char encoded[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
+			uint32_t decoded_len;
+			uint32_t cached_pcm_len;
+			uint32_t encoded_len;
+			static unsigned char sid_be[] = "\xf4\xf8\xf7\xcf\x78\x00\x80";
+			static unsigned char sid_oa[] = "\xf0\x4c\xe3\xdf\x3d\xe0\x02";
+			static unsigned char short_payload[] = "\xf0";
+			static unsigned char reserved_oa[] = "\xf0\x54";
+			static unsigned char reserved_be_ft10[] = "\xf5\x40";
+
+			status = switch_core_codec_init(&source_be,
+				"AMR-WB", "mod_amrwb", "mode-set=0,1,2;octet-align=0",
+				16000, 20, 1, SWITCH_CODEC_FLAG_DECODE, &codec_settings, fst_pool);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			status = switch_core_codec_init(&source_oa,
+				"AMR-WB", "mod_amrwb", "mode-set=0,1,2;octet-align=1",
+				16000, 20, 1, SWITCH_CODEC_FLAG_DECODE, &codec_settings, fst_pool);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			status = switch_core_codec_init(&target_oa,
+				"AMR-WB", "mod_amrwb", "mode-set=0,1,2;octet-align=1",
+				16000, 20, 1, SWITCH_CODEC_FLAG_ENCODE, &codec_settings, fst_pool);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+
+			decoded_len = sizeof(decoded);
+			status = switch_core_codec_decode(&source_be, NULL, sid_be, sizeof(sid_be) - 1,
+				16000, decoded, &decoded_len, &rate, &flags);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			cached_pcm_len = decoded_len;
+
+			decoded_len = sizeof(decoded);
+			status = switch_core_codec_decode(&source_be, NULL, sid_be, sizeof(sid_be) - 2,
+				16000, decoded, &decoded_len, &rate, &flags);
+			fst_check(status != SWITCH_STATUS_SUCCESS);
+			decoded_len = sizeof(decoded);
+			status = switch_core_codec_decode(&source_be, NULL, short_payload, sizeof(short_payload) - 1,
+				16000, decoded, &decoded_len, &rate, &flags);
+			fst_check(status != SWITCH_STATUS_SUCCESS);
+			decoded_len = sizeof(decoded);
+			status = switch_core_codec_decode(&source_be, NULL, reserved_be_ft10, sizeof(reserved_be_ft10) - 1,
+				16000, decoded, &decoded_len, &rate, &flags);
+			fst_check(status != SWITCH_STATUS_SUCCESS);
+
+			decoded_len = cached_pcm_len;
+			encoded_len = sizeof(encoded);
+			status = switch_core_codec_encode(&target_oa, &source_be, decoded, decoded_len,
+				16000, encoded, &encoded_len, &rate, &flags);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			fst_check((encoded[1] >> 3 & 0x0f) != 9);
+
+			decoded_len = sizeof(decoded);
+			status = switch_core_codec_decode(&source_oa, NULL, sid_oa, sizeof(sid_oa) - 1,
+				16000, decoded, &decoded_len, &rate, &flags);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			cached_pcm_len = decoded_len;
+
+			decoded_len = sizeof(decoded);
+			status = switch_core_codec_decode(&source_oa, NULL, sid_oa, sizeof(sid_oa) - 2,
+				16000, decoded, &decoded_len, &rate, &flags);
+			fst_check(status != SWITCH_STATUS_SUCCESS);
+			decoded_len = sizeof(decoded);
+			status = switch_core_codec_decode(&source_oa, NULL, short_payload, sizeof(short_payload) - 1,
+				16000, decoded, &decoded_len, &rate, &flags);
+			fst_check(status != SWITCH_STATUS_SUCCESS);
+			decoded_len = sizeof(decoded);
+			status = switch_core_codec_decode(&source_oa, NULL, reserved_oa, sizeof(reserved_oa) - 1,
+				16000, decoded, &decoded_len, &rate, &flags);
+			fst_check(status != SWITCH_STATUS_SUCCESS);
+
+			decoded_len = cached_pcm_len;
+			encoded_len = sizeof(encoded);
+			status = switch_core_codec_encode(&target_oa, &source_oa, decoded, decoded_len,
+				16000, encoded, &encoded_len, &rate, &flags);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			fst_check((encoded[1] >> 3 & 0x0f) != 9);
+
+			switch_core_codec_destroy(&target_oa);
+			switch_core_codec_destroy(&source_oa);
+			switch_core_codec_destroy(&source_be);
+		}
+
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_sid_advances_encoder_state)
+		{
+			switch_codec_t source_be = { 0 };
+			switch_codec_t target_relay = { 0 };
+			switch_codec_t target_control = { 0 };
+			switch_codec_settings_t codec_settings = {{ 0 }};
+			switch_status_t status;
+			uint32_t flags = 0;
+			uint32_t rate = 16000;
+			unsigned char decoded[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
+			unsigned char relayed[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
+			unsigned char control[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
+			uint32_t decoded_len = sizeof(decoded);
+			uint32_t relayed_len;
+			uint32_t control_len;
+			static unsigned char sid_be[] = "\xf4\xf8\xf7\xcf\x78\x00\x80";
+
+			status = switch_core_codec_init(&source_be,
+				"AMR-WB", "mod_amrwb", "mode-set=0,1,2;octet-align=0",
+				16000, 20, 1, SWITCH_CODEC_FLAG_DECODE, &codec_settings, fst_pool);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			status = switch_core_codec_init(&target_relay,
+				"AMR-WB", "mod_amrwb", "mode-set=0,1,2;octet-align=1",
+				16000, 20, 1, SWITCH_CODEC_FLAG_ENCODE, &codec_settings, fst_pool);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			status = switch_core_codec_init(&target_control,
+				"AMR-WB", "mod_amrwb", "mode-set=0,1,2;octet-align=1",
+				16000, 20, 1, SWITCH_CODEC_FLAG_ENCODE, &codec_settings, fst_pool);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+
+			status = switch_core_codec_decode(&source_be, NULL, sid_be, sizeof(sid_be) - 1,
+				16000, decoded, &decoded_len, &rate, &flags);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			relayed_len = sizeof(relayed);
+			status = switch_core_codec_encode(&target_relay, &source_be, decoded, decoded_len,
+				16000, relayed, &relayed_len, &rate, &flags);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			fst_check((relayed[1] >> 3 & 0x0f) == 9);
+			control_len = sizeof(control);
+			status = switch_core_codec_encode(&target_control, NULL, decoded, decoded_len,
+				16000, control, &control_len, &rate, &flags);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+
+			memset(decoded, 0, decoded_len);
+			relayed_len = sizeof(relayed);
+			control_len = sizeof(control);
+			status = switch_core_codec_encode(&target_relay, NULL, decoded, decoded_len,
+				16000, relayed, &relayed_len, &rate, &flags);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			status = switch_core_codec_encode(&target_control, NULL, decoded, decoded_len,
+				16000, control, &control_len, &rate, &flags);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			fst_check(relayed_len == control_len);
+			fst_check(!memcmp(relayed, control, control_len));
+
+			switch_core_codec_destroy(&target_control);
+			switch_core_codec_destroy(&target_relay);
+			switch_core_codec_destroy(&source_be);
+		}
+
+		FST_TEST_END()
+
 	}
 	FST_SUITE_END()
 }
