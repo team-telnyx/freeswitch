@@ -526,6 +526,25 @@ public:
 		return out;
 	}
 
+	/* ANY is a registration convenience, not an HTTP method token. A route
+	   registered ANY really is served for every concrete verb, so it must be
+	   reported as those verbs — emitting "Allow: ANY" would both be invalid
+	   per RFC 9110 and fail the CORS preflight this exists to support. Note
+	   lookup()'s 405 path never had this problem: it only records a method
+	   when it does NOT match, and ANY always matches. */
+	static void insert_method(std::set<switch_web_method_t> &out, switch_web_method_t m)
+	{
+		if (m != SWITCH_WEB_METHOD_ANY) {
+			out.insert(m);
+			return;
+		}
+		out.insert(SWITCH_WEB_METHOD_GET);
+		out.insert(SWITCH_WEB_METHOD_POST);
+		out.insert(SWITCH_WEB_METHOD_PUT);
+		out.insert(SWITCH_WEB_METHOD_DELETE);
+		out.insert(SWITCH_WEB_METHOD_PATCH);
+	}
+
 	std::set<switch_web_method_t> allowed_methods(const std::string &path) const
 	{
 		std::shared_lock<std::shared_mutex> lock(mu_);
@@ -533,11 +552,11 @@ public:
 
 		auto eit = exact_.find(path);
 		if (eit != exact_.end()) {
-			for (const auto &e : eit->second) out.insert(e.method);
+			for (const auto &e : eit->second) insert_method(out, e.method);
 		}
 		for (const auto &p : patterns_) {
 			std::map<std::string, std::string> caps;
-			if (match_pattern(p.tokens, path, caps)) out.insert(p.method);
+			if (match_pattern(p.tokens, path, caps)) insert_method(out, p.method);
 		}
 		for (const auto &pr : prefixes_) {
 			if (path.compare(0, pr.raw.size(), pr.raw) != 0) continue;
@@ -545,7 +564,7 @@ public:
 			    path[pr.raw.size()] != '/') {
 				continue;
 			}
-			out.insert(pr.method);
+			insert_method(out, pr.method);
 		}
 		return out;
 	}
@@ -813,13 +832,12 @@ SWITCH_DECLARE(void) switch_web_response_set_status(switch_web_response_t *res, 
 	if (res) res->status = code;
 }
 
-/* A CR or LF in a header value ends the header and starts a new one, so a
+/* A CR or LF in a header VALUE ends the header and starts a new one, so a
    handler echoing request-derived data into a response header would hand the
    caller full control of the rest of the response — injected headers, injected
-   body. Neither Beast nor this layer validated it. Reject anything with a
-   control character rather than silently stripping, so the handler's bug is
-   visible instead of quietly reshaped. */
-static bool web_header_token_ok(const char *s)
+   body. Neither Beast nor this layer validated it. Reject rather than silently
+   strip, so the handler's bug stays visible instead of being quietly reshaped. */
+static bool web_header_value_ok(const char *s)
 {
 	for (const unsigned char *p = (const unsigned char *)s; *p; ++p) {
 		if (*p < 0x20 || *p == 0x7f) return false;
@@ -827,13 +845,36 @@ static bool web_header_token_ok(const char *s)
 	return true;
 }
 
+/* A header NAME is an RFC 9110 token — control-free is not enough. An empty
+   name, a space, or an embedded ':' produces a field-line that is not valid
+   per RFC 9112 §5, and Beast does not validate it either: the bytes go on the
+   wire and a fronting nginx/envoy rejects the whole response, turning a
+   handler typo into an outage for that route. */
+static bool web_header_name_ok(const char *s)
+{
+	if (!*s) return false;
+	for (const unsigned char *p = (const unsigned char *)s; *p; ++p) {
+		if (*p <= 0x20 || *p >= 0x7f) return false;
+		if (strchr("\"(),/:;<=>?@[\\]{}", *p)) return false;
+	}
+	return true;
+}
+
 SWITCH_DECLARE(void) switch_web_response_set_header(switch_web_response_t *res, const char *name, const char *value)
 {
 	if (!res || !name || !value) return;
-	if (!web_header_token_ok(name) || !web_header_token_ok(value)) {
+	if (!web_header_name_ok(name)) {
+		/* Length only: the name is exactly what may contain CR/LF, and logging
+		   it raw would let a rejected header forge a line in the log. */
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-			"mod_web_server: rejected header '%s' — control characters are not "
-			"permitted in a header name or value\n", name);
+			"mod_web_server: rejected a response header — the name (%u bytes) is "
+			"not a valid HTTP token\n", (unsigned)strlen(name));
+		return;
+	}
+	if (!web_header_value_ok(value)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+			"mod_web_server: rejected response header '%s' — control characters "
+			"are not permitted in a header value\n", name);
 		return;
 	}
 	/* HTTP header names are case-insensitive; lowercase on insert to dedupe

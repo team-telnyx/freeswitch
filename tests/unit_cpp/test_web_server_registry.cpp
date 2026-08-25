@@ -967,12 +967,60 @@ static void test_allowed_methods()
 	CHECK_EQ(mp.size(), (std::size_t)1);
 	CHECK(mp.count(SWITCH_WEB_METHOD_DELETE) == 1);
 
+	/* An ANY route must be reported as the concrete verbs it actually serves —
+	   "ANY" is not an HTTP method token, and Allow: ANY fails CORS preflight
+	   and is invalid per RFC 9110. */
+	wipe();
+	switch_web_server_register("modA", SWITCH_WEB_METHOD_ANY, "/any",
+	                           SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	auto ma = internal::allowed_methods("/any");
+	CHECK(ma.count(SWITCH_WEB_METHOD_ANY) == 0);
+	CHECK_EQ(ma.size(), (std::size_t)5);
+	for (auto m : { SWITCH_WEB_METHOD_GET, SWITCH_WEB_METHOD_POST, SWITCH_WEB_METHOD_PUT,
+	                SWITCH_WEB_METHOD_DELETE, SWITCH_WEB_METHOD_PATCH }) {
+		CHECK(ma.count(m) == 1);
+	}
+	/* and it really is served for each of them */
+	for (auto m : { SWITCH_WEB_METHOD_GET, SWITCH_WEB_METHOD_POST, SWITCH_WEB_METHOD_DELETE }) {
+		CHECK_EQ((int)internal::lookup(m, "/any").outcome, (int)internal::LookupOutcome::Hit);
+	}
+	wipe();
+	switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/am",
+	                           SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	switch_web_server_register("modB", SWITCH_WEB_METHOD_DELETE, "/am/{id}",
+	                           SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+
 	/* prefix tier, and a path that matches nothing under it */
 	switch_web_server_register_prefix("modC", SWITCH_WEB_METHOD_PUT, "/pre",
 	                                  SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
 	CHECK(internal::allowed_methods("/pre/deep/path").count(SWITCH_WEB_METHOD_PUT) == 1);
 	CHECK(internal::allowed_methods("/prefix").empty());   /* segment-bounded */
 	wipe();
+}
+
+/* ----- Response header validation ----- */
+
+static void test_header_validation()
+{
+	std::cout << "[test] response headers reject injection and invalid names\n";
+	internal::ResponsePtr res(internal::make_response());
+
+	/* A CR or LF in a value is response splitting. */
+	switch_web_response_set_header(res.get(), "x-echo", "ok\r\nX-Injected: yes");
+	CHECK(internal::response_headers(res.get()).count("x-echo") == 0);
+
+	/* A name must be an RFC 9110 token: not empty, no space, no colon. */
+	switch_web_response_set_header(res.get(), "", "v");
+	switch_web_response_set_header(res.get(), "x space", "v");
+	switch_web_response_set_header(res.get(), "x-evil: injected", "v");
+	switch_web_response_set_header(res.get(), "utf8\xc3\xa9", "v");
+	CHECK_EQ(internal::response_headers(res.get()).size(), (std::size_t)0);
+
+	/* Legitimate headers still go through, and the name is lower-cased. */
+	switch_web_response_set_header(res.get(), "Content-Type", "application/json");
+	switch_web_response_set_header(res.get(), "X-Request-Id", "abc-123");
+	CHECK_EQ(internal::response_headers(res.get()).size(), (std::size_t)2);
+	CHECK(internal::response_headers(res.get()).count("content-type") == 1);
 }
 
 int main()
@@ -1012,6 +1060,7 @@ int main()
 	test_invalid_method_rejected();
 	test_query_params();
 	test_allowed_methods();
+	test_header_validation();
 
 	wipe();
 	std::cout << "\n" << g_pass.load() << " passed, " << g_fail.load() << " failed\n";
