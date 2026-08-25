@@ -4,7 +4,9 @@
  * mod-internal lookup namespace.
  */
 #include <atomic>
+#include <chrono>
 #include <iostream>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -692,6 +694,110 @@ static void test_register_without_listener()
 	internal::set_listener_present(false);
 }
 
+/* ----- Drain contract ----- */
+
+/*
+ * The property the whole design exists for: unregister_module() must not
+ * return while a handler of that module is still running. Nothing exercised
+ * it before — no test constructed an InFlightTicket or started a thread.
+ */
+static void test_drain_waits_for_inflight()
+{
+	std::cout << "[test] unregister_module blocks until the in-flight ticket drops\n";
+	wipe();
+	switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/drain",
+	                           SWITCH_WEB_DISPATCH_POOL, dummy_handler, NULL);
+
+	/* Hold a ticket, exactly as a dispatched-but-unfinished handler does. */
+	auto held = internal::lookup(SWITCH_WEB_METHOD_GET, "/drain");
+	CHECK_EQ((int)held.outcome, (int)internal::LookupOutcome::Hit);
+
+	std::atomic<bool> returned{false};
+	std::thread sweeper([&] {
+		switch_web_server_unregister_module("modA");
+		returned.store(true);
+	});
+
+	std::this_thread::sleep_for(std::chrono::milliseconds(200));
+	CHECK(returned.load() == false);          /* still blocked, ticket outstanding */
+
+	{ auto drop = std::move(held); }          /* release it */
+	sweeper.join();
+	CHECK(returned.load() == true);
+
+	/* And the route really is gone afterwards. */
+	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/drain").outcome,
+	         (int)internal::LookupOutcome::NotFound);
+}
+
+/*
+ * Regression: remove_module() used to erase the module's slot before waiting,
+ * so a registration landing mid-drain created a *fresh* slot. New lookups then
+ * incremented the new counter while the drain watched the old one, and
+ * unregister_module() returned with a handler still in flight. Registrations
+ * are now refused with INUSE until the drain completes.
+ */
+static void test_register_during_drain_is_refused()
+{
+	std::cout << "[test] registration during a drain is refused, not silently re-slotted\n";
+	wipe();
+	switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/d1",
+	                           SWITCH_WEB_DISPATCH_POOL, dummy_handler, NULL);
+
+	auto held = internal::lookup(SWITCH_WEB_METHOD_GET, "/d1");
+	CHECK_EQ((int)held.outcome, (int)internal::LookupOutcome::Hit);
+
+	std::atomic<bool> returned{false};
+	std::thread sweeper([&] {
+		switch_web_server_unregister_module("modA");
+		returned.store(true);
+	});
+	std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+	auto s = switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/d2",
+	                                    SWITCH_WEB_DISPATCH_POOL, dummy_handler, NULL);
+	CHECK_EQ((int)s, (int)SWITCH_STATUS_INUSE);
+	CHECK(returned.load() == false);           /* the drain did not get satisfied */
+
+	{ auto drop = std::move(held); }
+	sweeper.join();
+
+	/* Once drained, the module can register again against a fresh slot. */
+	CHECK_EQ((int)switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/d2",
+	                                         SWITCH_WEB_DISPATCH_POOL, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_SUCCESS);
+}
+
+/* Concurrent lookup / unregister / re-register must not corrupt the registry
+   or lose the drain guarantee. */
+static void test_drain_under_concurrency()
+{
+	std::cout << "[test] concurrent lookup + unregister_module stress\n";
+	wipe();
+	std::atomic<bool> stop{false};
+	std::atomic<int>  hits{0};
+
+	std::thread reader([&] {
+		while (!stop.load()) {
+			auto r = internal::lookup(SWITCH_WEB_METHOD_GET, "/race");
+			if (r.outcome == internal::LookupOutcome::Hit) hits.fetch_add(1);
+		}
+	});
+
+	for (int i = 0; i < 200; ++i) {
+		switch_web_server_register("modC", SWITCH_WEB_METHOD_GET, "/race",
+		                           SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+		switch_web_server_unregister_module("modC");
+	}
+	stop.store(true);
+	reader.join();
+
+	/* Survived without deadlock or corruption, and the sweep left nothing. */
+	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/race").outcome,
+	         (int)internal::LookupOutcome::NotFound);
+	std::cout << "        (" << hits.load() << " concurrent hits observed)\n";
+}
+
 int main()
 {
 	test_exact_basic();
@@ -722,6 +828,9 @@ int main()
 	test_response_printf_long_output();
 	test_snapshot();
 	test_register_without_listener();
+	test_drain_waits_for_inflight();
+	test_register_during_drain_is_refused();
+	test_drain_under_concurrency();
 
 	wipe();
 	std::cout << "\n" << g_pass.load() << " passed, " << g_fail.load() << " failed\n";

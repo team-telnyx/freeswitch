@@ -191,6 +191,7 @@ public:
 		}
 
 		std::unique_lock<std::shared_mutex> lock(mu_);
+		if (module_draining_locked(module)) return SWITCH_STATUS_INUSE;
 		auto slot = slot_for_locked(module);
 
 		if (is_pattern(path)) {
@@ -241,6 +242,7 @@ public:
 		}
 
 		std::unique_lock<std::shared_mutex> lock(mu_);
+		if (module_draining_locked(module)) return SWITCH_STATUS_INUSE;
 		auto slot = slot_for_locked(module);
 
 		for (auto &existing : prefixes_) {
@@ -327,7 +329,13 @@ public:
 			auto sit = module_slots_.find(module);
 			if (sit != module_slots_.end()) {
 				slot = sit->second;
-				module_slots_.erase(sit);
+				/* Mark, do not erase. Erasing here let a concurrent add() for
+				   the same module create a fresh slot: new lookups incremented
+				   the new counter while this drain watched the old one, so
+				   unregister_module() could return with a handler from that
+				   module still running. Leaving the slot in the index and
+				   refusing registrations against it closes that. */
+				slot->draining.store(true, std::memory_order_release);
 			}
 		}
 
@@ -349,6 +357,15 @@ public:
 						"from module '%s' to return before unload\n",
 						n_left, module.c_str());
 				}
+			}
+
+			/* Drained. Drop the slot so a later re-register of this module
+			   starts clean. No lookup can have minted a ticket in the
+			   meantime — the routes were removed before the wait began. */
+			std::unique_lock<std::shared_mutex> lock(mu_);
+			auto sit = module_slots_.find(module);
+			if (sit != module_slots_.end() && sit->second == slot) {
+				module_slots_.erase(sit);
 			}
 		}
 		return n;
@@ -441,6 +458,13 @@ public:
 
 private:
 	Registry() = default;
+
+	/* mu_ must be held by the caller. */
+	bool module_draining_locked(const std::string &module) const {
+		auto it = module_slots_.find(module);
+		return it != module_slots_.end() &&
+		       it->second->draining.load(std::memory_order_acquire);
+	}
 
 	/* mu_ must be held in unique mode by the caller. */
 	std::shared_ptr<ModuleSlot> slot_for_locked(const std::string &module) {
