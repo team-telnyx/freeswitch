@@ -3,6 +3,7 @@
  * Exercises both the public C ABI (switch_web_server_*) and the
  * mod-internal lookup namespace.
  */
+#include <cstring>
 #include <atomic>
 #include <chrono>
 #include <iostream>
@@ -48,11 +49,16 @@ static switch_status_t dummy_handler(switch_web_request_t *req,
 	return SWITCH_STATUS_SUCCESS;
 }
 
+/* Must name EVERY module any test registers under. A module missing here
+   leaks its routes into later tests, where they silently turn a fresh
+   registration into a conflict rejection. */
 static void wipe()
 {
 	switch_web_server_unregister_module("modA");
 	switch_web_server_unregister_module("modB");
 	switch_web_server_unregister_module("modC");
+	switch_web_server_unregister_module("modOK");
+	switch_web_server_unregister_module("modZ");
 }
 
 /* ----- Exact-route tests ----- */
@@ -892,14 +898,24 @@ static void test_invalid_mode_rejected()
 {
 	std::cout << "[test] out-of-range dispatch mode is rejected\n";
 	wipe();
+	/* Values outside an unfixed enum's value range are UB to form, so these go
+	   through an int and a memcpy rather than a direct cast — a compiler is
+	   entitled to assume a directly-cast out-of-range enum cannot exist, which
+	   would make the whole test vacuous. What is exercised here is what a
+	   module built against a different header would actually pass in. */
+	auto as_mode = [](int v) {
+		switch_web_dispatch_t m;
+		std::memcpy(&m, &v, sizeof m);
+		return m;
+	};
 	CHECK_EQ((int)switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/m1",
-	                                         (switch_web_dispatch_t)42, dummy_handler, NULL),
+	                                         as_mode(42), dummy_handler, NULL),
 	         (int)SWITCH_STATUS_GENERR);
 	CHECK_EQ((int)switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/m2",
-	                                         (switch_web_dispatch_t)-1, dummy_handler, NULL),
+	                                         as_mode(-1), dummy_handler, NULL),
 	         (int)SWITCH_STATUS_GENERR);
 	CHECK_EQ((int)switch_web_server_register_prefix("modA", SWITCH_WEB_METHOD_GET, "/m3",
-	                                                (switch_web_dispatch_t)9, dummy_handler, NULL),
+	                                                as_mode(9), dummy_handler, NULL),
 	         (int)SWITCH_STATUS_GENERR);
 	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/m1").outcome,
 	         (int)internal::LookupOutcome::NotFound);
@@ -946,15 +962,21 @@ static void test_invalid_registration_path_rejected()
 		         (int)SWITCH_STATUS_SUCCESS);
 	}
 
-	/* A GENERR is refused before a module slot is created, so it leaves no
-	   trace — unlike a conflict rejection, which does. */
+	/* A rejected registration must not leave a usable route behind, whichever
+	   way it was rejected. (The stronger claim — that a GENERR also creates no
+	   ModuleSlot, unlike a conflict — is not observable through the public
+	   ABI, since slots are keyed by module name and reused; it is asserted in
+	   the comment at Registry::add and not here.) */
 	wipe();
 	CHECK_EQ((int)switch_web_server_register("modZ", SWITCH_WEB_METHOD_GET, "/a b",
 	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
 	         (int)SWITCH_STATUS_GENERR);
+	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/a b").outcome,
+	         (int)internal::LookupOutcome::NotFound);
 	CHECK_EQ((int)switch_web_server_register("modZ", SWITCH_WEB_METHOD_GET, "/fine",
 	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
 	         (int)SWITCH_STATUS_SUCCESS);
+	wipe();
 }
 
 /* ----- Query-string parsing (the ABI helper) ----- */
