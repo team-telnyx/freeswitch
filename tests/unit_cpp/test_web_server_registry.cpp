@@ -699,7 +699,7 @@ static void test_register_without_listener()
 /* Spin until `path` stops resolving, which proves remove_module()'s write-lock
    section has completed and `draining` is set. Deterministic where a sleep is
    a guess — on a loaded box a sleep can fire before the sweeper has the lock,
-   which would fail the test spuriously rather than catch a regression. */
+   which would fail the test spuriously. */
 static void wait_until_unrouted(const char *path)
 {
 	for (int i = 0; i < 20000; ++i) {
@@ -746,13 +746,9 @@ static void test_drain_waits_for_inflight()
 	         (int)internal::LookupOutcome::NotFound);
 }
 
-/*
- * Regression: remove_module() used to erase the module's slot before waiting,
- * so a registration landing mid-drain created a *fresh* slot. New lookups then
- * incremented the new counter while the drain watched the old one, and
- * unregister_module() returned with a handler still in flight. Registrations
- * are now refused with INUSE until the drain completes.
- */
+/* A registration landing mid-drain must not get a fresh slot: new lookups
+ * would count against it while the drain watched the old one, and
+ * unregister_module() would return with a handler still in flight. */
 static void test_register_during_drain_is_refused()
 {
 	std::cout << "[test] registration during a drain is refused, not silently re-slotted\n";
@@ -967,24 +963,21 @@ static void test_allowed_methods()
 	CHECK_EQ(mp.size(), (std::size_t)1);
 	CHECK(mp.count(SWITCH_WEB_METHOD_DELETE) == 1);
 
-	/* An ANY route must be reported as the concrete verbs it actually serves.
-	   "ANY" is not an HTTP method token, so Allow: ANY is invalid per RFC 9110
-	   and tells a client nothing about what it may send. (An earlier version of
-	   this comment said it "fails CORS preflight" — mod_web_server emits no CORS
-	   headers at all, so no preflight ever succeeds here regardless.) */
+	/* An ANY route is reported as the concrete verbs it serves: "ANY" is not
+	   an HTTP method token, so Allow: ANY is invalid per RFC 9110. */
 	wipe();
 	switch_web_server_register("modA", SWITCH_WEB_METHOD_ANY, "/any",
 	                           SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
 	auto ma = internal::allowed_methods("/any");
 	CHECK(ma.count(SWITCH_WEB_METHOD_ANY) == 0);
 	CHECK_EQ(ma.size(), (std::size_t)5);
-	for (auto m : { SWITCH_WEB_METHOD_GET, SWITCH_WEB_METHOD_POST, SWITCH_WEB_METHOD_PUT,
-	                SWITCH_WEB_METHOD_DELETE, SWITCH_WEB_METHOD_PATCH }) {
-		CHECK(ma.count(m) == 1);
+	for (auto verb : { SWITCH_WEB_METHOD_GET, SWITCH_WEB_METHOD_POST, SWITCH_WEB_METHOD_PUT,
+	                   SWITCH_WEB_METHOD_DELETE, SWITCH_WEB_METHOD_PATCH }) {
+		CHECK(ma.count(verb) == 1);
 	}
 	/* and it really is served for each of them */
-	for (auto m : { SWITCH_WEB_METHOD_GET, SWITCH_WEB_METHOD_POST, SWITCH_WEB_METHOD_DELETE }) {
-		CHECK_EQ((int)internal::lookup(m, "/any").outcome, (int)internal::LookupOutcome::Hit);
+	for (auto verb : { SWITCH_WEB_METHOD_GET, SWITCH_WEB_METHOD_POST, SWITCH_WEB_METHOD_DELETE }) {
+		CHECK_EQ((int)internal::lookup(verb, "/any").outcome, (int)internal::LookupOutcome::Hit);
 	}
 	wipe();
 	switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/am",
