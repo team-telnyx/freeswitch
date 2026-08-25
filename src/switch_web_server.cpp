@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <cstdarg>
 #include <cstdio>
 #include <map>
@@ -70,6 +71,55 @@ bool valid_method(switch_web_method_t m)
 		return true;
 	}
 	return false;
+}
+
+/* Percent-decode one query token, '+' meaning space. Returns false if the
+   token contains %00 — decoding that yields an embedded NUL, and every
+   C-string consumer downstream would silently see a truncated value. */
+bool decode_query_token(const std::string &in, std::string &out)
+{
+	out.clear();
+	out.reserve(in.size());
+	for (std::size_t i = 0; i < in.size(); ++i) {
+		if (in[i] == '+') {
+			out.push_back(' ');
+		} else if (in[i] == '%' && i + 2 < in.size() &&
+		           isxdigit((unsigned char)in[i + 1]) && isxdigit((unsigned char)in[i + 2])) {
+			const int hi = isdigit((unsigned char)in[i + 1])
+				? in[i + 1] - '0' : (tolower((unsigned char)in[i + 1]) - 'a' + 10);
+			const int lo = isdigit((unsigned char)in[i + 2])
+				? in[i + 2] - '0' : (tolower((unsigned char)in[i + 2]) - 'a' + 10);
+			const int c = (hi << 4) | lo;
+			if (c == 0) return false;
+			out.push_back((char)c);
+			i += 2;
+		} else {
+			out.push_back(in[i]);
+		}
+	}
+	return true;
+}
+
+std::map<std::string, std::string> parse_query(const std::string &query)
+{
+	std::map<std::string, std::string> out;
+	std::size_t i = 0;
+	while (i < query.size()) {
+		std::size_t amp = query.find('&', i);
+		const std::string piece = query.substr(i, amp == std::string::npos ? std::string::npos : amp - i);
+		i = (amp == std::string::npos) ? query.size() : amp + 1;
+		if (piece.empty()) continue;
+
+		const std::size_t eq = piece.find('=');
+		if (eq == std::string::npos) continue;   /* no '=' — not a pair */
+
+		std::string key, val;
+		if (!decode_query_token(piece.substr(0, eq), key)) continue;
+		if (!decode_query_token(piece.substr(eq + 1), val)) continue;
+		if (key.empty()) continue;
+		out.emplace(std::move(key), std::move(val));   /* first occurrence wins */
+	}
+	return out;
 }
 
 bool method_matches(switch_web_method_t route, switch_web_method_t request)
@@ -476,6 +526,30 @@ public:
 		return out;
 	}
 
+	std::set<switch_web_method_t> allowed_methods(const std::string &path) const
+	{
+		std::shared_lock<std::shared_mutex> lock(mu_);
+		std::set<switch_web_method_t> out;
+
+		auto eit = exact_.find(path);
+		if (eit != exact_.end()) {
+			for (const auto &e : eit->second) out.insert(e.method);
+		}
+		for (const auto &p : patterns_) {
+			std::map<std::string, std::string> caps;
+			if (match_pattern(p.tokens, path, caps)) out.insert(p.method);
+		}
+		for (const auto &pr : prefixes_) {
+			if (path.compare(0, pr.raw.size(), pr.raw) != 0) continue;
+			if (path.size() > pr.raw.size() && pr.raw.back() != '/' &&
+			    path[pr.raw.size()] != '/') {
+				continue;
+			}
+			out.insert(pr.method);
+		}
+		return out;
+	}
+
 	std::vector<RouteSnapshot> snapshot() const
 	{
 		std::shared_lock<std::shared_mutex> lock(mu_);
@@ -542,6 +616,7 @@ struct switch_web_request_s {
 	std::map<std::string, std::string>                  headers;   /* lower-cased keys */
 	std::string                                         body;
 	std::shared_ptr<std::map<std::string, std::string>> params;
+	std::map<std::string, std::string>                  query_params;  /* parsed from `query` */
 };
 
 struct switch_web_response_s {
@@ -591,6 +666,11 @@ LookupResult lookup(switch_web_method_t method, const std::string &path)
 	return Registry::instance().lookup(method, path);
 }
 
+std::set<switch_web_method_t> allowed_methods(const std::string &path)
+{
+	return Registry::instance().allowed_methods(path);
+}
+
 std::vector<RouteSnapshot> snapshot()
 {
 	return Registry::instance().snapshot();
@@ -616,6 +696,7 @@ switch_web_request_t *make_request(RequestInit init)
 	r->headers   = std::move(init.headers);
 	r->body      = std::move(init.body);
 	r->params    = std::move(init.params);
+	r->query_params = parse_query(r->query);
 	return r;
 }
 
@@ -718,6 +799,13 @@ SWITCH_DECLARE(const char *) switch_web_request_param(const switch_web_request_t
 	if (!req || !name || !req->params) return nullptr;
 	auto it = req->params->find(name);
 	return it == req->params->end() ? nullptr : it->second.c_str();
+}
+
+SWITCH_DECLARE(const char *) switch_web_request_query_param(const switch_web_request_t *req, const char *name)
+{
+	if (!req || !name) return nullptr;
+	auto it = req->query_params.find(name);
+	return it == req->query_params.end() ? nullptr : it->second.c_str();
 }
 
 SWITCH_DECLARE(void) switch_web_response_set_status(switch_web_response_t *res, int code)
