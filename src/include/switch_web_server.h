@@ -131,6 +131,17 @@ SWITCH_DECLARE(switch_status_t) switch_web_server_register_prefix(const char *mo
                                                                   switch_web_handler_func handler,
                                                                   void *user_data);
 
+/*
+ * Remove a single route.
+ *
+ * WARNING: unlike switch_web_server_unregister_module() below, this does NOT
+ * drain. It returns as soon as the route is out of the index, while a handler
+ * resolved a moment earlier may still be executing against your user_data.
+ * Never use it as the last step before unloading, or before freeing anything a
+ * handler touches — use switch_web_server_unregister_module() for that.
+ *
+ * Returns SUCCESS if a route was removed, NOTFOUND if none matched.
+ */
 SWITCH_DECLARE(switch_status_t) switch_web_server_unregister(const char *module_name,
                                                              switch_web_method_t method,
                                                              const char *path);
