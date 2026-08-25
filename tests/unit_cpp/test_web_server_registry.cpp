@@ -885,6 +885,78 @@ static void test_invalid_method_rejected()
 	         (int)internal::LookupOutcome::NotFound);
 }
 
+/* An unrecognised dispatch mode is worse than an unrecognised method: the
+   dispatcher tests `mode == POOL`, so anything else silently means LITE, and a
+   handler written to block would then run on the shared IO strand. */
+static void test_invalid_mode_rejected()
+{
+	std::cout << "[test] out-of-range dispatch mode is rejected\n";
+	wipe();
+	CHECK_EQ((int)switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/m1",
+	                                         (switch_web_dispatch_t)42, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_GENERR);
+	CHECK_EQ((int)switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/m2",
+	                                         (switch_web_dispatch_t)-1, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_GENERR);
+	CHECK_EQ((int)switch_web_server_register_prefix("modA", SWITCH_WEB_METHOD_GET, "/m3",
+	                                                (switch_web_dispatch_t)9, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_GENERR);
+	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/m1").outcome,
+	         (int)internal::LookupOutcome::NotFound);
+
+	/* Both legitimate modes still register. */
+	CHECK_EQ((int)switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/lite",
+	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_SUCCESS);
+	CHECK_EQ((int)switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/pool",
+	                                         SWITCH_WEB_DISPATCH_POOL, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_SUCCESS);
+}
+
+/* A path the dispatcher can never match is a dead endpoint with no
+   diagnostic — the same failure the method check exists to prevent. The target
+   is split at '?' before routing, so a registered '?' can never match. */
+static void test_invalid_registration_path_rejected()
+{
+	std::cout << "[test] unmatchable registration paths are rejected\n";
+	wipe();
+	/* NB the string splits: "\x7fb" would be read as the hex escape 0x7fb,
+	   not DEL followed by 'b'. Same for the UTF-8 case below. */
+	const char *bad[] = { "/a?x=1", "/a b", "/a\r\nb", "/a#frag", "rel", "", "/a\x7f" "b", "/a\tb" };
+	for (const char *p : bad) {
+		CHECK_EQ((int)switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, p,
+		                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+		         (int)SWITCH_STATUS_GENERR);
+		CHECK_EQ((int)switch_web_server_register_prefix("modA", SWITCH_WEB_METHOD_GET, p,
+		                                                SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+		         (int)SWITCH_STATUS_GENERR);
+	}
+
+	/* Nothing legitimate became newly unregistrable. These are the shapes the
+	   real consumers use, plus percent-escapes and non-ASCII, which are valid
+	   path bytes even though this layer does not decode them. */
+	const char *good[] = {
+		"/", "/ok", "/a/", "/a%20b", "/caf\xc3" "\xa9", "/users/{id}",
+		"/metrics", "/health", "/healthz", "/readyz",
+		"/dg/pair/{pair_id}/status", "/dg/list_json"
+	};
+	for (const char *p : good) {
+		CHECK_EQ((int)switch_web_server_register("modOK", SWITCH_WEB_METHOD_GET, p,
+		                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+		         (int)SWITCH_STATUS_SUCCESS);
+	}
+
+	/* A GENERR is refused before a module slot is created, so it leaves no
+	   trace — unlike a conflict rejection, which does. */
+	wipe();
+	CHECK_EQ((int)switch_web_server_register("modZ", SWITCH_WEB_METHOD_GET, "/a b",
+	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_GENERR);
+	CHECK_EQ((int)switch_web_server_register("modZ", SWITCH_WEB_METHOD_GET, "/fine",
+	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_SUCCESS);
+}
+
 /* ----- Query-string parsing (the ABI helper) ----- */
 
 static switch_web_request_t *mk_req(const char *query)
@@ -1053,6 +1125,8 @@ int main()
 	test_drain_under_concurrency();
 	test_overlapping_drains();
 	test_invalid_method_rejected();
+	test_invalid_mode_rejected();
+	test_invalid_registration_path_rejected();
 	test_query_params();
 	test_allowed_methods();
 	test_header_validation();
