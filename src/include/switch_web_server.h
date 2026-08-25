@@ -49,6 +49,10 @@ typedef enum {
 typedef struct switch_web_request_s  switch_web_request_t;
 typedef struct switch_web_response_s switch_web_response_t;
 
+/* Build the response through the switch_web_response_* setters. The RETURN
+   VALUE is advisory: anything other than SWITCH_STATUS_SUCCESS logs a WARNING
+   naming the module and route, and the response you built is sent regardless.
+   To fail a request, set the status you want — do not rely on the return. */
 typedef switch_status_t (*switch_web_handler_func)(switch_web_request_t *req,
                                                    switch_web_response_t *res,
                                                    void *user_data);
@@ -57,6 +61,10 @@ typedef switch_status_t (*switch_web_handler_func)(switch_web_request_t *req,
 SWITCH_DECLARE(switch_web_method_t) switch_web_request_method(const switch_web_request_t *req);
 SWITCH_DECLARE(const char *)        switch_web_request_path(const switch_web_request_t *req);
 SWITCH_DECLARE(const char *)        switch_web_request_query(const switch_web_request_t *req);
+/* Case-insensitive. If the request repeated a field, only the FIRST value is
+   kept — they are not comma-joined as RFC 9110 5.3 would allow. Relevant for
+   X-Forwarded-For and Cookie, where a proxy chain may legitimately send
+   several; read switch_web_request_remote_ip() if you want the peer. */
 SWITCH_DECLARE(const char *)        switch_web_request_header(const switch_web_request_t *req, const char *name);
 SWITCH_DECLARE(const char *)        switch_web_request_body(const switch_web_request_t *req, size_t *len_out);
 SWITCH_DECLARE(const char *)        switch_web_request_remote_ip(const switch_web_request_t *req);
@@ -87,6 +95,13 @@ SWITCH_DECLARE(void) switch_web_response_set_status(switch_web_response_t *res, 
 /*!
  * \brief Set a response header, replacing any previous value for that name.
  *
+ * `Connection` is not settable: the framework decides keep-alive from the
+ * request and overwrites whatever a handler set, without a warning. Return
+ * from the handler and let the framework close the connection instead.
+ *
+ * Names are emitted lowercased, which is legal (field names are
+ * case-insensitive) but visible to anyone diffing raw responses.
+ *
  * Silently DROPS the header (with a WARNING to the FreeSWITCH log) when it
  * would corrupt the response:
  *   - `name` is empty or is not an RFC 9110 token — anything with a space,
@@ -108,6 +123,20 @@ SWITCH_DECLARE(void) switch_web_response_printf(switch_web_response_t *res, cons
  * Register a route. `path` is an exact path ("/foo") or a pattern with
  * {name} captures ("/users/{id}"), read back via
  * switch_web_request_param(req, "id").
+ *
+ * IMPORTANT — request paths are matched as RAW BYTES. The dispatcher splits
+ * the request target at '?' and compares what is left literally: it does NOT
+ * percent-decode and does NOT normalise. Three consequences a handler author
+ * must plan for:
+ *   - "/%6fk" does NOT match a route registered as "/ok".
+ *   - "/x/../y" reaches a prefix route registered on "/x", and both
+ *     switch_web_request_path() and any {capture} hand you the dot-segments
+ *     verbatim.
+ *   - A {capture} value is likewise raw and undecoded, unlike a query
+ *     parameter (see switch_web_request_query_param below, which decodes).
+ * So a handler that joins a path or a capture onto a directory MUST reject or
+ * normalise dot-segments itself — the framework will not do it for you. This
+ * matters most for the prefix tier, whose obvious use is serving files.
  *
  * `module_name` MUST be the name this module was loaded as — the `modname`
  * given to switch_loadable_module_create_module_interface(). Routes are keyed
@@ -142,11 +171,17 @@ SWITCH_DECLARE(void) switch_web_response_printf(switch_web_response_t *res, cons
  *   FALSE    — route conflict per the overlap rules above.
  *   INUSE    — switch_web_server_unregister_module() is draining this module;
  *              registrations are refused until it returns.
- *   GENERR   — null/empty module_name, null/empty path, path not starting with
- *              '/', null handler, or a `method` outside the enum below. The
- *              enum is pinned, so that last case needs a cast; it is rejected
- *              because such a route would match nothing and conflict with
- *              nothing — a dead endpoint with no diagnostic.
+ *   GENERR   — null/empty module_name, null handler, a `method` or `mode`
+ *              outside its enum, or a path that does not start with '/' or
+ *              contains a space, control character, '?' or '#'. Both enums are
+ *              pinned, so an out-of-range value needs a cast. They are rejected
+ *              rather than accepted because the results are silent: an unknown
+ *              method matches nothing and conflicts with nothing (a dead
+ *              endpoint with no diagnostic), and an unknown MODE is worse — the
+ *              dispatcher tests `mode == POOL`, so anything else means LITE and
+ *              a handler written to block would run on the shared IO strand.
+ *              A path containing '?' can never match either, since the target
+ *              is split at '?' before routing.
  *
  * Re-registering an existing (method, raw path) swaps handler and user_data in
  * place under the write lock with NO drain — a dispatcher that already
