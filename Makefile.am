@@ -235,9 +235,9 @@ CORE_LIBS+=libfreeswitch_libyuv.la
 endif
 
 lib_LTLIBRARIES	         = libfreeswitch.la
-libfreeswitch_la_CFLAGS  = $(CORE_CFLAGS) $(SQLITE_CFLAGS) $(GUMBO_CFLAGS) $(FVAD_CFLAGS) $(FREETYPE_CFLAGS) $(CURL_CFLAGS) $(PCRE_CFLAGS) $(SPEEX_CFLAGS) $(LIBEDIT_CFLAGS) $(openssl_CFLAGS) $(SOFIA_SIP_CFLAGS) $(AM_CFLAGS) $(TPL_CFLAGS)
+libfreeswitch_la_CFLAGS  = $(CORE_CFLAGS) $(SQLITE_CFLAGS) $(GUMBO_CFLAGS) $(FVAD_CFLAGS) $(FREETYPE_CFLAGS) $(CURL_CFLAGS) $(PCRE2_CFLAGS) $(SPEEX_CFLAGS) $(LIBEDIT_CFLAGS) $(openssl_CFLAGS) $(SOFIA_SIP_CFLAGS) $(AM_CFLAGS) $(TPL_CFLAGS)
 libfreeswitch_la_LDFLAGS = -version-info 1:0:0 $(AM_LDFLAGS) $(PLATFORM_CORE_LDFLAGS) -no-undefined
-libfreeswitch_la_LIBADD  = $(CORE_LIBS) $(APR_LIBS) $(SQLITE_LIBS) $(GUMBO_LIBS) $(FVAD_LIBS) $(FREETYPE_LIBS) $(CURL_LIBS) $(PCRE_LIBS) $(SPEEX_LIBS) $(LIBEDIT_LIBS) $(SYSTEMD_LIBS) $(openssl_LIBS) $(PLATFORM_CORE_LIBS) $(TPL_LIBS) $(SPANDSP_LIBS) $(SOFIA_SIP_LIBS)
+libfreeswitch_la_LIBADD  = $(CORE_LIBS) $(APR_LIBS) $(SQLITE_LIBS) $(GUMBO_LIBS) $(FVAD_LIBS) $(FREETYPE_LIBS) $(CURL_LIBS) $(PCRE2_LIBS) $(SPEEX_LIBS) $(LIBEDIT_LIBS) $(SYSTEMD_LIBS) $(openssl_LIBS) $(PLATFORM_CORE_LIBS) $(TPL_LIBS) $(SPANDSP_LIBS) $(SOFIA_SIP_LIBS)
 libfreeswitch_la_DEPENDENCIES = $(BUILT_SOURCES)
 
 if HAVE_PNG
@@ -303,7 +303,6 @@ library_include_HEADERS = \
 	src/include/switch_json.h \
 	src/include/switch_utf8.h \
 	src/include/switch_msrp.h \
-	src/include/switch_vpx.h \
 	src/include/switch_vad.h \
 	libs/libteletone/src/libteletone_detect.h \
 	libs/libteletone/src/libteletone_generate.h \
@@ -361,6 +360,7 @@ libfreeswitch_la_SOURCES = \
 	src/switch_rtp.c \
 	src/switch_jitterbuffer.c \
 	src/switch_estimators.c \
+	src/switch_image.c \
 	src/switch_ivr_bridge.c \
 	src/switch_ivr_originate.c \
 	src/switch_ivr_async.c \
@@ -405,7 +405,8 @@ libfreeswitch_la_SOURCES = \
 	libs/miniupnpc/minissdpc.c \
 	libs/miniupnpc/upnperrors.c \
 	libs/libnatpmp/natpmp.c \
-	libs/libnatpmp/getgateway.c
+	libs/libnatpmp/getgateway.c \
+	src/switch_uuidv7.c
 
 if ENABLE_CPP
 libfreeswitch_la_SOURCES += src/switch_cpp.cpp
@@ -623,10 +624,6 @@ libs/srtp/libsrtp.la: libs/srtp libs/srtp/.update $(SRTP_SRC)
 ##
 ## helper targets
 ##
-yaml-files:
-	@echo `mkdir $(DESTDIR)$(confdir)/yaml 2>/dev/null`
-	$(INSTALL) -m 644 $(switch_srcdir)/conf/default/yaml/*.yaml $(DESTDIR)$(confdir)/yaml
-
 vm-sync:
 	test -d $(DESTDIR)$(confdir) || $(mkinstalldirs) $(DESTDIR)$(confdir)
 	test -d $(DESTDIR)$(confdir)/lang || $(mkinstalldirs) $(DESTDIR)$(confdir)/lang
@@ -703,9 +700,6 @@ nodepends: .nodepends
 yesdepends:
 	rm .nodepends
 
-iksemel-dep:
-	make -C src/mod/formats/mod_ssml deps
-
 core: $(switch_builddir)/modules.conf src/include/switch_version.h $(CORE_LIBS) 
 	$(MAKE) $(AM_MAKEFLAGS) libfreeswitch.la
 
@@ -748,7 +742,7 @@ pristine:
 	git clean -fdx
 	git reset --hard
 
-update-clean: clean python-reconf python3-reconf
+update-clean: clean python3-reconf
 	cd libs/esl && $(MAKE) clean
 	cd libs/srtp && $(MAKE) clean
 
@@ -760,10 +754,6 @@ sndfile-reconf:
 	cd libs/libsndfile && autoreconf
 	cd libs/libsndfile && ./config.status --recheck
 	cd libs/libsndfile && ./config.status
-
-python-reconf:
-	rm -f src/mod/languages/mod_python/Makefile
-	./config.status
 
 python3-reconf:
 	rm -f src/mod/languages/mod_python3/Makefile
@@ -778,13 +768,6 @@ srtp-reconf:
 	cd libs/srtp && $(MAKE) clean
 	cd libs/srtp && sh ./config.status --recheck
 	cd libs/srtp && sh ./config.status
-
-
-iks-reconf:
-	cd libs/iksemel && $(MAKE) clean
-	cd libs/iksemel && autoreconf -fi
-	cd libs/iksemel && sh ./configure.gnu $(MY_DEFAULT_ARGS)
-	$(MAKE) mod_ssml-clean
 
 cluecon:
 	@clear

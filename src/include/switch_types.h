@@ -41,7 +41,7 @@
 
 #include <switch.h>
 #include <switch_json.h>
-#include <switch_vpx.h>
+#include <switch_image.h>
 
 SWITCH_BEGIN_EXTERN_C
 #define SWITCH_ENT_ORIGINATE_DELIM ":_:"
@@ -1869,7 +1869,8 @@ typedef enum {
 	SWITCH_SPEECH_FLAG_BLOCKING = (1 << 3),
 	SWITCH_SPEECH_FLAG_PAUSE = (1 << 4),
 	SWITCH_SPEECH_FLAG_OPEN = (1 << 5),
-	SWITCH_SPEECH_FLAG_DONE = (1 << 6)
+	SWITCH_SPEECH_FLAG_DONE = (1 << 6),
+	SWITCH_SPEECH_FLAG_MULTI = (1 << 7)
 } switch_speech_flag_enum_t;
 typedef uint32_t switch_speech_flag_t;
 
@@ -2159,6 +2160,7 @@ typedef uint32_t switch_io_flag_t;
     SWITCH_EVENT_CALL_DETAIL
     SWITCH_EVENT_DEVICE_STATE
     SWITCH_EVENT_SHUTDOWN_REQUESTED		- Shutdown of the system has been requested
+    SWITCH_EVENT_CERT_RELOAD			- SSL/TLS certificates reload has been requested
     SWITCH_EVENT_ALL				- All events at once
 </pre>
 
@@ -2259,6 +2261,7 @@ typedef enum {
 	SWITCH_EVENT_DEVICE_STATE,
 	SWITCH_EVENT_TEXT,
 	SWITCH_EVENT_SHUTDOWN_REQUESTED,
+	SWITCH_EVENT_CERT_RELOAD,
 	SWITCH_EVENT_ALL
 } switch_event_types_t;
 
@@ -2398,7 +2401,8 @@ typedef enum {
 	SCSC_SESSIONS_PEAK_FIVEMIN,
 	SCSC_LOG_TRUNCATE,
 	SCSC_MDNS_RESOLVE,
-	SCSC_SHUTDOWN_CAUSE
+	SCSC_SHUTDOWN_CAUSE,
+	SCSC_UUID_VERSION
 } switch_session_ctl_t;
 
 typedef enum {

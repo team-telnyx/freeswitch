@@ -1525,6 +1525,13 @@ SWITCH_DECLARE(void) switch_string_tolower(char *s);
 **/
 SWITCH_DECLARE(int) switch_rand(void);
 
+/*!
+ * \brief Check if a hostname is a valid IP address (IPv4 or IPv6)
+ * \param hostname The hostname to check
+ * \return 1 if a valid IP address, 0 - otherwise
+ */
+SWITCH_DECLARE(int) switch_is_ip_address(const char *hostname);
+
 SWITCH_END_EXTERN_C
 #endif
 /* For Emacs:
