@@ -148,11 +148,18 @@ SWITCH_DECLARE(switch_status_t) switch_web_server_unregister(const char *module_
  *   - NEVER call this from inside a web handler, including for your own
  *     module. The calling thread holds the in-flight count it is waiting on,
  *     so it deadlocks against itself with no way out but a restart.
- *   - Do not reach back into the loadable-module machinery from a handler
- *     (switch_api_execute() and anything else taking PROTECT_INTERFACE).
- *     do_shutdown() holds your module_interface write lock across SHUTDOWN,
- *     so the handler blocks on that lock while this drain waits for the
- *     handler. Call your implementation function directly instead.
+ *   - NEVER call your OWN module's API from a handler (switch_api_execute()
+ *     on a command your module registered, or anything else taking
+ *     PROTECT_INTERFACE on your module_interface). PROTECT_INTERFACE
+ *     read-locks that interface's rwlock, and do_shutdown() holds the WRITE
+ *     lock on it across your SHUTDOWN function — so the handler blocks on the
+ *     lock while this drain waits for the handler. Deadlock, unload only.
+ *     Call your implementation function directly instead.
+ *   - Calling ANOTHER module's API is not a deadlock — it takes that module's
+ *     rwlock, not yours — but it is a shutdown-latency hazard: your drain is
+ *     then bounded by how long that module takes to answer, including while
+ *     it is itself tearing down. If a handler fans out across modules, give it
+ *     a way to abandon the fan-out once teardown starts.
  *
  * Registrations for this module are refused with SWITCH_STATUS_INUSE while
  * the drain is in progress.
