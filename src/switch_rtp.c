@@ -12635,10 +12635,12 @@ fork_done:
 
 						/* Without a trusted payload boundary, attempting a fallback rewrite can
 						 * move extension bytes into media. Drop only this packet, roll back its
-						 * sequence allocation, and keep the media bridge alive. */
+						 * sequence allocation, and report a write failure. A zero return is
+						 * reserved for transport-not-ready so the media layer does not re-arm
+						 * pre-DTLS keyframe recovery for a malformed packet. */
 						rtp_log_mid_rewrite_drop(rtp_session, send_msg, bytes, trusted_payload_offset, "common");
 						*seq -= delta;
-						ret = 0;
+						ret = -1;
 						goto end;
 					}
 				}
@@ -13227,7 +13229,7 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 						rtp_session->seq--;
 					}
 					WRITE_DEC(rtp_session);
-					return 0;
+					return -1;
 				}
 			}
 		}
@@ -13379,16 +13381,18 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 	}
 
 	if (switch_test_flag(frame, SFF_RTP_HEADER) || rtp_session->flags[SWITCH_RTP_FLAG_TEXT]) {
-		switch_size_t wrote;
+		int wrote;
 		wrote = rtp_write_manual_state(rtp_session, write_state, frame->data, frame->datalen,
 								   frame->m, force_video && payload_override != INVALID_PT ? payload_override : frame->payload, (uint32_t) (frame->timestamp), &frame->flags,
 								   force_video ? ssrc : 0, force_video ? mid_ext_id : 0, force_video ? mid : NULL,
 								   frame->payload, frame->seq, frame->ssrc);
 
-		rtp_session->stats.outbound.raw_bytes += wrote;
-		rtp_session->stats.outbound.media_bytes += wrote;
-		rtp_session->stats.outbound.media_packet_count++;
-		rtp_session->stats.outbound.packet_count++;
+		if (wrote > 0) {
+			rtp_session->stats.outbound.raw_bytes += (switch_size_t)wrote;
+			rtp_session->stats.outbound.media_bytes += (switch_size_t)wrote;
+			rtp_session->stats.outbound.media_packet_count++;
+			rtp_session->stats.outbound.packet_count++;
+		}
 #if DEBUG_RTP
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "RTP: write frame fwd: %u WROTE_MANUAL %p/%p\n", fwd, (void*)rtp_session->session, (void*)rtp_session);
 #endif
@@ -13713,7 +13717,7 @@ static int rtp_write_manual_state(switch_rtp_t *rtp_session, switch_rtp_write_st
 			}
 			rtp_log_mid_rewrite_drop(rtp_session, &rtp_session->write_msg, bytes, 0, "manual");
 			(*seq)--;
-			ret = 0;
+			ret = -1;
 			goto end;
 		}
 	}

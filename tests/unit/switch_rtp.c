@@ -23,6 +23,80 @@ switch_io_flag_t io_flags;
 switch_payload_t read_pt;
 int send_rtcp_test_success = 0;
 
+static int make_udp_sink(switch_port_t *port)
+{
+	struct sockaddr_in addr;
+	socklen_t addr_len = sizeof(addr);
+	int fd;
+
+	if (!port) return -1;
+
+	fd = socket(AF_INET, SOCK_DGRAM, 0);
+	if (fd < 0) return -1;
+
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	addr.sin_port = 0;
+	if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
+		getsockname(fd, (struct sockaddr *)&addr, &addr_len) < 0) {
+		close(fd);
+		return -1;
+	}
+
+	*port = ntohs(addr.sin_port);
+	return fd;
+}
+
+static switch_bool_t recv_rtp_seq(int fd, uint16_t *seq, int timeout_ms)
+{
+	fd_set read_fds;
+	struct timeval timeout;
+	uint8_t packet[SWITCH_RTP_MAX_PACKET_LEN];
+	ssize_t bytes;
+	int ready;
+
+	if (fd < 0 || !seq || timeout_ms < 0) return SWITCH_FALSE;
+
+	FD_ZERO(&read_fds);
+	FD_SET(fd, &read_fds);
+	timeout.tv_sec = timeout_ms / 1000;
+	timeout.tv_usec = (timeout_ms % 1000) * 1000;
+	ready = select(fd + 1, &read_fds, NULL, NULL, &timeout);
+	if (ready != 1) return SWITCH_FALSE;
+
+	bytes = recvfrom(fd, packet, sizeof(packet), 0, NULL, NULL);
+	if (bytes < SWITCH_RTP_HEADER_LEN) return SWITCH_FALSE;
+
+	*seq = (uint16_t)(((uint16_t)packet[2] << 8) | packet[3]);
+	return SWITCH_TRUE;
+}
+
+static void prepare_mid_write_packet(switch_rtp_packet_t *packet, switch_bool_t malformed, uint32_t timestamp)
+{
+	switch_rtp_hdr_ext_t *ext;
+
+	memset(packet, 0, sizeof(*packet));
+	packet->header.version = 2;
+	packet->header.pt = TEST_PT;
+	packet->header.ts = htonl(timestamp);
+	packet->header.ssrc = htonl(0x11223344);
+
+	if (malformed) {
+		packet->header.x = 1;
+		ext = (switch_rtp_hdr_ext_t *)packet->body;
+		ext->profile = htons(0xBEDE);
+		ext->length = htons(16);
+		packet->ext = ext;
+		packet->ebody = packet->body;
+		packet->body[4] = (char)(TEST_MID_EXT_ID << 4);
+		packet->body[5] = '0';
+		packet->body[8] = (char)0xaa;
+	} else {
+		packet->body[0] = (char)0xaa;
+	}
+}
+
 static void show_event(switch_event_t *event) {
 	char *str;
 	/*print the event*/
@@ -301,6 +375,145 @@ FST_TEARDOWN_END()
 			SWITCH_RTP_HEADER_LEN + 8) == SWITCH_STATUS_SUCCESS);
 		fst_check(bytes == SWITCH_RTP_HEADER_LEN + sizeof(expected_repaired_mid));
 		fst_check(!memcmp(body, expected_repaired_mid, sizeof(expected_repaired_mid)));
+	}
+	FST_TEST_END()
+	FST_TEST_BEGIN(test_mid_rewrite_drop_is_not_transport_deferred)
+	{
+		switch_memory_pool_t *test_pool = NULL;
+		switch_rtp_t *drop_rtp = NULL;
+		switch_rtp_flag_t drop_flags[SWITCH_RTP_FLAG_INVALID] = { 0 };
+		const char *drop_err = NULL;
+		switch_port_t local_port = 0;
+		switch_port_t sink_port = 0;
+		switch_rtp_packet_t packet;
+		switch_frame_t frame = { 0 };
+		switch_rtp_stats_t *stats;
+		uint8_t small_payload = 0xaa;
+		uint8_t *large_payload = NULL;
+		uint64_t packets_before_drop;
+		uint16_t first_seq = 0;
+		uint16_t second_seq = 0;
+		int sink_fd = -1;
+		int wrote;
+
+		fst_requires(switch_core_new_memory_pool(&test_pool) == SWITCH_STATUS_SUCCESS);
+		sink_fd = make_udp_sink(&sink_port);
+		fst_requires(sink_fd >= 0);
+		fst_requires(sink_port > 0);
+
+		local_port = switch_rtp_request_port(rx_host);
+		fst_requires(local_port > 0);
+		drop_flags[SWITCH_RTP_FLAG_RAW_WRITE] = 1;
+		drop_rtp = switch_rtp_new(rx_host, local_port, tx_host, sink_port, TEST_PT, 8000, 20 * 1000,
+			drop_flags, "soft", &drop_err, test_pool);
+		fst_requires(drop_rtp != NULL);
+		fst_requires(switch_rtp_ready(drop_rtp));
+		fst_requires(switch_rtp_enable_mid(drop_rtp, TEST_MID_EXT_ID, "0") == SWITCH_STATUS_SUCCESS);
+		switch_rtp_clear_flag(drop_rtp, SWITCH_RTP_FLAG_PAUSE);
+
+		/* Common forwarded path: an untrusted malformed extension is a packet
+		 * failure, not the transport-not-ready result. Its sequence is rolled back. */
+		prepare_mid_write_packet(&packet, SWITCH_FALSE, 9000);
+		memset(&frame, 0, sizeof(frame));
+		frame.packet = &packet;
+		frame.packetlen = SWITCH_RTP_HEADER_LEN + 1;
+		frame.data = packet.body;
+		frame.datalen = 1;
+		frame.payload = TEST_PT;
+		frame.timestamp = 9000;
+		frame.flags = SFF_RAW_RTP | SFF_EXTERNAL;
+		wrote = switch_rtp_write_frame(drop_rtp, &frame);
+		fst_requires(wrote > 0);
+		fst_requires(recv_rtp_seq(sink_fd, &first_seq, 1000));
+
+		prepare_mid_write_packet(&packet, SWITCH_TRUE, 9160);
+		frame.packet = &packet;
+		frame.packetlen = SWITCH_RTP_HEADER_LEN + 9;
+		frame.data = NULL;
+		frame.timestamp = 9160;
+		wrote = switch_rtp_write_frame(drop_rtp, &frame);
+		fst_check(wrote < 0);
+		fst_check(!recv_rtp_seq(sink_fd, &second_seq, 100));
+
+		prepare_mid_write_packet(&packet, SWITCH_FALSE, 9160);
+		frame.packet = &packet;
+		frame.packetlen = SWITCH_RTP_HEADER_LEN + 1;
+		frame.data = packet.body;
+		wrote = switch_rtp_write_frame(drop_rtp, &frame);
+		fst_requires(wrote > 0);
+		fst_requires(recv_rtp_seq(sink_fd, &second_seq, 1000));
+		fst_check(second_seq == (uint16_t)(first_seq + 1));
+
+		/* Proxy path has the same result and rollback contract. */
+		prepare_mid_write_packet(&packet, SWITCH_FALSE, 9320);
+		memset(&frame, 0, sizeof(frame));
+		frame.packet = &packet;
+		frame.packetlen = SWITCH_RTP_HEADER_LEN + 1;
+		frame.data = packet.body;
+		frame.datalen = 1;
+		frame.payload = TEST_PT;
+		frame.timestamp = 9320;
+		frame.flags = SFF_PROXY_PACKET | SFF_EXTERNAL;
+		wrote = switch_rtp_write_frame(drop_rtp, &frame);
+		fst_requires(wrote > 0);
+		fst_requires(recv_rtp_seq(sink_fd, &first_seq, 1000));
+
+		prepare_mid_write_packet(&packet, SWITCH_TRUE, 9480);
+		frame.packet = &packet;
+		frame.packetlen = SWITCH_RTP_HEADER_LEN + 9;
+		frame.data = NULL;
+		frame.timestamp = 9480;
+		wrote = switch_rtp_write_frame(drop_rtp, &frame);
+		fst_check(wrote < 0);
+		fst_check(!recv_rtp_seq(sink_fd, &second_seq, 100));
+
+		prepare_mid_write_packet(&packet, SWITCH_FALSE, 9480);
+		frame.packet = &packet;
+		frame.packetlen = SWITCH_RTP_HEADER_LEN + 1;
+		frame.data = packet.body;
+		wrote = switch_rtp_write_frame(drop_rtp, &frame);
+		fst_requires(wrote > 0);
+		fst_requires(recv_rtp_seq(sink_fd, &second_seq, 1000));
+		fst_check(second_seq == (uint16_t)(first_seq + 1));
+
+		/* Manual path: a locally built packet that cannot fit the negotiated MID
+		 * is dropped without being counted or consuming a sequence number. */
+		memset(&frame, 0, sizeof(frame));
+		frame.data = &small_payload;
+		frame.datalen = 1;
+		frame.payload = TEST_PT;
+		frame.timestamp = 9640;
+		frame.flags = SFF_RTP_HEADER;
+		wrote = switch_rtp_write_frame(drop_rtp, &frame);
+		fst_requires(wrote > 0);
+		fst_requires(recv_rtp_seq(sink_fd, &first_seq, 1000));
+
+		stats = switch_rtp_get_stats(drop_rtp, NULL);
+		fst_requires(stats != NULL);
+		packets_before_drop = stats->outbound.packet_count;
+		large_payload = switch_core_alloc(test_pool, SWITCH_RTP_MAX_BUF_LEN - 4);
+		memset(large_payload, 0xaa, SWITCH_RTP_MAX_BUF_LEN - 4);
+		frame.data = large_payload;
+		frame.datalen = SWITCH_RTP_MAX_BUF_LEN - 4;
+		frame.timestamp = 9800;
+		wrote = switch_rtp_write_frame(drop_rtp, &frame);
+		fst_check(wrote < 0);
+		fst_check(!recv_rtp_seq(sink_fd, &second_seq, 100));
+		stats = switch_rtp_get_stats(drop_rtp, NULL);
+		fst_requires(stats != NULL);
+		fst_check(stats->outbound.packet_count == packets_before_drop);
+
+		frame.data = &small_payload;
+		frame.datalen = 1;
+		frame.timestamp = 9800;
+		wrote = switch_rtp_write_frame(drop_rtp, &frame);
+		fst_requires(wrote > 0);
+		fst_requires(recv_rtp_seq(sink_fd, &second_seq, 1000));
+		fst_check(second_seq == (uint16_t)(first_seq + 1));
+
+		switch_rtp_destroy(&drop_rtp);
+		close(sink_fd);
+		switch_core_destroy_memory_pool(&test_pool);
 	}
 	FST_TEST_END()
 	FST_TEST_BEGIN(test_session_with_rtp)
