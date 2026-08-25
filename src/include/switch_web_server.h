@@ -105,61 +105,51 @@ SWITCH_DECLARE(void) switch_web_response_set_body(switch_web_response_t *res, co
 SWITCH_DECLARE(void) switch_web_response_printf(switch_web_response_t *res, const char *fmt, ...);
 
 /*
- * `module_name` MUST be the name this module was loaded as — the `modname`
- * passed to switch_loadable_module_create_module_interface(). It is the key
- * routes are indexed by, and the core sweeps a module's routes on unload using
- * that same loaded name (switch_loadable_module.c, do_shutdown). Register under
- * anything else and that backstop will not match: a module that also forgets
- * its own switch_web_server_unregister_module() leaves handlers in the registry
- * pointing into a dlclose()d .so.
- *
  * Register a route. `path` is an exact path ("/foo") or a pattern with
- * {name} captures ("/users/{id}"). Captures are read via
+ * {name} captures ("/users/{id}"), read back via
  * switch_web_request_param(req, "id").
  *
- * Routes live in three tiers — exact paths, {capture} patterns, and
- * segment-bounded prefixes (switch_web_server_register_prefix) — and a
- * lookup tries them in that fixed order: exact, then pattern, then prefix.
- * That precedence is structural (decided by tier, never by insertion or
- * module-load order), so a more specific route intentionally and
- * deterministically shadows a less specific one. Example: an exact
- * "/api/health" still wins even if a prefix "/api" is also registered.
+ * `module_name` MUST be the name this module was loaded as — the `modname`
+ * given to switch_loadable_module_create_module_interface(). Routes are keyed
+ * by it, and the core sweeps a module's routes on unload under that same name
+ * (switch_loadable_module.c, do_shutdown). Register under anything else and
+ * that backstop cannot match, leaving handlers pointing into a dlclose()d .so
+ * if the module also forgets its own unregister_module() call.
  *
- * Contract: WITHIN a single tier, a registration is rejected whenever its
- * match-set would intersect an existing route's under an overlapping
- * method — so no request can match two routes in the same tier, and the
- * winner never depends on registration order. Overlap is decided by what a
- * request could match, not by raw string equality:
+ * Routes live in three tiers — exact, {capture} pattern, and segment-bounded
+ * prefix (switch_web_server_register_prefix) — tried in that fixed order. The
+ * precedence is structural, never insertion- or load-order dependent, so an
+ * exact "/api/health" always wins over a prefix "/api".
+ *
+ * WITHIN a tier, a registration is rejected when its match-set would intersect
+ * an existing route's under an overlapping method, so no request can match two
+ * routes in one tier. Overlap is by what a request could match, not string
+ * equality:
  *   - exact paths overlap only when identical;
- *   - patterns overlap when they have the same segment count and, at every
- *     position, one side is a {capture} or the literals match — so
- *     "/users/{id}" conflicts with "/users/{name}" (param names do not
- *     affect matching);
- *   - prefixes overlap when one segment-bounded-contains the other — so
- *     "/api" conflicts with "/api/v2" but not with "/apiv2".
- * ANY overlaps every specific method (and vice versa). The check is
- * symmetric, so the outcome is the same in either registration order.
- * ACROSS tiers, overlapping match-sets are NOT a conflict: both routes
- * register and the tier precedence above decides which one a request
- * reaches. Cross-tier shadowing is allowed and intentional.
+ *   - patterns overlap at equal segment count when, at every position, one
+ *     side is a {capture} or the literals match — "/users/{id}" conflicts
+ *     with "/users/{name}" (capture names do not affect matching);
+ *   - prefixes overlap when one segment-bounded-contains the other — "/api"
+ *     conflicts with "/api/v2" but not with "/apiv2".
+ * ANY overlaps every specific method and vice versa. The check is symmetric.
+ *
+ * ACROSS tiers, overlapping match-sets are NOT a conflict: both register and
+ * tier precedence decides. Cross-tier shadowing is intentional.
  *
  * Returns:
  *   SUCCESS  — inserted, or the same module re-registered the identical
- *              (method, raw path) — handler and mode are updated in place.
+ *              (method, raw path); handler and mode are updated in place.
  *   FALSE    — route conflict per the overlap rules above.
- *   INUSE    — switch_web_server_unregister_module() is currently draining
- *              this module; registrations are refused until it returns.
- *   GENERR   — invalid arguments: null/empty module_name, null/empty path,
- *              path that does not start with '/', null handler, or a `method`
- *              that is not one of the enumerators below. The enum is pinned
- *              (see above) so a module built against an older header can only
- *              hit that last case by casting; it is rejected rather than
- *              registered because an out-of-range verb matches no request and
- *              conflicts with nothing, i.e. it would be a dead route with no
- *              diagnostic.
+ *   INUSE    — switch_web_server_unregister_module() is draining this module;
+ *              registrations are refused until it returns.
+ *   GENERR   — null/empty module_name, null/empty path, path not starting with
+ *              '/', null handler, or a `method` outside the enum below. The
+ *              enum is pinned, so that last case needs a cast; it is rejected
+ *              because such a route would match nothing and conflict with
+ *              nothing — a dead endpoint with no diagnostic.
  *
- * Re-registering an existing (method, raw path) swaps handler and user_data
- * in place under the write lock, with NO drain — a dispatcher that already
+ * Re-registering an existing (method, raw path) swaps handler and user_data in
+ * place under the write lock with NO drain — a dispatcher that already
  * resolved the route may still invoke the OLD handler with the OLD user_data.
  * Do not free the previous user_data on the strength of a re-register.
  */
@@ -230,13 +220,11 @@ SWITCH_DECLARE(void) switch_web_server_unregister_module(const char *module_name
 /*
  * Reports whether a mod_web_server listener is currently up.
  *
- * This is for logging and operator surfaces ONLY. Do NOT gate registration on
- * it. The registry lives in libfreeswitch, not in mod_web_server, so
- * switch_web_server_register() succeeds whether or not the listener module is
- * loaded, and the route starts being served the moment mod_web_server comes
- * up. Registering only when this returns TRUE makes your endpoint depend on
- * module load order and silently drops it forever whenever your module happens
- * to load first.
+ * For logging and operator surfaces ONLY — do NOT gate registration on it.
+ * The registry lives in libfreeswitch, so register() succeeds whether or not
+ * the listener module is loaded and the route serves the moment it comes up.
+ * Gating on TRUE makes your endpoint depend on module load order and drops it
+ * permanently whenever your module loads first.
  */
 SWITCH_DECLARE(switch_bool_t) switch_web_server_available(void);
 

@@ -54,17 +54,9 @@ struct PatternEntry : public Entry {
 	std::vector<PatternToken> tokens;
 };
 
-/* The one list of concrete verbs — insert_method() expands ANY through it,
-   so a verb missing from here is a verb Allow: under-reports for every ANY
-   route while lookup() happily serves it.
-
-   Keeping it in step with the enum is enforced by valid_method() below, not
-   by a static_assert on the array length: an earlier revision asserted
-   `count == SWITCH_WEB_METHOD_PATCH + 1`, which is inert for the case it was
-   written to catch. Appending a verb at 5 does not move PATCH, so the
-   comparison stays 5 == 5 and the assert stays silent — it fires only if
-   someone renumbers PATCH or edits the array, i.e. never in the scenario
-   that matters. */
+/* The one list of concrete verbs — insert_method() expands ANY through it, so
+   a verb missing here is a verb Allow: under-reports on every ANY route while
+   lookup() serves it. valid_method() below is what keeps the two in step. */
 constexpr switch_web_method_t kConcreteMethods[] = {
 	SWITCH_WEB_METHOD_GET,
 	SWITCH_WEB_METHOD_POST,
@@ -80,17 +72,12 @@ constexpr switch_web_method_t kConcreteMethods[] = {
    same path — a dead endpoint with no diagnostic. method_name() would also
    render it as "?" in the Allow: header.
 
-   Written as a switch over every enumerator with no default: label, so
-   -Wswitch names this function the moment a verb is appended to
-   switch_web_method_t. The pragma is load-bearing rather than decorative: this
-   tree compiles src/ with plain `-g -O2` and no -Wall, so -Wswitch is off and
-   the diagnostic would never appear. Promoting it to an error here — and only
-   here — makes the coupling a build failure instead of a convention.
-   Verified by compiling the construct with a sixth verb added: it fails.
-
-   Adding a case here without adding the verb to kConcreteMethods above still
-   compiles, and makes valid_method() accept a verb that ANY routes will not
-   advertise. Add it in both places. */
+   A switch over every enumerator with no default: label, so appending a verb
+   to switch_web_method_t fails the build here. The pragma is load-bearing:
+   src/ compiles with plain `-g -O2`, so -Wswitch is otherwise off.
+   Adding a case here still needs the verb added to kConcreteMethods above —
+   nothing enforces that half, and skipping it means ANY routes serve a verb
+   they do not advertise. */
 #pragma GCC diagnostic push
 #pragma GCC diagnostic error "-Wswitch"
 bool valid_method(switch_web_method_t m)
@@ -862,14 +849,11 @@ SWITCH_DECLARE(void) switch_web_response_set_status(switch_web_response_t *res, 
 	if (res) res->status = code;
 }
 
-/* A CR or LF in a header VALUE ends the header and starts a new one, so a
-   handler echoing request-derived data into a response header would hand the
-   caller full control of the rest of the response — injected headers, injected
-   body. Neither Beast nor this layer validated it. Drop the whole header
-   rather than silently stripping the offending bytes, so the handler's bug
-   shows up as a missing header and a WARNING rather than as a quietly
-   reshaped value. Note the caller cannot observe the drop: set_header returns
-   void, which the public header now says explicitly. */
+/* A CR or LF in a header VALUE ends the header and starts a new one, handing
+   a handler that echoes request-derived data full control of the rest of the
+   response. Beast does not validate it. The whole header is dropped rather
+   than stripped, so the bug surfaces as a missing header plus a WARNING; the
+   caller cannot observe it (set_header returns void). */
 static bool web_header_value_ok(const char *s)
 {
 	for (const unsigned char *p = (const unsigned char *)s; *p; ++p) {
