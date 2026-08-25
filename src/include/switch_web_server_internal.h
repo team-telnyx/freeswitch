@@ -41,6 +41,11 @@ enum class LookupOutcome {
  */
 struct ModuleSlot {
 	std::atomic<int>        in_flight{0};
+	/* Set by remove_module() before it waits. The slot stays in the index
+	   while draining so a concurrent registration for the same module is
+	   rejected rather than silently minting a second slot that the in-flight
+	   drain would not be watching. */
+	std::atomic<bool>       draining{false};
 	std::mutex              mu;
 	std::condition_variable cv;
 };
@@ -63,18 +68,22 @@ private:
 	std::shared_ptr<ModuleSlot> slot_;
 };
 
+/* Scalars carry initializers deliberately: on a NotFound/MethodNotAllowed
+   result these members are documented as unread, and an indeterminate handler
+   pointer that crosses a module boundary is one stray `if (r.route.handler)`
+   away from a jump to garbage. */
 struct ResolvedRoute {
-	switch_web_method_t     method;
-	switch_web_dispatch_t   mode;
-	switch_web_handler_func handler;
-	void                   *user_data;
+	switch_web_method_t     method    = SWITCH_WEB_METHOD_GET;
+	switch_web_dispatch_t   mode      = SWITCH_WEB_DISPATCH_LITE;
+	switch_web_handler_func handler   = nullptr;
+	void                   *user_data = nullptr;
 	std::string             module;
 	std::string             raw;        /* original path/pattern/prefix */
 	std::string             kind;       /* "exact" | "pattern" | "prefix" */
 };
 
 struct LookupResult {
-	LookupOutcome                                       outcome;
+	LookupOutcome                                       outcome = LookupOutcome::NotFound;
 	ResolvedRoute                                       route;     /* valid only on Hit */
 	std::shared_ptr<std::map<std::string, std::string>> params;    /* valid only on Hit, may be null */
 	std::set<switch_web_method_t>                       allowed;   /* valid only on MethodNotAllowed */
