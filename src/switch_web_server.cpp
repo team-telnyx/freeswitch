@@ -660,6 +660,7 @@ const char *method_name(switch_web_method_t m)
 	case SWITCH_WEB_METHOD_DELETE: return "DELETE";
 	case SWITCH_WEB_METHOD_PATCH:  return "PATCH";
 	case SWITCH_WEB_METHOD_ANY:    return "ANY";
+	default:                       break;   /* not reachable: add() validates */
 	}
 	return "?";
 }
@@ -724,9 +725,29 @@ SWITCH_DECLARE(void) switch_web_response_set_status(switch_web_response_t *res, 
 	if (res) res->status = code;
 }
 
+/* A CR or LF in a header value ends the header and starts a new one, so a
+   handler echoing request-derived data into a response header would hand the
+   caller full control of the rest of the response — injected headers, injected
+   body. Neither Beast nor this layer validated it. Reject anything with a
+   control character rather than silently stripping, so the handler's bug is
+   visible instead of quietly reshaped. */
+static bool web_header_token_ok(const char *s)
+{
+	for (const unsigned char *p = (const unsigned char *)s; *p; ++p) {
+		if (*p < 0x20 || *p == 0x7f) return false;
+	}
+	return true;
+}
+
 SWITCH_DECLARE(void) switch_web_response_set_header(switch_web_response_t *res, const char *name, const char *value)
 {
 	if (!res || !name || !value) return;
+	if (!web_header_token_ok(name) || !web_header_token_ok(value)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+			"mod_web_server: rejected header '%s' — control characters are not "
+			"permitted in a header name or value\n", name);
+		return;
+	}
 	/* HTTP header names are case-insensitive; lowercase on insert to dedupe
 	   without depending on a case-insensitive map. */
 	std::string key(name);
