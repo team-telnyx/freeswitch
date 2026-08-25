@@ -108,6 +108,23 @@ static void originate_and_wait(const char *dest, switch_call_cause_t *cause)
 	switch_yield(1000000);
 }
 
+/*
+ * Hangup cause for a 603 whose cause is derived from the SIP status line.
+ *
+ * Upstream sofia_glue.c maps "case 603: case 608:" together to
+ * SWITCH_CAUSE_CALL_REJECTED. The Telnyx fork splits them and maps 603 to
+ * SWITCH_CAUSE_DECLINE (sofia_glue.c:2002, since 6209709875, 2021); 608 still
+ * maps to CALL_REJECTED. That divergence long predates the v1.11.x syncs and is
+ * kept per the fork policy of favouring the Telnyx code path, so this upstream
+ * test is adapted to it rather than the mapping being changed.
+ *
+ * Note this applies only where the cause comes from the SIP status code. A 603
+ * carrying "Reason: Q.850;cause=21" still yields CALL_REJECTED, because the
+ * Reason header cause takes precedence - the detect_valid_603plus_q850 and
+ * detect_no_analytics_in_reason cases below rely on that and are left as-is.
+ */
+#define FST_603_STATUS_CAUSE SWITCH_CAUSE_DECLINE
+
 /* Test suite */
 
 FST_CORE_EX_BEGIN("./conf", SCF_VG | SCF_USE_SQL)
@@ -143,7 +160,7 @@ FST_MODULE_BEGIN(mod_sofia, sofia)
 		reset_capture();
 		originate_and_wait("sofia/gateway/test/+15553336050", &cause);
 
-		fst_xcheck(cause == SWITCH_CAUSE_CALL_REJECTED, "Expected CALL_REJECTED for 603");
+		fst_xcheck(cause == FST_603_STATUS_CAUSE, "Expected DECLINE for 603 (Telnyx SIP-status mapping)");
 		fst_xcheck(capture.received == SWITCH_TRUE, "Should have received outbound hangup event");
 		fst_xcheck(!zstr_buf(capture.sip_603plus_reason), "sip_603plus_reason must be set for valid 603+");
 		fst_xcheck(!!strstr(capture.sip_603plus_reason, "v=analytics1"), "sip_603plus_reason must contain v=analytics1");
@@ -196,7 +213,7 @@ FST_MODULE_BEGIN(mod_sofia, sofia)
 		reset_capture();
 		originate_and_wait("sofia/gateway/test/+15553336056", &cause);
 
-		fst_xcheck(cause == SWITCH_CAUSE_CALL_REJECTED, "Expected CALL_REJECTED for 603");
+		fst_xcheck(cause == FST_603_STATUS_CAUSE, "Expected DECLINE for 603 (Telnyx SIP-status mapping)");
 		fst_xcheck(capture.received == SWITCH_TRUE, "Should have received outbound hangup event");
 		fst_xcheck(!zstr_buf(capture.sip_603plus_reason), "sip_603plus_reason must be set after 180+603");
 		fst_xcheck(!!strstr(capture.sip_603plus_reason, "v=analytics1"), "sip_603plus_reason must contain v=analytics1");
@@ -224,7 +241,7 @@ FST_MODULE_BEGIN(mod_sofia, sofia)
 		reset_capture();
 		originate_and_wait("sofia/gateway/test/+15553336052", &cause);
 
-		fst_xcheck(cause == SWITCH_CAUSE_CALL_REJECTED, "Expected CALL_REJECTED for 603");
+		fst_xcheck(cause == FST_603_STATUS_CAUSE, "Expected DECLINE for 603 (Telnyx SIP-status mapping)");
 		fst_xcheck(capture.received == SWITCH_TRUE, "Should have received outbound hangup event");
 		fst_xcheck(zstr_buf(capture.sip_603plus_reason), "sip_603plus_reason must NOT be set when phrase is 'Decline'");
 		/* sip_reason should still be set (existing behavior for any Reason header) */
@@ -276,7 +293,7 @@ FST_MODULE_BEGIN(mod_sofia, sofia)
 		reset_capture();
 		originate_and_wait("sofia/gateway/test/+15553336054", &cause);
 
-		fst_xcheck(cause == SWITCH_CAUSE_CALL_REJECTED, "Expected CALL_REJECTED for 603");
+		fst_xcheck(cause == FST_603_STATUS_CAUSE, "Expected DECLINE for 603 (Telnyx SIP-status mapping)");
 		fst_xcheck(capture.received == SWITCH_TRUE, "Should have received outbound hangup event");
 		fst_xcheck(zstr_buf(capture.sip_603plus_reason), "sip_603plus_reason must NOT be set without Reason header");
 		fst_xcheck(zstr_buf(capture.sip_reason), "sip_reason should not be set when Reason header is suppressed");
@@ -333,7 +350,7 @@ FST_MODULE_BEGIN(mod_sofia, sofia)
 		reset_capture();
 		originate_and_wait("sofia/gateway/test/+15553336060", &cause);
 
-		fst_xcheck(cause == SWITCH_CAUSE_CALL_REJECTED, "Expected CALL_REJECTED for 603");
+		fst_xcheck(cause == FST_603_STATUS_CAUSE, "Expected DECLINE for 603 (Telnyx SIP-status mapping)");
 		fst_xcheck(capture.received == SWITCH_TRUE, "Should have received outbound hangup event");
 		fst_xcheck(!strcasecmp(capture.sip_invite_failure_phrase, "Network Blocked"),
 			"passthrough=true must preserve 'Network Blocked' phrase");
@@ -359,7 +376,7 @@ FST_MODULE_BEGIN(mod_sofia, sofia)
 		reset_capture();
 		originate_and_wait("sofia/gateway/test/+15553336061", &cause);
 
-		fst_xcheck(cause == SWITCH_CAUSE_CALL_REJECTED, "Expected CALL_REJECTED for 603");
+		fst_xcheck(cause == FST_603_STATUS_CAUSE, "Expected DECLINE for 603 (Telnyx SIP-status mapping)");
 		fst_xcheck(capture.received == SWITCH_TRUE, "Should have received outbound hangup event");
 		fst_xcheck(strcasecmp(capture.sip_invite_failure_phrase, "Network Blocked") != 0,
 			"passthrough=false must NOT send 'Network Blocked' phrase");
@@ -387,7 +404,7 @@ FST_MODULE_BEGIN(mod_sofia, sofia)
 		reset_capture();
 		originate_and_wait("sofia/gateway/test/+15553336062", &cause);
 
-		fst_xcheck(cause == SWITCH_CAUSE_CALL_REJECTED, "Expected CALL_REJECTED for 603");
+		fst_xcheck(cause == FST_603_STATUS_CAUSE, "Expected DECLINE for 603 (Telnyx SIP-status mapping)");
 		fst_xcheck(capture.received == SWITCH_TRUE, "Should have received outbound hangup event");
 		fst_xcheck(strcasecmp(capture.sip_invite_failure_phrase, "Network Blocked") != 0,
 			"default passthrough must NOT change phrase (stays 'Decline')");
@@ -422,7 +439,7 @@ FST_MODULE_BEGIN(mod_sofia, sofia)
 		reset_capture();
 		originate_and_wait("sofia/gateway/test/+15553336063", &cause);
 
-		fst_xcheck(cause == SWITCH_CAUSE_CALL_REJECTED, "Expected CALL_REJECTED for 603");
+		fst_xcheck(cause == FST_603_STATUS_CAUSE, "Expected DECLINE for 603 (Telnyx SIP-status mapping)");
 		fst_xcheck(capture.received == SWITCH_TRUE, "Should have received outbound hangup event");
 		fst_xcheck(!strcasecmp(capture.sip_invite_failure_phrase, "Network Blocked"),
 			"disable_q850+passthrough=true must preserve 'Network Blocked' phrase");
@@ -447,7 +464,7 @@ FST_MODULE_BEGIN(mod_sofia, sofia)
 		reset_capture();
 		originate_and_wait("sofia/gateway/test/+15553336064", &cause);
 
-		fst_xcheck(cause == SWITCH_CAUSE_CALL_REJECTED, "Expected CALL_REJECTED for 603");
+		fst_xcheck(cause == FST_603_STATUS_CAUSE, "Expected DECLINE for 603 (Telnyx SIP-status mapping)");
 		fst_xcheck(capture.received == SWITCH_TRUE, "Should have received outbound hangup event");
 		fst_xcheck(strcasecmp(capture.sip_invite_failure_phrase, "Network Blocked") != 0,
 			"disable_q850+passthrough=false must NOT send 'Network Blocked' phrase");
@@ -473,7 +490,7 @@ FST_MODULE_BEGIN(mod_sofia, sofia)
 		reset_capture();
 		originate_and_wait("sofia/gateway/test/+15553336065", &cause);
 
-		fst_xcheck(cause == SWITCH_CAUSE_CALL_REJECTED, "Expected CALL_REJECTED for 603");
+		fst_xcheck(cause == FST_603_STATUS_CAUSE, "Expected DECLINE for 603 (Telnyx SIP-status mapping)");
 		fst_xcheck(capture.received == SWITCH_TRUE, "Should have received outbound hangup event");
 		fst_xcheck(strcasecmp(capture.sip_invite_failure_phrase, "Network Blocked") != 0,
 			"disable_q850+default must NOT send 'Network Blocked' phrase");
