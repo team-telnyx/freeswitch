@@ -52,6 +52,26 @@ struct PatternEntry : public Entry {
 	std::vector<PatternToken> tokens;
 };
 
+/* The enum values are pinned precisely so a module built against an older
+   header keeps meaning what it meant. Reject anything outside the set anyway:
+   an out-of-range value overlaps nothing, so it would register successfully,
+   never match a request, and never conflict with a legitimate route on the
+   same path — a dead endpoint with no diagnostic. method_name() would also
+   render it as "?" in the Allow: header. */
+bool valid_method(switch_web_method_t m)
+{
+	switch (m) {
+	case SWITCH_WEB_METHOD_GET:
+	case SWITCH_WEB_METHOD_POST:
+	case SWITCH_WEB_METHOD_PUT:
+	case SWITCH_WEB_METHOD_DELETE:
+	case SWITCH_WEB_METHOD_PATCH:
+	case SWITCH_WEB_METHOD_ANY:
+		return true;
+	}
+	return false;
+}
+
 bool method_matches(switch_web_method_t route, switch_web_method_t request)
 {
 	return route == SWITCH_WEB_METHOD_ANY || route == request;
@@ -186,7 +206,8 @@ public:
 	{
 		/* GENERR = malformed call; FALSE = route conflict. Keep them
 		   distinct so callers can log "bad input" vs "shadowed route". */
-		if (module.empty() || path.empty() || path[0] != '/' || !handler) {
+		if (module.empty() || path.empty() || path[0] != '/' || !handler ||
+		    !valid_method(method)) {
 			return SWITCH_STATUS_GENERR;
 		}
 
@@ -237,7 +258,8 @@ public:
 	                           switch_web_handler_func handler,
 	                           void *user_data)
 	{
-		if (module.empty() || prefix.empty() || prefix[0] != '/' || !handler) {
+		if (module.empty() || prefix.empty() || prefix[0] != '/' || !handler ||
+		    !valid_method(method)) {
 			return SWITCH_STATUS_GENERR;
 		}
 
@@ -297,10 +319,16 @@ public:
 	   in-flight handler invocation for that module has returned. The slot
 	   is retired from the index but lives on via shared_ptrs held by
 	   in-flight tickets; the last ticket release destroys it. */
+	/* Loops because two concurrent unregister_module() calls for the same
+	   module share one slot: whichever finishes first erases it, the module
+	   can then be re-registered, and the loser would otherwise return without
+	   draining the NEW slot — with a handler of that module in flight. Going
+	   round again re-marks whatever slot is current and drains that too. */
 	std::size_t remove_module(const std::string &module)
 	{
-		std::shared_ptr<ModuleSlot> slot;
 		std::size_t n = 0;
+		for (;;) {
+		std::shared_ptr<ModuleSlot> slot;
 		{
 			std::unique_lock<std::shared_mutex> lock(mu_);
 
@@ -339,7 +367,14 @@ public:
 			}
 		}
 
-		if (slot) {
+		if (!slot) {
+			return n;
+		}
+		{
+			/* Scoped so slot->mu is released before mu_ is taken below —
+			   otherwise this establishes slot->mu -> mu_ while the ticket
+			   paths take slot->mu with no registry lock, an inversion waiting
+			   to happen. */
 			std::unique_lock<std::mutex> lk(slot->mu);
 			/* Predicate-variant wait_for re-checks in_flight on every wake
 			   (including spurious ones) and races safely against the notify in
@@ -359,16 +394,24 @@ public:
 				}
 			}
 
-			/* Drained. Drop the slot so a later re-register of this module
-			   starts clean. No lookup can have minted a ticket in the
-			   meantime — the routes were removed before the wait began. */
+		}
+
+		/* Drained. Drop the slot so a later re-register starts clean. */
+		{
 			std::unique_lock<std::shared_mutex> lock(mu_);
 			auto sit = module_slots_.find(module);
-			if (sit != module_slots_.end() && sit->second == slot) {
-				module_slots_.erase(sit);
+			if (sit == module_slots_.end()) {
+				return n;               /* another drain retired it; nothing live */
 			}
+			if (sit->second == slot) {
+				module_slots_.erase(sit);
+				return n;
+			}
+			/* Our slot was retired by a concurrent drain and the module has
+			   been re-slotted since. That new slot may already have tickets,
+			   so drain it too rather than returning on a stale guarantee. */
 		}
-		return n;
+		}
 	}
 
 	LookupResult lookup(switch_web_method_t method, const std::string &path) const

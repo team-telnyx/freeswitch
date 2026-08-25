@@ -696,6 +696,22 @@ static void test_register_without_listener()
 
 /* ----- Drain contract ----- */
 
+/* Spin until `path` stops resolving, which proves remove_module()'s write-lock
+   section has completed and `draining` is set. Deterministic where a sleep is
+   a guess — on a loaded box a sleep can fire before the sweeper has the lock,
+   which would fail the test spuriously rather than catch a regression. */
+static void wait_until_unrouted(const char *path)
+{
+	for (int i = 0; i < 20000; ++i) {
+		if (internal::lookup(SWITCH_WEB_METHOD_GET, path).outcome ==
+		    internal::LookupOutcome::NotFound) {
+			return;
+		}
+		std::this_thread::sleep_for(std::chrono::microseconds(200));
+	}
+	CHECK(!"timed out waiting for the route to be swept");
+}
+
 /*
  * The property the whole design exists for: unregister_module() must not
  * return while a handler of that module is still running. Nothing exercised
@@ -718,7 +734,7 @@ static void test_drain_waits_for_inflight()
 		returned.store(true);
 	});
 
-	std::this_thread::sleep_for(std::chrono::milliseconds(200));
+	wait_until_unrouted("/drain");
 	CHECK(returned.load() == false);          /* still blocked, ticket outstanding */
 
 	{ auto drop = std::move(held); }          /* release it */
@@ -752,12 +768,18 @@ static void test_register_during_drain_is_refused()
 		switch_web_server_unregister_module("modA");
 		returned.store(true);
 	});
-	std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	wait_until_unrouted("/d1");
 
 	auto s = switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/d2",
 	                                    SWITCH_WEB_DISPATCH_POOL, dummy_handler, NULL);
 	CHECK_EQ((int)s, (int)SWITCH_STATUS_INUSE);
 	CHECK(returned.load() == false);           /* the drain did not get satisfied */
+
+	/* The property, not just the status code: the refused registration must
+	   not have produced a reachable route on a second slot. A fix that changed
+	   the return value but still re-slotted would pass the check above. */
+	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/d2").outcome,
+	         (int)internal::LookupOutcome::NotFound);
 
 	{ auto drop = std::move(held); }
 	sweeper.join();
@@ -777,6 +799,8 @@ static void test_drain_under_concurrency()
 	std::atomic<bool> stop{false};
 	std::atomic<int>  hits{0};
 
+	std::atomic<int> registered{0};
+
 	std::thread reader([&] {
 		while (!stop.load()) {
 			auto r = internal::lookup(SWITCH_WEB_METHOD_GET, "/race");
@@ -785,8 +809,11 @@ static void test_drain_under_concurrency()
 	});
 
 	for (int i = 0; i < 200; ++i) {
-		switch_web_server_register("modC", SWITCH_WEB_METHOD_GET, "/race",
-		                           SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+		if (switch_web_server_register("modC", SWITCH_WEB_METHOD_GET, "/race",
+		                               SWITCH_WEB_DISPATCH_LITE, dummy_handler,
+		                               NULL) == SWITCH_STATUS_SUCCESS) {
+			registered.fetch_add(1);
+		}
 		switch_web_server_unregister_module("modC");
 	}
 	stop.store(true);
@@ -795,7 +822,60 @@ static void test_drain_under_concurrency()
 	/* Survived without deadlock or corruption, and the sweep left nothing. */
 	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/race").outcome,
 	         (int)internal::LookupOutcome::NotFound);
+	/* Without these the test would "pass" with every register refused and
+	   every lookup missing — i.e. proving nothing. */
+	CHECK_EQ(registered.load(), 200);
+	CHECK(hits.load() > 0);
 	std::cout << "        (" << hits.load() << " concurrent hits observed)\n";
+}
+
+/* Two unregister_module() calls for the same module overlapping. Whichever
+   finishes first retires the shared slot; the other must not return on that
+   stale guarantee if the module has been re-slotted since. */
+static void test_overlapping_drains()
+{
+	std::cout << "[test] overlapping unregister_module calls both drain\n";
+	wipe();
+	switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/ov",
+	                           SWITCH_WEB_DISPATCH_POOL, dummy_handler, NULL);
+
+	auto held = internal::lookup(SWITCH_WEB_METHOD_GET, "/ov");
+	CHECK_EQ((int)held.outcome, (int)internal::LookupOutcome::Hit);
+
+	std::atomic<int> done{0};
+	std::thread a([&] { switch_web_server_unregister_module("modA"); done.fetch_add(1); });
+	std::thread b([&] { switch_web_server_unregister_module("modA"); done.fetch_add(1); });
+
+	wait_until_unrouted("/ov");
+	CHECK_EQ(done.load(), 0);                 /* both blocked on the live ticket */
+
+	{ auto drop = std::move(held); }
+	a.join(); b.join();
+	CHECK_EQ(done.load(), 2);
+
+	/* Slot fully retired: the module registers cleanly again. */
+	CHECK_EQ((int)switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/ov",
+	                                         SWITCH_WEB_DISPATCH_POOL, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_SUCCESS);
+}
+
+/* An out-of-range method (e.g. a module built against a header where ANY was
+   5) must be rejected, not silently accepted as an unreachable route. */
+static void test_invalid_method_rejected()
+{
+	std::cout << "[test] out-of-range method is rejected\n";
+	wipe();
+	CHECK_EQ((int)switch_web_server_register("modA", (switch_web_method_t)5, "/bad",
+	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_GENERR);
+	CHECK_EQ((int)switch_web_server_register("modA", (switch_web_method_t)99999, "/bad2",
+	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_GENERR);
+	CHECK_EQ((int)switch_web_server_register_prefix("modA", (switch_web_method_t)5, "/bad3",
+	                                                SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_GENERR);
+	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/bad").outcome,
+	         (int)internal::LookupOutcome::NotFound);
 }
 
 int main()
@@ -831,6 +911,8 @@ int main()
 	test_drain_waits_for_inflight();
 	test_register_during_drain_is_refused();
 	test_drain_under_concurrency();
+	test_overlapping_drains();
+	test_invalid_method_rejected();
 
 	wipe();
 	std::cout << "\n" << g_pass.load() << " passed, " << g_fail.load() << " failed\n";
