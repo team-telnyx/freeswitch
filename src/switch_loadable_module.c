@@ -40,6 +40,9 @@
 /* for fspr_env_get and fspr_env_set */
 #include <fspr_env.h>
 
+/* for the unload backstop that sweeps this module's HTTP routes */
+#include <switch_web_server.h>
+
 /* for fspr file and directory handling */
 #include <fspr_file_io.h>
 
@@ -2356,6 +2359,20 @@ static switch_status_t do_shutdown(switch_loadable_module_t *module, switch_bool
 		} else {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CONSOLE, "%s has no shutdown routine\n", module->module_interface->module_name);
 		}
+
+		/* Backstop for mod_web_server routes. A module is supposed to call
+		   switch_web_server_unregister_module() from its own SHUTDOWN, but that
+		   is a contract, and a module that forgets one leaves a handler pointer
+		   in the process-wide registry aimed at a .so we are about to
+		   dlclose() — the next request then jumps into freed text. Sweeping
+		   here makes the guarantee structural instead of documentary.
+
+		   Cheap and idempotent: a well-behaved module already drained, so this
+		   finds no slot and returns immediately. For one that did not, it
+		   removes the routes and blocks until any in-flight handler returns,
+		   which is exactly the wait that has to happen before the unload
+		   below. */
+		switch_web_server_unregister_module(module->module_interface->module_name);
 	}
 
 	if (fail_if_busy && module->module_interface->rwlock) {

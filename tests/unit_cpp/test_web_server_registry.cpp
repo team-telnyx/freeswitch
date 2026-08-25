@@ -808,11 +808,19 @@ static void test_drain_under_concurrency()
 		}
 	});
 
+	int resolved = 0;
 	for (int i = 0; i < 200; ++i) {
 		if (switch_web_server_register("modC", SWITCH_WEB_METHOD_GET, "/race",
 		                               SWITCH_WEB_DISPATCH_LITE, dummy_handler,
 		                               NULL) == SWITCH_STATUS_SUCCESS) {
 			registered.fetch_add(1);
+		}
+		/* Checked from this thread, so it is deterministic. The temporary
+		   LookupResult (and its ticket) dies at the end of the full expression,
+		   before the unregister below, so this cannot self-block. */
+		if (internal::lookup(SWITCH_WEB_METHOD_GET, "/race").outcome ==
+		    internal::LookupOutcome::Hit) {
+			++resolved;
 		}
 		switch_web_server_unregister_module("modC");
 	}
@@ -823,10 +831,13 @@ static void test_drain_under_concurrency()
 	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/race").outcome,
 	         (int)internal::LookupOutcome::NotFound);
 	/* Without these the test would "pass" with every register refused and
-	   every lookup missing — i.e. proving nothing. */
+	   every lookup missing — i.e. proving nothing. Both are deterministic:
+	   the reader thread's hit count is reported but NOT asserted, because
+	   whether it catches one of the 200 short windows depends on scheduling
+	   and asserting it makes the test flaky rather than strict. */
 	CHECK_EQ(registered.load(), 200);
-	CHECK(hits.load() > 0);
-	std::cout << "        (" << hits.load() << " concurrent hits observed)\n";
+	CHECK_EQ(resolved, 200);
+	std::cout << "        (" << hits.load() << " concurrent hits observed by the reader)\n";
 }
 
 /* Two unregister_module() calls for the same module overlapping. Whichever
@@ -878,6 +889,92 @@ static void test_invalid_method_rejected()
 	         (int)internal::LookupOutcome::NotFound);
 }
 
+/* ----- Query-string parsing (the ABI helper) ----- */
+
+static switch_web_request_t *mk_req(const char *query)
+{
+	internal::RequestInit init;
+	init.method = SWITCH_WEB_METHOD_GET;
+	init.path   = "/q";
+	init.query  = query;
+	return internal::make_request(std::move(init));
+}
+
+static void check_qp(const char *query, const char *key, const char *expect)
+{
+	internal::RequestPtr r(mk_req(query));
+	const char *got = switch_web_request_query_param(r.get(), key);
+	if (!expect) {
+		CHECK(got == NULL);
+		if (got) std::cerr << "    query=[" << query << "] key=" << key
+		                   << " expected NULL got [" << got << "]\n";
+	} else {
+		CHECK(got != NULL && std::string(got) == expect);
+		if (!got || std::string(got) != expect) {
+			std::cerr << "    query=[" << query << "] key=" << key << " expected ["
+			          << expect << "] got [" << (got ? got : "(null)") << "]\n";
+		}
+	}
+}
+
+static void test_query_params()
+{
+	std::cout << "[test] query parameters decode per the documented rules\n";
+
+	check_qp("a=1&b=2", "a", "1");
+	check_qp("a=1&b=2", "b", "2");
+	check_qp("a=1&b=2", "c", NULL);            /* absent */
+	check_qp("a=", "a", "");                   /* present but empty */
+	check_qp("", "a", NULL);
+	check_qp("a", "a", NULL);                  /* no '=' is not a pair */
+	check_qp("a=1&a=2", "a", "1");             /* first occurrence wins */
+	check_qp("a=x+y", "a", "x y");             /* '+' is a space */
+	check_qp("a=x%20y", "a", "x y");
+	check_qp("a=foo%2Fbar", "a", "foo/bar");
+	check_qp("a=%2f", "a", "/");               /* lowercase hex */
+	check_qp("a=100%", "a", "100%");           /* stray % is literal */
+	check_qp("a=%zz", "a", "%zz");             /* invalid escape is literal */
+	check_qp("a=b%00c", "a", NULL);            /* %00 drops the pair, not truncates */
+	check_qp("a=b&x%00=1&c=d", "c", "d");      /* a bad pair does not eat the rest */
+	check_qp("a=b%3Dc", "a", "b=c");           /* decoded '=' stays in the value */
+	check_qp("a=b=c", "a", "b=c");             /* split on the FIRST '=' only */
+	check_qp("&&a=1&&", "a", "1");             /* empty pairs ignored */
+	check_qp("a%2Bb=1", "a+b", "1");           /* keys decode too */
+}
+
+/* ----- allowed_methods (what OPTIONS answers from) ----- */
+
+static void test_allowed_methods()
+{
+	std::cout << "[test] allowed_methods collects across all three tiers\n";
+	wipe();
+
+	CHECK(internal::allowed_methods("/nothing").empty());
+
+	switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/am",
+	                           SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	switch_web_server_register("modA", SWITCH_WEB_METHOD_POST, "/am",
+	                           SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	auto m = internal::allowed_methods("/am");
+	CHECK_EQ(m.size(), (std::size_t)2);
+	CHECK(m.count(SWITCH_WEB_METHOD_GET) == 1);
+	CHECK(m.count(SWITCH_WEB_METHOD_POST) == 1);
+
+	/* pattern tier */
+	switch_web_server_register("modB", SWITCH_WEB_METHOD_DELETE, "/am/{id}",
+	                           SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	auto mp = internal::allowed_methods("/am/7");
+	CHECK_EQ(mp.size(), (std::size_t)1);
+	CHECK(mp.count(SWITCH_WEB_METHOD_DELETE) == 1);
+
+	/* prefix tier, and a path that matches nothing under it */
+	switch_web_server_register_prefix("modC", SWITCH_WEB_METHOD_PUT, "/pre",
+	                                  SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	CHECK(internal::allowed_methods("/pre/deep/path").count(SWITCH_WEB_METHOD_PUT) == 1);
+	CHECK(internal::allowed_methods("/prefix").empty());   /* segment-bounded */
+	wipe();
+}
+
 int main()
 {
 	test_exact_basic();
@@ -913,6 +1010,8 @@ int main()
 	test_drain_under_concurrency();
 	test_overlapping_drains();
 	test_invalid_method_rejected();
+	test_query_params();
+	test_allowed_methods();
 
 	wipe();
 	std::cout << "\n" << g_pass.load() << " passed, " << g_fail.load() << " failed\n";

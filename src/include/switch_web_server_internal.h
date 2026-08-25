@@ -99,6 +99,9 @@ struct RouteSnapshot {
 };
 
 LookupResult                lookup(switch_web_method_t method, const std::string &path);
+/* Every method registered for this path, across all three tiers. Empty when
+   nothing matches. Used to answer OPTIONS without inventing an Allow: list. */
+std::set<switch_web_method_t> allowed_methods(const std::string &path);
 std::vector<RouteSnapshot>  snapshot();
 std::size_t                 route_count();
 void                        set_listener_present(bool present);

@@ -62,6 +62,26 @@ SWITCH_DECLARE(const char *)        switch_web_request_body(const switch_web_req
 SWITCH_DECLARE(const char *)        switch_web_request_remote_ip(const switch_web_request_t *req);
 SWITCH_DECLARE(const char *)        switch_web_request_param(const switch_web_request_t *req, const char *name);
 
+/*
+ * Look up a query-string parameter by name, percent-decoded.
+ *
+ * Provided so every consumer does not re-derive query parsing, badly: the
+ * first two both hand-rolled it and both got it wrong in the same ways —
+ * splitting on '&' and decoding the whole piece lets a decoded '=' or '"'
+ * change how the rest parses, '+' is not a space unless you map it, and %00
+ * silently truncates.
+ *
+ * Rules: '&' separates pairs, the FIRST '=' separates key from value, both
+ * halves are decoded independently, '+' decodes to space, and %XX decodes
+ * case-insensitively. A pair whose key or value contains %00 is dropped
+ * rather than truncated. A repeated key keeps the first occurrence. A pair
+ * with no '=' is ignored.
+ *
+ * Returns NULL when absent, "" for a present-but-empty value — so a caller
+ * can tell "?x=" from no x at all. The pointer is valid for the handler call.
+ */
+SWITCH_DECLARE(const char *)        switch_web_request_query_param(const switch_web_request_t *req, const char *name);
+
 /* Response setters. set_body / printf may be called multiple times; the last call wins. */
 SWITCH_DECLARE(void) switch_web_response_set_status(switch_web_response_t *res, int code);
 SWITCH_DECLARE(void) switch_web_response_set_header(switch_web_response_t *res, const char *name, const char *value);
