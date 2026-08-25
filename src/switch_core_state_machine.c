@@ -873,13 +873,8 @@ SWITCH_DECLARE(void) switch_core_session_hangup_state(switch_core_session_t *ses
 	switch_core_media_bug_remove_all(session);
 	switch_channel_stop_broadcast(session->channel);
 
-	/* TELCORE-374: When a channel hangs up during a bridge, its partner may
-	 * be blocked inside a broadcast playback loop (e.g. uuid_broadcast with
-	 * loop=infinity). The bridge thread is stuck in the playback and cannot
-	 * detect the peer hangup through normal read/write failure. Stop the
-	 * partner's broadcast so CF_STOP_BROADCAST + CF_BREAK interrupt the
-	 * playback loop, letting the bridge thread exit and hangup_after_bridge
-	 * take effect. */
+	/* A bridged peer may be blocked in a broadcast playback loop and cannot
+	 * detect this hangup on its own. Stop its broadcast so it can exit. */
 	{
 		switch_core_session_t *partner_session = NULL;
 
