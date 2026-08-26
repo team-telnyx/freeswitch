@@ -175,6 +175,59 @@ FST_TEST_BEGIN(dtmf_sent_event_fires_when_rfc2833_digit_finishes)
 }
 FST_TEST_END()
 
+FST_TEST_BEGIN(no_dtmf_sent_event_when_the_end_packets_are_rejected)
+{
+	switch_core_session_t *session = NULL;
+	switch_channel_t *channel = NULL;
+	switch_memory_pool_t *pool = NULL;
+	switch_rtp_t *rtp_session = NULL;
+	switch_rtp_flag_t flags[SWITCH_RTP_FLAG_INVALID] = { 0 };
+	switch_dtmf_t dtmf = { '5', 800, 0, SWITCH_DTMF_APP };
+	switch_call_cause_t cause;
+	switch_status_t status;
+	const char *err = NULL;
+	int i;
+
+	switch_core_new_memory_pool(&pool);
+
+	status = switch_ivr_originate(NULL, &session, &cause, "null/+15553334444", 2, NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL);
+	fst_requires(session);
+	fst_check(status == SWITCH_STATUS_SUCCESS);
+
+	channel = switch_core_session_get_channel(session);
+	fst_requires(channel);
+	switch_channel_set_variable(channel, "call_control", "true");
+
+	switch_core_memory_pool_set_data(pool, "__session", session);
+	rtp_session = switch_rtp_new(rx_host, rx_port, tx_host, tx_port, TEST_PT, 160, 20 * 1000, flags, "soft", &err, pool);
+	fst_requires(rtp_session);
+	fst_requires(switch_rtp_ready(rtp_session));
+	switch_rtp_set_default_payload(rtp_session, TEST_PT);
+	switch_rtp_set_telephony_event(rtp_session, TEST_TE_PT);
+
+	status = switch_rtp_queue_rfc2833(rtp_session, &dtmf);
+	fst_xcheck(status == SWITCH_STATUS_SUCCESS, "queue outbound RFC 2833 digit");
+
+	/* Take IO away after queueing: switch_rtp_write_manual() now fails switch_rtp_ready()
+	   and returns -1 for every packet, so nothing reaches the socket even though do_2833()
+	   still walks the digit to completion. */
+	switch_rtp_clear_flag(rtp_session, SWITCH_RTP_FLAG_IO);
+
+	/* 800 samples at 160 per interval completes in 5 pumps; 20 is well past the point
+	   where the working case above has already fired. */
+	for (i = 0; i < 20; i++) {
+		do_2833(rtp_session);
+		switch_yield(20000);
+	}
+
+	fst_xcheck(got_dtmf_sent_event() == 0, "a digit whose end packets were all rejected is never confirmed");
+
+	switch_rtp_destroy(&rtp_session);
+	switch_core_session_rwunlock(session);
+	switch_core_destroy_memory_pool(&pool);
+}
+FST_TEST_END()
+
 FST_TEST_BEGIN(no_dtmf_sent_event_for_an_event_sensitive_digit)
 {
 	switch_core_session_t *session = NULL;

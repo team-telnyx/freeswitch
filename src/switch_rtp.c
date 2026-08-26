@@ -8441,7 +8441,7 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 	//switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG1, "do_2833 %s / %p\n", rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName", (void*) rtp_session);
 
 	if (rtp_session->dtmf_data.out_digit_dur > 0) {
-		int x, loops = 1;
+		int x, loops = 1, end_packets_sent = 0;
 		switch_time_t now_us = switch_micro_time_now();
 
 		/* Ignore sub-ptime wakeups so tight read loops cannot collapse the digit. */
@@ -8488,7 +8488,7 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 
 		for (x = 0; x < loops; x++) {
 
-			switch_size_t wrote = 0;
+			int wrote = 0;
 
 			if (rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS) {
 				wrote = switch_rtp_write_manual(rtp_session,
@@ -8498,8 +8498,18 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 				wrote = switch_rtp_write_manual(rtp_session, rtp_session->dtmf_data.out_digit_packet, 4, 0, rtp_session->te, rtp_session->dtmf_data.timestamp_dtmf, &flags);
 			}
 
-			rtp_session->stats.outbound.raw_bytes += wrote;
-			rtp_session->stats.outbound.dtmf_packet_count++;
+			/* switch_rtp_write_manual() returns -1 when RTP is not writable or the socket
+			   /SRTP send failed, and 0 when the packet was dropped before it reached the
+			   socket. Only count what left the switch: the previous unsigned assignment
+			   turned -1 into SIZE_MAX and added it to raw_bytes. */
+			if (wrote > 0) {
+				rtp_session->stats.outbound.raw_bytes += wrote;
+				rtp_session->stats.outbound.dtmf_packet_count++;
+
+				if (loops != 1) {
+					end_packets_sent++;
+				}
+			}
 
 			if (loops == 1) {
 				rtp_session->last_write_ts += samples;
@@ -8533,8 +8543,10 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 				rtp_session->last_write_samplecount = rtp_session->write_timer.samplecount;
 			}
 
-			/* The end packets are on the wire: this digit is done, confirm what we sent. */
-			if (rtp_session->session) {
+			/* The end packets are on the wire: this digit is done, confirm what we sent.
+			   Nothing is confirmed when every end write was rejected -- claiming a digit
+			   the socket never accepted is the exact false positive this event removes. */
+			if (rtp_session->session && end_packets_sent) {
 				switch_dtmf_t sent_dtmf = { rtp_session->dtmf_data.out_digit,
 											rtp_session->dtmf_data.out_digit_dur,
 											rtp_session->dtmf_data.out_digit_flags,
@@ -8597,7 +8609,7 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 
 		if (switch_queue_trypop(rtp_session->dtmf_data.dtmf_queue, &pop) == SWITCH_STATUS_SUCCESS) {
 			switch_dtmf_t *rdigit = pop;
-			switch_size_t wrote;
+			int wrote;
 			uint32_t shift = 0, new_ts = 0;
 
 			if (rdigit->digit == 'w') {
@@ -8688,8 +8700,10 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 						rtp_session->te, rtp_session->dtmf_data.timestamp_dtmf, &flags);
 
 
-				rtp_session->stats.outbound.raw_bytes += wrote;
-				rtp_session->stats.outbound.dtmf_packet_count++;
+				if (wrote > 0) {
+					rtp_session->stats.outbound.raw_bytes += wrote;
+					rtp_session->stats.outbound.dtmf_packet_count++;
+				}
 
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "Send start packet for [%c] ts=%u dur=%d/%d/%d seq=%d lw=%u\n",
 						rtp_session->dtmf_data.out_digit,
