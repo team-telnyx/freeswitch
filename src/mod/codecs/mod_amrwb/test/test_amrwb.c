@@ -206,6 +206,44 @@ FST_CORE_BEGIN(".")
 
 		FST_TEST_END()
 
+		FST_TEST_BEGIN(amrwb_rejects_multiple_frames)
+		{
+			switch_codec_t source_be = { 0 };
+			switch_codec_t source_oa = { 0 };
+			switch_codec_settings_t codec_settings = {{ 0 }};
+			switch_status_t status;
+			uint32_t flags = 0;
+			uint32_t rate = 16000;
+			unsigned char decoded[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
+			uint32_t decoded_len;
+			static unsigned char multiframes_be[] = "\xfc\xf8\xf7\xcf\x78\x00\x80";
+			static unsigned char multiframes_oa[] = "\xf0\xcc\x4c\xe3\xdf\x3d\xe0\x02\xe3\xdf\x3d\xe0\x02";
+
+			status = switch_core_codec_init(&source_be,
+				"AMR-WB", "mod_amrwb", "mode-set=0,1,2;octet-align=0",
+				16000, 20, 1, SWITCH_CODEC_FLAG_DECODE, &codec_settings, fst_pool);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			status = switch_core_codec_init(&source_oa,
+				"AMR-WB", "mod_amrwb", "mode-set=0,1,2;octet-align=1",
+				16000, 20, 1, SWITCH_CODEC_FLAG_DECODE, &codec_settings, fst_pool);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+
+			decoded_len = sizeof(decoded);
+			status = switch_core_codec_decode(&source_be, NULL, multiframes_be, sizeof(multiframes_be) - 1,
+				16000, decoded, &decoded_len, &rate, &flags);
+			fst_check(status != SWITCH_STATUS_SUCCESS);
+
+			decoded_len = sizeof(decoded);
+			status = switch_core_codec_decode(&source_oa, NULL, multiframes_oa, sizeof(multiframes_oa) - 1,
+				16000, decoded, &decoded_len, &rate, &flags);
+			fst_check(status != SWITCH_STATUS_SUCCESS);
+
+			switch_core_codec_destroy(&source_oa);
+			switch_core_codec_destroy(&source_be);
+		}
+
+		FST_TEST_END()
+
 		FST_TEST_BEGIN(amrwb_rejects_truncated_sid)
 		{
 			switch_codec_t source_be = { 0 };

@@ -75,7 +75,7 @@ extern switch_bool_t switch_amrwb_pack_be(unsigned char *shift_buf, int n)
 	*/
 
 	ft = save_toc >> 3 ; /* drop Q, P1, P2  */
-	ft &= ~(1 << 5); /* clear -  will mark just 1 frame - bit F */
+	ft &= ~(1 << 4); /* clear F: this encoder emits exactly one frame */
 
 	/* we only encode one frame, so bit 0 of TOC will be 0 */
 	shift_buf[0] |= (ft >> 1); /* first 3 bits of FT */
@@ -107,6 +107,10 @@ extern switch_bool_t switch_amrwb_unpack_be(unsigned char *encoded_buf, uint8_t 
 	memcpy(shift_tocs, encoded_buf, 2);
 	/* shift for BE */
 	switch_amr_array_lshift(4, shift_tocs, 2);
+	/* This implementation decodes exactly one 20 ms frame per payload. */
+	if (shift_tocs[0] & 0x80) {
+		return SWITCH_FALSE;
+	}
 	shift_buf = encoded_buf + 1; /* skip CMR */
 	/* shift for BE */
 	switch_amr_array_lshift(2, shift_buf, encoded_len - 1);
