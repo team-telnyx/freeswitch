@@ -1639,6 +1639,26 @@ static switch_status_t sofia_send_dtmf(switch_core_session_t *session, const swi
 	return SWITCH_STATUS_SUCCESS;
 }
 
+/* Build our own SDP offer to put in a reliable provisional response. RTP is not activated here:
+   the answer arrives in the PRACK and nua_i_prack brings media up. */
+static switch_status_t sofia_early_offer_gen_sdp(private_object_t *tech_pvt)
+{
+	switch_core_session_t *session = tech_pvt->session;
+	switch_status_t status;
+
+	sofia_clear_flag_locked(tech_pvt, TFLAG_LATE_NEGOTIATION);
+	switch_core_media_prepare_codecs(session, SWITCH_TRUE);
+
+	if ((status = switch_core_media_choose_port(tech_pvt->session, SWITCH_MEDIA_TYPE_AUDIO, 0)) != SWITCH_STATUS_SUCCESS) {
+		switch_channel_hangup(tech_pvt->channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
+		return status;
+	}
+
+	switch_core_media_gen_local_sdp(session, SDP_OFFER, NULL, 0, NULL, 0);
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
 static switch_status_t sofia_receive_message(switch_core_session_t *session, switch_core_session_message_t *msg)
 {
 	switch_channel_t *channel = switch_core_session_get_channel(session);
@@ -3017,16 +3037,12 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 						}
 					}
 				} else if (sofia_test_flag(tech_pvt, TFLAG_3PCC_EARLY_OFFER)) {
-					/* Early-offer: build our own SDP offer for the 183. RTP is NOT activated
-					   here -- the PRACK answer (consumed in nua_i_prack) does that, after which
-					   the synchronous wait further below unblocks the dialplan. */
-					sofia_clear_flag_locked(tech_pvt, TFLAG_LATE_NEGOTIATION);
-					switch_core_media_prepare_codecs(tech_pvt->session, SWITCH_TRUE);
-					if ((status = switch_core_media_choose_port(tech_pvt->session, SWITCH_MEDIA_TYPE_AUDIO, 0)) != SWITCH_STATUS_SUCCESS) {
-						switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
+					/* Early-offer: the offer goes in the 183 and the answer comes back in the
+					   PRACK, after which the synchronous wait further below unblocks the
+					   dialplan. */
+					if ((status = sofia_early_offer_gen_sdp(tech_pvt)) != SWITCH_STATUS_SUCCESS) {
 						goto end_lock;
 					}
-					switch_core_media_gen_local_sdp(session, SDP_OFFER, NULL, 0, NULL, 0);
 				} else {
 					if (sofia_test_flag(tech_pvt, TFLAG_LATE_NEGOTIATION) ||
 						switch_core_media_codec_chosen(tech_pvt->session, SWITCH_MEDIA_TYPE_AUDIO) != SWITCH_STATUS_SUCCESS) {
