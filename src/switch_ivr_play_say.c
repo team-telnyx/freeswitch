@@ -1028,8 +1028,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_file_event(switch_core_session
 	}
 
 	if (fh->samplerate >= 1000) {
-		switch_channel_set_variable_printf(channel, "record_seconds", "%d", fh->samples_out / fh->samplerate);
-		switch_channel_set_variable_printf(channel, "record_ms", "%d", fh->samples_out / (fh->samplerate / 1000));
+		switch_channel_set_variable_printf(channel, "record_seconds", "%u", (uint32_t) (fh->samples_out / fh->samplerate));
+		switch_channel_set_variable_printf(channel, "record_ms", "%u", (uint32_t) (fh->samples_out / (fh->samplerate / 1000)));
 
 	}
 
