@@ -8545,7 +8545,13 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 
 			/* The end packets are on the wire: this digit is done, confirm what we sent.
 			   Nothing is confirmed when every end write was rejected -- claiming a digit
-			   the socket never accepted is the exact false positive this event removes. */
+			   the socket never accepted is the exact false positive this event removes.
+
+			   out_digit_sofar is a whole number of packet intervals and this branch is
+			   only reached once it has passed out_digit_dur, so within one clock domain
+			   the reported figure lands on or past the requested one: it measures
+			   overshoot from scheduling gaps, never a short digit. A digit cut short by
+			   teardown never gets here and is reported by nothing at all. */
 			if (rtp_session->session && end_packets_sent) {
 				switch_dtmf_t sent_dtmf = { rtp_session->dtmf_data.out_digit,
 											rtp_session->dtmf_data.out_digit_dur,

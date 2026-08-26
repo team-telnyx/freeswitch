@@ -646,6 +646,14 @@ SWITCH_DECLARE(switch_size_t) switch_channel_dequeue_dtmf_string(_In_ switch_cha
   \param method transport the digit was sent with ("RFC2833")
   \note Unlike SWITCH_EVENT_DTMF, which is a receive-side event, this is fired
         only after the digit has left the switch.
+  \note sent_duration is not a truncation check. A transport emits whole packet
+        intervals and only reports once it has covered the requested duration, so
+        compared like for like it lands on or past dtmf->duration and measures
+        overshoot from scheduling gaps. A digit abandoned before it finished -- the
+        genuinely truncated case -- fires nothing, so a consumer needs a timeout
+        rather than a short duration to detect it. The two figures can still
+        disagree downwards across clock domains, which is what the millisecond
+        headers exist to expose.
 */
 SWITCH_DECLARE(void) switch_channel_fire_dtmf_sent_event(_In_ switch_channel_t *channel, _In_ const switch_dtmf_t *dtmf,
 														 _In_ uint32_t sent_duration, _In_ uint32_t samples_per_second,
