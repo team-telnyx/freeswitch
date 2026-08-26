@@ -11,12 +11,7 @@
 	#include "avmd_goertzel.h"
 #endif
 
-#ifndef __AVMD_BUFFER_H__
-	#include "avmd_buffer.h"
-#endif
-
-
-extern double avmd_goertzel(circ_buffer_t *b, size_t pos, double f, size_t num)
+extern double avmd_goertzel(const double *samples, size_t num, uint32_t rate, double frequency_hz, double mean)
 {
 	double s = 0.0;
 	double p = 0.0;
@@ -24,11 +19,14 @@ extern double avmd_goertzel(circ_buffer_t *b, size_t pos, double f, size_t num)
 	double coeff;
 	size_t i;
 
-	coeff = 2.0 * cos(2.0 * M_PI * f);
+	if (samples == NULL || num == 0 || rate == 0 || frequency_hz <= 0.0 || frequency_hz >= 0.5 * (double)rate) {
+		return 0.0;
+	}
+
+	coeff = 2.0 * cos((2.0 * M_PI * frequency_hz) / (double)rate);
 
 	for (i = 0; i < num; i++) {
-		/* TODO: optimize to avoid GET_SAMPLE when possible */
-		s = GET_SAMPLE(b, i + pos) + (coeff * p) - p2;
+		s = (samples[i] - mean) + (coeff * p) - p2;
 		p2 = p;
 		p = s;
 	}
