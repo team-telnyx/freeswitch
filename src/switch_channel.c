@@ -689,6 +689,19 @@ SWITCH_DECLARE(switch_status_t) switch_channel_queue_dtmf_string(switch_channel_
 /* The rate switch_dtmf_t.duration is expressed in, everywhere in the core. */
 #define DTMF_DURATION_CLOCK_RATE 8000
 
+/* Divide once, at the end: samples / (rate / 1000) truncates the rate first, which is
+   exact only when the rate is a whole number of kHz. At 11025Hz it overstates a 440ms
+   digit as 441ms. The 64-bit intermediate keeps a maximum-length digit at 48kHz
+   (SWITCH_MAX_DTMF_DURATION rescaled, ~1.15M samples) clear of a 32-bit overflow. */
+static uint32_t dtmf_samples_to_ms(uint32_t samples, uint32_t samples_per_second)
+{
+	if (samples_per_second < 1000) {
+		return 0;
+	}
+
+	return (uint32_t) (((uint64_t) samples * 1000) / samples_per_second);
+}
+
 static const char *dtmf_source_str(switch_dtmf_source_t source)
 {
 	switch(source) {
@@ -786,12 +799,12 @@ SWITCH_DECLARE(void) switch_channel_fire_dtmf_sent_event(switch_channel_t *chann
 	   is in samples_per_second, the transmitting session's own rate. Publish each with
 	   its own rate and a millisecond form so a consumer has one comparable number. */
 	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Duration", "%u", dtmf->duration);
-	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Duration-MS", "%u", dtmf->duration / (DTMF_DURATION_CLOCK_RATE / 1000));
+	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Duration-MS", "%u", dtmf_samples_to_ms(dtmf->duration, DTMF_DURATION_CLOCK_RATE));
 	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Duration-Clock-Rate", "%u", (uint32_t) DTMF_DURATION_CLOCK_RATE);
 	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Duration-Sent", "%u", sent_duration);
 
 	if (samples_per_second >= 1000) {
-		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Duration-Sent-MS", "%u", sent_duration / (samples_per_second / 1000));
+		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Duration-Sent-MS", "%u", dtmf_samples_to_ms(sent_duration, samples_per_second));
 		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Duration-Sent-Clock-Rate", "%u", samples_per_second);
 	}
 
