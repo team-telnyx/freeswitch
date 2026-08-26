@@ -644,38 +644,6 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 			for (x = 0; x < loops || loops < 0; x++) {
 				switch_time_t b4, aftr;
 
-				/* An infinite broadcast on a bridged channel is run by the
-				 * bridge thread, which cannot observe its peer while inside
-				 * this loop. Re-check the peer each iteration so a hangup
-				 * ends the loop. force_locate() returns a hung-up-but-not-
-				 * destroyed peer; get_partner()/locate() cannot, so the
-				 * check would be dead with the regular helper. */
-				if (loops < 0 && switch_channel_test_flag(channel, CF_BRIDGED)) {
-					char peer_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1] = "";
-					int peer_gone = 0;
-
-					if (switch_channel_get_partner_uuid_copy(channel, peer_uuid, sizeof(peer_uuid))) {
-						switch_core_session_t *peer_session = switch_core_session_force_locate(peer_uuid);
-
-						if (peer_session) {
-							peer_gone = switch_channel_down_nosig(switch_core_session_get_channel(peer_session));
-							switch_core_session_rwunlock(peer_session);
-						} else {
-							peer_gone = 1;
-						}
-					} else {
-						peer_gone = 1;
-					}
-
-					if (peer_gone) {
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-										  "%s Stopping infinite broadcast: bridge peer is gone\n",
-										  switch_channel_get_name(channel));
-						switch_channel_set_flag(channel, CF_STOP_BROADCAST);
-						break;
-					}
-				}
-
 				/* Reset the break between iterations only. The application no
 				 * longer clears CF_BREAK for us, so a break raised late in
 				 * iteration N and never consumed would otherwise abort N+1 and
@@ -684,6 +652,33 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 				 * command was waiting on lead-frames belongs to it. */
 				if (x > 0) {
 					switch_channel_clear_flag(channel, CF_BREAK);
+				}
+
+				/* The bridge thread runs this loop and cannot see its peer from
+				 * inside it. A peer hangup landing before CF_BROADCAST is raised
+				 * above arms nothing, so check the peer here instead. locate(),
+				 * not get_partner(): get_partner() cannot tell "no partner" from
+				 * "partner is down", and a transfer clears the partner uuid while
+				 * CF_BRIDGED is still set. Raise the stop rather than breaking
+				 * out, so the app still runs and still fires PLAYBACK_STOP.
+				 * Must follow the CF_BREAK reset above, which would otherwise
+				 * wipe the break this raises. */
+				if (switch_channel_test_flag(channel, CF_BRIDGED)) {
+					char peer_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1] = "";
+
+					if (switch_channel_get_partner_uuid_copy(channel, peer_uuid, sizeof(peer_uuid))) {
+						switch_core_session_t *peer_session = switch_core_session_locate(peer_uuid);
+
+						if (peer_session) {
+							switch_core_session_rwunlock(peer_session);
+						} else {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+											  "%s Stopping broadcast: bridge peer %s is gone\n",
+											  switch_channel_get_name(channel), peer_uuid);
+							switch_channel_set_flag(channel, CF_STOP_BROADCAST);
+							switch_channel_set_flag(channel, CF_BREAK);
+						}
+					}
 				}
 
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s Command Execute [depth=%d] %s(%s)\n",
