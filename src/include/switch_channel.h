@@ -641,7 +641,7 @@ SWITCH_DECLARE(switch_size_t) switch_channel_dequeue_dtmf_string(_In_ switch_cha
               may already have been clamped to the min/max dtmf duration
   \param sent_duration duration actually transmitted, in samples
   \param samples_per_second rate both durations are expressed in, 0 if unknown
-  \param method transport the digit was sent with ("RFC2833", "INFO")
+  \param method transport the digit was sent with ("RFC2833")
   \note Unlike SWITCH_EVENT_DTMF, which is a receive-side event, this is fired
         only after the digit has left the switch.
 */

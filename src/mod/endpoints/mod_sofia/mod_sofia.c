@@ -1621,11 +1621,11 @@ static switch_status_t sofia_send_dtmf(switch_core_session_t *session, const swi
 				nua_info(tech_pvt->nh, SIPTAG_CONTENT_TYPE_STR("application/dtmf-relay"), SIPTAG_PAYLOAD_STR(message), TAG_END());
 				switch_mutex_unlock(tech_pvt->sofia_mutex);
 
-				/* Confirm the digit we just signalled. Unlike the RFC 2833 path -- where the
-				   event is fired once the end packets are on the wire -- this fires when the
-				   INFO has been handed to the SIP stack, with the duration we advertised in
-				   the body (the INFO body is expressed at 8kHz). */
-				switch_channel_fire_dtmf_sent_event(channel, dtmf, dtmf->duration, 8000, "INFO");
+				/* No telnyx::dtmf_sent confirmation here: nua_info() only queues the request
+				   into the SIP stack and returns, so firing now would report the same "handed
+				   off" state the +OK from uuid_send_dtmf already gives. The response arrives
+				   asynchronously as nua_r_info, which is not attributable to a single digit
+				   (every INFO on the handle lands there), so INFO stays unconfirmed for now. */
 			}
 		}
 		break;
