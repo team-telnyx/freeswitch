@@ -811,6 +811,13 @@ SWITCH_DECLARE(void) switch_channel_fire_dtmf_sent_event(switch_channel_t *chann
 	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Source", "%s", dtmf_source_str(dtmf->source));
 	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "DTMF-Method", method);
 
+	/* Deliberately always on the bus, unlike the receive-side event in
+	   switch_channel_dequeue_dtmf(), which honours CF_DIVERT_EVENTS. That flag is set
+	   by an ESL client asking for a session's events to be routed to its own queue
+	   instead (mod_event_socket "divert_events"). The consumer of this event is the
+	   mod_telnyx ZMQ publisher, a plain bus subscriber, so diverting would silently
+	   drop the B2BUA's confirmation for the duration of an unrelated ESL session --
+	   and a confirmation that can vanish is worth no more than no confirmation. */
 	switch_event_fire(&event);
 }
 

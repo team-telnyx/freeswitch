@@ -645,7 +645,8 @@ SWITCH_DECLARE(switch_size_t) switch_channel_dequeue_dtmf_string(_In_ switch_cha
   \param samples_per_second rate sent_duration is expressed in, 0 if unknown
   \param method transport the digit was sent with ("RFC2833")
   \note Unlike SWITCH_EVENT_DTMF, which is a receive-side event, this is fired
-        only after the digit has left the switch.
+        only after the digit has left the switch. It also always goes to the event
+        bus, where SWITCH_EVENT_DTMF honours CF_DIVERT_EVENTS.
   \note sent_duration is not a truncation check. A transport emits whole packet
         intervals and only reports once it has covered the requested duration, so
         compared like for like it lands on or past dtmf->duration and measures
