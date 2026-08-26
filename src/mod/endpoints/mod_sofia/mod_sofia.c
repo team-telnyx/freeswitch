@@ -2938,6 +2938,19 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 				case SWITCH_RING_READY_RINGING:
 				default:
 
+					/* Whether this 180 may go out reliably. Applied here rather than at
+					   invite time so the routing dialplan can still decide it; the tag
+					   reaches the stack ahead of the response below, both being queued on
+					   the same nua handle. */
+					{
+						const char *reliable_180 = switch_channel_get_variable(channel, "reliable_180_without_sdp");
+
+						if (reliable_180 || sofia_test_pflag(tech_pvt->profile, PFLAG_RELIABLE_180_NOSDP)) {
+							nua_set_hparams(tech_pvt->nh,
+											NUTAG_RELIABLE_180_NOSDP(reliable_180 ? switch_true(reliable_180) : 1), TAG_END());
+						}
+					}
+
 					/* A no-SDP INVITE deferred by the early-offer flow has no offer to put in a
 					   reliable 180, and the far end is entitled to one in the first reliable
 					   provisional, so send a 183 carrying it instead. The answer arrives in the
