@@ -410,6 +410,25 @@
         -->
         <!-- <param name="enable-3pcc-early-offer" value="true"/> -->
 
+        <!--
+             enable-ring-ready-early-media promotes the 180 Ringing that ring_ready
+             would send into a reliable 183 carrying that same SDP offer, so a no-SDP
+             INVITE gets its offer in the first reliable provisional response even when
+             the dialplan never calls pre_answer. Requires enable-3pcc-early-offer (it
+             is silently disabled otherwise). Override per call with the channel
+             variable ring_ready_early_media, which is honoured up to the ring_ready
+             indication, so the dialplan can still turn it off after routing.
+
+             Because the 180 is replaced, the caller's network no longer generates
+             local ringback, so a ringback source is played for the caller until the
+             call is bridged or answered. ring-ready-early-media-ringback sets it;
+             override per call with the channel variable
+             ring_ready_early_media_ringback, or suppress it entirely with
+             disable_ring_ready_early_media_ringback=true.
+        -->
+        <!-- <param name="enable-ring-ready-early-media" value="true"/> -->
+        <!-- <param name="ring-ready-early-media-ringback" value="tone_stream://%(2000,4000,440,480);loops=-1"/> -->
+
         <!-- use at your own risk or if you know what this does. -->
         <!-- <param name="NDLB-force-rport" value="true"/> -->
         <!--
