@@ -686,6 +686,9 @@ SWITCH_DECLARE(switch_status_t) switch_channel_queue_dtmf_string(switch_channel_
 	return bad_input ? SWITCH_STATUS_GENERR : SWITCH_STATUS_FALSE;
 }
 
+/* The rate switch_dtmf_t.duration is expressed in, everywhere in the core. */
+#define DTMF_DURATION_CLOCK_RATE 8000
+
 static const char *dtmf_source_str(switch_dtmf_source_t source)
 {
 	switch(source) {
@@ -775,12 +778,21 @@ SWITCH_DECLARE(void) switch_channel_fire_dtmf_sent_event(switch_channel_t *chann
 
 	switch_channel_event_set_data(channel, event);
 	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Digit", "%c", dtmf->digit);
+
+	/* The two durations are not in the same clock domain and must not be compared as
+	   sample counts. switch_dtmf_t.duration is always in FreeSWITCH's 8kHz convention
+	   (SWITCH_DEFAULT_DTMF_DURATION and the min/max clamps are 8kHz sample counts,
+	   which is why mod_sofia divides it by 8 for the INFO body), while sent_duration
+	   is in samples_per_second, the transmitting session's own rate. Publish each with
+	   its own rate and a millisecond form so a consumer has one comparable number. */
 	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Duration", "%u", dtmf->duration);
+	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Duration-MS", "%u", dtmf->duration / (DTMF_DURATION_CLOCK_RATE / 1000));
+	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Duration-Clock-Rate", "%u", (uint32_t) DTMF_DURATION_CLOCK_RATE);
 	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Duration-Sent", "%u", sent_duration);
 
 	if (samples_per_second >= 1000) {
 		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Duration-Sent-MS", "%u", sent_duration / (samples_per_second / 1000));
-		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Clock-Rate", "%u", samples_per_second);
+		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Duration-Sent-Clock-Rate", "%u", samples_per_second);
 	}
 
 	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Source", "%s", dtmf_source_str(dtmf->source));

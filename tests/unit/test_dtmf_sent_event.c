@@ -152,7 +152,13 @@ FST_TEST_BEGIN(dtmf_sent_event_fires_when_rfc2833_digit_finishes)
 	fst_xcheck(!zstr(value) && !strcmp(value, "RFC2833"), "DTMF-Method is the transport used");
 
 	value = dtmf_sent_header("DTMF-Duration");
-	fst_xcheck(!zstr(value) && atoi(value) == 800, "DTMF-Duration is the requested duration in samples");
+	fst_xcheck(!zstr(value) && atoi(value) == 800, "DTMF-Duration is the requested duration in 8kHz samples");
+
+	value = dtmf_sent_header("DTMF-Duration-MS");
+	fst_xcheck(!zstr(value) && atoi(value) == 100, "DTMF-Duration-MS reports the requested length in ms");
+
+	value = dtmf_sent_header("DTMF-Duration-Clock-Rate");
+	fst_xcheck(!zstr(value) && atoi(value) == 8000, "DTMF-Duration is always in the 8kHz domain");
 
 	value = dtmf_sent_header("DTMF-Duration-Sent");
 	fst_xcheck(!zstr(value) && atoi(value) == 800, "DTMF-Duration-Sent is the duration actually transmitted");
@@ -160,14 +166,89 @@ FST_TEST_BEGIN(dtmf_sent_event_fires_when_rfc2833_digit_finishes)
 	value = dtmf_sent_header("DTMF-Duration-Sent-MS");
 	fst_xcheck(!zstr(value) && atoi(value) == 100, "DTMF-Duration-Sent-MS reports the transmitted length in ms");
 
-	value = dtmf_sent_header("DTMF-Clock-Rate");
-	fst_xcheck(!zstr(value) && atoi(value) == 8000, "DTMF-Clock-Rate states the rate the sample counts are expressed in");
+	value = dtmf_sent_header("DTMF-Duration-Sent-Clock-Rate");
+	fst_xcheck(!zstr(value) && atoi(value) == 8000, "DTMF-Duration-Sent-Clock-Rate states the rate DTMF-Duration-Sent is in");
 
 	value = dtmf_sent_header("Unique-ID");
 	fst_xcheck(!zstr(value) && !strcmp(value, switch_core_session_get_uuid(session)), "event is bound to the sending channel");
 
 	value = dtmf_sent_header("call_control");
 	fst_xcheck(!zstr(value) && !strcmp(value, "true"), "event carries the call_control header the ZMQ publisher filters on");
+
+	switch_rtp_destroy(&rtp_session);
+	switch_core_session_rwunlock(session);
+	switch_core_destroy_memory_pool(&pool);
+}
+FST_TEST_END()
+
+FST_TEST_BEGIN(dtmf_sent_event_keeps_the_two_clock_domains_apart)
+{
+	switch_core_session_t *session = NULL;
+	switch_channel_t *channel = NULL;
+	switch_memory_pool_t *pool = NULL;
+	switch_rtp_t *rtp_session = NULL;
+	switch_rtp_flag_t flags[SWITCH_RTP_FLAG_INVALID] = { 0 };
+	/* 2000 == SWITCH_DEFAULT_DTMF_DURATION, i.e. 250ms in FS's 8kHz convention. */
+	switch_dtmf_t dtmf = { '5', 2000, 0, SWITCH_DTMF_APP };
+	switch_call_cause_t cause;
+	switch_status_t status;
+	const char *err = NULL;
+	const char *value;
+	int i;
+
+	switch_core_new_memory_pool(&pool);
+
+	status = switch_ivr_originate(NULL, &session, &cause, "null/+15553334444", 2, NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL);
+	fst_requires(session);
+	fst_check(status == SWITCH_STATUS_SUCCESS);
+
+	channel = switch_core_session_get_channel(session);
+	fst_requires(channel);
+	switch_channel_set_variable(channel, "call_control", "true");
+
+	switch_core_memory_pool_set_data(pool, "__session", session);
+	/* 960 samples per 20ms interval == 48kHz, the rate an Opus leg is created at
+	   (switch_core_media.c). At 8kHz the requested and transmitted domains coincide
+	   and the distinction is invisible, so this is the case that pins it down. */
+	rtp_session = switch_rtp_new(rx_host, rx_port, tx_host, tx_port, TEST_PT, 960, 20 * 1000, flags, "soft", &err, pool);
+	fst_requires(rtp_session);
+	fst_requires(switch_rtp_ready(rtp_session));
+	switch_rtp_set_default_payload(rtp_session, TEST_PT);
+	switch_rtp_set_telephony_event(rtp_session, TEST_TE_PT);
+
+	status = switch_rtp_queue_rfc2833(rtp_session, &dtmf);
+	fst_xcheck(status == SWITCH_STATUS_SUCCESS, "queue outbound RFC 2833 digit");
+
+	for (i = 0; i < 100 && !got_dtmf_sent_event(); i++) {
+		do_2833(rtp_session);
+		switch_yield(20000);
+	}
+
+	fst_xcheck(got_dtmf_sent_event() == 1, "exactly one confirmation event for one digit");
+	fst_requires(dtmf_sent_event);
+
+	value = dtmf_sent_header("DTMF-Duration");
+	fst_xcheck(!zstr(value) && atoi(value) == 2000, "DTMF-Duration stays in the 8kHz domain regardless of the session rate");
+
+	value = dtmf_sent_header("DTMF-Duration-Clock-Rate");
+	fst_xcheck(!zstr(value) && atoi(value) == 8000, "DTMF-Duration-Clock-Rate is 8kHz, not the session rate");
+
+	value = dtmf_sent_header("DTMF-Duration-MS");
+	fst_xcheck(!zstr(value) && atoi(value) == 250, "DTMF-Duration-MS is the requested 250ms");
+
+	value = dtmf_sent_header("DTMF-Duration-Sent-Clock-Rate");
+	fst_xcheck(!zstr(value) && atoi(value) == 48000, "DTMF-Duration-Sent-Clock-Rate is the session rate");
+
+	/* do_2833() compares out_digit_sofar (48kHz samples) against out_digit_dur (8kHz
+	   samples), so the digit ends after ceil(2000/960) == 3 intervals: 2880 samples,
+	   60ms, far short of the 250ms asked for. That truncation is pre-existing core
+	   behaviour; what matters here is that the event describes it without lying -- the
+	   two MS values are directly comparable and disagree. */
+	value = dtmf_sent_header("DTMF-Duration-Sent");
+	fst_xcheck(!zstr(value) && atoi(value) == 2880, "DTMF-Duration-Sent is in session samples");
+
+	value = dtmf_sent_header("DTMF-Duration-Sent-MS");
+	fst_xcheck(!zstr(value) && atoi(value) == 60, "DTMF-Duration-Sent-MS is comparable to DTMF-Duration-MS");
 
 	switch_rtp_destroy(&rtp_session);
 	switch_core_session_rwunlock(session);
