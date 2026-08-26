@@ -2938,6 +2938,68 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 				case SWITCH_RING_READY_RINGING:
 				default:
 
+					/* A no-SDP INVITE deferred by the early-offer flow has no offer to put in a
+					   reliable 180, and the far end is entitled to one in the first reliable
+					   provisional, so send a 183 carrying it instead. The answer arrives in the
+					   PRACK; nothing is waited on here. Skipped when this leg originated a bridge,
+					   because the outbound leg's codecs are not inherited until later. */
+					if (switch_channel_var_true(channel, "ring_ready_early_media") &&
+						switch_channel_test_flag(channel, CF_3PCC) &&
+						sofia_test_flag(tech_pvt, TFLAG_LATE_NEGOTIATION) &&
+						!sofia_test_flag(tech_pvt, TFLAG_EARLY_OFFER_SENT) &&
+						!switch_channel_test_flag(channel, CF_PROXY_MODE) &&
+						!switch_channel_test_flag(channel, CF_PROXY_MEDIA) &&
+						!switch_channel_test_flag(channel, CF_ORIGINATOR)) {
+
+						if (sofia_early_offer_gen_sdp(tech_pvt) != SWITCH_STATUS_SUCCESS) {
+							switch_safe_free(extra_header);
+							status = SWITCH_STATUS_FALSE;
+							goto end_lock;
+						}
+
+						sofia_set_flag_locked(tech_pvt, TFLAG_3PCC_EARLY_OFFER);
+						sofia_set_flag_locked(tech_pvt, TFLAG_EARLY_OFFER_SENT);
+						tech_pvt->mparams.early_sdp = switch_core_session_strdup(tech_pvt->session, tech_pvt->mparams.local_sdp_str);
+
+						if (sofia_use_soa(tech_pvt)) {
+							nua_respond(tech_pvt->nh, SIP_183_SESSION_PROGRESS,
+										NUTAG_AUTOANSWER(0),
+										SIPTAG_CONTACT_STR(tech_pvt->reply_contact),
+										SOATAG_REUSE_REJECTED(1),
+										SOATAG_RTP_SELECT(1),
+										SOATAG_SDP_PRINT_FLAGS(SOA_SDP_PRINT_FLAG_ALWAYS),
+										SOATAG_SDP_MEDIA_STRICT_FMT(sofia_test_pflag(tech_pvt->profile, PFLAG_SDP_MEDIA_STRICT_FMT)),
+										SOATAG_ADDRESS(tech_pvt->mparams.adv_sdp_audio_ip),
+										SOATAG_USER_SDP_STR(tech_pvt->mparams.local_sdp_str),
+										SOATAG_AUDIO_AUX("cn telephone-event"),
+										SIPTAG_REQUIRE_STR("100rel"),
+										SIPTAG_HEADER_STR("P-Early-Media: sendrecv"),
+										TAG_IF(cid, SIPTAG_HEADER_STR(cid)),
+										TAG_IF(call_info, SIPTAG_CALL_INFO_STR(call_info)),
+										TAG_IF(!zstr(extra_header), SIPTAG_HEADER_STR(extra_header)),
+										TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)),
+										TAG_END());
+						} else {
+							nua_respond(tech_pvt->nh, SIP_183_SESSION_PROGRESS,
+										NUTAG_AUTOANSWER(0),
+										NUTAG_MEDIA_ENABLE(0),
+										SIPTAG_CONTACT_STR(tech_pvt->reply_contact),
+										SIPTAG_CONTENT_TYPE_STR("application/sdp"),
+										SIPTAG_PAYLOAD_STR(tech_pvt->mparams.local_sdp_str),
+										SIPTAG_REQUIRE_STR("100rel"),
+										SIPTAG_HEADER_STR("P-Early-Media: sendrecv"),
+										TAG_IF(cid, SIPTAG_HEADER_STR(cid)),
+										TAG_IF(call_info, SIPTAG_CALL_INFO_STR(call_info)),
+										TAG_IF(!zstr(extra_header), SIPTAG_HEADER_STR(extra_header)),
+										TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)),
+										TAG_END());
+						}
+
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+										  "%s ring_ready promoted to early media with an SDP offer\n", switch_channel_get_name(channel));
+						break;
+					}
+
 					nua_respond(tech_pvt->nh, SIP_180_RINGING,
 								SIPTAG_CONTACT_STR(tech_pvt->reply_contact),
 								TAG_IF(cid, SIPTAG_HEADER_STR(cid)),
@@ -3015,7 +3077,8 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 				}
 			}
 
-			if (!sofia_test_flag(tech_pvt, TFLAG_ANS) && !sofia_test_flag(tech_pvt, TFLAG_EARLY_MEDIA)) {
+			if (!sofia_test_flag(tech_pvt, TFLAG_ANS) && !sofia_test_flag(tech_pvt, TFLAG_EARLY_MEDIA)
+				&& !sofia_test_flag(tech_pvt, TFLAG_EARLY_OFFER_SENT)) {
 
 				sofia_set_flag_locked(tech_pvt, TFLAG_EARLY_MEDIA);
 				switch_log_printf(SWITCH_CHANNEL_ID_SESSION, msg->_file, msg->_func, msg->_line,
