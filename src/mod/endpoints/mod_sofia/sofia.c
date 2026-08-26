@@ -6190,6 +6190,16 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						if (profile->minimum_session_expires < 90) {
 							profile->minimum_session_expires = 90;
 						}
+					} else if (!strcasecmp(var, "enable-reliable-180-without-sdp")) {
+						/* A 180 carries no session description, so on an INVITE that arrived
+						   without one a reliable 180 would be the first reliable non-failure
+						   message and would then be required to carry the offer. Such 180s are
+						   sent unreliably; enable this only for a peer that insists otherwise. */
+						if (switch_true(val)) {
+							sofia_set_pflag(profile, PFLAG_RELIABLE_180_NOSDP);
+						} else {
+							sofia_clear_pflag(profile, PFLAG_RELIABLE_180_NOSDP);
+						}
 					} else if (!strcasecmp(var, "enable-100rel")) {
 						if (switch_true(val)) {
 							sofia_clear_pflag(profile, PFLAG_DISABLE_100REL);

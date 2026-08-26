@@ -426,6 +426,20 @@
              ring_ready_early_media_ringback, or suppress it entirely with
              disable_ring_ready_early_media_ringback=true.
         -->
+        <!--
+             enable-reliable-180-without-sdp restores sending a 180 Ringing reliably
+             even when there is no SDP to put in it. Off by default: a 180 never
+             carries a session description, so on an INVITE that arrived without one
+             a reliable 180 becomes the first reliable non-failure message of the
+             dialog and RFC 3261 13.2.1 then requires it to carry the offer. Peers
+             that enforce that drop the call. With this off the 180 goes out
+             unreliably and the offer travels in the first message that can hold one.
+             An INVITE that did carry an offer keeps its reliable 180 either way, as
+             does one that requires 100rel. Override per call with the channel
+             variable reliable_180_without_sdp.
+        -->
+        <!-- <param name="enable-reliable-180-without-sdp" value="true"/> -->
+
         <!-- <param name="enable-ring-ready-early-media" value="true"/> -->
         <!-- <param name="ring-ready-early-media-ringback" value="tone_stream://%(2000,4000,440,480);loops=-1"/> -->
 
