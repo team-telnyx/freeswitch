@@ -29,6 +29,7 @@ static switch_port_t tx_port = 12346;
 static const switch_payload_t TEST_PT = 8;
 static const switch_payload_t TEST_TE_PT = 101;
 
+static switch_memory_pool_t *event_pool = NULL;
 static switch_mutex_t *event_mutex = NULL;
 static switch_event_t *dtmf_sent_event = NULL;
 static int dtmf_sent_event_count = 0;
@@ -78,12 +79,21 @@ FST_SUITE_BEGIN(test_dtmf_sent_event)
 FST_SETUP_BEGIN()
 {
 	fst_requires_module("mod_loopback");
-	switch_mutex_init(&event_mutex, SWITCH_MUTEX_NESTED, fst_pool);
+
+	/* Not fst_pool: FST_TEARDOWN_BEGIN() destroys fst_pool inside the macro, before the
+	   teardown body that unbinds the handler ever runs (switch_test.h), so a mutex taken
+	   from fst_pool would be freed while the handler is still bound. This pool is created
+	   once for the whole suite and left to the core to reclaim at shutdown, which also
+	   keeps the mutex valid for a dispatch already in flight when we unbind. */
+	if (!event_pool) {
+		switch_core_new_memory_pool(&event_pool);
+		switch_mutex_init(&event_mutex, SWITCH_MUTEX_NESTED, event_pool);
+	}
+
 	dtmf_sent_event = NULL;
 	dtmf_sent_event_count = 0;
-	/* Bound here rather than in the test body: an aborted assertion skips the rest
-	   of the body, and a handler left bound would go on locking a mutex allocated
-	   from the per-test pool that teardown is about to destroy. */
+	/* Bound here rather than in the test body: an aborted assertion skips the rest of
+	   the body, so a bind done there could never be undone. */
 	switch_event_bind("test_dtmf_sent_event", SWITCH_EVENT_CUSTOM, SWITCH_EVENT_SUBCLASS_ANY, dtmf_sent_event_handler, NULL);
 }
 FST_SETUP_END()
