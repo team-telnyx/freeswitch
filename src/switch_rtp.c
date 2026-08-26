@@ -7138,6 +7138,16 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_change_interval(switch_rtp_t *rtp_ses
 							  "Problem RE-Starting timer [%s] %d bytes per %dms\n", rtp_session->timer_name, samples_per_interval, ms_per_packet / 1000);
 		}
 
+		/* The new timer's samplecount restarts near zero, so any DTMF delay floor
+		   armed against the old timer's epoch would hold digits for the rest of the leg. */
+		if (rtp_session->next_write_samplecount || rtp_session->max_next_write_samplecount) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+							  "Timer re-created, clearing pending DTMF delay floor (%u/%u)\n",
+							  rtp_session->next_write_samplecount, rtp_session->max_next_write_samplecount);
+			rtp_session->next_write_samplecount = 0;
+			rtp_session->max_next_write_samplecount = 0;
+		}
+
 		WRITE_DEC(rtp_session);
 		READ_DEC(rtp_session);
 	}
@@ -8452,21 +8462,21 @@ SWITCH_DECLARE(void) switch_rtp_clear_flag(switch_rtp_t *rtp_session, switch_rtp
 	}
 }
 
-static void set_dtmf_delay(switch_rtp_t *rtp_session, uint32_t ms, uint32_t max_ms)
+static void set_dtmf_delay(switch_rtp_t *rtp_session, uint32_t ms)
 {
-	int upsamp, max_upsamp;
-
-	if (!max_ms) max_ms = ms;
-
-	upsamp = ms * (rtp_session->samples_per_second / 1000);
-	max_upsamp = max_ms * (rtp_session->samples_per_second / 1000);
+	uint32_t upsamp = ms * (rtp_session->samples_per_second / 1000);
 
 	rtp_session->sending_dtmf = 0;
 	rtp_session->queue_delay = upsamp;
 
 	if (rtp_session->flags[SWITCH_RTP_FLAG_USE_TIMER]) {
-		rtp_session->max_next_write_samplecount = rtp_session->timer.samplecount + max_upsamp;
+		/* Floor and ceiling are the same instant: the queued digit is held until
+		   the media clock reaches next_write_samplecount and released right there.
+		   Upstream arms a 10x ceiling for the interdigit case, but in this fork
+		   queue_delay is only cleared by an outbound write, so a stalled write
+		   path would turn that window into an extra hold of up to 10x the delay. */
 		rtp_session->next_write_samplecount = rtp_session->timer.samplecount + upsamp;
+		rtp_session->max_next_write_samplecount = rtp_session->next_write_samplecount;
 		rtp_session->last_write_ts += upsamp;
 	}
 
@@ -8578,7 +8588,7 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 			rtp_session->dtmf_data.out_digit_dur = 0;
 
 			if (rtp_session->interdigit_delay) {
-				set_dtmf_delay(rtp_session, rtp_session->interdigit_delay, rtp_session->interdigit_delay * 10);
+				set_dtmf_delay(rtp_session, rtp_session->interdigit_delay);
 			}
 
 			return;
@@ -8624,13 +8634,13 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 			uint32_t shift = 0, new_ts = 0;
 
 			if (rdigit->digit == 'w') {
-				set_dtmf_delay(rtp_session, 500, 0);
+				set_dtmf_delay(rtp_session, 500);
 				free(rdigit);
 				return;
 			}
 
 			if (rdigit->digit == 'W') {
-				set_dtmf_delay(rtp_session, 1000, 0);
+				set_dtmf_delay(rtp_session, 1000);
 				free(rdigit);
 				return;
 			}
