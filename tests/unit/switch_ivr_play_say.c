@@ -100,6 +100,140 @@ static switch_status_t partial_play_and_collect_input_callback(switch_core_sessi
 	return status;
 }
 
+/*
+ * Watches PLAYBACK_STOP for one specific channel. Used by
+ * peer_hangup_during_lead_frames_ends_bridged_broadcast, which asserts both
+ * that the playback ends promptly once the bridge peer is gone and that it is
+ * reported as a break rather than as a file that played to the end.
+ */
+static char playback_watch_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1] = "";
+static char playback_watch_status[32] = "";
+
+static void on_playback_stop_watch(switch_event_t *event)
+{
+	const char *uuid = switch_event_get_header(event, "Unique-ID");
+
+	if (uuid && *playback_watch_uuid && !strcmp(uuid, playback_watch_uuid)) {
+		switch_set_string(playback_watch_status, switch_str_nil(switch_event_get_header(event, "Playback-Status")));
+	}
+}
+
+/*
+ * One run of the peer-hangup-during-lead-frames scenario over a real two-leg
+ * bridge. bcast_index picks which leg carries the broadcast, so the caller can
+ * drive both directions.
+ *
+ * Leaves the outcome in playback_watch_status: "break" once the stop landed,
+ * still empty if the playback never ended.
+ *
+ * Plain C rather than fct macros: fst_requires expands to a bare "break",
+ * which inside a loop would escape only that loop and let the caller run on
+ * with half-built fixtures.
+ *
+ * Returns 0 if the fixture could not be established, so nothing was measured.
+ * Sets *in_window to 1 if the hangup really did land before CF_BROADCAST.
+ */
+static int run_peer_hangup_lead_frames_case(int bcast_index, int *in_window)
+{
+	switch_core_session_t *legs[2] = { NULL, NULL };
+	switch_channel_t *chans[2] = { NULL, NULL };
+	switch_call_cause_t cause = SWITCH_CAUSE_NORMAL_CLEARING;
+	switch_event_t *event = NULL;
+	int ok = 0;
+	int i, waited;
+
+	*in_window = 0;
+	*playback_watch_status = '\0';
+
+	for (i = 0; i < 2; i++) {
+		if (switch_ivr_originate(NULL, &legs[i], &cause, "null/+15553334444", 2,
+								 NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) != SWITCH_STATUS_SUCCESS || !legs[i]) {
+			goto done;
+		}
+		chans[i] = switch_core_session_get_channel(legs[i]);
+		switch_channel_set_variable(chans[i], "send_silence_when_idle", "-1");
+		/* park it the way the session harness does, so uuid_bridge takes over
+		 * from a known state. The _timeout form only: the plain
+		 * switch_channel_wait_for_state is an unbounded for(;;). */
+		switch_channel_set_state(chans[i], CS_SOFT_EXECUTE);
+		if (!switch_channel_wait_for_state_timeout(chans[i], CS_SOFT_EXECUTE, 5000) || !switch_channel_up(chans[i])) {
+			goto done;
+		}
+	}
+
+	if (switch_ivr_uuid_bridge(switch_core_session_get_uuid(legs[0]),
+							   switch_core_session_get_uuid(legs[1])) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+
+	/* both legs must really be inside audio_bridge_thread, or this measures
+	 * something else entirely */
+	if (switch_channel_wait_for_flag(chans[0], CF_BRIDGED, SWITCH_TRUE, 5000, NULL) != SWITCH_STATUS_SUCCESS ||
+		switch_channel_wait_for_flag(chans[1], CF_BRIDGED, SWITCH_TRUE, 5000, NULL) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+
+	switch_set_string(playback_watch_uuid, switch_core_session_get_uuid(legs[bcast_index]));
+	if (switch_event_bind("peer_gone_broadcast", SWITCH_EVENT_PLAYBACK_STOP, SWITCH_EVENT_SUBCLASS_ANY,
+						  on_playback_stop_watch, NULL) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+
+	/* shaped exactly like the command switch_ivr_broadcast queues, with the
+	 * lead-frames window widened so the hangup lands inside it
+	 * deterministically instead of racing 100ms */
+	if (switch_event_create(&event, SWITCH_EVENT_COMMAND) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "call-command", "execute");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-name", "playback");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-arg", "silence_stream://20000");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "event-lock", "true");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "lead-frames", "150");
+	if (switch_core_session_queue_private_event(legs[bcast_index], &event, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+
+	/* let the bridge thread pick it up and settle into the wait */
+	switch_sleep(1500000);
+
+	/* the window under test is "dequeued, but CF_BROADCAST not raised yet" */
+	*in_window = (switch_core_session_private_event_count(legs[bcast_index]) == 0 &&
+				  !switch_channel_test_flag(chans[bcast_index], CF_BROADCAST));
+
+	switch_channel_hangup(chans[!bcast_index], SWITCH_CAUSE_NORMAL_CLEARING);
+
+	/* Fixed: the lead-frames wait ends, the peer check raises the stop, and
+	 * the app breaks on its first frame -- PLAYBACK_STOP within ~2s of the
+	 * hangup. Regressed: nothing interrupts the bridge thread and
+	 * PLAYBACK_STOP only arrives after the whole 20s file. The 12s bound sits
+	 * well clear of the 6000ms lead-frames cap and well short of the file. */
+	for (waited = 0; waited < 12000 && !*playback_watch_status; waited += 100) {
+		switch_sleep(100000);
+	}
+
+	ok = 1;
+
+  done:
+
+	/* no-op when never bound */
+	switch_event_unbind_callback(on_playback_stop_watch);
+	*playback_watch_uuid = '\0';
+	/* no-op once the queue took ownership and NULLed it */
+	switch_event_destroy(&event);
+
+	for (i = 0; i < 2; i++) {
+		if (legs[i]) {
+			if (switch_channel_ready(chans[i])) {
+				switch_channel_hangup(chans[i], SWITCH_CAUSE_NORMAL_CLEARING);
+			}
+			switch_core_session_rwunlock(legs[i]);
+		}
+	}
+
+	return ok;
+}
+
 FST_CORE_BEGIN("./conf_playsay")
 {
 	FST_SUITE_BEGIN(switch_ivr_play_say)
@@ -548,6 +682,44 @@ FST_CORE_BEGIN("./conf_playsay")
 			switch_event_destroy(&event);
 		}
 		FST_SESSION_END()
+
+
+		/*
+		 * peer_hangup_during_lead_frames_ends_bridged_broadcast: guard for the
+		 * zombie-call race, over a real two-leg bridge with a real
+		 * audio_bridge_thread on each leg, run in both directions.
+		 *
+		 * The zombie is produced by the bridge thread itself: it dequeues the
+		 * broadcast, waits out lead-frames, and only then raises
+		 * CF_BROADCAST. A peer hangup inside that wait arms nothing --
+		 * switch_channel_stop_broadcast() is gated on CF_BROADCAST -- so the
+		 * thread used to play the whole file before returning to the bridge
+		 * loop where it would finally notice the peer was gone.
+		 *
+		 * The assertion is on PLAYBACK_STOP -- that it arrives promptly and
+		 * reports a break -- rather than on teardown timing, so it does not
+		 * depend on hangup_after_bridge semantics.
+		 */
+		FST_TEST_BEGIN(peer_hangup_during_lead_frames_ends_bridged_broadcast)
+		{
+			int in_window = 0;
+
+			fst_requires_module("mod_commands");
+			fst_requires_module("mod_loopback");
+
+			/* direction 1: the bridge originator carries the broadcast */
+			fst_requires(run_peer_hangup_lead_frames_case(0, &in_window));
+			fst_xcheck(in_window, "A-leg: expect the peer hangup to land before CF_BROADCAST is raised");
+			fst_xcheck(*playback_watch_status, "A-leg: expect the playback to end once the bridge peer is gone, not after the whole file");
+			fst_xcheck(!strcmp(playback_watch_status, "break"), "A-leg: expect PLAYBACK_STOP to report a break, not a file played to the end");
+
+			/* direction 2: the bridge originatee carries the broadcast */
+			fst_requires(run_peer_hangup_lead_frames_case(1, &in_window));
+			fst_xcheck(in_window, "B-leg: expect the peer hangup to land before CF_BROADCAST is raised");
+			fst_xcheck(*playback_watch_status, "B-leg: expect the playback to end once the bridge peer is gone, not after the whole file");
+			fst_xcheck(!strcmp(playback_watch_status, "break"), "B-leg: expect PLAYBACK_STOP to report a break, not a file played to the end");
+		}
+		FST_TEST_END()
 	}
 	FST_SUITE_END()
 }
