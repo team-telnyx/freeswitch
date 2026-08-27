@@ -6,10 +6,9 @@ noinst_PROGRAMS += switch_core_video switch_core_db switch_vad switch_packetizer
 
 noinst_PROGRAMS += switch_hold switch_sip switch_mod_telnyx switch_mod_gstt switch_3pcc test_inuse_race switch_jb_deadlock switch_cjson switch_sockaddr test_rtp_set_flag_null_crash test_write_frame_foreign_codec test_video_bridge_engine_race switch_apr_cleanup
 
-# TELCORE-412 repro. Asserts the correct transfer-handoff behaviour, so it FAILS until
-# the handoff is fixed -- hence EXTRA_PROGRAMS: built on demand, not part of make check.
-#     cd tests/unit && make test_transfer_handoff_window && ./test_transfer_handoff_window
-EXTRA_PROGRAMS = test_transfer_handoff_window
+# TELCORE-412 regression: a transfer landing in the state-machine handoff window must
+# still be routed. See switch_channel_inc_transfer_generation().
+noinst_PROGRAMS += test_transfer_handoff_window
 
 # switch_mod_lumenvox is intentionally NOT built/run in CI yet: LumenVox servers
 # are not reachable from CI, so the ASR tests cannot run there. Re-enable by
