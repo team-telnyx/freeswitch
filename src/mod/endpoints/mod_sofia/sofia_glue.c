@@ -1720,12 +1720,6 @@ switch_status_t sofia_glue_do_invite(switch_core_session_t *session)
 		switch_channel_set_variable(channel, "sofia_profile_url", tech_pvt->profile->url);
 	}
 
-	/* Outbound counterpart of the stamp sofia_handle_sip_i_invite() puts on inbound
-	   channels. The dialplan has already run here, so an explicit channel variable wins. */
-	if (tech_pvt->profile->strict_codec_match && !switch_channel_get_variable(channel, "telnyx-strict-codec-match")) {
-		switch_channel_set_variable(channel, "telnyx-strict-codec-match", tech_pvt->profile->strict_codec_match);
-	}
-
 	extra_headers = sofia_glue_get_extra_headers(channel, SOFIA_SIP_HEADER_PREFIX);
 
 	if ((val = switch_channel_get_variable(channel, SOFIA_SESSION_TIMEOUT))) {
