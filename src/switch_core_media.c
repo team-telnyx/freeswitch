@@ -13899,9 +13899,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 				other_engine = &other_smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
 				/* Only update partner's smode if partner's endpoint is not on hold
 				 * When we transition to sendrecv/recvonly (can receive), only update if partner can send.
-				 * Skip propagating INACTIVE to a non-held partner on a=inactive hold (TELCORE-413):
-				 * keeps the partner's pre-hold smode (normally SENDRECV) so the write gate in
-				 * switch_core_media_write_frame keeps sending the already-broadcast MOH to B. */
+				 * Do not propagate INACTIVE to a non-held partner so it can receive hold audio. */
 				if (new_smode == SWITCH_MEDIA_FLOW_SENDRECV || new_smode == SWITCH_MEDIA_FLOW_RECVONLY) {
 					if (other_engine->rmode != SWITCH_MEDIA_FLOW_INACTIVE) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG, 
