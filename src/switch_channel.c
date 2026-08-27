@@ -164,6 +164,7 @@ struct switch_channel {
 	switch_core_session_t *session;
 	switch_channel_state_t state;
 	switch_channel_state_t running_state;
+	switch_atomic_t transfer_generation;
 	switch_channel_callstate_t callstate;
 	uint32_t flags[CF_FLAG_MAX];
 	uint32_t caps[CC_FLAG_MAX];
@@ -2459,6 +2460,32 @@ static inline void careful_set(switch_channel_t *channel, switch_channel_state_t
 	}
 }
 
+/*
+ * Transfer generation: marks a caller profile installed by a transfer as not yet routed.
+ *
+ * A flag cannot carry this - the state machine clears flags entering any state handler,
+ * so an unrelated state can consume it. A counter is not consumable; ROUTING snapshots
+ * it and compares. It wraps, hence != and never > or <.
+ *
+ * Atomic so the increment cannot be lost. The read is an unordered plain load; the
+ * session thread observes a bump because the transfer wakes it, and that supplies the
+ * edge. state_mutex must not be used here: perform_set_running_state() holds it across
+ * an event fire.
+ */
+SWITCH_DECLARE(void) switch_channel_inc_transfer_generation(switch_channel_t *channel)
+{
+	switch_assert(channel != NULL);
+
+	switch_atomic_inc(&channel->transfer_generation);
+}
+
+SWITCH_DECLARE(uint32_t) switch_channel_get_transfer_generation(switch_channel_t *channel)
+{
+	switch_assert(channel != NULL);
+
+	return switch_atomic_read(&channel->transfer_generation);
+}
+
 SWITCH_DECLARE(switch_channel_state_t) switch_channel_perform_set_running_state(switch_channel_t *channel, switch_channel_state_t state,
 																				const char *file, const char *func, int line)
 {
@@ -3467,6 +3494,8 @@ SWITCH_DECLARE(void) switch_channel_transfer_to_extension(switch_channel_t *chan
 	switch_mutex_unlock(channel->profile_mutex);
 
 	switch_channel_set_flag(channel, CF_TRANSFER);
+	/* Same handoff as switch_ivr_session_transfer(); see the counter. */
+	switch_channel_inc_transfer_generation(channel);
 	switch_channel_set_state(channel, CS_ROUTING);
 }
 

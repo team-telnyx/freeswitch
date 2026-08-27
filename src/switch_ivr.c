@@ -2366,6 +2366,9 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_session_transfer(switch_core_session_
 			switch_channel_set_caller_profile(channel, new_profile); 	
 		}
 
+		/* Level-triggered handoff: set_state() alone can be lost, see the counter. */
+		switch_channel_inc_transfer_generation(channel);
+
 		/* Refusal for CS_ROUTING is exactly last_state >= CS_HANGUP. Test it with a
 		   pre-read: set_state() returns channel->state read after it drops state_mutex
 		   and after waking the session thread, so it can read back CS_EXECUTE on success
@@ -2381,6 +2384,12 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_session_transfer(switch_core_session_
 		}
 
 		switch_channel_set_state(channel, CS_ROUTING);
+
+		/* set_state() is a silent no-op when the channel is already CS_ROUTING, so wake
+		   the thread ourselves or the bump above is stranded. Bare wake, not
+		   signal_state_change(): that also runs state_change io routines and hooks, which
+		   are not all state-guarded, for a transition that may not have happened. */
+		switch_core_session_wake_session_thread(session);
 
 		switch_channel_audio_sync(channel);
 
