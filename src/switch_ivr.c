@@ -2366,7 +2366,22 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_session_transfer(switch_core_session_
 			switch_channel_set_caller_profile(channel, new_profile); 	
 		}
 
+		/* Refusal for CS_ROUTING is exactly last_state >= CS_HANGUP. Test it with a
+		   pre-read: set_state() returns channel->state read after it drops state_mutex
+		   and after waking the session thread, so it can read back CS_EXECUTE on success
+		   or CS_HANGUP on a transfer that did take. */
+		if (switch_channel_get_state(channel) >= CS_HANGUP) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
+							  "Transfer of %s to %s[%s@%s] refused, channel is in state %s\n",
+							  switch_channel_get_name(channel), use_dialplan, extension, use_context,
+							  switch_channel_state_name(switch_channel_get_state(channel)));
+			switch_ivr_fire_transfer_event(session, "transfer::failed", extension, use_dialplan, use_context,
+										   "Channel is not in a transferable state");
+			return SWITCH_STATUS_FALSE;
+		}
+
 		switch_channel_set_state(channel, CS_ROUTING);
+
 		switch_channel_audio_sync(channel);
 
 		msg.message_id = SWITCH_MESSAGE_INDICATE_TRANSFER;
