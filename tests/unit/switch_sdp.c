@@ -867,6 +867,78 @@ FST_CORE_BEGIN("./conf_sdp")
 			fst_xcheck(strstr(local_sdp, "a=fmtp:104") != NULL, "hold answer still carries the AMR-WB fmtp");
 		}
 		FST_SESSION_END()
+
+		/*
+		 * A re-INVITE that swaps the codec outright is not the case this flag exists for.
+		 * Nothing in the answer depends on the codec having already been re-initialised,
+		 * so the reset stays deferred to the read loop rather than running on the
+		 * signalling thread, which is what the unflagged path does.
+		 */
+		FST_SESSION_BEGIN(sdp_strict_codec_match_defers_unrelated_swap)
+		{
+			switch_status_t status;
+			switch_media_handle_t *media_handle;
+			switch_core_media_params_t *mparams;
+			switch_codec_implementation_t impl = { 0 };
+			const char *local_sdp;
+			uint8_t match = 0, p = 0;
+
+			const char *offer_pcmu =
+				"v=0\r\n"
+				"o=- 4 1 IN IP4 198.51.100.1\r\n"
+				"s=-\r\n"
+				"t=0 0\r\n"
+				"m=audio 56210 RTP/AVP 0\r\n"
+				"c=IN IP4 198.51.100.1\r\n"
+				"a=rtpmap:0 PCMU/8000\r\n"
+				"a=sendrecv\r\n";
+
+			const char *offer_pcma =
+				"v=0\r\n"
+				"o=- 4 2 IN IP4 198.51.100.1\r\n"
+				"s=-\r\n"
+				"t=0 0\r\n"
+				"m=audio 56210 RTP/AVP 8\r\n"
+				"c=IN IP4 198.51.100.1\r\n"
+				"a=rtpmap:8 PCMA/8000\r\n"
+				"a=sendrecv\r\n";
+
+			switch_channel_set_variable(fst_channel, "telnyx-strict-codec-match", "true");
+			/* Keep both codecs offerable across the re-negotiation. */
+			switch_channel_set_variable(fst_channel, "absolute_codec_string", "PCMU,PCMA");
+
+			mparams = switch_core_session_alloc(fst_session, sizeof(switch_core_media_params_t));
+			mparams->inbound_codec_string = switch_core_session_strdup(fst_session, "PCMU,PCMA");
+			mparams->outbound_codec_string = switch_core_session_strdup(fst_session, "PCMU,PCMA");
+			mparams->rtpip = switch_core_session_strdup(fst_session, (char *)rx_host);
+
+			status = switch_media_handle_create(&media_handle, fst_session, mparams);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+
+			status = switch_core_media_prepare_codecs(fst_session, SWITCH_FALSE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+
+			match = switch_core_media_negotiate_sdp(fst_session, offer_pcmu, &p, SDP_OFFER);
+			fst_requires(match == 1);
+			fst_requires(switch_core_session_get_read_impl(fst_session, &impl) == SWITCH_STATUS_SUCCESS);
+			fst_requires(!strcasecmp(impl.iananame, "PCMU"));
+
+			match = switch_core_media_negotiate_sdp(fst_session, offer_pcma, &p, SDP_OFFER);
+			fst_xcheck(match == 1, "an unrelated codec swap still negotiates");
+
+			switch_core_media_gen_local_sdp(fst_session, SDP_ANSWER, rx_host, 12345, NULL, 1);
+			local_sdp = switch_channel_get_variable(fst_channel, "rtp_local_sdp_str");
+			fst_requires(local_sdp);
+			fst_xcheck(strstr(local_sdp, "PCMA/8000") != NULL, "the answer follows the swap");
+
+			/*
+			 * Still the old codec here: the read loop has not run, which is what tells
+			 * the deferred reset apart from one forced on this thread.
+			 */
+			fst_requires(switch_core_session_get_read_impl(fst_session, &impl) == SWITCH_STATUS_SUCCESS);
+			fst_xcheck(!strcasecmp(impl.iananame, "PCMU"), "the codec reset is left to the read loop");
+		}
+		FST_SESSION_END()
 	}
 	FST_SUITE_END()
 }
