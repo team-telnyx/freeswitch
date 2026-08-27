@@ -1015,6 +1015,70 @@ FST_CORE_BEGIN("./conf_sdp")
 			fst_xcheck(!strcasecmp(impl.iananame, "PCMU"), "the codec reset is left to the read loop");
 		}
 		FST_SESSION_END()
+
+		/*
+		 * A ptime change on one codec takes the inline reset as well, not only a flip
+		 * between two implementations of it. ptime is part of the payload map key, so a
+		 * re-offer that changes it allocates a fresh map, which is the same reason the
+		 * implementation flip cannot be left to the read loop.
+		 */
+		FST_SESSION_BEGIN(sdp_strict_codec_match_resets_on_ptime_change)
+		{
+			switch_status_t status;
+			switch_media_handle_t *media_handle;
+			switch_core_media_params_t *mparams;
+			switch_codec_implementation_t impl = { 0 };
+			uint8_t match = 0, p = 0;
+
+			const char *offer_20ms =
+				"v=0\r\n"
+				"o=- 5 1 IN IP4 198.51.100.1\r\n"
+				"s=-\r\n"
+				"t=0 0\r\n"
+				"m=audio 56210 RTP/AVP 0\r\n"
+				"c=IN IP4 198.51.100.1\r\n"
+				"a=rtpmap:0 PCMU/8000\r\n"
+				"a=ptime:20\r\n"
+				"a=sendrecv\r\n";
+
+			const char *offer_30ms =
+				"v=0\r\n"
+				"o=- 5 2 IN IP4 198.51.100.1\r\n"
+				"s=-\r\n"
+				"t=0 0\r\n"
+				"m=audio 56210 RTP/AVP 0\r\n"
+				"c=IN IP4 198.51.100.1\r\n"
+				"a=rtpmap:0 PCMU/8000\r\n"
+				"a=ptime:30\r\n"
+				"a=sendrecv\r\n";
+
+			switch_channel_set_variable(fst_channel, "telnyx-strict-codec-match", "true");
+			switch_channel_set_variable(fst_channel, "absolute_codec_string", "PCMU");
+
+			mparams = switch_core_session_alloc(fst_session, sizeof(switch_core_media_params_t));
+			mparams->inbound_codec_string = switch_core_session_strdup(fst_session, "PCMU");
+			mparams->outbound_codec_string = switch_core_session_strdup(fst_session, "PCMU");
+			mparams->rtpip = switch_core_session_strdup(fst_session, (char *)rx_host);
+
+			status = switch_media_handle_create(&media_handle, fst_session, mparams);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+
+			status = switch_core_media_prepare_codecs(fst_session, SWITCH_FALSE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+
+			match = switch_core_media_negotiate_sdp(fst_session, offer_20ms, &p, SDP_OFFER);
+			fst_requires(match == 1);
+			fst_requires(switch_core_session_get_read_impl(fst_session, &impl) == SWITCH_STATUS_SUCCESS);
+			fst_requires(impl.microseconds_per_packet == 20000);
+
+			match = switch_core_media_negotiate_sdp(fst_session, offer_30ms, &p, SDP_OFFER);
+			fst_requires(match == 1);
+
+			/* Reset already done here, unlike the unrelated swap above. */
+			fst_requires(switch_core_session_get_read_impl(fst_session, &impl) == SWITCH_STATUS_SUCCESS);
+			fst_xcheck(impl.microseconds_per_packet == 30000, "a ptime change on one codec resets inline");
+		}
+		FST_SESSION_END()
 	}
 	FST_SUITE_END()
 }

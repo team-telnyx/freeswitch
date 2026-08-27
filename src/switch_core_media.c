@@ -8243,11 +8243,12 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 							}
 						} else if (same_codec_name) {
 							/*
-							 * Another implementation of the codec already in use. Reset here
-							 * rather than leaving it to the deferred reset in the read loop:
-							 * the answer SDP is generated before that runs, and it takes
-							 * a=fmtp from the payload map that switch_core_media_set_codec()
-							 * fills in.
+							 * The codec already in use, at a different implementation, ptime
+							 * or rate. Any of the three rebuilds the payload map, since all
+							 * three are part of its key, so reset here rather than leaving it
+							 * to the deferred reset in the read loop: the answer SDP is
+							 * generated before that runs, and it takes a=fmtp from the payload
+							 * map that switch_core_media_set_codec() fills in.
 							 */
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Force reset codec for %s\n", a_engine->read_impl.iananame);
 							if (switch_core_media_set_codec(session, 2, smh->mparams->codec_flags) != SWITCH_STATUS_SUCCESS) {
