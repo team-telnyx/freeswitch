@@ -869,6 +869,82 @@ FST_CORE_BEGIN("./conf_sdp")
 		FST_SESSION_END()
 
 		/*
+		 * Negative control: the same offers with telnyx-strict-codec-match left unset.
+		 * These assertions pin the behaviour of the unflagged path, defects included, so
+		 * that a change to it has to be deliberate rather than accidental.
+		 */
+		FST_SESSION_BEGIN(sdp_amrwb_legacy_codec_match)
+		{
+			switch_status_t status;
+			switch_media_handle_t *media_handle;
+			switch_core_media_params_t *mparams;
+			switch_codec_implementation_t impl = { 0 };
+			switch_payload_t initial_ianacode;
+			const char *local_sdp;
+			uint8_t match = 0, p = 0;
+
+			const char *offer_both =
+				"v=0\r\n"
+				"o=- 3 1 IN IP4 198.51.100.1\r\n"
+				"s=-\r\n"
+				"t=0 0\r\n"
+				"m=audio 56210 RTP/AVP 104 110\r\n"
+				"c=IN IP4 198.51.100.1\r\n"
+				"a=rtpmap:104 AMR-WB/16000\r\n"
+				"a=fmtp:104 mode-set=2\r\n"
+				"a=rtpmap:110 AMR-WB/16000\r\n"
+				"a=fmtp:110 octet-align=1; mode-set=2\r\n"
+				"a=sendrecv\r\n";
+
+			const char *offer_hold =
+				"v=0\r\n"
+				"o=- 3 2 IN IP4 198.51.100.1\r\n"
+				"s=-\r\n"
+				"t=0 0\r\n"
+				"m=audio 56210 RTP/AVP 104\r\n"
+				"c=IN IP4 198.51.100.1\r\n"
+				"a=rtpmap:104 AMR-WB/16000\r\n"
+				"a=fmtp:104 mode-set=2; mode-change-capability=2; max-red=0\r\n"
+				"a=sendonly\r\n";
+
+			mparams = switch_core_session_alloc(fst_session, sizeof(switch_core_media_params_t));
+			mparams->inbound_codec_string = switch_core_session_strdup(fst_session, "AMR-WB");
+			mparams->outbound_codec_string = switch_core_session_strdup(fst_session, "AMR-WB");
+			mparams->rtpip = switch_core_session_strdup(fst_session, (char *)rx_host);
+
+			status = switch_media_handle_create(&media_handle, fst_session, mparams);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+
+			status = switch_core_media_prepare_codecs(fst_session, SWITCH_FALSE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+
+			match = switch_core_media_negotiate_sdp(fst_session, offer_both, &p, SDP_OFFER);
+			fst_requires(match == 1);
+			fst_requires(switch_core_session_get_read_impl(fst_session, &impl) == SWITCH_STATUS_SUCCESS);
+			initial_ianacode = impl.ianacode;
+
+			switch_core_media_gen_local_sdp(fst_session, SDP_ANSWER, rx_host, 12345, NULL, 1);
+			local_sdp = switch_channel_get_variable(fst_channel, "rtp_local_sdp_str");
+			fst_requires(local_sdp);
+			fst_xcheck(strstr(local_sdp, "a=fmtp:") != NULL, "legacy: initial answer carries an fmtp");
+
+			/* Legacy drops the fmtp when a re-offer rebuilds the payload map. */
+			match = switch_core_media_negotiate_sdp(fst_session, offer_hold, &p, SDP_OFFER);
+			fst_requires(match == 1);
+			switch_core_media_gen_local_sdp(fst_session, SDP_ANSWER, rx_host, 12345, NULL, 1);
+			local_sdp = switch_channel_get_variable(fst_channel, "rtp_local_sdp_str");
+			fst_requires(local_sdp);
+			fst_xcheck(strstr(local_sdp, "a=fmtp:104") == NULL, "legacy: hold answer loses the AMR-WB fmtp");
+
+			/* Legacy matches on iananame alone, so the last implementation offered wins. */
+			match = switch_core_media_negotiate_sdp(fst_session, offer_both, &p, SDP_OFFER);
+			fst_requires(match == 1);
+			fst_requires(switch_core_session_get_read_impl(fst_session, &impl) == SWITCH_STATUS_SUCCESS);
+			fst_xcheck(impl.ianacode != initial_ianacode, "legacy: re-offer of the same list flips the implementation");
+		}
+		FST_SESSION_END()
+
+		/*
 		 * A re-INVITE that swaps the codec outright is not the case this flag exists for.
 		 * Nothing in the answer depends on the codec having already been re-initialised,
 		 * so the reset stays deferred to the read loop rather than running on the
