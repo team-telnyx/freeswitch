@@ -8233,13 +8233,23 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 							 * codec with no a=fmtp at all. Carry the fmtp of the codec we are
 							 * keeping over to the new payload map.
 							 */
-							if (a_engine->cur_payload_map && zstr(a_engine->cur_payload_map->fmtp_out) &&
-								switch_core_codec_ready(&a_engine->write_codec) && !zstr(a_engine->write_codec.fmtp_out) &&
+							if (a_engine->cur_payload_map && switch_core_codec_ready(&a_engine->write_codec) &&
+								!zstr(a_engine->write_codec.fmtp_out) &&
 								same_codec_impl(a_engine->write_codec.implementation, selected_imp)) {
-								a_engine->cur_payload_map->fmtp_out = switch_core_session_strdup(session, a_engine->write_codec.fmtp_out);
-								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-												  "Keeping fmtp [%s] for %s on the new payload map\n",
-												  a_engine->cur_payload_map->fmtp_out, a_engine->read_impl.iananame);
+								const char *kept = NULL;
+
+								switch_mutex_lock(smh->sdp_mutex);
+								if (zstr(a_engine->cur_payload_map->fmtp_out)) {
+									a_engine->cur_payload_map->fmtp_out = switch_core_session_strdup(session, a_engine->write_codec.fmtp_out);
+									kept = a_engine->cur_payload_map->fmtp_out;
+								}
+								switch_mutex_unlock(smh->sdp_mutex);
+
+								if (kept) {
+									switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+													  "Keeping fmtp [%s] for %s on the new payload map\n",
+													  kept, a_engine->read_impl.iananame);
+								}
 							}
 						} else if (same_codec_name) {
 							/*
