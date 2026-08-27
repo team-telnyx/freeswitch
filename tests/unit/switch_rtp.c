@@ -516,6 +516,67 @@ FST_TEARDOWN_END()
 		switch_core_destroy_memory_pool(&test_pool);
 	}
 	FST_TEST_END()
+	FST_TEST_BEGIN(test_legacy_accept_any_payload_keeps_inbound_stats)
+	{
+		switch_memory_pool_t *test_pool = NULL;
+		switch_rtp_t *legacy_rtp = NULL;
+		switch_socket_t *send_sock = NULL;
+		switch_sockaddr_t *send_bind_addr = NULL, *rtp_addr = NULL, *local_sa = NULL;
+		switch_rtp_flag_t legacy_flags[SWITCH_RTP_FLAG_INVALID] = {0};
+		payload_map_t negotiated_map = {0};
+		payload_map_t *negotiated_maps = &negotiated_map;
+		const char *legacy_err = NULL;
+		switch_frame_t frame = { 0 };
+		switch_rtp_stats_t *stats;
+		switch_port_t local_port = 0;
+		switch_port_t remote_port = 0;
+		switch_size_t packet_len;
+		switch_status_t status;
+		uint8_t packet[] = {
+			0x80, 96, 0x00, 0x01, 0x00, 0x00, 0x00, 0xa0, 0x11, 0x22, 0x33, 0x44,
+			0x7f
+		};
+
+		fst_requires(switch_core_new_memory_pool(&test_pool) == SWITCH_STATUS_SUCCESS);
+		local_port = switch_rtp_request_port(rx_host);
+		fst_requires(local_port > 0);
+		fst_requires(switch_sockaddr_info_get(&send_bind_addr, rx_host, SWITCH_UNSPEC, 0, 0, test_pool) == SWITCH_STATUS_SUCCESS);
+		fst_requires(switch_socket_create(&send_sock, switch_sockaddr_get_family(send_bind_addr), SOCK_DGRAM, 0, test_pool) == SWITCH_STATUS_SUCCESS);
+		fst_requires(switch_socket_bind(send_sock, send_bind_addr) == SWITCH_STATUS_SUCCESS);
+		fst_requires(switch_socket_addr_get(&local_sa, SWITCH_FALSE, send_sock) == SWITCH_STATUS_SUCCESS);
+		remote_port = switch_sockaddr_get_port(local_sa);
+		fst_requires(remote_port > 0);
+
+		legacy_rtp = switch_rtp_new(rx_host, local_port, tx_host, remote_port, TEST_PT, 8000, 20 * 1000,
+			legacy_flags, "soft", &legacy_err, test_pool);
+		fst_requires(legacy_rtp != NULL);
+		fst_requires(switch_rtp_ready(legacy_rtp));
+		negotiated_map.allocated = 1;
+		negotiated_map.negotiated = 1;
+		negotiated_map.pt = TEST_PT;
+		negotiated_map.recv_pt = TEST_PT;
+		fst_requires(switch_rtp_set_payload_map(legacy_rtp, &negotiated_maps) == SWITCH_STATUS_SUCCESS);
+		switch_rtp_intentional_bugs(legacy_rtp, RTP_BUG_ACCEPT_ANY_PAYLOAD);
+		switch_rtp_clear_flag(legacy_rtp, SWITCH_RTP_FLAG_PAUSE);
+		fst_requires(switch_sockaddr_info_get(&rtp_addr, rx_host, SWITCH_UNSPEC, local_port, 0, test_pool) == SWITCH_STATUS_SUCCESS);
+
+		packet_len = sizeof(packet);
+		fst_requires(switch_socket_sendto(send_sock, rtp_addr, 0, (const char *)packet, &packet_len) == SWITCH_STATUS_SUCCESS);
+		status = switch_rtp_zerocopy_read_frame(legacy_rtp, &frame, SWITCH_IO_FLAG_NONE);
+		fst_requires(status == SWITCH_STATUS_SUCCESS);
+		fst_check(frame.payload == 96);
+		stats = switch_rtp_get_stats(legacy_rtp, NULL);
+		fst_requires(stats != NULL);
+		fst_check(stats->inbound.packet_count == 1);
+		fst_check(stats->inbound.media_packet_count == 1);
+
+		if (send_sock) {
+			switch_socket_close(send_sock);
+		}
+		switch_rtp_destroy(&legacy_rtp);
+		switch_core_destroy_memory_pool(&test_pool);
+	}
+	FST_TEST_END()
 	FST_TEST_BEGIN(test_session_with_rtp)
 	{
 		switch_core_session_t *session = NULL;

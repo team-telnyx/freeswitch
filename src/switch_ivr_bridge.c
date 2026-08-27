@@ -237,7 +237,8 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 	}
 	b_channel = switch_core_session_get_channel(vh->session_b);
 
-	/* sample once whether destination video is bundled with audio. */
+	/* Seed the destination transport state. Re-offers can change it while this
+	 * bridge thread remains alive, so the loop re-evaluates it below. */
 	dst_is_bundle = switch_core_media_video_is_bundled(vh->session_b);
 
 	switch_core_session_request_video_refresh(vh->session_a);
@@ -246,6 +247,17 @@ static void video_bridge_thread(switch_core_session_t *session, void *obj)
 	refresh_timer = refresh_cnt;
 
 	while (switch_channel_up_nosig(channel) && switch_channel_up_nosig(b_channel) && vh->up == 1) {
+		switch_bool_t current_dst_is_bundle;
+
+		current_dst_is_bundle = switch_core_media_video_is_bundled(vh->session_b);
+		if (current_dst_is_bundle != dst_is_bundle) {
+			dst_is_bundle = current_dst_is_bundle;
+			bundle_kf_kick = 0;
+			bridge_start = switch_micro_time_now();
+			last_periodic_refresh = 0;
+			refresh_timer = refresh_cnt;
+		}
+
 		if (switch_channel_media_up(channel)) {
 			if (switch_core_session_transcoding(vh->session_a, vh->session_b, SWITCH_MEDIA_TYPE_VIDEO)) {
 				pass_val = 1;

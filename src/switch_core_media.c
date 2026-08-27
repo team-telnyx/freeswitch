@@ -222,6 +222,7 @@ struct switch_rtp_engine_s {
 	pre_dtls_video_buf_t *pre_dtls_buf; /* lazily allocated pre-DTLS video drop tracker */
 	switch_bool_t pre_dtls_wait_keyframe; /* suppress startup video until a fresh VP8 keyframe follows pre-DTLS drop */
 	uint32_t pre_dtls_wait_keyframe_drops;
+	switch_time_t pre_dtls_wait_keyframe_started;
 
 	/* BUNDLE drain thread state and fields */
 	volatile int bundle_drain_state;  /* 0=inactive, 1=starting, 2=running, 3=stopping */
@@ -331,9 +332,13 @@ static switch_bool_t engine_uses_vp8(switch_rtp_engine_t *engine)
 		!strcasecmp(engine->cur_payload_map->rm_encoding, "VP8"));
 }
 
-static void request_partner_keyframe(switch_core_session_t *session)
+#define PRE_DTLS_KEYFRAME_GATE_TIMEOUT_US 2000000
+#define PRE_DTLS_KEYFRAME_GATE_MAX_DROPS 300
+
+static switch_bool_t request_partner_keyframe(switch_core_session_t *session)
 {
 	switch_core_session_t *other_session = NULL;
+	switch_bool_t requested = SWITCH_FALSE;
 
 	if (switch_core_session_get_partner(session, &other_session) == SWITCH_STATUS_SUCCESS) {
 		switch_channel_t *other_channel;
@@ -341,14 +346,29 @@ static void request_partner_keyframe(switch_core_session_t *session)
 		if (switch_channel_up_nosig(session->channel) && other_channel && switch_channel_up_nosig(other_channel)) {
 			switch_core_media_gen_key_frame(other_session);
 			switch_core_session_force_request_video_refresh(other_session);
+			requested = SWITCH_TRUE;
 		}
 		switch_core_session_rwunlock(other_session);
+	}
+
+	return requested;
+}
+
+static void request_pre_dtls_source_keyframe(switch_core_session_t *session)
+{
+	if (!request_partner_keyframe(session)) {
+		/* Conference/file/generated video may not have a bridge partner. Ask the
+		 * local encoder and endpoint rather than leaving the gate dependent on a
+		 * spontaneous source keyframe. */
+		switch_core_media_gen_key_frame(session);
+		switch_core_session_force_request_video_refresh(session);
 	}
 }
 
 static switch_bool_t pre_dtls_keyframe_gate(switch_core_session_t *session, switch_rtp_engine_t *engine, switch_frame_t *frame, const char *path)
 {
 	switch_bool_t is_keyframe;
+	switch_time_t now;
 
 	if (!engine || !engine->pre_dtls_wait_keyframe) {
 		return SWITCH_TRUE;
@@ -356,8 +376,9 @@ static switch_bool_t pre_dtls_keyframe_gate(switch_core_session_t *session, swit
 
 	if (!engine_uses_vp8(engine)) {
 		engine->pre_dtls_wait_keyframe = SWITCH_FALSE;
+		engine->pre_dtls_wait_keyframe_started = 0;
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
-			"BUNDLE pre-DTLS %s keyframe gate bypassed for non-VP8 codec=%s\n",
+			"pre-DTLS %s keyframe gate bypassed for non-VP8 codec=%s\n",
 			switch_str_nil(path), engine->cur_payload_map && engine->cur_payload_map->rm_encoding ? engine->cur_payload_map->rm_encoding : "unknown");
 		return SWITCH_TRUE;
 	}
@@ -365,16 +386,34 @@ static switch_bool_t pre_dtls_keyframe_gate(switch_core_session_t *session, swit
 	is_keyframe = vp8_frame_is_keyframe(frame);
 	if (is_keyframe) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
-			"BUNDLE pre-DTLS %s keyframe gate opened: suppressed=%u seq=%u ts=%u len=%u\n",
+			"pre-DTLS %s keyframe gate opened: suppressed=%u seq=%u ts=%u len=%u\n",
 			switch_str_nil(path), engine->pre_dtls_wait_keyframe_drops, frame->seq, frame->timestamp, frame->datalen);
 		engine->pre_dtls_wait_keyframe = SWITCH_FALSE;
 		engine->pre_dtls_wait_keyframe_drops = 0;
+		engine->pre_dtls_wait_keyframe_started = 0;
 		return SWITCH_TRUE;
+	}
+
+	now = switch_micro_time_now();
+	if (!engine->pre_dtls_wait_keyframe_started) {
+		engine->pre_dtls_wait_keyframe_started = now;
 	}
 
 	engine->pre_dtls_wait_keyframe_drops++;
 	if (!(engine->pre_dtls_wait_keyframe_drops % 50)) {
-		request_partner_keyframe(session);
+		request_pre_dtls_source_keyframe(session);
+	}
+
+	if (engine->pre_dtls_wait_keyframe_drops >= PRE_DTLS_KEYFRAME_GATE_MAX_DROPS ||
+		(now - engine->pre_dtls_wait_keyframe_started) >= PRE_DTLS_KEYFRAME_GATE_TIMEOUT_US) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+			"pre-DTLS %s keyframe gate timed out: suppressed=%u elapsed_ms=%" SWITCH_TIME_T_FMT " - resuming video\n",
+			switch_str_nil(path), engine->pre_dtls_wait_keyframe_drops,
+			(now - engine->pre_dtls_wait_keyframe_started) / 1000);
+		engine->pre_dtls_wait_keyframe = SWITCH_FALSE;
+		engine->pre_dtls_wait_keyframe_drops = 0;
+		engine->pre_dtls_wait_keyframe_started = 0;
+		return SWITCH_TRUE;
 	}
 
 	return SWITCH_FALSE;
@@ -387,6 +426,7 @@ static void pre_dtls_track_deferred_write(switch_core_session_t *session, switch
 		engine->pre_dtls_buf->active = SWITCH_TRUE;
 		engine->pre_dtls_wait_keyframe = SWITCH_FALSE;
 		engine->pre_dtls_wait_keyframe_drops = 0;
+		engine->pre_dtls_wait_keyframe_started = 0;
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 			"pre-DTLS %s drop tracker allocated: capacity=%d\n",
 			switch_str_nil(path), PRE_DTLS_VIDEO_CAPACITY);
@@ -397,6 +437,7 @@ static void pre_dtls_track_deferred_write(switch_core_session_t *session, switch
 		engine->pre_dtls_buf->active = SWITCH_TRUE;
 		engine->pre_dtls_wait_keyframe = SWITCH_FALSE;
 		engine->pre_dtls_wait_keyframe_drops = 0;
+		engine->pre_dtls_wait_keyframe_started = 0;
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 			"pre-DTLS %s drop tracker re-armed after write 0 seq=%u\n",
 			switch_str_nil(path), frame->seq);
@@ -4043,7 +4084,7 @@ static switch_status_t bundle_frame_dup(switch_frame_t *orig, switch_frame_t **c
 		new_frame->packetlen = packetlen;
 		new_frame->data = ((uint8_t *)packet) + data_offset;
 		new_frame->datalen = datalen;
-		new_frame->buflen = (uint32_t)sizeof(*packet);
+		new_frame->buflen = (uint32_t)(sizeof(*packet) - data_offset);
 	} else {
 		if (!orig->data || !orig->buflen || orig->datalen > orig->buflen) {
 			return SWITCH_STATUS_FALSE;
@@ -4623,8 +4664,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 			switch_core_media_release_queued_read_frame(engine);
 
 			if (switch_frame_buffer_pop_timeout(engine->read_fb, &pop, 5000) != SWITCH_STATUS_SUCCESS || !pop) {
-				*frame = NULL;
-				switch_goto_status(SWITCH_STATUS_BREAK, end);
+				/* BREAK is considered a successful read by callers, so it must never
+				 * carry a NULL frame. Return the same dummy CNG frame used for read
+				 * contention while the drain queue is temporarily empty. */
+				*frame = &runtime.dummy_cng_frame;
+				switch_goto_status(SWITCH_STATUS_SUCCESS, end);
 			}
 
 			engine->read_fb_frame = (switch_frame_t *) pop;
@@ -5475,11 +5519,12 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 					engine->pre_dtls_buf->active = SWITCH_FALSE;
 					engine->pre_dtls_wait_keyframe = (switch_bool_t)engine_uses_vp8(engine);
 					engine->pre_dtls_wait_keyframe_drops = 0;
+					engine->pre_dtls_wait_keyframe_started = switch_micro_time_now();
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 						"pre-DTLS bundle tracked writes dropped after transport ready: dropped_now=%u dropped_total=%u tracked=%u gate_vp8_keyframe=%d - requesting source keyframe\n",
 						dropped_pre_dtls, engine->pre_dtls_buf->stat_dropped,
 						engine->pre_dtls_buf->stat_queued, engine->pre_dtls_wait_keyframe);
-					request_partner_keyframe(session);
+					request_pre_dtls_source_keyframe(session);
 					if (!pre_dtls_keyframe_gate(session, engine, frame, "bundle")) {
 						video_suppressed = 1;
 					} else {
@@ -5533,11 +5578,12 @@ enqueue_pre_dtls_pkt:
 					engine->pre_dtls_buf->active = SWITCH_FALSE;
 					engine->pre_dtls_wait_keyframe = (switch_bool_t)engine_uses_vp8(engine);
 					engine->pre_dtls_wait_keyframe_drops = 0;
+					engine->pre_dtls_wait_keyframe_started = switch_micro_time_now();
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 						"pre-DTLS non-bundle tracked writes dropped after transport ready: dropped_now=%u dropped_total=%u tracked=%u gate_vp8_keyframe=%d - requesting source keyframe\n",
 						dropped_pre_dtls, engine->pre_dtls_buf->stat_dropped,
 						engine->pre_dtls_buf->stat_queued, engine->pre_dtls_wait_keyframe);
-					request_partner_keyframe(session);
+					request_pre_dtls_source_keyframe(session);
 					if (pre_dtls_keyframe_gate(session, engine, frame, "non-bundle")) {
 						nbw = switch_rtp_write_frame(engine->rtp_session, frame);
 						if (nbw < 0) {
@@ -14482,9 +14528,9 @@ static char *get_setup(switch_rtp_engine_t *engine, switch_core_session_t *sessi
 
 //?
 static void generate_m(switch_core_session_t *session, char *buf, size_t buflen,
-					   switch_port_t port, const char *family, const char *ip,
-					   int cur_ptime, const char *append_audio, const char *sr, int use_cng, int cng_type, switch_event_t *map, int secure,
-					   switch_sdp_type_t sdp_type)
+						   switch_port_t port, const char *family, const char *ip,
+						   int cur_ptime, const char *append_audio, const char *sr, int use_cng, int cng_type, switch_event_t *map, int secure,
+						   switch_sdp_type_t sdp_type, int *audio_mid_emitted)
 {
 	int i = 0;
 	int rate;
@@ -14704,11 +14750,15 @@ static void generate_m(switch_core_session_t *session, char *buf, size_t buflen,
 			}
 		}
 	}
-	if (switch_core_media_bundle_should_offer(smh) &&
+	if ((!audio_mid_emitted || !*audio_mid_emitted) &&
+		switch_core_media_bundle_should_offer(smh) &&
 		!switch_channel_var_true(session->channel, "rtp_no_audio_mid") &&
 		!switch_channel_var_true(session->channel, "rtp_no_attr_mid")) {
 		audio_mid = switch_channel_get_variable_dup(session->channel, "rtp_audio_mid", SWITCH_FALSE, -1);
 		switch_snprintf(buf + strlen(buf), buflen - strlen(buf), "a=mid:%s\r\n", !zstr(audio_mid) ? audio_mid : "audio");
+		if (audio_mid_emitted) {
+			*audio_mid_emitted = 1;
+		}
 	}
 
 
@@ -15021,6 +15071,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 	int is_outbound = switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_OUTBOUND;
 	const char *vbw;
 	int bw = 256, i = 0;
+	int audio_mid_emitted = 0;
 	uint8_t fir = 0, nack = 0, pli = 0, tmmbr = 0, has_vid = 0, bundle_has_vid = 0;
 	const char *use_rtcp_mux = NULL;
 	const char *bundle_audio_mid = NULL, *bundle_video_mid = NULL;
@@ -15818,7 +15869,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 
 			if ((!a_engine->no_crypto && switch_channel_test_flag(session->channel, CF_SECURE)) ||
 				switch_channel_test_flag(session->channel, CF_DTLS)) {
-				generate_m(session, buf, SDPBUFLEN, port, family, ip, 0, append_audio, sr, use_cng, cng_type, map, 1, sdp_type);
+				generate_m(session, buf, SDPBUFLEN, port, family, ip, 0, append_audio, sr, use_cng, cng_type, map, 1, sdp_type, &audio_mid_emitted);
 				bp = (buf + strlen(buf));
 
 				if (smh->crypto_mode == CRYPTO_MODE_MANDATORY) {
@@ -15828,7 +15879,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 			}
 
 			if (both) {
-				generate_m(session, bp, SDPBUFLEN - strlen(buf), port, family, ip, 0, append_audio, sr, use_cng, cng_type, map, 0, sdp_type);
+				generate_m(session, bp, SDPBUFLEN - strlen(buf), port, family, ip, 0, append_audio, sr, use_cng, cng_type, map, 0, sdp_type, &audio_mid_emitted);
 			}
 
 		} else {
@@ -15854,7 +15905,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 
 					if ((!a_engine->no_crypto && switch_channel_test_flag(session->channel, CF_SECURE)) ||
 						switch_channel_test_flag(session->channel, CF_DTLS)) {
-						generate_m(session, bp, SDPBUFLEN - strlen(buf), port, family, ip, cur_ptime, append_audio, sr, use_cng, cng_type, map, 1, sdp_type);
+						generate_m(session, bp, SDPBUFLEN - strlen(buf), port, family, ip, cur_ptime, append_audio, sr, use_cng, cng_type, map, 1, sdp_type, &audio_mid_emitted);
 						bp = (buf + strlen(buf));
 
 						if (smh->crypto_mode == CRYPTO_MODE_MANDATORY) {
@@ -15867,7 +15918,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 					}
 
 					if (both) {
-						generate_m(session, bp, SDPBUFLEN - strlen(buf), port, family, ip, cur_ptime, append_audio, sr, use_cng, cng_type, map, 0, sdp_type);
+						generate_m(session, bp, SDPBUFLEN - strlen(buf), port, family, ip, cur_ptime, append_audio, sr, use_cng, cng_type, map, 0, sdp_type, &audio_mid_emitted);
 					}
 				}
 

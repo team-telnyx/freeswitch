@@ -9078,8 +9078,7 @@ static switch_bool_t rtp_should_bypass_audio_jb(switch_rtp_t *rtp_session)
 		rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] ||
 		rtp_session->flags[SWITCH_RTP_FLAG_PROXY_MEDIA] ||
 		rtp_session->flags[SWITCH_RTP_FLAG_UDPTL] ||
-		(!(rtp_session->rtp_bugs & RTP_BUG_ACCEPT_ANY_PAYLOAD) &&
-		 !rtp_session->flags[SWITCH_RTP_FLAG_BUNDLE_ACCEPT_ANY_PT])) {
+		!rtp_session->flags[SWITCH_RTP_FLAG_BUNDLE_ACCEPT_ANY_PT]) {
 		return SWITCH_FALSE;
 	}
 

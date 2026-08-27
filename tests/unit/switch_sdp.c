@@ -35,6 +35,24 @@
 
 static const char *rx_host = "127.0.0.1";
 
+static unsigned int count_occurrences(const char *haystack, const char *needle)
+{
+	unsigned int count = 0;
+	size_t needle_len;
+
+	if (!haystack || !needle || !*needle) {
+		return 0;
+	}
+
+	needle_len = strlen(needle);
+	while ((haystack = strstr(haystack, needle))) {
+		count++;
+		haystack += needle_len;
+	}
+
+	return count;
+}
+
 typedef struct sdp_candidate_s {
     char foundation[32];
     char transport[8];     /* "udp", "tcp" */
@@ -481,6 +499,38 @@ FST_CORE_BEGIN("./conf_sdp")
 			fst_check(strstr(s, "a=group:BUNDLE 0 1") != NULL);
 			fst_check(strstr(s, "a=mid:0") != NULL);
 			fst_check(strstr(s, "a=mid:1") != NULL);
+		}
+		FST_SESSION_END()
+
+		FST_SESSION_BEGIN(sdp_bundle_offer_emits_audio_mid_once_for_multiple_audio_mlines)
+		{
+			switch_status_t status;
+			switch_media_handle_t *media_handle;
+			switch_core_media_params_t *mparams;
+			const char *s;
+
+			mparams = switch_core_session_alloc(fst_session, sizeof(switch_core_media_params_t));
+			mparams->inbound_codec_string = switch_core_session_strdup(fst_session, "PCMU@20i,PCMU@30i,VP8");
+			mparams->outbound_codec_string = switch_core_session_strdup(fst_session, "PCMU@20i,PCMU@30i,VP8");
+			mparams->rtpip = switch_core_session_strdup(fst_session, (char *)rx_host);
+
+			status = switch_media_handle_create(&media_handle, fst_session, mparams);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			status = switch_core_media_prepare_codecs(fst_session, SWITCH_FALSE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			status = switch_core_media_choose_ports(fst_session, SWITCH_TRUE, SWITCH_TRUE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+
+			switch_channel_set_flag(fst_channel, CF_VIDEO);
+			switch_channel_set_variable(fst_channel, "rtp-bundle", "auto");
+			switch_channel_set_variable(fst_channel, "rtp_audio_mid", "0");
+			switch_channel_set_variable(fst_channel, "rtp_video_mid", "1");
+
+			switch_core_media_gen_local_sdp(fst_session, SDP_OFFER, "127.0.0.1", 40000, NULL, 1);
+			s = switch_channel_get_variable(fst_channel, "rtp_local_sdp_str");
+			fst_requires(s != NULL);
+			fst_check(count_occurrences(s, "m=audio ") > 1);
+			fst_check(count_occurrences(s, "a=mid:0\r\n") == 1);
 		}
 		FST_SESSION_END()
 
