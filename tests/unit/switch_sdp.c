@@ -678,12 +678,12 @@ FST_CORE_BEGIN("./conf_sdp")
 		FST_SESSION_END()
 
 		/*
-		 * TELCORE-413: when generating the SDP answer for a hold re-INVITE,
+		 * When generating the SDP answer for a hold re-INVITE,
 		 * switch_core_media_gen_local_sdp() must not push INACTIVE onto a partner
 		 * leg that is not itself held -- that closes the partner's RTP write gate
 		 * in switch_core_media_write_frame() and the hold audio stops reaching it.
 		 * Every held-partner state, the legacy opt-out, and every other answer
-		 * direction must keep the propagation that ENGDESK-45312 introduced.
+		 * direction must keep the existing partner-propagation behavior.
 		 *
 		 * Each row seeds the partner with "baseline", generates the answer with
 		 * "sr", then checks the partner's resulting smode. The baseline differs
@@ -814,7 +814,7 @@ FST_CORE_BEGIN("./conf_sdp")
 
 						got = switch_core_session_media_flow(partner, SWITCH_MEDIA_TYPE_AUDIO);
 						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-										  "TELCORE-413 matrix: %s -> partner smode %d, expected %d\n",
+										  "inactive hold matrix: %s -> partner smode %d, expected %d\n",
 										  matrix[i].name, got, matrix[i].expect);
 						fst_xcheck(got == matrix[i].expect, matrix[i].name);
 					}
