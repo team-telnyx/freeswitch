@@ -13909,7 +13909,8 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 				} else if (new_smode == SWITCH_MEDIA_FLOW_INACTIVE &&
 						   !switch_channel_var_true(session->channel, "rtp_inactive_hold_propagate_legacy") &&
 						   other_engine->rmode != SWITCH_MEDIA_FLOW_INACTIVE &&
-						   !switch_channel_test_flag(switch_core_session_get_channel(other_session), CF_PROTO_HOLD)) {
+						   !switch_channel_test_flag(switch_core_session_get_channel(other_session), CF_PROTO_HOLD) &&
+						   !switch_channel_test_flag(switch_core_session_get_channel(other_session), CF_HOLD)) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
 									  "Skipping partner media mode update for inactive hold; partner keeps smode %d\n",
 									  other_engine->smode);
