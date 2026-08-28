@@ -676,6 +676,176 @@ FST_CORE_BEGIN("./conf_sdp")
 		}
 		}
 		FST_SESSION_END()
+
+		/*
+		 * When generating the SDP answer for a hold re-INVITE,
+		 * switch_core_media_gen_local_sdp() must not push INACTIVE onto a partner
+		 * leg that is not itself held -- that closes the partner's RTP write gate
+		 * in switch_core_media_write_frame() and the hold audio stops reaching it.
+		 * Every held-partner state, the legacy opt-out, and every other answer
+		 * direction must keep the existing partner-propagation behavior.
+		 *
+		 * Each row seeds the partner with "baseline", generates the answer with
+		 * "sr", then checks the partner's resulting smode. The baseline differs
+		 * from the expectation wherever the row has to prove the code acted, so no
+		 * row can pass just because the seed already matched.
+		 */
+		FST_SESSION_BEGIN(inactive_hold_partner_smode)
+		{
+			static const struct {
+				const char *name;
+				const char *sr;
+				switch_media_flow_t baseline;
+				int proto_hold;
+				int hold;
+				int legacy;
+				switch_media_flow_t expect;
+			} matrix[] = {
+				{ "inactive answer, non-held partner keeps sendrecv", "inactive",
+				  SWITCH_MEDIA_FLOW_SENDRECV, 0, 0, 0, SWITCH_MEDIA_FLOW_SENDRECV },
+				{ "inactive answer, non-held partner is preserved, not forced to sendrecv", "inactive",
+				  SWITCH_MEDIA_FLOW_SENDONLY, 0, 0, 0, SWITCH_MEDIA_FLOW_SENDONLY },
+				{ "inactive answer, partner CF_PROTO_HOLD still propagates", "inactive",
+				  SWITCH_MEDIA_FLOW_SENDRECV, 1, 0, 0, SWITCH_MEDIA_FLOW_INACTIVE },
+				{ "inactive answer, partner CF_HOLD still propagates", "inactive",
+				  SWITCH_MEDIA_FLOW_SENDRECV, 0, 1, 0, SWITCH_MEDIA_FLOW_INACTIVE },
+				{ "inactive answer, legacy opt-out still propagates", "inactive",
+				  SWITCH_MEDIA_FLOW_SENDRECV, 0, 0, 1, SWITCH_MEDIA_FLOW_INACTIVE },
+				{ "sendonly answer unchanged", "sendonly",
+				  SWITCH_MEDIA_FLOW_SENDRECV, 0, 0, 0, SWITCH_MEDIA_FLOW_RECVONLY },
+				{ "recvonly answer unchanged", "recvonly",
+				  SWITCH_MEDIA_FLOW_SENDRECV, 0, 0, 0, SWITCH_MEDIA_FLOW_SENDONLY },
+				{ "sendrecv resume restores the partner", "sendrecv",
+				  SWITCH_MEDIA_FLOW_INACTIVE, 0, 0, 0, SWITCH_MEDIA_FLOW_SENDRECV }
+			};
+			const char *offer =
+				"v=0\n"
+				"o=- 1683118194 1683118195 IN IP4 127.0.0.1\n"
+				"s=-\n"
+				"c=IN IP4 127.0.0.1\n"
+				"t=0 0\n"
+				"m=audio 11114 RTP/AVP 0\n"
+				"a=rtpmap:0 PCMU/8000\n"
+				"a=sendrecv\n";
+			const char *inactive_offer =
+				"v=0\n"
+				"o=- 1683118194 1683118196 IN IP4 127.0.0.1\n"
+				"s=-\n"
+				"c=IN IP4 127.0.0.1\n"
+				"t=0 0\n"
+				"m=audio 11114 RTP/AVP 0\n"
+				"a=rtpmap:0 PCMU/8000\n"
+				"a=inactive\n";
+			switch_core_session_t *partner = NULL;
+			switch_channel_t *partner_channel = NULL;
+			switch_call_cause_t cause = SWITCH_CAUSE_NORMAL_CLEARING;
+			switch_media_handle_t *media_handle = NULL, *partner_media_handle = NULL;
+			switch_core_media_params_t *mparams, *partner_mparams;
+			const char *rmode_str;
+			switch_status_t status;
+			uint8_t match = 0, p = 0;
+			int i;
+
+			/* The partner has to be a real located session: the block under test
+			 * reaches it through switch_core_session_get_partner(). Nothing below
+			 * uses fst_requires(), which would break out of the test and skip the
+			 * hangup and rwunlock of that session. */
+			status = switch_ivr_originate(NULL, &partner, &cause, "null/+15554445555", 2,
+										  NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+
+			if (partner) {
+				partner_channel = switch_core_session_get_channel(partner);
+				switch_channel_set_state(partner_channel, CS_SOFT_EXECUTE);
+				switch_channel_wait_for_state(partner_channel, NULL, CS_SOFT_EXECUTE);
+
+				mparams = switch_core_session_alloc(fst_session, sizeof(switch_core_media_params_t));
+				mparams->inbound_codec_string = switch_core_session_strdup(fst_session, "PCMU");
+				mparams->outbound_codec_string = switch_core_session_strdup(fst_session, "PCMU");
+				mparams->rtpip = switch_core_session_strdup(fst_session, (char *)rx_host);
+				status = switch_media_handle_create(&media_handle, fst_session, mparams);
+				fst_check(status == SWITCH_STATUS_SUCCESS);
+
+				partner_mparams = switch_core_session_alloc(partner, sizeof(switch_core_media_params_t));
+				partner_mparams->inbound_codec_string = switch_core_session_strdup(partner, "PCMU");
+				partner_mparams->outbound_codec_string = switch_core_session_strdup(partner, "PCMU");
+				partner_mparams->rtpip = switch_core_session_strdup(partner, (char *)rx_host);
+				status = switch_media_handle_create(&partner_media_handle, partner, partner_mparams);
+				fst_check(status == SWITCH_STATUS_SUCCESS);
+
+				/* This test covers SDP answer propagation only; keep
+				 * switch_core_media_toggle_hold() and its broadcast out of the way. */
+				switch_channel_set_variable(fst_channel, "rtp_disable_hold", "true");
+				switch_channel_set_variable(partner_channel, "rtp_disable_hold", "true");
+
+				/* gen_local_sdp() needs negotiated codecs and an advertised port on the
+				 * holding leg, so do not run the matrix unless every precondition held. */
+				if (switch_core_media_prepare_codecs(fst_session, SWITCH_FALSE) == SWITCH_STATUS_SUCCESS &&
+					switch_core_media_prepare_codecs(partner, SWITCH_FALSE) == SWITCH_STATUS_SUCCESS &&
+					switch_core_media_negotiate_sdp(fst_session, offer, &p, SDP_OFFER) == 1 &&
+					switch_core_media_negotiate_sdp(partner, offer, &p, SDP_OFFER) == 1 &&
+					switch_core_media_choose_port(fst_session, SWITCH_MEDIA_TYPE_AUDIO, 0) == SWITCH_STATUS_SUCCESS) {
+
+					/* The block only runs for an answer generated on a bridged re-INVITE. */
+					switch_channel_set_flag(fst_channel, CF_REINVITE);
+					switch_channel_set_variable(fst_channel, SWITCH_SIGNAL_BOND_VARIABLE, switch_core_session_get_uuid(partner));
+
+					for (i = 0; i < (int)(sizeof(matrix) / sizeof(matrix[0])); ++i) {
+						switch_media_flow_t got;
+
+						switch_core_media_set_smode(partner, SWITCH_MEDIA_TYPE_AUDIO, matrix[i].baseline, SDP_ANSWER);
+
+						if (matrix[i].proto_hold) {
+							switch_channel_set_flag(partner_channel, CF_PROTO_HOLD);
+						} else {
+							switch_channel_clear_flag(partner_channel, CF_PROTO_HOLD);
+						}
+
+						if (matrix[i].hold) {
+							switch_channel_set_flag(partner_channel, CF_HOLD);
+						} else {
+							switch_channel_clear_flag(partner_channel, CF_HOLD);
+						}
+
+						switch_channel_set_variable(fst_channel, "rtp_inactive_hold_propagate_legacy",
+													matrix[i].legacy ? "true" : NULL);
+
+						switch_core_media_gen_local_sdp(fst_session, SDP_ANSWER, NULL, 0, matrix[i].sr, 0);
+
+						got = switch_core_session_media_flow(partner, SWITCH_MEDIA_TYPE_AUDIO);
+						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+										  "inactive hold matrix: %s -> partner smode %d, expected %d\n",
+										  matrix[i].name, got, matrix[i].expect);
+						fst_xcheck(got == matrix[i].expect, matrix[i].name);
+					}
+
+					/* The remaining row needs the partner's negotiated remote mode to be
+					 * inactive, which only switch_core_media_negotiate_sdp() can set. */
+					switch_channel_clear_flag(partner_channel, CF_PROTO_HOLD);
+					switch_channel_clear_flag(partner_channel, CF_HOLD);
+					switch_channel_set_variable(fst_channel, "rtp_inactive_hold_propagate_legacy", NULL);
+
+					match = switch_core_media_negotiate_sdp(partner, inactive_offer, &p, SDP_OFFER);
+					fst_check(match == 1);
+
+					rmode_str = switch_channel_get_variable(partner_channel, "remote_audio_media_flow");
+					fst_xcheck(rmode_str && !strcmp(rmode_str, "inactive"), "partner remote mode is inactive");
+
+					switch_core_media_set_smode(partner, SWITCH_MEDIA_TYPE_AUDIO, SWITCH_MEDIA_FLOW_SENDRECV, SDP_ANSWER);
+					switch_core_media_gen_local_sdp(fst_session, SDP_ANSWER, NULL, 0, "inactive", 0);
+					fst_xcheck(switch_core_session_media_flow(partner, SWITCH_MEDIA_TYPE_AUDIO) == SWITCH_MEDIA_FLOW_INACTIVE,
+							   "inactive answer, partner rmode inactive still propagates");
+				} else {
+					fst_fail("media setup for the inactive hold matrix failed");
+				}
+
+				switch_channel_hangup(partner_channel, SWITCH_CAUSE_NORMAL_CLEARING);
+				switch_core_session_rwunlock(partner);
+			} else {
+				fst_fail("could not originate the partner session");
+			}
+		}
+		FST_SESSION_END()
 	}
 	FST_SUITE_END()
 }
