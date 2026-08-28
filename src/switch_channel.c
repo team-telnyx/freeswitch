@@ -4797,6 +4797,76 @@ SWITCH_DECLARE(switch_core_session_t *) switch_channel_get_session(switch_channe
 #define CLAMP_STAMP_FIELD(v, lo, hi) ((v) < (lo) ? (lo) : ((v) > (hi) ? (hi) : (v)))
 
 /*!
+  \brief Widen the window in which a stray write to a stamp buffer can be seen.
+
+  A CDR timestamp was once stored with a NUL byte in the middle of an otherwise
+  correct value. The write that shortened it was never identified: it lands
+  inside the buffer, so it corrupts no allocator metadata and crosses no page
+  boundary, which leaves both AddressSanitizer and guard pages blind to it.
+
+  The only period in which it can be observed is between the formatter filling
+  the buffer and the value being copied into the channel variable, which is a
+  few hundred nanoseconds. This helper takes a reference copy, holds that gap
+  open for the configured number of milliseconds, then compares. Chance of
+  catching a randomly timed write scales with the width of the gap, so a
+  millisecond turns a wait of years into one a soak test can win.
+
+  Disabled unless the "cdr_stamp_watch_ms" core variable is set to a positive
+  value, so production pays nothing. Intended for a lab or canary host.
+
+  \return milliseconds to hold the window open, 0 when disabled
+*/
+static uint32_t chan_stamp_watch_ms(void)
+{
+	const char *val = switch_core_get_variable("cdr_stamp_watch_ms");
+	int ms;
+
+	if (zstr(val)) {
+		return 0;
+	}
+
+	ms = atoi(val);
+
+	if (ms < 0) {
+		return 0;
+	}
+
+	/* Cap it: this delays hangup processing on every call while enabled. */
+	if (ms > 1000) {
+		ms = 1000;
+	}
+
+	return (uint32_t)ms;
+}
+
+/*!
+  \brief Report a stamp buffer that changed after the formatter returned.
+
+  Logs the value before and after alongside a hex dump, which is what
+  identifies the write. A single altered byte and an otherwise intact buffer
+  means one stray store; a run of zeroes means a wider store, which is a
+  different fault to look for.
+*/
+static void chan_stamp_report_mutation(switch_channel_t *channel, const char *name,
+									   const char *before, const char *after,
+									   switch_size_t retsize, uint32_t waited_ms)
+{
+	char hex[3 * 24 + 1] = "";
+	switch_size_t i;
+	switch_size_t pos = 0;
+
+	for (i = 0; i < 24; i++) {
+		pos += switch_snprintf(hex + pos, sizeof(hex) - pos, "%02x ", (unsigned char)after[i]);
+	}
+
+	switch_log_printf(SWITCH_CHANNEL_CHANNEL_LOG(channel), SWITCH_LOG_CRIT,
+					  "CDR stamp mutated after formatting [%s] before=[%s] after=[%s] "
+					  "retsize=%" SWITCH_SIZE_T_FMT " strlen_now=%" SWITCH_SIZE_T_FMT
+					  " watched_ms=%u hex=%s\n",
+					  name, before, after, retsize, strlen(after), waited_ms, hex);
+}
+
+/*!
   \brief Format a CDR timestamp and verify the result before it is stored.
 
   switch_strftime_nocheck() discards the value returned by strftime(), so a
@@ -4823,6 +4893,7 @@ static switch_bool_t switch_channel_format_stamp(switch_channel_t *channel, cons
 	switch_size_t retsize = 0;
 	switch_size_t len;
 	int year;
+	uint32_t watch_ms;
 
 	memset(&tm, 0, sizeof(tm));
 	memset(buf, 0, buflen);
@@ -4830,6 +4901,24 @@ static switch_bool_t switch_channel_format_stamp(switch_channel_t *channel, cons
 	switch_time_exp_lt(&tm, when);
 	switch_strftime_nocheck(buf, &retsize, buflen, SWITCH_CDR_STAMP_FMT, &tm);
 	len = strlen(buf);
+
+	/*
+	 * Diagnostic only, off unless cdr_stamp_watch_ms is set. Holds the gap
+	 * between formatting and storing open so a stray write into this buffer
+	 * can be seen and dumped instead of silently changing the value.
+	 */
+	if ((watch_ms = chan_stamp_watch_ms())) {
+		char before[80] = "";
+
+		switch_copy_string(before, buf, sizeof(before));
+		switch_yield(watch_ms * 1000);
+
+		if (strcmp(before, buf)) {
+			chan_stamp_report_mutation(channel, name, before, buf, retsize, watch_ms);
+			switch_copy_string(buf, before, buflen);
+			len = strlen(buf);
+		}
+	}
 
 	if (retsize == SWITCH_CDR_STAMP_LEN && len == SWITCH_CDR_STAMP_LEN) {
 		return SWITCH_TRUE;

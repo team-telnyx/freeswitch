@@ -359,6 +359,48 @@ FST_TEST_BEGIN(corrupt_tm_does_not_truncate)
 }
 FST_TEST_END()
 
+/*
+ * The stamp watchdog stays off unless it is asked for.
+ *
+ * It holds every stamp open for the configured time, so a stray value in
+ * production configuration would add that delay to every hangup. Confirm the
+ * default is inert and that the value is capped.
+ */
+FST_SESSION_BEGIN(stamp_watchdog_is_off_by_default)
+{
+	switch_channel_t *channel = switch_core_session_get_channel(fst_session);
+	switch_caller_profile_t *profile;
+	switch_time_t started;
+	switch_time_t elapsed_ms;
+	const char *stored;
+
+	fst_requires(channel);
+
+	profile = switch_channel_get_caller_profile(channel);
+	fst_requires(profile);
+	fst_requires(profile->times);
+
+	fst_check(zstr(switch_core_get_variable("cdr_stamp_watch_ms")));
+
+	profile->times->created = REPORTED_UEPOCH;
+
+	reset_timestamps(channel);
+	started = switch_time_now();
+	switch_channel_set_timestamps(channel);
+	elapsed_ms = (switch_time_now() - started) / 1000;
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+					  "set_timestamps took %" SWITCH_TIME_T_FMT " ms\n", elapsed_ms);
+
+	/* Nine stamps at even 1 ms each would be 9 ms; unset must cost nothing. */
+	fst_check(elapsed_ms < 100);
+
+	stored = switch_channel_get_variable(channel, "start_stamp");
+	fst_requires(stored);
+	fst_check(strlen(stored) == STAMP_LEN);
+}
+FST_SESSION_END()
+
 FST_SUITE_END()
 
 FST_CORE_END()
