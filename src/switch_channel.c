@@ -4790,6 +4790,59 @@ SWITCH_DECLARE(switch_core_session_t *) switch_channel_get_session(switch_channe
 	return channel->session;
 }
 
+#define SWITCH_CDR_STAMP_FMT "%Y-%m-%d %T"
+#define SWITCH_CDR_STAMP_LEN 19
+
+/*!
+  \brief Format a CDR timestamp and verify the result before it is stored.
+
+  switch_strftime_nocheck() discards the value returned by strftime(), so a
+  short or mangled buffer is stored into the CDR without any indication that
+  something went wrong. A malformed stamp is not detectable downstream and
+  breaks consumers that parse the field.
+
+  This helper formats the stamp, then verifies that strftime() reported the
+  expected length AND that the buffer really holds that many bytes. If the two
+  disagree, it logs the evidence needed to identify the writer and rebuilds the
+  value from the same broken-down time using an independent formatter.
+
+  \param channel the channel, used for logging context
+  \param name the CDR variable name, used for logging
+  \param when the microsecond timestamp to format
+  \param buf destination buffer
+  \param buflen size of the destination buffer
+  \return SWITCH_TRUE when the first format attempt was well formed
+*/
+static switch_bool_t switch_channel_format_stamp(switch_channel_t *channel, const char *name,
+												 switch_time_t when, char *buf, switch_size_t buflen)
+{
+	switch_time_exp_t tm;
+	switch_size_t retsize = 0;
+	switch_size_t len;
+
+	memset(&tm, 0, sizeof(tm));
+	memset(buf, 0, buflen);
+
+	switch_time_exp_lt(&tm, when);
+	switch_strftime_nocheck(buf, &retsize, buflen, SWITCH_CDR_STAMP_FMT, &tm);
+	len = strlen(buf);
+
+	if (retsize == SWITCH_CDR_STAMP_LEN && len == SWITCH_CDR_STAMP_LEN) {
+		return SWITCH_TRUE;
+	}
+
+	switch_log_printf(SWITCH_CHANNEL_CHANNEL_LOG(channel), SWITCH_LOG_CRIT,
+					  "Malformed CDR timestamp [%s] retsize=%" SWITCH_SIZE_T_FMT " strlen=%" SWITCH_SIZE_T_FMT
+					  " src=%" SWITCH_TIME_T_FMT " buf=[%s]\n", name, retsize, len, when, buf);
+
+	/* Rebuild from the same broken-down time. Same instant, independent formatter. */
+	switch_snprintf(buf, buflen, "%04d-%02d-%02d %02d:%02d:%02d",
+					tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+					tm.tm_hour, tm.tm_min, tm.tm_sec);
+
+	return SWITCH_FALSE;
+}
+
 SWITCH_DECLARE(switch_status_t) switch_channel_set_timestamps(switch_channel_t *channel)
 {
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
@@ -4797,7 +4850,7 @@ SWITCH_DECLARE(switch_status_t) switch_channel_set_timestamps(switch_channel_t *
 	switch_caller_profile_t *caller_profile;
 	switch_app_log_t *app_log, *ap;
 	char *last_app = NULL, *last_arg = NULL;
-	char start[80] = "", resurrect[80] = "", answer[80] = "", hold[80],
+	char start[80] = "", resurrect[80] = "", answer[80] = "", hold[80] = "",
 		bridge[80] = "", progress[80] = "", progress_media[80] = "", end[80] = "", tmp[80] = "",
 		profile_start[80] =	"";
 	int32_t duration = 0, legbillsec = 0, billsec = 0, mduration = 0, billmsec = 0, legbillmsec = 0, progressmsec = 0, progress_mediamsec = 0, ringback_delaymsec = 0, first_early_rtp_packetmsec = 0;
@@ -4897,51 +4950,39 @@ SWITCH_DECLARE(switch_status_t) switch_channel_set_timestamps(switch_channel_t *
 	}
 
 	if (caller_profile->times) {
-		switch_time_exp_t tm;
-		switch_size_t retsize;
-		const char *fmt = "%Y-%m-%d %T";
-
-		switch_time_exp_lt(&tm, caller_profile->times->created);
-		switch_strftime_nocheck(start, &retsize, sizeof(start), fmt, &tm);
+		switch_channel_format_stamp(channel, "start_stamp", caller_profile->times->created, start, sizeof(start));
 		switch_channel_set_variable(channel, "start_stamp", start);
 
-		switch_time_exp_lt(&tm, caller_profile->times->profile_created);
-		switch_strftime_nocheck(profile_start, &retsize, sizeof(profile_start), fmt, &tm);
+		switch_channel_format_stamp(channel, "profile_start_stamp", caller_profile->times->profile_created, profile_start, sizeof(profile_start));
 		switch_channel_set_variable(channel, "profile_start_stamp", profile_start);
 
 		if (caller_profile->times->answered) {
-			switch_time_exp_lt(&tm, caller_profile->times->answered);
-			switch_strftime_nocheck(answer, &retsize, sizeof(answer), fmt, &tm);
+			switch_channel_format_stamp(channel, "answer_stamp", caller_profile->times->answered, answer, sizeof(answer));
 			switch_channel_set_variable(channel, "answer_stamp", answer);
 		}
 
 		if (caller_profile->times->bridged) {
-			switch_time_exp_lt(&tm, caller_profile->times->bridged);
-			switch_strftime_nocheck(bridge, &retsize, sizeof(bridge), fmt, &tm);
+			switch_channel_format_stamp(channel, "bridge_stamp", caller_profile->times->bridged, bridge, sizeof(bridge));
 			switch_channel_set_variable(channel, "bridge_stamp", bridge);
 		}
 
 		if (caller_profile->times->last_hold) {
-			switch_time_exp_lt(&tm, caller_profile->times->last_hold);
-			switch_strftime_nocheck(hold, &retsize, sizeof(hold), fmt, &tm);
+			switch_channel_format_stamp(channel, "hold_stamp", caller_profile->times->last_hold, hold, sizeof(hold));
 			switch_channel_set_variable(channel, "hold_stamp", hold);
 		}
 
 		if (caller_profile->times->resurrected) {
-			switch_time_exp_lt(&tm, caller_profile->times->resurrected);
-			switch_strftime_nocheck(resurrect, &retsize, sizeof(resurrect), fmt, &tm);
+			switch_channel_format_stamp(channel, "resurrect_stamp", caller_profile->times->resurrected, resurrect, sizeof(resurrect));
 			switch_channel_set_variable(channel, "resurrect_stamp", resurrect);
 		}
 
 		if (caller_profile->times->progress) {
-			switch_time_exp_lt(&tm, caller_profile->times->progress);
-			switch_strftime_nocheck(progress, &retsize, sizeof(progress), fmt, &tm);
+			switch_channel_format_stamp(channel, "progress_stamp", caller_profile->times->progress, progress, sizeof(progress));
 			switch_channel_set_variable(channel, "progress_stamp", progress);
 		}
 
 		if (caller_profile->times->progress_media) {
-			switch_time_exp_lt(&tm, caller_profile->times->progress_media);
-			switch_strftime_nocheck(progress_media, &retsize, sizeof(progress_media), fmt, &tm);
+			switch_channel_format_stamp(channel, "progress_media_stamp", caller_profile->times->progress_media, progress_media, sizeof(progress_media));
 			switch_channel_set_variable(channel, "progress_media_stamp", progress_media);
 		}
 
@@ -4972,8 +5013,7 @@ SWITCH_DECLARE(switch_status_t) switch_channel_set_timestamps(switch_channel_t *
 			}
 		}
 
-		switch_time_exp_lt(&tm, caller_profile->times->hungup);
-		switch_strftime_nocheck(end, &retsize, sizeof(end), fmt, &tm);
+		switch_channel_format_stamp(channel, "end_stamp", caller_profile->times->hungup, end, sizeof(end));
 		switch_channel_set_variable(channel, "end_stamp", end);
 
 		tt_created = (time_t) (caller_profile->times->created / 1000000);
