@@ -30,6 +30,17 @@
  * is therefore deterministic. Against the unvalidated code that stamp reaches
  * the CDR unchanged and the test fails; with validation in place the stamp is
  * rejected, logged, repaired, and the test passes.
+ *
+ * WHAT THESE TESTS DO NOT ASSERT
+ *
+ *   - that the corruption behind TELCORE-424 cannot happen again. It is not
+ *     reproduced here and a green run says nothing about it.
+ *   - anything about the code that shortened the production buffer. It was
+ *     never identified.
+ *
+ * A malformed stamp that is detected is repaired to a well formed value, which
+ * can differ from the true time when the source time is out of range. The CRIT
+ * line carries the original bytes for anyone who needs them.
  */
 
 #include <switch.h>
@@ -67,6 +78,46 @@ static void reset_timestamps(switch_channel_t *channel)
 	switch_channel_clear_flag(channel, CF_TIMESTAMP_SET);
 }
 
+/*
+ * Capture the CRIT diagnostic the guard emits.
+ *
+ * The log pipeline is asynchronous, so the logger stores the first matching
+ * line and signals a condition the test waits on, following the pattern in
+ * tests/unit/switch_log.c.
+ */
+static switch_mutex_t *log_mutex = NULL;
+static switch_thread_cond_t *log_cond = NULL;
+static char *captured_crit = NULL;
+
+static switch_status_t crit_logger(const switch_log_node_t *node, switch_log_level_t level)
+{
+	switch_mutex_lock(log_mutex);
+	if (level == SWITCH_LOG_CRIT && !captured_crit && node->content &&
+		strstr(node->content, "Malformed CDR timestamp")) {
+		captured_crit = strdup(node->content);
+		switch_thread_cond_signal(log_cond);
+	}
+	switch_mutex_unlock(log_mutex);
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static char *wait_for_crit(switch_interval_time_t timeout_ms)
+{
+	char *line = NULL;
+	switch_time_t now = switch_time_now();
+	switch_time_t expiration = now + (timeout_ms * 1000);
+
+	switch_mutex_lock(log_mutex);
+	while (!captured_crit && (now = switch_time_now()) < expiration) {
+		switch_thread_cond_timedwait(log_cond, log_mutex, expiration - now);
+	}
+	line = captured_crit;
+	captured_crit = NULL;
+	switch_mutex_unlock(log_mutex);
+
+	return line;
+}
+
 FST_CORE_BEGIN("./conf")
 
 FST_SUITE_BEGIN(switch_channel_timestamps)
@@ -97,12 +148,17 @@ FST_SESSION_BEGIN(malformed_stamp_is_rejected_and_repaired)
 	switch_channel_t *channel = switch_core_session_get_channel(fst_session);
 	switch_caller_profile_t *profile;
 	const char *stored;
+	char *crit;
 
 	fst_requires(channel);
 
 	profile = switch_channel_get_caller_profile(channel);
 	fst_requires(profile);
 	fst_requires(profile->times);
+
+	switch_mutex_init(&log_mutex, SWITCH_MUTEX_NESTED, fst_pool);
+	switch_thread_cond_create(&log_cond, fst_pool);
+	switch_log_bind_logger(crit_logger, SWITCH_LOG_CRIT, SWITCH_FALSE);
 
 	profile->times->created = OVERLONG_UEPOCH;
 	profile->times->profile_created = OVERLONG_UEPOCH;
@@ -122,6 +178,22 @@ FST_SESSION_BEGIN(malformed_stamp_is_rejected_and_repaired)
 	stored = switch_channel_get_variable(channel, "profile_start_stamp");
 	fst_requires(stored);
 	fst_check(strlen(stored) == STAMP_LEN);
+
+	/*
+	 * The diagnostic is the part that identifies the writer next time, so it
+	 * has to carry the field name, both lengths and the rejected bytes.
+	 */
+	crit = wait_for_crit(1000);
+	fst_requires(crit);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "captured: %s", crit);
+
+	fst_check(strstr(crit, "start_stamp") != NULL);
+	fst_check(strstr(crit, "retsize=") != NULL);
+	fst_check(strstr(crit, "strlen=") != NULL);
+	fst_check(strstr(crit, "buf=[") != NULL);
+
+	switch_safe_free(crit);
+	switch_log_unbind_logger(crit_logger);
 }
 FST_SESSION_END()
 
