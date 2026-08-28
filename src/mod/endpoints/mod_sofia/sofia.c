@@ -5043,7 +5043,7 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 					switch_thread_rwlock_create(&profile->rwlock, profile->pool);
 					switch_mutex_init(&profile->flag_mutex, SWITCH_MUTEX_NESTED, profile->pool);
 					profile->dtmf_duration = 100;
-					profile->rtp_digit_delay = 40;
+					profile->rtp_digit_delay = 20;
 					profile->ignore_rtp_during_dtmf_timeout = SWITCH_RTP_DEFAULT_IGNORE_DTMF_TIMEOUT_MS;
 					profile->sip_force_expires = 0;
 					profile->sip_force_expires_min = 0;

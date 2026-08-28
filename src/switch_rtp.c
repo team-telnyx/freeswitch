@@ -545,7 +545,6 @@ struct switch_rtp {
 	uint32_t last_max_vb_frames;
 	int skip_timer;
 	uint32_t prev_nacks_inflight;
-	switch_time_t next_dtmf_send_time;
 	rtcp_probe_func rtcp_probe;
 	uint8_t send_rtp_exts_size;
 	uint8_t send_rtp_exts_written;
@@ -7141,6 +7140,16 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_change_interval(switch_rtp_t *rtp_ses
 							  "Problem RE-Starting timer [%s] %d bytes per %dms\n", rtp_session->timer_name, samples_per_interval, ms_per_packet / 1000);
 		}
 
+		/* The new timer's samplecount restarts near zero, so any DTMF delay floor
+		   armed against the old timer's epoch would hold digits for the rest of the leg. */
+		if (rtp_session->next_write_samplecount || rtp_session->max_next_write_samplecount) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+							  "Timer re-created, clearing pending DTMF delay floor (%u/%u)\n",
+							  rtp_session->next_write_samplecount, rtp_session->max_next_write_samplecount);
+			rtp_session->next_write_samplecount = 0;
+			rtp_session->max_next_write_samplecount = 0;
+		}
+
 		WRITE_DEC(rtp_session);
 		READ_DEC(rtp_session);
 	}
@@ -8457,13 +8466,22 @@ SWITCH_DECLARE(void) switch_rtp_clear_flag(switch_rtp_t *rtp_session, switch_rtp
 
 static void set_dtmf_delay(switch_rtp_t *rtp_session, uint32_t ms)
 {
-	int upsamp = ms * (rtp_session->samples_per_second / 1000);
-	rtp_session->queue_delay =  ms * (rtp_session->samples_per_second / 1000);
-	rtp_session->next_dtmf_send_time = switch_micro_time_now() + (ms * 1000);
+	uint32_t upsamp = ms * (rtp_session->samples_per_second / 1000);
+
 	rtp_session->sending_dtmf = 0;
+	rtp_session->queue_delay = upsamp;
+
 	if (rtp_session->flags[SWITCH_RTP_FLAG_USE_TIMER]) {
+		/* Floor and ceiling are the same instant: the queued digit is held until
+		   the media clock reaches next_write_samplecount and released right there.
+		   Upstream arms a 10x ceiling for the interdigit case, but in this fork
+		   queue_delay is only cleared by an outbound write, so a stalled write
+		   path would turn that window into an extra hold of up to 10x the delay. */
+		rtp_session->next_write_samplecount = rtp_session->timer.samplecount + upsamp;
+		rtp_session->max_next_write_samplecount = rtp_session->next_write_samplecount;
 		rtp_session->last_write_ts += upsamp;
 	}
+
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "Queue digit delay of %dms\n", ms);
 }
 
@@ -8611,11 +8629,6 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 	if (!rtp_session->dtmf_data.out_digit_dur && rtp_session->dtmf_data.dtmf_queue && switch_queue_size(rtp_session->dtmf_data.dtmf_queue)) {
 		void *pop;
 
-
-		if (rtp_session->queue_delay && rtp_session->next_dtmf_send_time >  switch_micro_time_now()) {
-			return;
-		}
-
 		if (rtp_session->flags[SWITCH_RTP_FLAG_USE_TIMER]) {
 			//switch_core_timer_sync(&rtp_session->write_timer);
 			if (rtp_session->timer.samplecount < rtp_session->next_write_samplecount) {
@@ -8640,9 +8653,6 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 
 		if (rtp_session->queue_delay) {
 			return;
-		} else {
-			rtp_session->next_dtmf_send_time = 0;
-			rtp_session->queue_delay = 0;
 		}
 
 		if (!rtp_session->sending_dtmf) {
