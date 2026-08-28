@@ -13,7 +13,7 @@
  * for the specific language governing rights and limitations under the
  * License.
  *
- * switch_channel_timestamps.c -- CDR timestamp validation (TELCORE-424)
+ * switch_channel_timestamps.c -- CDR timestamp validation
  *
  * SCOPE OF THESE TESTS
  *
@@ -33,7 +33,7 @@
  *
  * WHAT THESE TESTS DO NOT ASSERT
  *
- *   - that the corruption behind TELCORE-424 cannot happen again. It is not
+ *   - that the corruption reported in the field cannot happen again. It is not
  *     reproduced here and a green run says nothing about it.
  *   - anything about the code that shortened the production buffer. It was
  *     never identified.
@@ -50,8 +50,8 @@
 #define STAMP_LEN 19
 #define STAMP_FMT "%Y-%m-%d %T"
 
-/* The microsecond value carried by the TELCORE-424 CDR. */
-#define TELCORE_424_UEPOCH 1787858962517996
+/* The microsecond value carried by the CDR that prompted this validation. */
+#define REPORTED_UEPOCH 1787858962517996
 
 /*
  * A caller_profile time that formats to 20 characters rather than 19, because
@@ -263,13 +263,13 @@ FST_SESSION_BEGIN(healthy_stamp_is_untouched)
 	fst_requires(profile);
 	fst_requires(profile->times);
 
-	profile->times->created = TELCORE_424_UEPOCH;
+	profile->times->created = REPORTED_UEPOCH;
 
 	reset_timestamps(channel);
 	switch_channel_set_timestamps(channel);
 
 	/* Recompute independently from the same source value. */
-	switch_time_exp_lt(&tm, TELCORE_424_UEPOCH);
+	switch_time_exp_lt(&tm, REPORTED_UEPOCH);
 	switch_strftime_nocheck(expected, &retsize, sizeof(expected), STAMP_FMT, &tm);
 
 	stored = switch_channel_get_variable(channel, "start_stamp");
@@ -294,7 +294,7 @@ FST_TEST_BEGIN(length_disagreement_is_the_detector)
 	switch_size_t retsize = 0;
 	char buf[80] = "";
 
-	switch_time_exp_lt(&tm, TELCORE_424_UEPOCH);
+	switch_time_exp_lt(&tm, REPORTED_UEPOCH);
 	switch_strftime_nocheck(buf, &retsize, sizeof(buf), STAMP_FMT, &tm);
 
 	fst_check(retsize == STAMP_LEN);
@@ -324,7 +324,7 @@ FST_TEST_BEGIN(strftime_cannot_truncate_at_full_buffer)
 	char buf[80] = "";
 	char small[9] = "";
 
-	switch_time_exp_lt(&tm, TELCORE_424_UEPOCH);
+	switch_time_exp_lt(&tm, REPORTED_UEPOCH);
 
 	switch_strftime_nocheck(buf, &retsize, sizeof(buf), STAMP_FMT, &tm);
 	fst_check(strlen(buf) == STAMP_LEN);
@@ -349,7 +349,7 @@ FST_TEST_BEGIN(corrupt_tm_does_not_truncate)
 	switch_size_t retsize = 0;
 	char buf[80] = "";
 
-	switch_time_exp_lt(&tm, TELCORE_424_UEPOCH);
+	switch_time_exp_lt(&tm, REPORTED_UEPOCH);
 	tm.tm_mday = 0;
 
 	switch_strftime_nocheck(buf, &retsize, sizeof(buf), STAMP_FMT, &tm);
