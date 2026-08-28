@@ -6120,6 +6120,20 @@ struct matches {
 #define MIN(a,b) (((a) < (b)) ? (a) : (b))
 #endif
 
+/*
+ * Whether an implementation is interchangeable with one already negotiated.
+ * Comparing iananame alone is not enough: AMR, AMR-WB, G7221, SILK and iLBC each
+ * register several implementations under a single name, and an offer that omits
+ * a=ptime matches every implementation a codec has registered.
+ */
+static int same_codec_impl(const switch_codec_implementation_t *imp, const switch_codec_implementation_t *ref)
+{
+	return imp && ref && imp->ianacode == ref->ianacode &&
+		imp->iananame && ref->iananame && !strcasecmp(imp->iananame, ref->iananame) &&
+		imp->microseconds_per_packet == ref->microseconds_per_packet &&
+		imp->samples_per_second == ref->samples_per_second;
+}
+
 static void greedy_sort(switch_media_handle_t *smh, struct matches *matches, int m_idx, const switch_codec_implementation_t **codec_array, int total_codecs)
 {
 	int j = 0, f = 0, g;
@@ -7468,6 +7482,22 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 			int ice = 0;
 			int last_pt = 0;
 			int changed_pt = 0;
+			/*
+			 * When set, a previously negotiated codec is only re-selected if the offered
+			 * implementation is the same one. Codecs such as AMR/AMR-WB register several
+			 * implementations under a single iananame, so matching by name alone cannot
+			 * tell them apart. Off by default.
+			 */
+			int strict_codec_match = switch_true(switch_channel_get_variable(session->channel, "telnyx-strict-codec-match"));
+			int found_prev = 0;
+			/* Implementation behind the payload map we end up selecting. */
+			const switch_codec_implementation_t *selected_imp = NULL;
+			/*
+			 * Set while the partner leg drives this renegotiation (rtp_pass_codecs_on_stream_change).
+			 * Its answer decides the codec, so the one previously negotiated on this leg must not
+			 * be re-asserted over it.
+			 */
+			int partner_driven = switch_channel_test_flag(session->channel, CF_AWAITING_STREAM_CHANGE);
 
 			nm_idx = 0;
 			m_idx = 0;
@@ -8123,6 +8153,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 					if (j == 0) {
 						a_engine->cur_payload_map = pmap;
 						a_engine->cur_payload_map->current = 1;
+						selected_imp = matches[j].imp;
 						if (a_engine->rtp_session) {
 							switch_rtp_set_default_payload(a_engine->rtp_session, pmap->pt);
 						}
@@ -8134,12 +8165,18 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 					/*
 					 * Prioritize previously negotiated codec
 					 */
-					if (a_engine->read_impl.iananame && switch_core_codec_ready(&a_engine->read_codec) && strcasecmp(pmap->iananame, a_engine->read_impl.iananame) == 0) {
+					if (a_engine->read_impl.iananame && switch_core_codec_ready(&a_engine->read_codec) && strcasecmp(pmap->iananame, a_engine->read_impl.iananame) == 0 &&
+						(!strict_codec_match || (!partner_driven && !found_prev && same_codec_impl(matches[j].imp, &a_engine->read_impl)))) {
+						if (strict_codec_match) {
+							/* Latch, so a later match on the same name cannot overwrite the exact one. */
+							found_prev = 1;
+						}
 						if (a_engine->cur_payload_map) {
 							a_engine->cur_payload_map->current = 0;
 						}
 						a_engine->cur_payload_map = pmap;
 						a_engine->cur_payload_map->current = 1;
+						selected_imp = matches[j].imp;
 						if (a_engine->rtp_session) {
 							switch_rtp_set_default_payload(a_engine->rtp_session, pmap->pt);
 						}
@@ -8238,6 +8275,74 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 							if (switch_core_codec_ready(&a_engine->read_codec)) {
 								switch_clear_flag(&a_engine->read_codec, SWITCH_CODEC_FLAG_RESET_PENDING);
 							}
+						}
+					} else if (strict_codec_match && selected_imp) {
+						/*
+						 * Compare the implementation we actually selected rather than any
+						 * match. Scanning every match keeps the current codec whenever the
+						 * offer merely contains something name-compatible, which leaves the
+						 * codec disagreeing with the answer when a re-INVITE offers only the
+						 * other implementation of the same codec.
+						 */
+						int codec_ready = switch_core_codec_ready(&a_engine->read_codec);
+						int same_codec_name = codec_ready && selected_imp->iananame && a_engine->read_impl.iananame &&
+							!strcasecmp(selected_imp->iananame, a_engine->read_impl.iananame);
+
+						if (codec_ready && same_codec_impl(selected_imp, &a_engine->read_impl)) {
+							a_engine->reset_codec = 0;
+							switch_clear_flag(&a_engine->read_codec, SWITCH_CODEC_FLAG_RESET_PENDING);
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Not resetting codec. We stick to %s\n", a_engine->read_impl.iananame);
+
+							/*
+							 * A re-offer carrying a different fmtp than the one we stored fails
+							 * fmtp_check_match() and allocates a fresh payload map, and only
+							 * switch_core_media_set_codec() ever fills in fmtp_out. Keeping the
+							 * codec means it is not called, so the answer would advertise the
+							 * codec with no a=fmtp at all. Carry the fmtp of the codec we are
+							 * keeping over to the new payload map.
+							 */
+							if (a_engine->cur_payload_map && switch_core_codec_ready(&a_engine->write_codec) &&
+								!zstr(a_engine->write_codec.fmtp_out) &&
+								same_codec_impl(a_engine->write_codec.implementation, selected_imp)) {
+								const char *kept = NULL;
+
+								if (zstr(a_engine->cur_payload_map->fmtp_out)) {
+									a_engine->cur_payload_map->fmtp_out = switch_core_session_strdup(session, a_engine->write_codec.fmtp_out);
+									kept = a_engine->cur_payload_map->fmtp_out;
+								}
+
+								if (kept) {
+									switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+													  "Keeping fmtp [%s] for %s on the new payload map\n",
+													  kept, a_engine->read_impl.iananame);
+								}
+							}
+						} else if (same_codec_name) {
+							/*
+							 * The codec already in use, at a different implementation, ptime
+							 * or rate. Any of the three rebuilds the payload map, since all
+							 * three are part of its key, so reset here rather than leaving it
+							 * to the deferred reset in the read loop: the answer SDP is
+							 * generated before that runs, and it takes a=fmtp from the payload
+							 * map that switch_core_media_set_codec() fills in.
+							 */
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Force reset codec for %s\n", a_engine->read_impl.iananame);
+							if (switch_core_media_set_codec(session, 2, smh->mparams->codec_flags) != SWITCH_STATUS_SUCCESS) {
+								match = 0;
+							} else {
+								a_engine->reset_codec = 0;
+								if (switch_core_codec_ready(&a_engine->read_codec)) {
+									switch_clear_flag(&a_engine->read_codec, SWITCH_CODEC_FLAG_RESET_PENDING);
+								}
+							}
+						} else {
+							/*
+							 * A different codec entirely, or none up yet. The answer does not
+							 * depend on the reset having already run, so leave it to the read
+							 * loop exactly as the unflagged path does rather than destroying
+							 * and re-initialising the codec on the signalling thread.
+							 */
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Deferring codec reset for %s\n", a_engine->read_impl.iananame);
 						}
 					} else {
 						for(z = 0; z < m_idx && smh->num_negotiated_codecs < SWITCH_MAX_CODECS; z++) { 
