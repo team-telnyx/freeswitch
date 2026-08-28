@@ -43,6 +43,7 @@ switch_xml
 switch_estimators
 switch_jitter_buffer
 test_sofia
+test_dtmf_sent_event
 switch_mod_lumenvox
 conf_lumenvox/[0-9]*/**
 .deps/

@@ -686,6 +686,39 @@ SWITCH_DECLARE(switch_status_t) switch_channel_queue_dtmf_string(switch_channel_
 	return bad_input ? SWITCH_STATUS_GENERR : SWITCH_STATUS_FALSE;
 }
 
+/* The rate switch_dtmf_t.duration is expressed in, everywhere in the core. */
+#define DTMF_DURATION_CLOCK_RATE 8000
+
+/* Divide once, at the end: samples / (rate / 1000) truncates the rate first, which is
+   exact only when the rate is a whole number of kHz. At 11025Hz it overstates a 440ms
+   digit as 441ms. The 64-bit intermediate keeps a maximum-length digit at 48kHz
+   (SWITCH_MAX_DTMF_DURATION rescaled, ~1.15M samples) clear of a 32-bit overflow. */
+static uint32_t dtmf_samples_to_ms(uint32_t samples, uint32_t samples_per_second)
+{
+	if (samples_per_second < 1000) {
+		return 0;
+	}
+
+	return (uint32_t) (((uint64_t) samples * 1000) / samples_per_second);
+}
+
+static const char *dtmf_source_str(switch_dtmf_source_t source)
+{
+	switch(source) {
+	case SWITCH_DTMF_INBAND_AUDIO:	/* From audio */
+		return "INBAND_AUDIO";
+	case SWITCH_DTMF_RTP:			/* From RTP as a telephone event */
+		return "RTP";
+	case SWITCH_DTMF_ENDPOINT:		/* From endpoint signaling */
+		return "ENDPOINT";
+	case SWITCH_DTMF_APP:			/* Injected by application */
+		return "APP";
+	case SWITCH_DTMF_UNKNOWN:		/* Unknown source */
+	default:
+		return "UNKNOWN";
+	}
+}
+
 SWITCH_DECLARE(switch_status_t) switch_channel_dequeue_dtmf(switch_channel_t *channel, switch_dtmf_t *dtmf)
 {
 	switch_event_t *event;
@@ -725,29 +758,10 @@ SWITCH_DECLARE(switch_status_t) switch_channel_dequeue_dtmf(switch_channel_t *ch
 	switch_mutex_unlock(channel->dtmf_mutex);
 
 	if (!event_sensitive && status == SWITCH_STATUS_SUCCESS && switch_event_create(&event, SWITCH_EVENT_DTMF) == SWITCH_STATUS_SUCCESS) {
-		const char *dtmf_source_str = NULL;
 		switch_channel_event_set_data(channel, event);
 		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Digit", "%c", dtmf->digit);
 		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Duration", "%u", dtmf->duration);
-		switch(dtmf->source) {
-			case SWITCH_DTMF_INBAND_AUDIO:	/* From audio */
-				dtmf_source_str = "INBAND_AUDIO";
-				break;
-			case SWITCH_DTMF_RTP:			/* From RTP as a telephone event */
-				dtmf_source_str = "RTP";
-				break;
-			case SWITCH_DTMF_ENDPOINT:		/* From endpoint signaling */
-				dtmf_source_str = "ENDPOINT";
-				break;
-			case SWITCH_DTMF_APP:			/* Injected by application */
-				dtmf_source_str = "APP";
-				break;
-			case SWITCH_DTMF_UNKNOWN:		/* Unknown source */
-			default:
-				dtmf_source_str = "UNKNOWN";
-				break;
-		}
-		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Source", "%s", dtmf_source_str);
+		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Source", "%s", dtmf_source_str(dtmf->source));
 		if (switch_channel_test_flag(channel, CF_DIVERT_EVENTS)) {
 			switch_core_session_queue_event(channel->session, &event);
 		} else {
@@ -756,6 +770,55 @@ SWITCH_DECLARE(switch_status_t) switch_channel_dequeue_dtmf(switch_channel_t *ch
 	}
 
 	return status;
+}
+
+SWITCH_DECLARE(void) switch_channel_fire_dtmf_sent_event(switch_channel_t *channel, const switch_dtmf_t *dtmf,
+														 uint32_t sent_duration, uint32_t samples_per_second, const char *method)
+{
+	switch_event_t *event;
+
+	if (!channel || !dtmf) {
+		return;
+	}
+
+	if (switch_test_flag(dtmf, DTMF_FLAG_SENSITIVE) || switch_test_flag(dtmf, DTMF_FLAG_EVENT_SENSITIVE)) {
+		return;
+	}
+
+	if (switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, SWITCH_EVENT_SUBCLASS_DTMF_SENT) != SWITCH_STATUS_SUCCESS) {
+		return;
+	}
+
+	switch_channel_event_set_data(channel, event);
+	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Digit", "%c", dtmf->digit);
+
+	/* The two durations are not in the same clock domain and must not be compared as
+	   sample counts. switch_dtmf_t.duration is always in FreeSWITCH's 8kHz convention
+	   (SWITCH_DEFAULT_DTMF_DURATION and the min/max clamps are 8kHz sample counts,
+	   which is why mod_sofia divides it by 8 for the INFO body), while sent_duration
+	   is in samples_per_second, the transmitting session's own rate. Publish each with
+	   its own rate and a millisecond form so a consumer has one comparable number. */
+	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Duration", "%u", dtmf->duration);
+	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Duration-MS", "%u", dtmf_samples_to_ms(dtmf->duration, DTMF_DURATION_CLOCK_RATE));
+	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Duration-Clock-Rate", "%u", (uint32_t) DTMF_DURATION_CLOCK_RATE);
+	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Duration-Sent", "%u", sent_duration);
+
+	if (samples_per_second >= 1000) {
+		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Duration-Sent-MS", "%u", dtmf_samples_to_ms(sent_duration, samples_per_second));
+		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Duration-Sent-Clock-Rate", "%u", samples_per_second);
+	}
+
+	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "DTMF-Source", "%s", dtmf_source_str(dtmf->source));
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "DTMF-Method", method);
+
+	/* Deliberately always on the bus, unlike the receive-side event in
+	   switch_channel_dequeue_dtmf(), which honours CF_DIVERT_EVENTS. That flag is set
+	   by an ESL client asking for a session's events to be routed to its own queue
+	   instead (mod_event_socket "divert_events"). The consumer of this event is the
+	   mod_telnyx ZMQ publisher, a plain bus subscriber, so diverting would silently
+	   drop the B2BUA's confirmation for the duration of an unrelated ESL session --
+	   and a confirmation that can vanish is worth no more than no confirmation. */
+	switch_event_fire(&event);
 }
 
 SWITCH_DECLARE(switch_size_t) switch_channel_dequeue_dtmf_string(switch_channel_t *channel, char *dtmf_str, switch_size_t len)
