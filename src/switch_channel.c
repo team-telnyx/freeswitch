@@ -4793,6 +4793,9 @@ SWITCH_DECLARE(switch_core_session_t *) switch_channel_get_session(switch_channe
 #define SWITCH_CDR_STAMP_FMT "%Y-%m-%d %T"
 #define SWITCH_CDR_STAMP_LEN 19
 
+/* Keep a broken-down time field inside the range its fixed-width field can hold. */
+#define CLAMP_STAMP_FIELD(v, lo, hi) ((v) < (lo) ? (lo) : ((v) > (hi) ? (hi) : (v)))
+
 /*!
   \brief Format a CDR timestamp and verify the result before it is stored.
 
@@ -4819,6 +4822,7 @@ static switch_bool_t switch_channel_format_stamp(switch_channel_t *channel, cons
 	switch_time_exp_t tm;
 	switch_size_t retsize = 0;
 	switch_size_t len;
+	int year;
 
 	memset(&tm, 0, sizeof(tm));
 	memset(buf, 0, buflen);
@@ -4835,10 +4839,27 @@ static switch_bool_t switch_channel_format_stamp(switch_channel_t *channel, cons
 					  "Malformed CDR timestamp [%s] retsize=%" SWITCH_SIZE_T_FMT " strlen=%" SWITCH_SIZE_T_FMT
 					  " src=%" SWITCH_TIME_T_FMT " buf=[%s]\n", name, retsize, len, when, buf);
 
-	/* Rebuild from the same broken-down time. Same instant, independent formatter. */
+	/*
+	 * Rebuild from the same broken-down time. Same instant, independent
+	 * formatter. Clamp each field to the range the fixed-width format can
+	 * represent, so the rebuilt value is always exactly SWITCH_CDR_STAMP_LEN
+	 * characters. Without the clamp a year outside 0..9999 reproduces the same
+	 * malformed length that was just rejected.
+	 */
+	year = tm.tm_year + 1900;
+	if (year < 0) {
+		year = 0;
+	} else if (year > 9999) {
+		year = 9999;
+	}
+
 	switch_snprintf(buf, buflen, "%04d-%02d-%02d %02d:%02d:%02d",
-					tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-					tm.tm_hour, tm.tm_min, tm.tm_sec);
+					year,
+					CLAMP_STAMP_FIELD(tm.tm_mon + 1, 1, 12),
+					CLAMP_STAMP_FIELD(tm.tm_mday, 1, 31),
+					CLAMP_STAMP_FIELD(tm.tm_hour, 0, 23),
+					CLAMP_STAMP_FIELD(tm.tm_min, 0, 59),
+					CLAMP_STAMP_FIELD(tm.tm_sec, 0, 60));
 
 	return SWITCH_FALSE;
 }
