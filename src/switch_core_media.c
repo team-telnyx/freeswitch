@@ -8238,12 +8238,10 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 								same_codec_impl(a_engine->write_codec.implementation, selected_imp)) {
 								const char *kept = NULL;
 
-								switch_mutex_lock(smh->sdp_mutex);
 								if (zstr(a_engine->cur_payload_map->fmtp_out)) {
 									a_engine->cur_payload_map->fmtp_out = switch_core_session_strdup(session, a_engine->write_codec.fmtp_out);
 									kept = a_engine->cur_payload_map->fmtp_out;
 								}
-								switch_mutex_unlock(smh->sdp_mutex);
 
 								if (kept) {
 									switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
