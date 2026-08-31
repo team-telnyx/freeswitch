@@ -5616,6 +5616,7 @@ struct speech_thread_handle {
 	switch_memory_pool_t *pool;
 	switch_thread_t *thread;
 	int ready;
+	int closing;
 };
 
 static void *SWITCH_THREAD_FUNC speech_thread(switch_thread_t *thread, void *obj)
@@ -5638,13 +5639,13 @@ static void *SWITCH_THREAD_FUNC speech_thread(switch_thread_t *thread, void *obj
 
 	sth->ready = 1;
 
-	while (switch_channel_up_nosig(channel) && !switch_test_flag(sth->ah, SWITCH_ASR_FLAG_CLOSED)) {
+	while (switch_channel_up_nosig(channel) && !sth->closing && !switch_test_flag(sth->ah, SWITCH_ASR_FLAG_CLOSED)) {
 		char *xmlstr = NULL;
 		switch_event_t *headers = NULL;
 
 		switch_thread_cond_wait(sth->cond, sth->mutex);
 
-		if (switch_channel_down_nosig(channel) || switch_test_flag(sth->ah, SWITCH_ASR_FLAG_CLOSED)) {
+		if (switch_channel_down_nosig(channel) || sth->closing || switch_test_flag(sth->ah, SWITCH_ASR_FLAG_CLOSED)) {
 			break;
 		}
 
@@ -5809,7 +5810,8 @@ static switch_bool_t speech_callback(switch_media_bug_t *bug, void *user_data, s
 			switch_channel_set_private(channel, SWITCH_SPEECH_KEY "_tmp", NULL);
 			switch_core_event_hook_remove_recv_dtmf(session, speech_on_dtmf);
 			
-			switch_core_asr_close(sth->ah, &flags);
+			sth->closing = 1;
+
 			if (sth->mutex && sth->cond && sth->ready) {
 				if (switch_mutex_trylock(sth->mutex) == SWITCH_STATUS_SUCCESS) {
 					switch_thread_cond_signal(sth->cond);
@@ -5818,6 +5820,8 @@ static switch_bool_t speech_callback(switch_media_bug_t *bug, void *user_data, s
 			}
 
 			switch_thread_join(&st, sth->thread);
+
+			switch_core_asr_close(sth->ah, &flags);
 
 		}
 		break;
