@@ -5607,6 +5607,8 @@ done:
 	return status;
 }
 
+#define SPEECH_THREAD_STOP_TIMEOUT_MS 5000
+
 struct speech_thread_handle {
 	switch_core_session_t *session;
 	switch_asr_handle_t *ah;
@@ -5617,6 +5619,7 @@ struct speech_thread_handle {
 	switch_thread_t *thread;
 	int ready;
 	int closing;
+	int stopped;
 };
 
 static void *SWITCH_THREAD_FUNC speech_thread(switch_thread_t *thread, void *obj)
@@ -5774,6 +5777,8 @@ static void *SWITCH_THREAD_FUNC speech_thread(switch_thread_t *thread, void *obj
 		}
 	}
 
+	sth->stopped = 1;
+
 	switch_mutex_unlock(sth->mutex);
 	switch_core_session_rwunlock(sth->session);
 
@@ -5813,15 +5818,41 @@ static switch_bool_t speech_callback(switch_media_bug_t *bug, void *user_data, s
 			sth->closing = 1;
 
 			if (sth->mutex && sth->cond && sth->ready) {
-				if (switch_mutex_trylock(sth->mutex) == SWITCH_STATUS_SUCCESS) {
-					switch_thread_cond_signal(sth->cond);
-					switch_mutex_unlock(sth->mutex);
+				int sanity = SPEECH_THREAD_STOP_TIMEOUT_MS;
+
+				/* Retried rather than signalled once: a single trylock misses
+				 * the window where the thread holds the mutex between its
+				 * predicate test and switch_thread_cond_wait(), and the wakeup
+				 * is then lost for good.
+				 */
+				while (!sth->stopped && sanity-- > 0) {
+					if (switch_mutex_trylock(sth->mutex) == SWITCH_STATUS_SUCCESS) {
+						switch_thread_cond_signal(sth->cond);
+						switch_mutex_unlock(sth->mutex);
+
+						if (sth->stopped) {
+							break;
+						}
+					}
+					switch_yield(1000);
 				}
 			}
 
-			switch_thread_join(&st, sth->thread);
-
-			switch_core_asr_close(sth->ah, &flags);
+			if (sth->ready && !sth->stopped) {
+				/* Wedged inside a module callback that only asr_close can
+				 * unblock, which a module doing network I/O in check_results
+				 * can be. Close first so it returns, giving up the window this
+				 * ordering exists to shut: liveness wins over the narrower race.
+				 */
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+								  "Speech thread still in the ASR module after %d ms, closing handle first\n",
+								  SPEECH_THREAD_STOP_TIMEOUT_MS);
+				switch_core_asr_close(sth->ah, &flags);
+				switch_thread_join(&st, sth->thread);
+			} else {
+				switch_thread_join(&st, sth->thread);
+				switch_core_asr_close(sth->ah, &flags);
+			}
 
 		}
 		break;
