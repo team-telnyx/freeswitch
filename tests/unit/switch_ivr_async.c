@@ -240,7 +240,7 @@ FST_CORE_BEGIN("./conf_async")
 			// A no-input timeout is enough to make mod_test report a result, so no speech is needed.
 			// The delay then holds the core speech thread inside asr_get_results while the stop runs.
 			fst_requires(switch_ivr_set_param_detect_speech(fst_session, "no-input-timeout", "500") == SWITCH_STATUS_SUCCESS);
-			fst_requires(switch_ivr_set_param_detect_speech(fst_session, "get-results-delay-ms", "1500") == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_ivr_set_param_detect_speech(fst_session, "get-results-delay-ms", "1000") == SWITCH_STATUS_SUCCESS);
 
 			helper.session = fst_session;
 			switch_threadattr_create(&thd_attr, fst_pool);

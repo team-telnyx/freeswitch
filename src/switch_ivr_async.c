@@ -5607,7 +5607,10 @@ done:
 	return status;
 }
 
-#define SPEECH_THREAD_STOP_TIMEOUT_MS 5000
+/* Only ever waits out a module callback already in flight, so this is far past
+ * any healthy case; it is kept short because the hangup path runs CLOSE with
+ * session->bug_rwlock held for write. */
+#define SPEECH_THREAD_STOP_TIMEOUT_MS 2000
 
 struct speech_thread_handle {
 	switch_core_session_t *session;
