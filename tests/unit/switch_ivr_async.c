@@ -62,6 +62,34 @@ static switch_status_t partial_play_and_collect_input_callback(switch_core_sessi
 	return status;
 }
 
+struct asr_stop_helper {
+	switch_core_session_t *session;
+	int stopped;
+};
+
+/* Closes the ASR handle from a thread other than the one pumping media, which
+ * is what uuid_detect_speech stop does in production. Waits for mod_test to
+ * report that the core speech thread is parked inside asr_get_results, so the
+ * close lands in the window rather than by luck. */
+static void *SWITCH_THREAD_FUNC asr_stop_thread(switch_thread_t *thread, void *obj)
+{
+	struct asr_stop_helper *helper = (struct asr_stop_helper *) obj;
+	int sanity = 5000;
+
+	while (sanity-- > 0 && !switch_true(switch_core_get_variable("mod_test_asr_in_get_results"))) {
+		switch_yield(1000);
+	}
+
+	if (switch_core_session_read_lock(helper->session) == SWITCH_STATUS_SUCCESS) {
+		if (switch_ivr_stop_detect_speech(helper->session) == SWITCH_STATUS_SUCCESS) {
+			helper->stopped = 1;
+		}
+		switch_core_session_rwunlock(helper->session);
+	}
+
+	return NULL;
+}
+
 FST_CORE_BEGIN("./conf_async")
 {
 	FST_SUITE_BEGIN(switch_ivr_play_async)
@@ -193,6 +221,39 @@ FST_CORE_BEGIN("./conf_async")
 			fst_xcheck(switch_channel_var_true(fst_channel, "record_post_process_test_pass"), "Expect record_post_process_test_pass channel variable set to true");
 
 			unlink(record_filename);
+		}
+		FST_SESSION_END()
+
+		FST_SESSION_BEGIN(detect_speech_stop_during_get_results)
+		{
+			switch_threadattr_t *thd_attr = NULL;
+			switch_thread_t *thread = NULL;
+			struct asr_stop_helper helper = { 0 };
+			switch_status_t status;
+
+			switch_core_set_variable("mod_test_asr_in_get_results", NULL);
+			switch_core_set_variable("mod_test_asr_use_after_close", NULL);
+
+			status = switch_ivr_detect_speech(fst_session, "test", "test", "test", "", NULL);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+
+			// A no-input timeout is enough to make mod_test report a result, so no speech is needed.
+			// The delay then holds the core speech thread inside asr_get_results while the stop runs.
+			fst_requires(switch_ivr_set_param_detect_speech(fst_session, "no-input-timeout", "500") == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_ivr_set_param_detect_speech(fst_session, "get-results-delay-ms", "1500") == SWITCH_STATUS_SUCCESS);
+
+			helper.session = fst_session;
+			switch_threadattr_create(&thd_attr, fst_pool);
+			switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
+			fst_requires(switch_thread_create(&thread, thd_attr, asr_stop_thread, &helper, fst_pool) == SWITCH_STATUS_SUCCESS);
+
+			switch_ivr_play_file(fst_session, NULL, "silence_stream://5000,0", NULL);
+
+			switch_thread_join(&status, thread);
+
+			fst_xcheck(helper.stopped, "Expect switch_ivr_stop_detect_speech() to have closed the media bug");
+			fst_xcheck(!switch_true(switch_core_get_variable("mod_test_asr_use_after_close")),
+					   "Expect asr_close not to run while the speech thread is still inside the module");
 		}
 		FST_SESSION_END()
 	}
