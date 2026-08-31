@@ -5806,7 +5806,16 @@ static switch_bool_t speech_callback(switch_media_bug_t *bug, void *user_data, s
 
 			switch_threadattr_create(&thd_attr, sth->pool);
 			switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
-			switch_thread_create(&sth->thread, thd_attr, speech_thread, sth, sth->pool);
+
+			if (switch_thread_create(&sth->thread, thd_attr, speech_thread, sth, sth->pool) != SWITCH_STATUS_SUCCESS) {
+				/* Without the thread nothing ever consumes a result: the read
+				 * callbacks keep feeding the module, but sth->ready stays 0 so
+				 * the condition is never signalled. Fail the bug instead, so
+				 * the caller gets an error rather than a silently deaf ASR. */
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(switch_core_media_bug_get_session(bug)), SWITCH_LOG_ERROR,
+								  "Failed to start speech thread\n");
+				return SWITCH_FALSE;
+			}
 		}
 		break;
 	case SWITCH_ABC_TYPE_CLOSE:
@@ -6155,6 +6164,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_detect_speech_init(switch_core_sessio
 
 	if ((status = switch_core_media_bug_add(session, "detect_speech", key,
 											speech_callback, sth, 0, bug_flags, &sth->bug)) != SWITCH_STATUS_SUCCESS) {
+		switch_channel_set_private(channel, SWITCH_SPEECH_KEY "_tmp", NULL);
 		switch_core_asr_close(ah, &flags);
 		return status;
 	}
