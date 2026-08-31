@@ -672,6 +672,7 @@ SWITCH_DECLARE(char *) switch_channel_expand_variables_check(switch_channel_t *c
 SWITCH_DECLARE(char *) switch_channel_build_param_string(_In_ switch_channel_t *channel, _In_opt_ switch_caller_profile_t *caller_profile,
 														 _In_opt_ const char *prefix);
 SWITCH_DECLARE(switch_status_t) switch_channel_set_timestamps(_In_ switch_channel_t *channel);
+SWITCH_DECLARE(void) switch_channel_repair_timestamps(_In_ switch_channel_t *channel);
 
 #define switch_channel_stop_broadcast(_channel)	for(;;) {if (switch_channel_test_flag(_channel, CF_BROADCAST)) {switch_channel_set_flag(_channel, CF_STOP_BROADCAST); switch_channel_set_flag(_channel, CF_BREAK); } break;}
 
