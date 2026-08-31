@@ -330,8 +330,13 @@ FST_TEST_BEGIN(strftime_cannot_truncate_at_full_buffer)
 	fst_check(strlen(buf) == STAMP_LEN);
 	fst_check(retsize == STAMP_LEN);
 
-	/* The artifact appears only when the size argument is 8. */
-	switch_strftime_nocheck(small, &retsize, sizeof(small) - 1, STAMP_FMT, &tm);
+	/*
+	 * strftime() writes whole conversions and stops when the next one will not
+	 * fit, so the reported value appears only at a size limit of 9 or 10:
+	 * "%Y-%m-" fits, "%d" does not. At 8 it stops one conversion earlier and
+	 * yields "2026-08". The call site passes a compile-time 80.
+	 */
+	switch_strftime_nocheck(small, &retsize, sizeof(small), STAMP_FMT, &tm);
 	fst_check_string_equals(small, "2026-08-");
 	fst_check(retsize == 0);
 }
@@ -400,6 +405,165 @@ FST_SESSION_BEGIN(stamp_watchdog_is_off_by_default)
 	fst_check(strlen(stored) == STAMP_LEN);
 }
 FST_SESSION_END()
+
+/*
+ * PROVES THE DAMAGE REACHES THE CDR, and that the repair catches it.
+ *
+ * The reported artifact is eight zero bytes at offset 8 of the stored stamp:
+ * bytes 0..7 stay "2026-08-", byte 8 becomes NUL, so the value reads
+ * "2026-08-". The write is an ordinary 8-byte zero store through a stale
+ * pointer -- a use-after-free; real_use_after_free_truncates_a_stamp below
+ * reproduces that write from a genuine free-and-recycle. Here we inject the
+ * same eight-byte result with memset and focus on what happens next.
+ *
+ * The stored stamp is a 20-byte heap block, live from
+ * switch_channel_set_timestamps() at hangup until the CDR is serialized in
+ * CS_REPORTING. This test damages the stored value and then runs the real CDR
+ * generator, which is the path the bad value travelled in production.
+ *
+ * The check inside switch_channel_format_stamp() cannot see this: the stack
+ * buffer it validated was correct; the damage lands after the copy. Only
+ * switch_channel_repair_timestamps(), which re-reads the value where it is
+ * used, catches it -- so this test is red without that call and green with it.
+ */
+FST_SESSION_BEGIN(damage_after_storing_is_caught_before_the_cdr)
+{
+	switch_channel_t *channel = switch_core_session_get_channel(fst_session);
+	switch_caller_profile_t *profile;
+	char *stored;
+	char from_cdr[80] = "";
+	cJSON *cdr = NULL;
+	cJSON *vars;
+	cJSON *stamp;
+
+	fst_requires(channel);
+
+	profile = switch_channel_get_caller_profile(channel);
+	fst_requires(profile);
+	fst_requires(profile->times);
+
+	profile->times->created = REPORTED_UEPOCH;
+
+	reset_timestamps(channel);
+	switch_channel_set_timestamps(channel);
+
+	/*
+	 * The raw heap block the CDR generator will read, not a copy of it.
+	 * SWITCH_FALSE asks for the stored pointer rather than a pool duplicate.
+	 */
+	stored = (char *) switch_channel_get_variable_dup(channel, "start_stamp", SWITCH_FALSE, -1);
+	fst_requires(stored);
+	fst_requires(strlen(stored) == STAMP_LEN);
+
+	/* The eight-byte zero store at offset 8 that a stale pointer would perform. */
+	memset(stored + 8, 0, 8);
+	fst_check_string_equals(stored, "2026-08-");
+
+	if (switch_ivr_generate_json_cdr(fst_session, &cdr, SWITCH_FALSE) == SWITCH_STATUS_SUCCESS && cdr) {
+		if ((vars = cJSON_GetObjectItem(cdr, "variables")) &&
+			(stamp = cJSON_GetObjectItem(vars, "start_stamp")) && stamp->valuestring) {
+			switch_copy_string(from_cdr, stamp->valuestring, sizeof(from_cdr));
+		}
+		cJSON_Delete(cdr);
+	}
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+					  "CDR start_stamp = [%s] len=%d\n", from_cdr, (int)strlen(from_cdr));
+
+	/* Without the repair the CDR carries "2026-08-" and both of these fail. */
+	fst_check(strlen(from_cdr) == STAMP_LEN);
+	fst_check(strcmp(from_cdr, "2026-08-") != 0);
+}
+FST_SESSION_END()
+
+/*
+ * REPRODUCES THE DEFECT THROUGH A REAL USE-AFTER-FREE -- no manual corruption.
+ *
+ * A 19-char timestamp lives in a 20-byte allocation, which glibc rounds to a
+ * 32-byte chunk in tcache bin 0. A small per-call record from some other module
+ * lands in the same size class. This test stages the exact production sequence:
+ * a module frees its record but keeps the pointer, the allocator recycles that
+ * chunk into the timestamp string, and the module's ordinary teardown -- one
+ * field assignment at offset 8 -- then zeroes the live string. Nothing here
+ * writes to the string; the allocator and the stale pointer do all of it.
+ *
+ * The recycle relies on glibc's tcache being LIFO, which holds under the system
+ * allocator FreeSWITCH ships with. Under a foreign allocator (ASan, valgrind,
+ * tcmalloc) the chunk is not handed back, so the test logs why and skips rather
+ * than fail on something that is not the code under test.
+ */
+FST_TEST_BEGIN(real_use_after_free_truncates_a_stamp)
+{
+	struct mod_rec {
+		void     *owner;   /* offset 0 */
+		uint64_t  seq;     /* offset 8  -- cleared on teardown */
+		uint32_t  flags;   /* offset 16 */
+	};
+	switch_time_exp_t tm;
+	switch_size_t retsize = 0;
+	char formatted[80] = "";
+	struct mod_rec *rec;
+	char *stamp;
+	uintptr_t stale_bits;
+	struct mod_rec *stale;
+
+	/* Format first, so any one-time allocation is out of the way. */
+	switch_time_exp_lt(&tm, REPORTED_UEPOCH);
+	switch_strftime_nocheck(formatted, &retsize, sizeof(formatted), STAMP_FMT, &tm);
+	fst_requires(strlen(formatted) == STAMP_LEN);
+
+	rec = (struct mod_rec *) malloc(sizeof(*rec));
+	fst_requires(rec);
+	rec->owner = rec;
+	rec->seq   = 0x1122334455667788ULL;
+	rec->flags = 1;
+
+	/*
+	 * Launder the address through an integer before freeing. The module's bug
+	 * is exactly that its pointer outlives the allocation; keeping the value as
+	 * an integer models the stale pointer and stops the compiler proving the
+	 * alias below (which -Werror=use-after-free would otherwise reject -- the
+	 * warning is itself confirmation this is a use-after-free).
+	 */
+	stale_bits = (uintptr_t) rec;
+
+	free(rec);                       /* module frees it, but the value survives */
+
+	stamp = strdup(formatted);       /* recycles that chunk; writes ONLY the string */
+	fst_requires(stamp);
+
+	stale = (struct mod_rec *) stale_bits;   /* the module's dangling pointer */
+
+	if ((void *) stamp != (void *) stale) {
+		/* Foreign allocator (ASan, valgrind, tcmalloc): the chunk was not handed
+		 * back, so the alias the bug needs does not exist here. Not a failure of
+		 * the code under test. */
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+						  "allocator did not recycle the freed chunk (stamp=%p stale=%p); "
+						  "UAF recycle path not exercised on this allocator\n",
+						  (void *) stamp, (void *) stale);
+	} else {
+		/* The string is correct at this point -- the copy was faithful. */
+		fst_check_string_equals(stamp, "2026-08-27 19:29:22");
+
+		/*
+		 * Module teardown through the stale pointer: one field assignment, 8
+		 * zero bytes at offset 8. The chunk is now the live timestamp, so this
+		 * lands on the string. Nothing here writes to the string directly.
+		 */
+		stale->seq = 0;
+
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+						  "after stale write, stamp = [%s] len=%d\n", stamp, (int) strlen(stamp));
+
+		/* Truncated to the exact production artifact, with no write to the string. */
+		fst_check(strlen(stamp) == 8);
+		fst_check_string_equals(stamp, "2026-08-");
+	}
+
+	free(stamp);
+}
+FST_TEST_END()
 
 FST_SUITE_END()
 
