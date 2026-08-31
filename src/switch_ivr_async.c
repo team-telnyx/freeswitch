@@ -5638,6 +5638,7 @@ static void *SWITCH_THREAD_FUNC speech_thread(switch_thread_t *thread, void *obj
 
 	if (switch_core_session_read_lock(sth->session) != SWITCH_STATUS_SUCCESS) {
 		sth->ready = 0;
+		sth->stopped = 1;
 		return NULL;
 	}
 
@@ -5813,35 +5814,37 @@ static switch_bool_t speech_callback(switch_media_bug_t *bug, void *user_data, s
 			switch_status_t st;
 			switch_core_session_t *session = switch_core_media_bug_get_session(bug);
 			switch_channel_t *channel = switch_core_session_get_channel(session);
-			
+			int signalled = 0;
+
 			switch_channel_set_private(channel, SWITCH_SPEECH_KEY, NULL);
 			switch_channel_set_private(channel, SWITCH_SPEECH_KEY "_tmp", NULL);
 			switch_core_event_hook_remove_recv_dtmf(session, speech_on_dtmf);
 			
 			sth->closing = 1;
 
-			if (sth->mutex && sth->cond && sth->ready) {
+			if (sth->thread) {
 				int sanity = SPEECH_THREAD_STOP_TIMEOUT_MS;
 
-				/* Retried rather than signalled once: a single trylock misses
-				 * the window where the thread holds the mutex between its
-				 * predicate test and switch_thread_cond_wait(), and the wakeup
-				 * is then lost for good.
+				/* Holding the mutex once is what makes the thread stop, so the
+				 * retry is only for the case where it cannot be taken. Whoever
+				 * holds it is either parked in switch_thread_cond_wait() and
+				 * takes the signal, or has not locked yet -- and then its own
+				 * lock orders it after the store above, which a bare read of a
+				 * predicate written from this thread does not guarantee. Only a
+				 * thread wedged inside a module callback keeps failing it.
 				 */
-				while (!sth->stopped && sanity-- > 0) {
-					if (switch_mutex_trylock(sth->mutex) == SWITCH_STATUS_SUCCESS) {
+				while (!signalled && !sth->stopped && sanity-- > 0) {
+					if (sth->mutex && sth->cond && switch_mutex_trylock(sth->mutex) == SWITCH_STATUS_SUCCESS) {
 						switch_thread_cond_signal(sth->cond);
 						switch_mutex_unlock(sth->mutex);
-
-						if (sth->stopped) {
-							break;
-						}
+						signalled = 1;
+					} else {
+						switch_yield(1000);
 					}
-					switch_yield(1000);
 				}
 			}
 
-			if (sth->ready && !sth->stopped) {
+			if (sth->thread && !signalled && !sth->stopped) {
 				/* Wedged inside a module callback that only asr_close can
 				 * unblock, which a module doing network I/O in check_results
 				 * can be. Close first so it returns, giving up the window this
