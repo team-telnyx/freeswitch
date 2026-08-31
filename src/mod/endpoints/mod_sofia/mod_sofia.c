@@ -1620,6 +1620,12 @@ static switch_status_t sofia_send_dtmf(switch_core_session_t *session, const swi
 				switch_mutex_lock(tech_pvt->sofia_mutex);
 				nua_info(tech_pvt->nh, SIPTAG_CONTENT_TYPE_STR("application/dtmf-relay"), SIPTAG_PAYLOAD_STR(message), TAG_END());
 				switch_mutex_unlock(tech_pvt->sofia_mutex);
+
+				/* No telnyx::dtmf_sent confirmation here: nua_info() only queues the request
+				   into the SIP stack and returns, so firing now would report the same "handed
+				   off" state the +OK from uuid_send_dtmf already gives. The response arrives
+				   asynchronously as nua_r_info, which is not attributable to a single digit
+				   (every INFO on the handle lands there), so INFO stays unconfirmed for now. */
 			}
 		}
 		break;
@@ -5535,6 +5541,9 @@ static switch_call_cause_t sofia_outgoing_channel(switch_core_session_t *session
 
 	switch_channel_set_variable_printf(nchannel, "sip_local_network_addr", "%s", profile->extsipip ? profile->extsipip : profile->sipip);
 	switch_channel_set_variable(nchannel, "sip_profile_name", profile_name);
+	if (profile->strict_codec_match) {
+		switch_channel_set_variable(nchannel, "telnyx-strict-codec-match", profile->strict_codec_match);
+	}
 
 	if (switch_stristr("fs_path", tech_pvt->dest)) {
 		char *remote_host = NULL;
