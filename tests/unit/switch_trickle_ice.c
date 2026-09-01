@@ -626,7 +626,8 @@ FCT_BGN()
 			fst_requires(status == SWITCH_STATUS_SUCCESS);
 			fst_requires((before.ice_type & ICE_CONTROLLED) != 0);
 			fst_requires(before.dtls_state == DS_HANDSHAKE);
-			fst_requires(before.dtls_ssl != NULL && before.socket != NULL);
+			fst_requires(before.dtls_context != NULL && before.dtls_ssl != NULL &&
+				before.socket != NULL);
 			fst_check(before.rtp_chosen == SWITCH_FALSE);
 			fst_check(before.rtcp_chosen == SWITCH_FALSE);
 
@@ -641,6 +642,7 @@ FCT_BGN()
 			fst_requires(nominated.rtp_chosen == SWITCH_TRUE);
 			fst_check(nominated.rtcp_chosen == SWITCH_FALSE);
 			fst_check(nominated.dtls_state == DS_HANDSHAKE);
+			fst_check(nominated.dtls_context == before.dtls_context);
 			fst_check(nominated.dtls_ssl == before.dtls_ssl);
 			fst_check(nominated.socket == before.socket);
 			status = switch_core_media_get_chosen_ice_candidate(session, SWITCH_MEDIA_TYPE_AUDIO,
@@ -665,6 +667,7 @@ FCT_BGN()
 			fst_check(after.rtp_chosen == nominated.rtp_chosen);
 			fst_check(after.rtcp_chosen == nominated.rtcp_chosen);
 			fst_check(after.dtls_state == DS_HANDSHAKE);
+			fst_check(after.dtls_context == before.dtls_context);
 			fst_check(after.dtls_ssl == before.dtls_ssl);
 			fst_check(after.socket == before.socket);
 			status = switch_core_media_get_chosen_ice_candidate(session, SWITCH_MEDIA_TYPE_AUDIO,

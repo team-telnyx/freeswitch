@@ -105,6 +105,7 @@ typedef struct {
 	switch_bool_t rtp_chosen;
 	switch_bool_t rtcp_chosen;
 	dtls_state_t dtls_state;
+	const void *dtls_context;
 	const void *dtls_ssl;
 	const void *socket;
 } switch_rtp_pvt_transport_snapshot_t;

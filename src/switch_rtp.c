@@ -2057,6 +2057,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_get_transport_snapshot(switch_rtp
 	dtls = proto == IPR_RTP ? rtp_session->dtls : rtp_session->rtcp_dtls;
 	if (dtls) {
 		snapshot->dtls_state = dtls->state;
+		snapshot->dtls_context = dtls;
 		snapshot->dtls_ssl = dtls->ssl;
 	}
 	snapshot->socket = proto == IPR_RTP ?
