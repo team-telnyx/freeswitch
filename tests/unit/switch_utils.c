@@ -80,6 +80,40 @@ FST_TEST_BEGIN(b64)
 }
 FST_TEST_END()
 
+FST_TEST_BEGIN(frame_buffer_dup_without_data_rebuilds_base_header)
+{
+	switch_frame_buffer_t *fb = NULL;
+	switch_frame_t orig = { 0 };
+	switch_frame_t *clone = NULL;
+	switch_rtp_packet_t packet = { 0 };
+	switch_rtp_packet_t *cloned_packet;
+
+	packet.header.version = 2;
+	packet.header.p = 1;
+	packet.header.x = 1;
+	packet.header.cc = 1;
+	orig.packet = &packet;
+	orig.data = NULL;
+	orig.datalen = 16;
+	orig.packetlen = SWITCH_RTP_HEADER_LEN;
+	orig.buflen = sizeof(packet);
+
+	fst_requires(switch_frame_buffer_create(&fb, 1) == SWITCH_STATUS_SUCCESS);
+	fst_requires(switch_frame_buffer_dup(fb, &orig, &clone) == SWITCH_STATUS_SUCCESS);
+	fst_requires(clone != NULL);
+	cloned_packet = (switch_rtp_packet_t *) clone->packet;
+	fst_check(clone->packetlen == SWITCH_RTP_HEADER_LEN);
+	fst_check(clone->datalen == 0);
+	fst_check(clone->data == (uint8_t *) clone->packet + SWITCH_RTP_HEADER_LEN);
+	fst_check(cloned_packet->header.cc == 0);
+	fst_check(cloned_packet->header.x == 0);
+	fst_check(cloned_packet->header.p == 0);
+
+	switch_frame_buffer_free(fb, &clone);
+	switch_frame_buffer_destroy(&fb);
+}
+FST_TEST_END()
+
 FST_TEST_BEGIN(is_file_path)
 {
     switch_bool_t b = switch_is_file_path("{av_record_audio_only=true");
