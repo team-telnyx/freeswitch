@@ -835,6 +835,15 @@ SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_should_preserve_active_dtls_tuple(s
 	return switch_cmp_addr(current_addr, handshake_peer_addr, SWITCH_FALSE) ? SWITCH_TRUE : SWITCH_FALSE;
 }
 
+SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_ice_selection_complete(const ice_t *ice, switch_bool_t rtcp_muxed)
+{
+	if (!ice || !ice->is_chosen[IPR_RTP]) {
+		return SWITCH_FALSE;
+	}
+
+	return (rtcp_muxed || ice->is_chosen[IPR_RTCP]) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
 static switch_bool_t ice_selected_tuple_unchanged(const switch_rtp_pvt_ice_tuple_t *tuple)
 {
 	if (!tuple || !tuple->selected || !tuple->ready || zstr(tuple->transport) ||
@@ -2019,6 +2028,39 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_get_ice_state(switch_rtp_t *rtp_s
 	switch_snprintf(local_pwd, local_pwd_len, "%s", ice->pass ? ice->pass : "");
 	switch_snprintf(remote_pwd, remote_pwd_len, "%s", ice->rpass ? ice->rpass : "");
 	*has_addr = ice->addr ? SWITCH_TRUE : SWITCH_FALSE;
+	switch_mutex_unlock(rtp_session->ice_mutex);
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_get_transport_snapshot(switch_rtp_t *rtp_session,
+	ice_proto_t proto, switch_rtp_pvt_transport_snapshot_t *snapshot)
+{
+	switch_rtp_ice_t *ice;
+	switch_dtls_t *dtls;
+
+	if (!rtp_session || (proto != IPR_RTP && proto != IPR_RTCP) || !snapshot) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	memset(snapshot, 0, sizeof(*snapshot));
+	switch_mutex_lock(rtp_session->ice_mutex);
+	ice = proto == IPR_RTP ? &rtp_session->ice : &rtp_session->rtcp_ice;
+	snapshot->ice_type = ice->type;
+	snapshot->ice_ready = ice->ready ? SWITCH_TRUE : SWITCH_FALSE;
+	snapshot->ice_rready = ice->rready ? SWITCH_TRUE : SWITCH_FALSE;
+	if (ice->ice_params) {
+		snapshot->rtp_chosen = ice->ice_params->is_chosen[IPR_RTP] ? SWITCH_TRUE : SWITCH_FALSE;
+		snapshot->rtcp_chosen = ice->ice_params->is_chosen[IPR_RTCP] ? SWITCH_TRUE : SWITCH_FALSE;
+	}
+
+	dtls = proto == IPR_RTP ? rtp_session->dtls : rtp_session->rtcp_dtls;
+	if (dtls) {
+		snapshot->dtls_state = dtls->state;
+		snapshot->dtls_ssl = dtls->ssl;
+	}
+	snapshot->socket = proto == IPR_RTP ?
+		(const void *)rtp_session->sock_input : (const void *)rtp_session->rtcp_sock_input;
 	switch_mutex_unlock(rtp_session->ice_mutex);
 
 	return SWITCH_STATUS_SUCCESS;
@@ -3489,6 +3531,39 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 	switch_mutex_unlock(rtp_session->ice_mutex);
 	WRITE_DEC(rtp_session);
 	READ_DEC(rtp_session);
+}
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_handle_ice_from(switch_rtp_t *rtp_session, ice_proto_t proto,
+	const char *host, switch_port_t port, void *data, switch_size_t len)
+{
+	switch_rtp_ice_t *ice;
+	switch_sockaddr_t *from_addr = NULL;
+	switch_sockaddr_t *saved_addr;
+	switch_sockaddr_t **active_addr;
+
+	if (!rtp_session || (proto != IPR_RTP && proto != IPR_RTCP) || zstr(host) || !port || !data || !len) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	if (switch_sockaddr_info_get(&from_addr, host, SWITCH_UNSPEC, port, 0, rtp_session->pool) != SWITCH_STATUS_SUCCESS ||
+		!from_addr) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	if (proto == IPR_RTP) {
+		ice = &rtp_session->ice;
+		active_addr = &rtp_session->from_addr;
+	} else {
+		ice = &rtp_session->rtcp_ice;
+		active_addr = &rtp_session->rtcp_from_addr;
+	}
+
+	saved_addr = *active_addr;
+	*active_addr = from_addr;
+	switch_rtp_pvt_handle_ice(rtp_session, ice, data, len);
+	*active_addr = saved_addr;
+
+	return SWITCH_STATUS_SUCCESS;
 }
 
 #ifdef ENABLE_SRTP
