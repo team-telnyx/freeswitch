@@ -22,6 +22,31 @@ i.e. the historical behaviour:
 | `network-connect-timeout` | budget for establishing the connection |
 | `network-async-open` | connect on the writer's thread instead of the caller's |
 
+Any of the four can also be set for a single recording, which is how you tune or
+disable this without restarting. Precedence is `{}` on the record command, then the
+channel variable, then `av.conf.xml`:
+
+| channel variable | record command param | unit |
+| --- | --- | --- |
+| `RECORD_NETWORK_CONNECT_TIMEOUT_MS` | `network_connect_timeout` | ms |
+| `RECORD_NETWORK_RW_TIMEOUT_MS` | `network_rw_timeout` | ms |
+| `RECORD_NETWORK_MAX_RW_TIMEOUT_MS` | `network_max_rw_timeout` | ms |
+| `RECORD_NETWORK_ASYNC_OPEN` | `network_async_open` | bool |
+| `RECORD_NETWORK_RESILIENCY` | `network_resiliency` | bool |
+
+`RECORD_NETWORK_RESILIENCY=false` is the kill switch -- it turns off the timeouts and
+the async open together for that recording. It is disable-only; setting it true where the
+config has the feature off does nothing.
+
+The individual settings are not disable-only. Each takes effect in either direction, so
+`RECORD_NETWORK_ASYNC_OPEN=true` with a `RECORD_NETWORK_CONNECT_TIMEOUT_MS` gets the full
+behaviour for one recording on a box that has the feature off -- which is how to try it on
+a single call. A recording may also loosen a budget the config has set.
+
+`network_max_rw_timeout` may only be *tightened* per recording. It is the ceiling that
+stops a caller-supplied `rw_timeout` defeating the bound, so a looser value is refused
+and logged rather than honoured.
+
 Core-side, in `vars.xml` or per recording:
 
 | variable | effect |
