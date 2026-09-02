@@ -11836,28 +11836,11 @@ SWITCH_DECLARE(switch_bool_t) switch_core_session_in_video_thread(switch_core_se
 }
 
 
-/* TELCORE-363: Decide whether the SCMF_AUTOFIX_TIMING "broken PTIME" autofix
- * may run for this codec implementation.
- *
- * The CBR autofix derives the remote ptime from RTP timestamp deltas:
- *
- *     codec_ms = (ts - last_ts) / (samples_per_second / 1000)
- *
- * That formula is only valid when the codec's RTP clock rate equals its
- * actual sampling rate. G722 famously violates this (RFC 3551 section 4.5.2):
- * it samples at 16 kHz but its RTP timestamp clock ticks at 8 kHz. Any
- * mixup between the two clocks (jitter-buffer PLC/acceleration rewriting
- * timestamps, recording resampler artifacts, etc.) makes a clean 20 ms
- * stream look like a 40 ms stream, so the autofix "corrects" our end from
- * the negotiated 20 ms row (spf=160) to the 40 ms row (spf=320). The write
- * timer then produces one 20 ms frame per 40 ms of RTP clock (80 ms wall
- * clock), i.e. only a quarter of the audio -- heard as choppy/compressed
- * speech while MOS stays perfect because no packet is ever lost.
- *
- * Guard: only allow the autofix when the RTP clock and the actual sample
- * clock agree. This keeps the legacy behaviour for every normal codec
- * (PCMU/PCMA/opus/...) and disables the rewrite only where its input math
- * is provably wrong. */
+/* TELCORE-363: the PTIME autofix computes remote ptime from RTP timestamp
+ * deltas / samples_per_second. That is only valid when the RTP clock equals
+ * the actual sampling rate. G722 (RFC 3551 4.5.2) uses an 8 kHz RTP clock at
+ * a 16 kHz sample rate, so the autofix can wrongly rewrite 20 ms -> 40 ms and
+ * quarter the produced audio. Only allow the autofix when the clocks match. */
 SWITCH_DECLARE(switch_bool_t) switch_core_media_codec_ptime_autofix_ok(const switch_codec_implementation_t *imp)
 {
 	if (!imp) {

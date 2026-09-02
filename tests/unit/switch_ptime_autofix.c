@@ -1,30 +1,8 @@
 /*
- * TELCORE-363: choppy outbound G722 audio despite good MOS.
- *
- * Root cause
- * ----------
- * The SCMF_AUTOFIX_TIMING "broken PTIME" autofix in
- * switch_core_media_read_frame() derives the remote ptime from RTP timestamp
- * deltas divided by implementation->samples_per_second. For G722 the RTP
- * clock (8 kHz, RFC 3551 section 4.5.2) differs from the actual sampling rate
- * (16 kHz), so timestamp artifacts (elastic jitter buffer PLC/acceleration,
- * recording resampler) make a clean 20 ms stream look like 40 ms. The autofix
- * then rewrote codec_ms from the negotiated 20 ms row (spf=160) to the 40 ms
- * row (spf=320) and re-initialized the write timer, producing only a quarter
- * of the audio: 518 packets in ~38.7 s (~13 pps instead of 50 pps), heard as
- * choppy/"sped-up" audio while MOS stayed at 4.5 because no packet was lost.
- *
- * Fix under test
- * --------------
- * switch_core_media_codec_ptime_autofix_ok() only allows the autofix when the
- * codec's RTP clock rate equals its actual sampling rate. This test verifies
- * the guard's decision for real codec implementations:
- *
- *   - G722  (8000 RTP clock / 16000 actual)  -> autofix must be DISALLOWED
- *   - PCMU  (8000 / 8000)                    -> autofix stays allowed
- *   - PCMA  (8000 / 8000)                    -> autofix stays allowed
- *   - OPUS  (48000 / 48000)                  -> autofix stays allowed
- *   - NULL / zeroed implementations          -> disallowed (defensive)
+ * TELCORE-363: tests for switch_core_media_codec_ptime_autofix_ok().
+ * The PTIME autofix must be disallowed for codecs whose RTP clock differs
+ * from the actual sample rate (G722: 8 kHz clock / 16 kHz samples), and
+ * stay allowed for matching-clock codecs (PCMU/PCMA/OPUS).
  */
 
 #include <switch.h>
@@ -63,14 +41,10 @@ FST_CORE_BEGIN("./conf")
 			fst_requires(status == SWITCH_STATUS_SUCCESS);
 			fst_requires(codec.implementation != NULL);
 
-			/* Confirm the RFC 3551 quirk this guard exists for: the RTP clock
-			 * and the actual sampling rate must differ for G722. */
+			/* G722: 8 kHz RTP clock, 16 kHz sample rate (RFC 3551 4.5.2) */
 			fst_check_int_equals(codec.implementation->samples_per_second, 8000);
 			fst_check_int_equals(codec.implementation->actual_samples_per_second, 16000);
 
-			/* The CBR ptime autofix must never run for G722: its timestamp
-			 * math divides by the wrong clock and rewrites 20 ms -> 40 ms,
-			 * quartering the produced audio (TELCORE-363). */
 			fst_xcheck(switch_core_media_codec_ptime_autofix_ok(codec.implementation) == SWITCH_FALSE,
 					   "G722 (8k RTP clock / 16k sample rate) must be excluded from the ptime autofix");
 
@@ -103,9 +77,6 @@ FST_CORE_BEGIN("./conf")
 				fst_check_int_equals(codec.implementation->samples_per_second,
 									 codec.implementation->actual_samples_per_second);
 
-				/* Legacy behaviour must be preserved for normal codecs: the
-				 * autofix still protects against genuinely broken remote
-				 * ptime senders. */
 				fst_xcheck(switch_core_media_codec_ptime_autofix_ok(codec.implementation) == SWITCH_TRUE,
 						   "codec with matching RTP/sample clocks must keep the ptime autofix enabled");
 
@@ -146,16 +117,12 @@ FST_CORE_BEGIN("./conf")
 			switch_codec_implementation_t zeroed = { 0 };
 			switch_codec_implementation_t partial = { 0 };
 
-			/* NULL implementation must never allow the autofix. */
 			fst_xcheck(switch_core_media_codec_ptime_autofix_ok(NULL) == SWITCH_FALSE,
 					   "NULL implementation must be rejected");
 
-			/* Fully zeroed implementation (no clock info) must be rejected. */
 			fst_xcheck(switch_core_media_codec_ptime_autofix_ok(&zeroed) == SWITCH_FALSE,
 					   "zeroed implementation must be rejected");
 
-			/* Missing actual_samples_per_second must be rejected rather than
-			 * treated as matching. */
 			partial.samples_per_second = 8000;
 			partial.actual_samples_per_second = 0;
 			fst_xcheck(switch_core_media_codec_ptime_autofix_ok(&partial) == SWITCH_FALSE,
