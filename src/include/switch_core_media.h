@@ -264,6 +264,7 @@ SWITCH_DECLARE(switch_rtp_t *) switch_core_media_get_rtp_session(switch_core_ses
 
 SWITCH_DECLARE(const char *)switch_core_media_get_codec_string(switch_core_session_t *session);
 SWITCH_DECLARE(void) switch_core_media_parse_rtp_bugs(switch_rtp_bug_flag_t *flag_pole, const char *str);
+SWITCH_DECLARE(switch_bool_t) switch_core_media_codec_ptime_autofix_ok(const switch_codec_implementation_t *imp);
 SWITCH_DECLARE(switch_status_t) switch_core_media_add_crypto(switch_core_session_t *session, switch_secure_settings_t *ssec, switch_rtp_crypto_direction_t direction);
 SWITCH_DECLARE(switch_t38_options_t *) switch_core_media_extract_t38_options(switch_core_session_t *session, const char *r_sdp);
 SWITCH_DECLARE(int) switch_core_media_toggle_hold(switch_core_session_t *session, int sendonly);

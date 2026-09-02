@@ -5119,7 +5119,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 				}
 
 				/* check for timing issues */
-				if (smh->media_flags[SCMF_AUTOFIX_TIMING] && type == SWITCH_MEDIA_TYPE_AUDIO && engine->read_impl.samples_per_second) {
+				if (smh->media_flags[SCMF_AUTOFIX_TIMING] && type == SWITCH_MEDIA_TYPE_AUDIO && engine->read_impl.samples_per_second &&
+					switch_core_media_codec_ptime_autofix_ok(&engine->read_impl)) {
 					char is_vbr;
 					is_vbr = engine->read_impl.encoded_bytes_per_packet?0:1;
 
@@ -11834,6 +11835,41 @@ SWITCH_DECLARE(switch_bool_t) switch_core_session_in_video_thread(switch_core_se
 	return switch_thread_equal(switch_thread_self(), v_engine->thread_id) ? SWITCH_TRUE : SWITCH_FALSE;
 }
 
+
+/* TELCORE-363: Decide whether the SCMF_AUTOFIX_TIMING "broken PTIME" autofix
+ * may run for this codec implementation.
+ *
+ * The CBR autofix derives the remote ptime from RTP timestamp deltas:
+ *
+ *     codec_ms = (ts - last_ts) / (samples_per_second / 1000)
+ *
+ * That formula is only valid when the codec's RTP clock rate equals its
+ * actual sampling rate. G722 famously violates this (RFC 3551 section 4.5.2):
+ * it samples at 16 kHz but its RTP timestamp clock ticks at 8 kHz. Any
+ * mixup between the two clocks (jitter-buffer PLC/acceleration rewriting
+ * timestamps, recording resampler artifacts, etc.) makes a clean 20 ms
+ * stream look like a 40 ms stream, so the autofix "corrects" our end from
+ * the negotiated 20 ms row (spf=160) to the 40 ms row (spf=320). The write
+ * timer then produces one 20 ms frame per 40 ms of RTP clock (80 ms wall
+ * clock), i.e. only a quarter of the audio -- heard as choppy/compressed
+ * speech while MOS stays perfect because no packet is ever lost.
+ *
+ * Guard: only allow the autofix when the RTP clock and the actual sample
+ * clock agree. This keeps the legacy behaviour for every normal codec
+ * (PCMU/PCMA/opus/...) and disables the rewrite only where its input math
+ * is provably wrong. */
+SWITCH_DECLARE(switch_bool_t) switch_core_media_codec_ptime_autofix_ok(const switch_codec_implementation_t *imp)
+{
+	if (!imp) {
+		return SWITCH_FALSE;
+	}
+
+	if (!imp->samples_per_second || !imp->actual_samples_per_second) {
+		return SWITCH_FALSE;
+	}
+
+	return imp->samples_per_second == imp->actual_samples_per_second ? SWITCH_TRUE : SWITCH_FALSE;
+}
 
 SWITCH_DECLARE(void) switch_core_media_parse_media_flags(switch_core_session_t *session)
 {
