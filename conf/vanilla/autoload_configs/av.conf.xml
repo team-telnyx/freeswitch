@@ -196,5 +196,34 @@ enum AVColorRange {
            write fails rather than when recording starts, so the failure shows up as a
            RECORD_STOP with uri-failure instead of an immediate error. -->
       <!-- <param name="network-async-open" value="true"/> -->
+
+      <!-- Everything above is the default for the box.  A single recording may override
+           any of it, which is what makes this tunable without a restart:
+
+             {} on the record command  >  channel variable  >  this file
+
+           channel variable                     record command param      unit
+           RECORD_NETWORK_CONNECT_TIMEOUT_MS    network_connect_timeout   ms
+           RECORD_NETWORK_RW_TIMEOUT_MS         network_rw_timeout        ms
+           RECORD_NETWORK_MAX_RW_TIMEOUT_MS     network_max_rw_timeout    ms
+           RECORD_NETWORK_ASYNC_OPEN            network_async_open        bool
+           RECORD_NETWORK_RESILIENCY            network_resiliency        bool
+
+           RECORD_NETWORK_RESILIENCY=false is the kill switch: it disables the timeouts
+           and the async open together for that recording, restoring the behaviour this
+           file's defaults would give if every setting were 0/false.  It is disable-only:
+           setting it true where the config has the feature off does nothing at all.
+
+           The individual settings are not disable-only, and each takes effect in either
+           direction.  A recording may therefore switch the feature on where this file
+           has it off -- network_async_open=true together with a network_connect_timeout
+           is enough to get the full behaviour for one recording, which is the way to try
+           this on a single call before turning it on for the box.  Equally, a recording
+           may loosen a budget this file has set; network_max_rw_timeout below is the one
+           setting that cannot be loosened, and it backstops the others.
+
+           network_max_rw_timeout is the one setting a recording may only *tighten*.  It
+           exists to stop an over-generous caller-supplied rw_timeout from defeating the
+           bound, so a looser per-recording value is refused and logged. -->
   </settings>
 </configuration>
