@@ -322,6 +322,65 @@ FST_CORE_BEGIN("conf")
 		}
 		FST_TEST_END()
 
+		/* A recording may tighten the configured budget.  The conf sets 1000ms; this
+		 * asks for 300ms and must be believed, so the open has to return well inside
+		 * the configured window rather than at it. */
+		FST_TEST_BEGIN(avformat_session_connect_timeout_overrides_config)
+		{
+			switch_file_handle_t fh = { 0 };
+			uint32_t flags = SWITCH_FILE_FLAG_WRITE | SWITCH_FILE_DATA_SHORT;
+			switch_status_t status;
+			switch_time_t start, elapsed_ms;
+
+			start = switch_mono_micro_time_now();
+			status = switch_core_file_open(&fh, "{network_connect_timeout=300}rtmp://192.0.2.1:1935/live/unreachable",
+										   1, 8000, flags, fst_pool);
+			elapsed_ms = (switch_mono_micro_time_now() - start) / 1000;
+
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+							  "per-session 300ms budget returned %d after %" SWITCH_INT64_T_FMT "ms\n",
+							  status, (int64_t) elapsed_ms);
+
+			fst_check(status != SWITCH_STATUS_SUCCESS);
+			/* Comfortably below the configured 1000ms, so this can only pass if the
+			 * per-recording value was the one applied. */
+			fst_check(elapsed_ms < 800);
+
+			if (status == SWITCH_STATUS_SUCCESS) {
+				switch_core_file_close(&fh);
+			}
+		}
+		FST_TEST_END()
+
+		/* The master switch has to reach the whole feature, not just one setting: with
+		 * it off the configured 1000ms budget must stop applying, leaving the open to
+		 * run to ffmpeg's own default.  Asserting it takes *longer* is the only way to
+		 * show the budget was really disabled rather than merely changed. */
+		FST_TEST_BEGIN(avformat_session_resiliency_off_disables_budget)
+		{
+			switch_file_handle_t fh = { 0 };
+			uint32_t flags = SWITCH_FILE_FLAG_WRITE | SWITCH_FILE_DATA_SHORT;
+			switch_status_t status;
+			switch_time_t start, elapsed_ms;
+
+			start = switch_mono_micro_time_now();
+			status = switch_core_file_open(&fh, "{network_resiliency=false}rtmp://192.0.2.1:1935/live/unreachable",
+										   1, 8000, flags, fst_pool);
+			elapsed_ms = (switch_mono_micro_time_now() - start) / 1000;
+
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+							  "resiliency off returned %d after %" SWITCH_INT64_T_FMT "ms\n",
+							  status, (int64_t) elapsed_ms);
+
+			fst_check(status != SWITCH_STATUS_SUCCESS);
+			fst_check(elapsed_ms > 2000);
+
+			if (status == SWITCH_STATUS_SUCCESS) {
+				switch_core_file_close(&fh);
+			}
+		}
+		FST_TEST_END()
+
 		FST_TEARDOWN_BEGIN()
 		{
 		  //const char *err = NULL;
