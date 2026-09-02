@@ -2371,8 +2371,121 @@ static switch_bool_t is_network_stream_name(const char *stream_name)
 			!strcasecmp(stream_name, "youtube")) ? SWITCH_TRUE : SWITCH_FALSE;
 }
 
+/* Parse a millisecond timeout setting into microseconds.  Returns 0 (disabled) for
+ * anything unparseable or negative, so a bad config can never be more aggressive
+ * than the historical unbounded behaviour. */
+static int64_t parse_timeout_ms_to_us(const char *name, const char *val)
+{
+	int64_t ms = 0;
+
+	if (zstr(val)) {
+		return 0;
+	}
+
+	/* Strict, so that "2s" is refused rather than read as 2ms -- a typo must not turn
+	 * into an aggressive timeout that fails every recording instantly.  The upper bound
+	 * keeps the conversion to microseconds clear of int64 overflow. */
+	if (!parse_int64_strict(val, &ms) || ms < 0 || ms > AVFORMAT_MAX_TIMEOUT_MS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+						  "Ignoring invalid %s '%s' (expected 0-%d milliseconds as a plain integer), leaving it disabled\n",
+						  name, val, AVFORMAT_MAX_TIMEOUT_MS);
+		return 0;
+	}
+
+	return ms * 1000;
+}
+
+/* The network settings actually in force for one file handle: the module config as a
+ * baseline, with per-recording overrides applied on top.  Resolved once at open. */
+struct avformat_net_settings {
+	int64_t default_rw_timeout_us;
+	int64_t max_rw_timeout_us;
+	int64_t connect_timeout_us;
+	switch_bool_t async_open;
+};
+
+/* Read one millisecond override out of the file params, if present.  The core injects
+ * these ahead of the caller's own brace block, and switch_event_create_brackets sets
+ * EF_UNIQ_HEADERS, so a value the caller wrote on the record command replaces the one
+ * derived from the channel variable.  Precedence therefore reads:
+ *
+ *     {} on the record command  >  channel variable  >  avformat.conf
+ *
+ * Note the unit split, which is not ours to fix: these are milliseconds, matching the
+ * config file, while the rw_timeout file param is microseconds, matching ffmpeg. */
+static switch_bool_t net_param_ms(switch_event_t *params, const char *name, int64_t *out)
+{
+	const char *val;
+
+	if (!params || zstr(val = switch_event_get_header(params, name))) {
+		return SWITCH_FALSE;
+	}
+
+	*out = parse_timeout_ms_to_us(name, val);
+
+	return SWITCH_TRUE;
+}
+
+static void resolve_net_settings(switch_file_handle_t *handle, struct avformat_net_settings *s)
+{
+	switch_event_t *params = handle ? handle->params : NULL;
+	const char *val;
+	int64_t ms_us = 0;
+
+	s->default_rw_timeout_us = avformat_globals.default_rw_timeout_us;
+	s->max_rw_timeout_us = avformat_globals.max_rw_timeout_us;
+	s->connect_timeout_us = avformat_globals.connect_timeout_us;
+	s->async_open = avformat_globals.network_async_open;
+
+	if (!params) {
+		return;
+	}
+
+	/* Master switch, checked first so one variable disables the whole feature for this
+	 * recording without having to unset each setting individually.  Unset leaves the
+	 * configured behaviour alone; it is not a way to force the feature on. */
+	if (!zstr(val = switch_event_get_header(params, "network_resiliency")) && switch_false(val)) {
+		s->default_rw_timeout_us = 0;
+		s->max_rw_timeout_us = 0;
+		s->connect_timeout_us = 0;
+		s->async_open = SWITCH_FALSE;
+
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+						  "Recorder resiliency disabled for this recording by network_resiliency=%s\n", val);
+		return;
+	}
+
+	if (net_param_ms(params, "network_connect_timeout", &ms_us)) {
+		s->connect_timeout_us = ms_us;
+	}
+
+	if (net_param_ms(params, "network_rw_timeout", &ms_us)) {
+		s->default_rw_timeout_us = ms_us;
+	}
+
+	/* The ceiling is the one setting a recording may only tighten.  It exists to stop an
+	 * over-generous caller-supplied rw_timeout from defeating the bound, so honouring a
+	 * looser per-recording value would hand back exactly the stall it prevents.  A
+	 * configured ceiling of 0 is no ceiling at all, so anything is a tightening. */
+	if (net_param_ms(params, "network_max_rw_timeout", &ms_us)) {
+		if (!s->max_rw_timeout_us || (ms_us && ms_us < s->max_rw_timeout_us)) {
+			s->max_rw_timeout_us = ms_us;
+		} else {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+							  "Ignoring network_max_rw_timeout %lldus for this recording: it would loosen the "
+							  "configured ceiling of %lldus, which may only be tightened\n",
+							  (long long) ms_us, (long long) s->max_rw_timeout_us);
+		}
+	}
+
+	if (!zstr(val = switch_event_get_header(params, "network_async_open"))) {
+		s->async_open = switch_true(val) ? SWITCH_TRUE : SWITCH_FALSE;
+	}
+}
+
 static switch_status_t av_file_open(switch_file_handle_t *handle, const char *path)
 {
+	struct avformat_net_settings net = { 0 };
 	av_file_context_t *context = NULL;
 	char *ext;
 	const char *tmp = NULL;
@@ -2567,8 +2680,10 @@ static switch_status_t av_file_open(switch_file_handle_t *handle, const char *pa
 		const char *rw_timeout_opt_resolved = NULL;
 		int64_t effective_rw_us = 0;
 
+		resolve_net_settings(handle, &net);
+
 		context->io_is_network = is_network_stream_name(handle->stream_name);
-		context->io_connect_timeout_us = context->io_is_network ? avformat_globals.connect_timeout_us : 0;
+		context->io_connect_timeout_us = context->io_is_network ? net.connect_timeout_us : 0;
 
 		/* A caller-supplied rw_timeout still wins, and is passed through verbatim so
 		 * ffmpeg's own suffixed forms ("5M") keep working; it is only rewritten when we
@@ -2583,9 +2698,9 @@ static switch_status_t av_file_open(switch_file_handle_t *handle, const char *pa
 				/* Unparseable here only means we cannot reason about it ourselves;
 				 * ffmpeg may still understand it, so hand it over untouched and fall
 				 * back to the configured default for our own deadlines. */
-				effective_rw_us = avformat_globals.default_rw_timeout_us;
+				effective_rw_us = net.default_rw_timeout_us;
 
-				if (context->io_is_network && avformat_globals.max_rw_timeout_us) {
+				if (context->io_is_network && net.max_rw_timeout_us) {
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
 									  "rw_timeout '%s' is not a plain integer; passing it through unclamped for '%s'\n",
 									  context->rw_timeout, file);
@@ -2594,24 +2709,24 @@ static switch_status_t av_file_open(switch_file_handle_t *handle, const char *pa
 				/* Explicit 0/negative means "no timeout"; treat it as unset so a
 				 * configured default can still protect a network output. */
 				rw_timeout_opt_resolved = NULL;
-			} else if (context->io_is_network && avformat_globals.max_rw_timeout_us && caller_us > avformat_globals.max_rw_timeout_us) {
+			} else if (context->io_is_network && net.max_rw_timeout_us && caller_us > net.max_rw_timeout_us) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
 								  "Clamping rw_timeout %lldus to configured maximum %lldus for '%s'\n",
-								  (long long) caller_us, (long long) avformat_globals.max_rw_timeout_us, file);
+								  (long long) caller_us, (long long) net.max_rw_timeout_us, file);
 				switch_snprintf(context->rw_timeout_buf, sizeof(context->rw_timeout_buf), "%lld",
-								(long long) avformat_globals.max_rw_timeout_us);
+								(long long) net.max_rw_timeout_us);
 				rw_timeout_opt_resolved = context->rw_timeout_buf;
-				effective_rw_us = avformat_globals.max_rw_timeout_us;
+				effective_rw_us = net.max_rw_timeout_us;
 			} else {
 				effective_rw_us = caller_us;
 			}
 		}
 
-		if (!rw_timeout_opt_resolved && context->io_is_network && avformat_globals.default_rw_timeout_us > 0) {
+		if (!rw_timeout_opt_resolved && context->io_is_network && net.default_rw_timeout_us > 0) {
 			switch_snprintf(context->rw_timeout_buf, sizeof(context->rw_timeout_buf), "%lld",
-							(long long) avformat_globals.default_rw_timeout_us);
+							(long long) net.default_rw_timeout_us);
 			rw_timeout_opt_resolved = context->rw_timeout_buf;
-			effective_rw_us = avformat_globals.default_rw_timeout_us;
+			effective_rw_us = net.default_rw_timeout_us;
 		}
 
 		context->io_write_timeout_us = effective_rw_us;
@@ -2625,7 +2740,7 @@ static switch_status_t av_file_open(switch_file_handle_t *handle, const char *pa
 		 * thread called switch_core_file_open -- for a recording that is the session
 		 * thread, so an unresponsive recorder stops that call's media.  Deferring costs
 		 * nothing when the recorder is healthy and keeps audio flowing when it is not. */
-		if (context->io_is_network && avformat_globals.network_async_open &&
+		if (context->io_is_network && net.async_open &&
 			handle->params && switch_true(switch_event_get_header(handle->params, "writer_thread"))) {
 			context->deferred_open = 1;
 			context->deferred_file = switch_core_strdup(handle->memory_pool, file);
@@ -3819,30 +3934,6 @@ static switch_status_t av_file_get_string(switch_file_handle_t *handle, switch_a
 static char *supported_formats[SWITCH_MAX_CODECS] = { 0 };
 
 static const char modname[] = "mod_av";
-
-/* Parse a millisecond timeout setting into microseconds.  Returns 0 (disabled) for
- * anything unparseable or negative, so a bad config can never be more aggressive
- * than the historical unbounded behaviour. */
-static int64_t parse_timeout_ms_to_us(const char *name, const char *val)
-{
-	int64_t ms = 0;
-
-	if (zstr(val)) {
-		return 0;
-	}
-
-	/* Strict, so that "2s" is refused rather than read as 2ms -- a typo must not turn
-	 * into an aggressive timeout that fails every recording instantly.  The upper bound
-	 * keeps the conversion to microseconds clear of int64 overflow. */
-	if (!parse_int64_strict(val, &ms) || ms < 0 || ms > AVFORMAT_MAX_TIMEOUT_MS) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-						  "Ignoring invalid %s '%s' (expected 0-%d milliseconds as a plain integer), leaving it disabled\n",
-						  name, val, AVFORMAT_MAX_TIMEOUT_MS);
-		return 0;
-	}
-
-	return ms * 1000;
-}
 
 static switch_status_t load_config(void)
 {
