@@ -3513,6 +3513,21 @@ static switch_status_t record_helper_destroy(struct record_helper **rh, switch_c
 	return SWITCH_STATUS_SUCCESS;
 }
 
+/* Recorder network settings that a session may override, and the mod_av file param each
+ * one maps to.  The channel-variable spelling matches the RECORD_* settings beside it;
+ * the param spelling matches avformat.conf.  All four timeouts are milliseconds -- the
+ * rw_timeout file param is microseconds, being ffmpeg's own, and is not one of these. */
+static const struct {
+	const char *var;
+	const char *param;
+} record_net_vars[] = {
+	{ "RECORD_NETWORK_RESILIENCY", "network_resiliency" },
+	{ "RECORD_NETWORK_CONNECT_TIMEOUT_MS", "network_connect_timeout" },
+	{ "RECORD_NETWORK_RW_TIMEOUT_MS", "network_rw_timeout" },
+	{ "RECORD_NETWORK_MAX_RW_TIMEOUT_MS", "network_max_rw_timeout" },
+	{ "RECORD_NETWORK_ASYNC_OPEN", "network_async_open" }
+};
+
 static const char *get_recording_var(switch_channel_t *channel, switch_event_t *vars, const char *name)
 {
 	const char *val = NULL;
@@ -3904,15 +3919,45 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 		 * talks to the network may postpone connecting rather than doing it here, on
 		 * the session thread.  Mirrors the condition record_callback uses when it
 		 * decides whether to create that thread; kept out of file_open_path so log and
-		 * event text still name the recording as the caller wrote it. */
+		 * event text still name the recording as the caller wrote it.
+		 *
+		 * The recorder network settings ride along in the same block.  It is prepended
+		 * rather than appended so that a value the caller wrote in its own brace block
+		 * wins: switch_event_create_brackets sets EF_UNIQ_HEADERS, so the later of two
+		 * occurrences replaces the earlier.  Precedence is therefore
+		 *
+		 *     {} on the record command  >  channel variable  >  avformat.conf  */
 		{
 			const char *use_thread = get_recording_var(channel, vars, "RECORD_USE_THREAD");
-
-			file_open_arg = file_open_path;
+			const char *params = "";
+			size_t i;
 
 			if (zstr(use_thread) || switch_true(use_thread)) {
-				file_open_arg = switch_core_sprintf(rh->helper_pool, "{writer_thread=true}%s", file_open_path);
+				params = "writer_thread=true";
 			}
+
+			for (i = 0; i < switch_arraylen(record_net_vars); i++) {
+				const char *val = get_recording_var(channel, vars, record_net_vars[i].var);
+
+				if (zstr(val)) {
+					continue;
+				}
+
+				/* A value carrying a delimiter would not just be ignored downstream, it
+				 * would truncate the brace block and corrupt the recording path. */
+				if (strpbrk(val, "{},")) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+									  "Ignoring %s '%s': it contains a brace or comma\n",
+									  record_net_vars[i].var, val);
+					continue;
+				}
+
+				params = switch_core_sprintf(rh->helper_pool, "%s%s%s=%s", params,
+											 zstr(params) ? "" : ",", record_net_vars[i].param, val);
+			}
+
+			file_open_arg = zstr(params) ? file_open_path :
+				switch_core_sprintf(rh->helper_pool, "{%s}%s", params, file_open_path);
 		}
 
 		if (switch_core_file_open(fh, file_open_arg, channels, read_impl.actual_samples_per_second, file_flags, NULL) != SWITCH_STATUS_SUCCESS) {
