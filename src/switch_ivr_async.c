@@ -5633,9 +5633,6 @@ static void *SWITCH_THREAD_FUNC speech_thread(switch_thread_t *thread, void *obj
 	switch_status_t status;
 	switch_event_t *event;
 
-	switch_thread_cond_create(&sth->cond, sth->pool);
-	switch_mutex_init(&sth->mutex, SWITCH_MUTEX_NESTED, sth->pool);
-
 	if (switch_core_session_read_lock(sth->session) != SWITCH_STATUS_SUCCESS) {
 		sth->ready = 0;
 		sth->stopped = 1;
@@ -5843,7 +5840,7 @@ static switch_bool_t speech_callback(switch_media_bug_t *bug, void *user_data, s
 				 * thread wedged inside a module callback keeps failing it.
 				 */
 				while (!signalled && !sth->stopped && sanity-- > 0) {
-					if (sth->mutex && sth->cond && switch_mutex_trylock(sth->mutex) == SWITCH_STATUS_SUCCESS) {
+					if (switch_mutex_trylock(sth->mutex) == SWITCH_STATUS_SUCCESS) {
 						switch_thread_cond_signal(sth->cond);
 						switch_mutex_unlock(sth->mutex);
 						signalled = 1;
@@ -5880,7 +5877,7 @@ static switch_bool_t speech_callback(switch_media_bug_t *bug, void *user_data, s
 					return SWITCH_FALSE;
 				}
 				if (switch_core_asr_check_results(sth->ah, &flags) == SWITCH_STATUS_SUCCESS) {
-					if (sth->mutex && sth->cond && sth->ready) {
+					if (sth->ready) {
 						switch_mutex_lock(sth->mutex);
 						switch_thread_cond_signal(sth->cond);
 						switch_mutex_unlock(sth->mutex);
@@ -5897,7 +5894,7 @@ static switch_bool_t speech_callback(switch_media_bug_t *bug, void *user_data, s
 					return SWITCH_FALSE;
 				}
 				if (switch_core_asr_check_results(sth->ah, &flags) == SWITCH_STATUS_SUCCESS) {
-					if (sth->mutex && sth->cond && sth->ready) {
+					if (sth->ready) {
 						switch_mutex_lock(sth->mutex);
 						switch_thread_cond_signal(sth->cond);
 						switch_mutex_unlock(sth->mutex);
@@ -6135,6 +6132,16 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_detect_speech_init(switch_core_sessio
 	sth->pool = switch_core_session_get_pool(session);
 	sth->session = session;
 	sth->ah = ah;
+
+	/* Created here rather than in speech_thread() so they exist before the bug
+	 * is added: every caller can then signal without testing for them.
+	 */
+	if (switch_thread_cond_create(&sth->cond, sth->pool) != SWITCH_STATUS_SUCCESS ||
+		switch_mutex_init(&sth->mutex, SWITCH_MUTEX_NESTED, sth->pool) != SWITCH_STATUS_SUCCESS) {
+		switch_channel_set_private(channel, SWITCH_SPEECH_KEY "_tmp", NULL);
+		switch_core_asr_close(ah, &flags);
+		return SWITCH_STATUS_MEMERR;
+	}
 
 	if ((p = switch_channel_get_variable(channel, "fire_asr_events")) && switch_true(p)) {
 		switch_set_flag(ah, SWITCH_ASR_FLAG_FIRE_EVENTS);
