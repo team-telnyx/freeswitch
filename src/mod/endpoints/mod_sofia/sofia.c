@@ -7331,7 +7331,16 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 			if (switch_core_session_get_partner(session, &other_session) == SWITCH_STATUS_SUCCESS) {
 				if(switch_core_session_compare(session, other_session)) {
 					private_object_t *other_tech_pvt = switch_core_session_get_private(other_session);
-					if (sofia_test_flag(other_tech_pvt, TFLAG_3PCC)) {
+					switch_channel_t *other_chan = switch_core_session_get_channel(other_session);
+					/* Dropping a provisional discards its SDP with it, leaving this leg without a
+					   codec, so only do it while the other leg genuinely cannot take early media:
+					   its offer/answer is still outstanding. TFLAG_3PCC alone does not mean that --
+					   it survives the ACK that completes a classic 3PCC call, and an early-offer
+					   call answers in a PRACK to a 183 generated from this very event. */
+					if (sofia_test_flag(other_tech_pvt, TFLAG_3PCC) &&
+						!switch_channel_test_flag(other_chan, CF_ANSWERED) &&
+						!sofia_test_flag(other_tech_pvt, TFLAG_3PCC_EARLY_OFFER) &&
+						!switch_channel_var_true(other_chan, "enable_3pcc_early_offer")) {
 						sofia_set_flag_locked(tech_pvt, TFLAG_SKIP_EARLY);
 					}
 				}
