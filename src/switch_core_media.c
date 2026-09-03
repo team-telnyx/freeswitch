@@ -4763,6 +4763,10 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 				engine->read_frame.pmap = NULL;
 				if (engine->read_frame.datalen) {
 					status = SWITCH_STATUS_SUCCESS;
+				} else {
+					/* A popped frame with a usable buffer but no payload is not a read;
+					 * leaving status unset here reaches the check below uninitialised. */
+					status = SWITCH_STATUS_BREAK;
 				}
 				switch_frame_free(&audio_fb_frame);
 			} else if (apop == (void *)1) {
