@@ -102,6 +102,9 @@ typedef enum {
 	AMRWB_BITRATE_24K
 } amrwb_bitrate_t;
 
+#define SWITCH_AMRWB_SID_FRAME_TYPE 9
+#define SWITCH_AMRWB_SID_FRAME_SIZE 6
+
 struct amrwb_context {
 	void *encoder_state;
 	void *decoder_state;
@@ -114,6 +117,11 @@ struct amrwb_context {
 	switch_byte_t flags;
 	int max_red;
 	int debug;
+	switch_byte_t decoded_sid[SWITCH_AMRWB_SID_FRAME_SIZE];
+	void *decoded_sid_pcm;
+	uint32_t decoded_sid_pcm_len;
+	switch_bool_t decoded_sid_valid;
+	switch_mutex_t *decoded_sid_mutex;
 };
 
 #define SWITCH_AMRWB_DEFAULT_BITRATE AMRWB_BITRATE_24K
@@ -133,12 +141,13 @@ static struct {
 	switch_byte_t silence_supp_off;
 } globals;
 
-const int switch_amrwb_frame_sizes[] = {17, 23, 32, 36, 40, 46, 50, 58, 60, 5, 0, 0, 0, 0, 1, 1};
+const int switch_amrwb_frame_sizes[] = {17, 23, 32, 36, 40, 46, 50, 58, 60, 5, 0, 0, 0, 0, 0, 0};
+const int switch_amrwb_frame_bits[] = {132, 177, 253, 285, 317, 365, 397, 461, 477, 40, 0, 0, 0, 0, 0, 0};
 
 #define SWITCH_AMRWB_OUT_MAX_SIZE 62
 #define SWITCH_AMRWB_MODES 10 /* Silence Indicator (SID) included */
 
-#define invalid_frame_type (index > SWITCH_AMRWB_MODES && index != 0xe && index != 0xf) /* include SPEECH_LOST and NO_DATA*/
+#define invalid_frame_type (index >= SWITCH_AMRWB_MODES && index != 0xe && index != 0xf) /* include SPEECH_LOST and NO_DATA*/
 
 static switch_bool_t switch_amrwb_unpack_oa(unsigned char *buf, uint8_t *tmp, int encoded_data_len)
 {
@@ -146,8 +155,17 @@ static switch_bool_t switch_amrwb_unpack_oa(unsigned char *buf, uint8_t *tmp, in
 	int index;
 	int framesz;
 
+	if (!buf || !tmp || encoded_data_len < 2) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB decoder (OA): Invalid frame size: %d\n", encoded_data_len);
+		return SWITCH_FALSE;
+	}
+
 	buf++;/* CMR skip */
 	tocs = buf;
+	if (tocs[0] & 0x80) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB decoder (OA): Multiple frames per payload are not supported\n");
+		return SWITCH_FALSE;
+	}
 	index = ((tocs[0]>>3) & 0xf);
 	buf++; /* point to voice payload */
 
@@ -156,12 +174,14 @@ static switch_bool_t switch_amrwb_unpack_oa(unsigned char *buf, uint8_t *tmp, in
 		return SWITCH_FALSE;
 	}
 	framesz = switch_amrwb_frame_sizes[index];
-	if (framesz > encoded_data_len - 1) {
+	if (encoded_data_len < framesz + 2) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB decoder (OA): Invalid frame size: %d\n", framesz);
 		return SWITCH_FALSE;
 	}
 	tmp[0] = tocs[0];
-	memcpy(&tmp[1], buf, framesz);
+	if (framesz) {
+		memcpy(&tmp[1], buf, framesz);
+	}
 
 	return SWITCH_TRUE;
 }
@@ -172,6 +192,41 @@ static switch_bool_t switch_amrwb_pack_oa(unsigned char *shift_buf, int n)
 	return SWITCH_TRUE;
 }
 
+static int switch_amrwb_relay_sid(switch_codec_t *other_codec, void *decoded_data, uint32_t decoded_data_len, switch_byte_t *encoded_data)
+{
+	struct amrwb_context *other_context;
+	int size = 0;
+
+	if (!other_codec || !other_codec->implementation || !other_codec->implementation->iananame || !other_codec->implementation->modname ||
+		strcasecmp(other_codec->implementation->iananame, "AMR-WB") ||
+		strcmp(other_codec->implementation->modname, "mod_amrwb")) {
+		return 0;
+	}
+
+	other_context = other_codec->private_info;
+	if (!other_context || !other_context->decoded_sid_mutex) {
+		return 0;
+	}
+
+	switch_mutex_lock(other_context->decoded_sid_mutex);
+	/* Relay is safe only while the PCM is byte-identical to the source
+	 * decoder output. Denoising, volume changes, resampling, or PLC must
+	 * use the target encoder output instead of the cached source SID. */
+	if (!other_context->decoded_sid_valid ||
+		other_context->decoded_sid_pcm_len != decoded_data_len ||
+		memcmp(other_context->decoded_sid_pcm, decoded_data, decoded_data_len)) {
+		goto done;
+	}
+
+	encoded_data[0] = 0xf0;
+	memcpy(encoded_data + 1, other_context->decoded_sid, SWITCH_AMRWB_SID_FRAME_SIZE);
+	size = SWITCH_AMRWB_SID_FRAME_SIZE;
+
+done:
+	switch_mutex_unlock(other_context->decoded_sid_mutex);
+	return size;
+}
+
 static switch_bool_t switch_amrwb_info(switch_codec_t *codec, unsigned char *encoded_buf, int encoded_data_len, int payload_format, char *print_text)
 {
 	uint8_t *tocs;
@@ -179,6 +234,11 @@ static switch_bool_t switch_amrwb_info(switch_codec_t *codec, unsigned char *enc
 	uint8_t shift_tocs[2] = {0x00, 0x00};
 
 	if (!encoded_buf) {
+		return SWITCH_FALSE;
+	}
+	if (encoded_data_len < 2) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(codec->session), SWITCH_LOG_ERROR,
+			"%s: Invalid AMR-WB payload size: %d\n", print_text, encoded_data_len);
 		return SWITCH_FALSE;
 	}
 
@@ -193,6 +253,11 @@ static switch_bool_t switch_amrwb_info(switch_codec_t *codec, unsigned char *enc
 			return SWITCH_FALSE;
 		}
 		framesz = switch_amrwb_frame_sizes[index];
+		if (encoded_data_len < framesz + 2) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(codec->session), SWITCH_LOG_ERROR,
+				"%s (OA): Invalid frame size: %d\n", print_text, encoded_data_len);
+			return SWITCH_FALSE;
+		}
 		not_last_frame = (tocs[0] >> 7) & 1;
 		q = (tocs[0] >> 2) & 1;
 		ft = tocs[0] >> 3;
@@ -212,6 +277,11 @@ static switch_bool_t switch_amrwb_info(switch_codec_t *codec, unsigned char *enc
 			return SWITCH_FALSE;
 		}
 		framesz = switch_amrwb_frame_sizes[index];
+		if (encoded_data_len * 8 < switch_amrwb_frame_bits[index] + 10) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(codec->session), SWITCH_LOG_ERROR,
+				"%s (BE): Invalid frame size: %d\n", print_text, encoded_data_len);
+			return SWITCH_FALSE;
+		}
 	}
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(codec->session), SWITCH_LOG_DEBUG, 
@@ -471,6 +541,9 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 			context->decoder_state = D_IF_init();
 		}
 
+		context->decoded_sid_pcm = switch_core_alloc(codec->memory_pool, codec->implementation->decoded_bytes_per_packet);
+		switch_mutex_init(&context->decoded_sid_mutex, SWITCH_MUTEX_UNNESTED, codec->memory_pool);
+
 		codec->private_info = context;
 
 		return SWITCH_STATUS_SUCCESS;
@@ -507,20 +580,30 @@ static switch_status_t switch_amrwb_encode(switch_codec_t *codec,
 #else
 	struct amrwb_context *context = codec->private_info;
 	int n;
+	int relayed_size;
+	int frame_type;
 	unsigned char *shift_buf = encoded_data;
 
 	if (!context) {
 		return SWITCH_STATUS_FALSE;
 	}
 
+	/* Always advance the stateful encoder, even when the wire payload is replaced
+	 * with the source SID, so speech resumes from the correct encoder history. */
 	n = E_IF_encode(context->encoder_state, context->enc_mode, (int16_t *) decoded_data, (switch_byte_t *) encoded_data + 1, 0);
 	if (n < 0) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB encoder: E_IF_encode() ERROR!\n");
 		return SWITCH_STATUS_FALSE;
 	}
 
+	relayed_size = switch_amrwb_relay_sid(other_codec, decoded_data, decoded_data_len, encoded_data);
+	if (relayed_size) {
+		n = relayed_size;
+	}
+
 	/* set CMR + TOC (F + 3 bits of FT), 1111 = CMR: No mode request */
 	*(switch_byte_t *) encoded_data = 0xf0;
+	frame_type = (shift_buf[1] >> 3) & 0x0f;
 	*encoded_data_len  = n;
 
 	if (switch_test_flag(context, AMRWB_OPT_OCTET_ALIGN)) {
@@ -529,6 +612,7 @@ static switch_status_t switch_amrwb_encode(switch_codec_t *codec,
 		*encoded_data_len = n + 1;
 	} else {
 		switch_amrwb_pack_be(shift_buf, n);
+		*encoded_data_len = (switch_amrwb_frame_bits[frame_type] + 10 + 7) / 8;
 	}
 
 	switch_mutex_lock(global_lock);
@@ -554,11 +638,24 @@ static switch_status_t switch_amrwb_decode(switch_codec_t *codec,
 	return SWITCH_STATUS_FALSE;
 #else
 	struct amrwb_context *context = codec->private_info;
-	unsigned char buf[SWITCH_AMRWB_OUT_MAX_SIZE];
-	uint8_t tmp[SWITCH_AMRWB_OUT_MAX_SIZE];
+	unsigned char buf[SWITCH_AMRWB_OUT_MAX_SIZE] = { 0 };
+	uint8_t tmp[SWITCH_AMRWB_OUT_MAX_SIZE] = { 0 };
+	int frame_type;
 
-	if (!context || encoded_data_len > SWITCH_AMRWB_OUT_MAX_SIZE) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB decoder: Invalid context or encoded data length %d\n", encoded_data_len);
+	if (!context) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB decoder: Invalid context\n");
+		goto decode_error;
+	}
+
+	/* Never let a failed or non-SID decode reuse a SID cached by the
+	 * preceding packet. */
+	switch_mutex_lock(context->decoded_sid_mutex);
+	context->decoded_sid_valid = SWITCH_FALSE;
+	context->decoded_sid_pcm_len = 0;
+	switch_mutex_unlock(context->decoded_sid_mutex);
+
+	if (!encoded_data || encoded_data_len > SWITCH_AMRWB_OUT_MAX_SIZE) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB decoder: Invalid encoded data or length: %d\n", encoded_data_len);
 		goto decode_error;
 	}
 
@@ -583,9 +680,20 @@ static switch_status_t switch_amrwb_decode(switch_codec_t *codec,
 		}
 	}
 
-	D_IF_decode(context->decoder_state, tmp, (int16_t *) decoded_data, 0);
+	frame_type = (tmp[0] >> 3) & 0x0f;
 
+	D_IF_decode(context->decoder_state, tmp, (int16_t *) decoded_data, 0);
 	*decoded_data_len = codec->implementation->decoded_bytes_per_packet;
+
+	if (frame_type == SWITCH_AMRWB_SID_FRAME_TYPE) {
+		switch_mutex_lock(context->decoded_sid_mutex);
+		memcpy(context->decoded_sid, tmp, SWITCH_AMRWB_SID_FRAME_SIZE);
+		context->decoded_sid[0] &= 0x7c; /* clear F and OA padding */
+		memcpy(context->decoded_sid_pcm, decoded_data, *decoded_data_len);
+		context->decoded_sid_pcm_len = *decoded_data_len;
+		context->decoded_sid_valid = SWITCH_TRUE;
+		switch_mutex_unlock(context->decoded_sid_mutex);
+	}
 
 	return SWITCH_STATUS_SUCCESS;
 

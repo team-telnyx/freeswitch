@@ -263,6 +263,7 @@ library_include_HEADERS = \
 	src/include/switch.h \
 	src/include/switch_apr.h \
 	src/include/switch_buffer.h \
+	src/include/switch_bundle.h \
 	src/include/switch_caller.h \
 	src/include/switch_channel.h \
 	src/include/switch_console.h \
@@ -322,6 +323,7 @@ libfreeswitch_la_SOURCES = \
 	src/switch_apr.c \
 	src/switch_apr_queue.c \
 	src/switch_buffer.c \
+	src/switch_bundle.c \
 	src/switch_caller.c \
 	src/switch_channel.c \
 	src/switch_console.c \

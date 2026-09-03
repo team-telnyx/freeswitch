@@ -5034,7 +5034,7 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 					switch_thread_rwlock_create(&profile->rwlock, profile->pool);
 					switch_mutex_init(&profile->flag_mutex, SWITCH_MUTEX_NESTED, profile->pool);
 					profile->dtmf_duration = 100;
-					profile->rtp_digit_delay = 40;
+					profile->rtp_digit_delay = 20;
 					profile->ignore_rtp_during_dtmf_timeout = SWITCH_RTP_DEFAULT_IGNORE_DTMF_TIMEOUT_MS;
 					profile->sip_force_expires = 0;
 					profile->sip_force_expires_min = 0;
@@ -6002,6 +6002,8 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 							sofia_clear_media_flag(profile, SCMF_CODEC_SCROOGE);
 							sofia_clear_media_flag(profile, SCMF_CODEC_GREEDY);
 						}
+					} else if (!strcasecmp(var, "strict-codec-match")) {
+						profile->strict_codec_match = switch_core_strdup(profile->pool, switch_true(val) ? "true" : "false");
 					} else if (!strcasecmp(var, "disable-transcoding")) {
 						if (switch_true(val)) {
 							sofia_set_media_flag(profile, SCMF_DISABLE_TRANSCODING);
@@ -12140,6 +12142,9 @@ void sofia_handle_sip_i_invite(switch_core_session_t *session, nua_t *nua, sofia
 		}
 
 		switch_channel_set_variable(channel, "sofia_profile_name", profile->name);
+		if (profile->strict_codec_match) {
+			switch_channel_set_variable(channel, "telnyx-strict-codec-match", profile->strict_codec_match);
+		}
 		switch_channel_set_variable(channel, "sofia_profile_url", profile->url);
 		switch_channel_set_variable(channel, "recovery_profile_name", profile->name);
 		switch_channel_set_variable(channel, "sofia_profile_domain_name", profile->domain_name);

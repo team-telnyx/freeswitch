@@ -2,13 +2,13 @@ include $(top_srcdir)/build/modmake.rulesam
 
 noinst_PROGRAMS = switch_event switch_hash switch_ivr_originate switch_utils switch_core switch_console switch_vpx switch_core_file \
 			   switch_ivr_play_say switch_core_codec switch_rtp switch_xml
-noinst_PROGRAMS += switch_core_video switch_core_db switch_vad switch_packetizer switch_core_session test_sofia switch_ivr_async switch_core_asr switch_log switch_stun switch_trickle_ice
+noinst_PROGRAMS += switch_core_video switch_core_db switch_vad switch_packetizer switch_core_session test_sofia switch_ivr_async switch_core_asr switch_log switch_stun switch_trickle_ice switch_bundle
 noinst_PROGRAMS += test_tts_format
 noinst_PROGRAMS += switch_core_media
 noinst_PROGRAMS += test_mod_verto
 noinst_PROGRAMS += test_mod_event_socket
 
-noinst_PROGRAMS += switch_hold switch_sip switch_mod_telnyx switch_mod_gstt switch_3pcc test_inuse_race switch_jb_deadlock switch_cjson switch_sockaddr test_rtp_set_flag_null_crash test_write_frame_foreign_codec test_video_bridge_engine_race switch_apr_cleanup
+noinst_PROGRAMS += switch_hold switch_sip switch_mod_telnyx switch_mod_gstt switch_3pcc test_inuse_race switch_jb_deadlock switch_cjson switch_sockaddr test_rtp_set_flag_null_crash test_write_frame_foreign_codec test_video_bridge_engine_race switch_apr_cleanup test_dtmf_sent_event
 
 # switch_mod_lumenvox is intentionally NOT built/run in CI yet: LumenVox servers
 # are not reachable from CI, so the ASR tests cannot run there. Re-enable by

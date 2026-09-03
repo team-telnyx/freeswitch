@@ -48,6 +48,7 @@ switch_core_media
 switch_sip
 switch_rtp_pcap
 test_tts_format
+test_dtmf_sent_event
 switch_mod_lumenvox
 conf_lumenvox/[0-9]*/**
 switch_apr_cleanup

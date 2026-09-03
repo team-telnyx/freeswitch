@@ -111,8 +111,6 @@ static const switch_payload_t INVALID_PT = 255;
 								 * characters when receiving." */
 
 #define SWITCH_HAVE_ICE 1 
-#define HAVE_MID_EXT 0
-
 static switch_port_t START_PORT = RTP_START_PORT;
 static switch_port_t END_PORT = RTP_END_PORT;
 static uint16_t START_SEQUENCE = RTP_START_SEQUENCE;
@@ -271,6 +269,8 @@ struct switch_rtp_rfc2833_data {
 	unsigned int out_digit_sofar;
 	unsigned int out_digit_sub_sofar;
 	unsigned int out_digit_dur;
+	int32_t out_digit_flags;			/* Kept from the queued digit so the sent event can honour the sensitive flags. */
+	switch_dtmf_source_t out_digit_source;	/* Kept from the queued digit so the sent event can report where it came from. */
 	switch_time_t out_digit_last_progress_us; /* Prevents sub-ptime do_2833() wakeups. */
 	uint16_t in_digit_seq;
 	uint32_t in_digit_ts;
@@ -348,9 +348,28 @@ typedef struct ts_normalised_s {
 	uint32_t dtmf_ts;
 } ts_normalised_t;
 
-#if HAVE_MID_EXT
-static void rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_t *send_msg, switch_size_t *bytes);
-#endif
+struct switch_rtp_write_state {
+	uint8_t initialized;
+	uint16_t seq;
+	uint32_t ts;
+	uint32_t last_write_ts;
+	uint32_t last_write_samplecount;
+	switch_time_t last_write_timestamp;
+	uint32_t reset;
+	uint8_t need_mark;
+	ts_normalize_t ts_norm;
+	uint16_t last_write_seq;
+	uint8_t video_delta_mode;
+	uint8_t video_frame_open;
+	uint8_t video_frame_last_set;
+	uint32_t video_frame_src_ts;
+	uint32_t video_frame_out_ts;
+	uint32_t video_frame_last_src_ts;
+	uint32_t video_frame_last_out_ts;
+	switch_time_t video_frame_last_timestamp;
+};
+
+static switch_status_t rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_t *send_msg, switch_size_t *bytes, uint8_t ext_id, const char *mid, switch_bool_t drop_peer_extensions, switch_size_t trusted_payload_offset);
 struct trickle_cb_ctx {
 	switch_ice_candidate_cb_t cb;
 	void *user_data;
@@ -468,6 +487,8 @@ struct switch_rtp {
 	uint16_t seq;
 	uint32_t ssrc;
 	uint32_t remote_ssrc;
+	uint32_t rtcp_fb_local_ssrc;
+	uint32_t rtcp_fb_remote_ssrc;
 	uint32_t last_jb_read_ssrc;
 	int8_t sending_dtmf;
 	uint8_t need_mark;
@@ -487,6 +508,7 @@ struct switch_rtp {
 	uint32_t queue_delay;
 	switch_time_t last_write_timestamp;
 	uint32_t flags[SWITCH_RTP_FLAG_INVALID];
+	uint8_t bundle_has_video;
 	switch_memory_pool_t *pool;
 	switch_sockaddr_t *from_addr, *rtp_from_addr, *rtcp_from_addr, *bundle_internal_addr, *bundle_external_addr;
 	char *rx_host;
@@ -526,6 +548,16 @@ struct switch_rtp {
 	switch_mutex_t *flag_mutex;
 	switch_mutex_t *read_mutex;
 	switch_mutex_t *write_mutex;
+	switch_mutex_t *bundle_video_frame_lock;  /* serializes video frame burst vs audio */
+	/* Drain-open-frame-first: the video writer signals that a VP8 frame is
+	   mid-emission so the audio writer can briefly defer, keeping fragments
+	   contiguous on the shared BUNDLE 5-tuple.  All reads/writes of these
+	   two fields are protected by bundle_video_frame_lock. */
+	uint8_t bundle_video_frame_in_progress;
+	switch_time_t bundle_video_frame_open_us;
+	uint32_t bundle_audio_pt_restamped_total;
+	uint32_t mid_rewrite_drop_total;
+	switch_payload_t bundle_audio_pt;  /* local egress audio PT, immune to video set_default_payload on shared BUNDLE session */
 	switch_mutex_t *ice_mutex;
 	switch_mutex_t *sock_mutex;
 	switch_timer_t timer;
@@ -567,6 +599,13 @@ struct switch_rtp {
 	uint16_t last_seq;
 	uint16_t last_write_seq;
 	uint8_t video_delta_mode;
+	uint8_t video_frame_open;
+	uint8_t video_frame_last_set;
+	uint32_t video_frame_src_ts;
+	uint32_t video_frame_out_ts;
+	uint32_t video_frame_last_src_ts;
+	uint32_t video_frame_last_out_ts;
+	switch_time_t video_frame_last_timestamp;
 	switch_time_t last_read_time;
 	switch_time_t last_publish_stats;
 	int publish_stats_interval_ms;
@@ -592,11 +631,10 @@ struct switch_rtp {
 	uint32_t last_max_vb_frames;
 	int skip_timer;
 	uint32_t prev_nacks_inflight;
-	switch_time_t next_dtmf_send_time;
 	rtcp_probe_func rtcp_probe;
 	uint8_t send_rtp_exts_size;
 	uint8_t send_rtp_exts_written;
-	uint8_t recv_rtp_exts_size;
+	uint32_t recv_rtp_exts_size;
 	uint8_t num_remote_extensions;
 	rtp_extension_t remote_extensions[MAX_RTP_EXTENSIONS];
 	uint8_t ext_total_len;
@@ -654,7 +692,7 @@ typedef enum {
 	RESULT_GOTO_TIMERCHECK
 } handle_rfc2833_result_t;
 
-SWITCH_DECLARE(void) switch_rtp_handle_extensions(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(switch_status_t) switch_rtp_handle_extensions(switch_rtp_t *rtp_session, switch_size_t packet_bytes);
 SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session);
 static switch_status_t switch_rtp_sendto(switch_rtp_t *rtp_session, switch_socket_t *sock, switch_sockaddr_t *where, int32_t flags, rtp_msg_t *send_msg, switch_size_t *len);
 
@@ -683,6 +721,9 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_get_extension_info(
 }
 
 #define rtp_type(rtp_session) rtp_session->flags[SWITCH_RTP_FLAG_TEXT] ?  "text" : (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] ? "video" : "audio")
+#define rtp_has_video_feedback(rtp_session) ((rtp_session)->flags[SWITCH_RTP_FLAG_VIDEO] || (rtp_session)->bundle_has_video)
+#define rtp_feedback_local_ssrc(rtp_session) (((rtp_session)->bundle_has_video && !(rtp_session)->flags[SWITCH_RTP_FLAG_VIDEO] && (rtp_session)->rtcp_fb_local_ssrc) ? (rtp_session)->rtcp_fb_local_ssrc : (rtp_session)->ssrc)
+#define rtp_feedback_remote_ssrc(rtp_session) (((rtp_session)->bundle_has_video && !(rtp_session)->flags[SWITCH_RTP_FLAG_VIDEO] && (rtp_session)->rtcp_fb_remote_ssrc) ? (rtp_session)->rtcp_fb_remote_ssrc : (rtp_session)->remote_ssrc)
 
 #define FORK_SSRC_CHECK 0
 
@@ -1344,8 +1385,25 @@ static handle_rfc2833_result_t handle_rfc2833(switch_rtp_t *rtp_session, switch_
 static int rtp_add_extension_header(switch_rtp_t *rtp_session, rtp_msg_t *send_msg, uint8_t score, void *data, switch_size_t *datalen);
 static int rtp_write_ready(switch_rtp_t *rtp_session, uint32_t bytes, int line);
 static int global_init = 0;
+static void rtp_log_mid_rewrite_drop(switch_rtp_t *rtp_session, rtp_msg_t *send_msg, switch_size_t bytes, switch_size_t trusted_payload_offset, const char *path)
+{
+	uint32_t total = ++rtp_session->mid_rewrite_drop_total;
+
+	if (total <= 5 || !(total % 500)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
+			"RTP MID rewrite dropped packet path=%s ext_id=%u mid=%s pt=%u seq=%u ssrc=%u bytes=%" SWITCH_SIZE_T_FMT " trusted_payload_offset=%" SWITCH_SIZE_T_FMT " total=%u\n",
+			switch_str_nil(path), rtp_session->ext_mid.ext_id, switch_str_nil(rtp_session->ext_mid.local_mid),
+			send_msg ? send_msg->header.pt : 0, send_msg ? ntohs(send_msg->header.seq) : 0,
+			send_msg ? ntohl(send_msg->header.ssrc) : 0, bytes, trusted_payload_offset, total);
+	}
+}
+
 static int rtp_common_write(switch_rtp_t *rtp_session,
-							rtp_msg_t *send_msg, void *data, uint32_t datalen, switch_payload_t payload, uint32_t timestamp, switch_frame_flag_t *flags);
+							rtp_msg_t *send_msg, void *data, uint32_t datalen, switch_payload_t payload, uint32_t timestamp, switch_frame_flag_t *flags, switch_rtp_write_state_t *write_state, uint32_t ssrc, uint8_t mid_ext_id, const char *mid, switch_bool_t force_video, switch_size_t trusted_payload_offset);
+static int rtp_write_manual_state(switch_rtp_t *rtp_session, switch_rtp_write_state_t *write_state,
+							  void *data, uint32_t datalen, uint8_t m, switch_payload_t payload, uint32_t ts,
+							  switch_frame_flag_t *flags, uint32_t ssrc, uint8_t mid_ext_id, const char *mid,
+							  switch_payload_t in_payload, uint16_t in_seq, uint32_t in_ssrc);
 
 
 #define MEDIA_TOO_LONG 2000
@@ -3675,6 +3733,27 @@ static void normalised_ts_commit_dtmf_ts(switch_rtp_t *rtp_session, uint32_t ts)
 	rtp_session->ts_normalised.dtmf_ts = ts;
 }
 
+SWITCH_DECLARE(switch_status_t) switch_rtp_write_state_create(switch_rtp_write_state_t **write_state, switch_memory_pool_t *pool)
+{
+	if (!write_state || !pool) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	*write_state = switch_core_alloc(pool, sizeof(**write_state));
+	switch_rtp_write_state_reset(*write_state);
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(void) switch_rtp_write_state_reset(switch_rtp_write_state_t *write_state)
+{
+	if (!write_state) {
+		return;
+	}
+
+	memset(write_state, 0, sizeof(*write_state));
+}
+
 static void do_cumulative_pp_mos(switch_rtp_t *rtp_session)
 {
 	double R = 0;
@@ -4163,6 +4242,18 @@ static int rtcp_stats(switch_rtp_t *rtp_session)
 	if(!rtp_session->rtcp_sock_output || !rtp_session->flags[SWITCH_RTP_FLAG_ENABLE_RTCP] || rtp_session->flags[SWITCH_RTP_FLAG_RTCP_PASSTHRU] || !rtp_session->rtcp_interval)
 		return 0; /* do not process RTCP in current state */
 
+	/* In BUNDLE mode the shared audio RTP session receives both audio
+	 * and video packets with different SSRCs and independent seq number spaces.
+	 * Running rtcp_stats on video packets corrupts audio RTCP stats (seq tracking,
+	 * jitter, loss) and triggers rtcp_stats_init on every SSRC flip (~2000+/call).
+	 * Skip RTCP stats entirely for packets whose SSRC matches the known video SSRC. */
+	if (rtp_session->bundle_has_video && !rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
+		uint32_t pkt_ssrc = ntohl(hdr->ssrc);
+		if (rtp_session->rtcp_fb_remote_ssrc && pkt_ssrc == rtp_session->rtcp_fb_remote_ssrc) {
+			return 0;
+		}
+	}
+
 	pkt_seq = (uint16_t) ntohs((uint16_t) rtp_session->last_rtp_hdr.seq);
 
 	/* Detect sequence number cycle change */
@@ -4386,12 +4477,13 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 
 	if (rtp_session->rtcp_sent_packets < 4) {
 		rate = 4000;
-	} else  {
-		if (rtp_session->pli_count || rtp_session->fir_count || rtp_session->tmmbr || rtp_session->tmmbn) {
-			//switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR, "MARK BW/FIR ETC %d %d\n", rtp_session->pli_count, rtp_session->fir_count);
-			rtcp_ok = 1;
-			rtcp_fb = 1;
-		}
+	}
+
+	/* Video feedback (PLI/FIR/TMMBR/TMMBN) is latency-critical and must not be gated by RTCP warmup;
+	 * the warmup rate only throttles cyclic SR/RR. */
+	if (rtp_session->pli_count || rtp_session->fir_count || rtp_session->tmmbr || rtp_session->tmmbn) {
+		rtcp_ok = 1;
+		rtcp_fb = 1;
 	}
 
 	if (rtp_session->send_rr) {
@@ -4437,13 +4529,12 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 		struct switch_rtcp_sender_info *rtcp_sender_info = 0;
 		switch_bool_t is_only_receiver = FALSE;
 		switch_bool_t report_sent = FALSE;
-
 		if (!rtcp_fb) {
 			rtp_session->rtcp_last_sent = now;
 			rtp_session->rtcp_sent_packets++;
 		}
 
-		if (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] && 
+		if (rtp_has_video_feedback(rtp_session) &&
 				rtp_session->vb && rtcp_cyclic) {
 				nack_dup = rtp_session->prev_nacks_inflight;
 				rtp_session->prev_nacks_inflight = 0;
@@ -4528,7 +4619,7 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 
 		rtp_session->rtcp_send_msg.header.length = htons((uint16_t)(rtcp_bytes / 4) - 1);
 
-		if (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
+		if (rtp_has_video_feedback(rtp_session)) {
 			if (rtp_session->pli_count) {
 				switch_rtcp_ext_hdr_t *ext_hdr;
 
@@ -4540,12 +4631,14 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 				ext_hdr->fmt = _RTCP_PSFB_PLI;
 				ext_hdr->pt = _RTCP_PT_PSFB;
 
-				ext_hdr->send_ssrc = htonl(rtp_session->ssrc);
-				ext_hdr->recv_ssrc = htonl(rtp_session->remote_ssrc);
+				ext_hdr->send_ssrc = htonl(rtp_feedback_local_ssrc(rtp_session));
+				ext_hdr->recv_ssrc = htonl(rtp_feedback_remote_ssrc(rtp_session));
 				rtp_session->rtcp_vstats.video_in.pli_count++;
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG1, "Sending RTCP PLI %u %u [%u]\n",
-								  rtp_session->ssrc, rtp_session->remote_ssrc, rtp_session->rtcp_vstats.video_in.pli_count);
-
+				if (rtp_session->flags[SWITCH_RTP_FLAG_DEBUG_RTP_WRITE]) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG_CLEAN(rtp_session->session), SWITCH_LOG_CONSOLE,
+						"RTCP feedback send PLI local_ssrc=%u remote_ssrc=%u\n",
+						rtp_feedback_local_ssrc(rtp_session), rtp_feedback_remote_ssrc(rtp_session));
+				}
 				ext_hdr->length = htons((uint8_t)(sizeof(switch_rtcp_ext_hdr_t) / 4) - 1);
 				rtcp_bytes += sizeof(switch_rtcp_ext_hdr_t);
 				rtp_session->pli_count = 0;
@@ -4565,15 +4658,19 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 					ext_hdr->p = 0;
 					ext_hdr->fmt = _RTCP_RTPFB_NACK;
 					ext_hdr->pt = _RTCP_PT_RTPFB;
-					ext_hdr->send_ssrc = htonl(rtp_session->ssrc);
-					ext_hdr->recv_ssrc = htonl(rtp_session->remote_ssrc);
+					ext_hdr->send_ssrc = htonl(rtp_feedback_local_ssrc(rtp_session));
+					ext_hdr->recv_ssrc = htonl(rtp_feedback_remote_ssrc(rtp_session));
 					ext_hdr->length = htons(3);
 					p += sizeof(switch_rtcp_ext_hdr_t);
 					nack = (uint32_t *) p;
 					*nack = cur_nack[n];
-
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG2, "Sending RTCP NACK %u [%d]\n",
-									  ntohs(*nack & 0xFFFF), rtp_session->rtcp_vstats.video_in.nack_count);
+					if (rtp_session->flags[SWITCH_RTP_FLAG_DEBUG_RTP_WRITE]) {
+						uint32_t nack_word = ntohl(cur_nack[n]);
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG_CLEAN(rtp_session->session), SWITCH_LOG_CONSOLE,
+							"RTCP feedback send NACK local_ssrc=%u remote_ssrc=%u pid=%u blp=0x%04x\n",
+							rtp_feedback_local_ssrc(rtp_session), rtp_feedback_remote_ssrc(rtp_session),
+							(uint16_t)(nack_word >> 16), (uint16_t)nack_word);
+					}
 
 					rtcp_bytes += sizeof(switch_rtcp_ext_hdr_t) + sizeof(cur_nack[n]);
 					cur_nack[n] = 0;
@@ -4606,16 +4703,19 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 				ext_hdr->fmt = _RTCP_PSFB_FIR;
 				ext_hdr->pt = _RTCP_PT_PSFB;
 
-				ext_hdr->send_ssrc = htonl(rtp_session->ssrc);
-				ext_hdr->recv_ssrc = htonl(rtp_session->remote_ssrc);
+				ext_hdr->send_ssrc = htonl(rtp_feedback_local_ssrc(rtp_session));
+				ext_hdr->recv_ssrc = htonl(rtp_feedback_remote_ssrc(rtp_session));
 
-				fir->ssrc = htonl(rtp_session->remote_ssrc);
+				fir->ssrc = htonl(rtp_feedback_remote_ssrc(rtp_session));
 				fir->seq = rtp_session->fir_seq;
 				fir->r1 = fir->r2 = fir->r3 = 0;
 
 				rtp_session->rtcp_vstats.video_in.fir_count++;
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG2, "Sending RTCP FIR SEQ %d [%u]\n", rtp_session->fir_seq, rtp_session->rtcp_vstats.video_in.fir_count);
-
+				if (rtp_session->flags[SWITCH_RTP_FLAG_DEBUG_RTP_WRITE]) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG_CLEAN(rtp_session->session), SWITCH_LOG_CONSOLE,
+						"RTCP feedback send FIR local_ssrc=%u remote_ssrc=%u fir_seq=%u\n",
+						rtp_feedback_local_ssrc(rtp_session), rtp_feedback_remote_ssrc(rtp_session), rtp_session->fir_seq);
+				}
 				rtp_session->fir_seq++;
 
 				ext_hdr->length = htons((uint8_t)((sizeof(switch_rtcp_ext_hdr_t) + sizeof(rtcp_fir_t)) / 4) - 1);
@@ -4640,7 +4740,7 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 				ext_hdr->version = 2;
 				ext_hdr->p = 0;
 				ext_hdr->pt = _RTCP_PT_RTPFB;
-				ext_hdr->send_ssrc = htonl(rtp_session->ssrc);
+				ext_hdr->send_ssrc = htonl(rtp_feedback_local_ssrc(rtp_session));
 				ext_hdr->recv_ssrc = 0;
 
 				if (rtp_session->tmmbr) {
@@ -4655,7 +4755,7 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 					rtp_session->tmmbn = 0;
 				}
 
-				tmmbx->ssrc = htonl(rtp_session->remote_ssrc);
+				tmmbx->ssrc = htonl(rtp_feedback_remote_ssrc(rtp_session));
 				calc_bw_exp(bps, 17, tmmbx);
 
 				ext_hdr->length = htons((uint8_t)((sizeof(switch_rtcp_ext_hdr_t) + sizeof(rtcp_tmmbx_t)) / 4) - 1);
@@ -7251,6 +7351,16 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_change_interval(switch_rtp_t *rtp_ses
 							  "Problem RE-Starting timer [%s] %d bytes per %dms\n", rtp_session->timer_name, samples_per_interval, ms_per_packet / 1000);
 		}
 
+		/* The new timer's samplecount restarts near zero, so any DTMF delay floor
+		   armed against the old timer's epoch would hold digits for the rest of the leg. */
+		if (rtp_session->next_write_samplecount || rtp_session->max_next_write_samplecount) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+							  "Timer re-created, clearing pending DTMF delay floor (%u/%u)\n",
+							  rtp_session->next_write_samplecount, rtp_session->max_next_write_samplecount);
+			rtp_session->next_write_samplecount = 0;
+			rtp_session->max_next_write_samplecount = 0;
+		}
+
 		WRITE_DEC(rtp_session);
 		READ_DEC(rtp_session);
 	}
@@ -7308,6 +7418,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_create(switch_rtp_t **new_rtp_session
 	rtp_session->te = INVALID_PT;
 	rtp_session->recv_te = INVALID_PT;
 	rtp_session->cng_pt = INVALID_PT;
+	rtp_session->bundle_audio_pt = INVALID_PT;  /* until BUNDLE setup captures the local audio PT */
 	rtp_session->session = session;
 	rtp_session->rtcp_probe = 0;
 	rtp_session->ignore_rtp_during_dtmf_timeout = SWITCH_RTP_DEFAULT_IGNORE_DTMF_TIMEOUT_MS;
@@ -7315,6 +7426,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_create(switch_rtp_t **new_rtp_session
 	switch_mutex_init(&rtp_session->flag_mutex, SWITCH_MUTEX_NESTED, pool);
 	switch_mutex_init(&rtp_session->read_mutex, SWITCH_MUTEX_NESTED, pool);
 	switch_mutex_init(&rtp_session->write_mutex, SWITCH_MUTEX_NESTED, pool);
+	switch_mutex_init(&rtp_session->bundle_video_frame_lock, SWITCH_MUTEX_NESTED, pool);
 	switch_mutex_init(&rtp_session->ice_mutex, SWITCH_MUTEX_NESTED, pool);
 	/* Pool-scoped: shared with every rtp_session on this pool, not per-session. */
 	rtp_session->sock_mutex = rtp_get_pool_sock_mutex(pool);
@@ -8181,7 +8293,7 @@ SWITCH_DECLARE(void) switch_rtp_video_refresh(switch_rtp_t *rtp_session)
 		return;
 	}
 
-	if (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] && (rtp_session->ice.ice_user || rtp_session->flags[SWITCH_RTP_FLAG_FIR] || rtp_session->flags[SWITCH_RTP_FLAG_OLD_FIR])) {
+	if (rtp_has_video_feedback(rtp_session) && (rtp_session->ice.ice_user || rtp_session->flags[SWITCH_RTP_FLAG_FIR] || rtp_session->flags[SWITCH_RTP_FLAG_OLD_FIR])) {
 		rtp_session->fir_count = 1;
 	}
 }
@@ -8193,7 +8305,7 @@ SWITCH_DECLARE(void) switch_rtp_video_loss(switch_rtp_t *rtp_session)
 		return;
 	}
 
-	if (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] && (rtp_session->ice.ice_user || rtp_session->flags[SWITCH_RTP_FLAG_PLI])) {
+	if (rtp_has_video_feedback(rtp_session) && (rtp_session->ice.ice_user || rtp_session->flags[SWITCH_RTP_FLAG_PLI])) {
 		rtp_session->pli_count = 1;
 	}
 }
@@ -8526,6 +8638,54 @@ SWITCH_DECLARE(void) switch_rtp_clear_flags(switch_rtp_t *rtp_session, switch_rt
 	}
 }
 
+SWITCH_DECLARE(void) switch_rtp_set_bundle_has_video(switch_rtp_t *rtp_session, switch_bool_t enabled)
+{
+	if (!rtp_session) {
+		return;
+	}
+
+	switch_mutex_lock(rtp_session->flag_mutex);
+	rtp_session->bundle_has_video = enabled ? 1 : 0;
+	if (!enabled) {
+		rtp_session->rtcp_fb_local_ssrc = 0;
+		rtp_session->rtcp_fb_remote_ssrc = 0;
+	}
+	switch_mutex_unlock(rtp_session->flag_mutex);
+
+	/* Clear drain-open-frame state when BUNDLE video is disabled.  Taken
+	   AFTER releasing flag_mutex: the audio write path acquires
+	   bundle_video_frame_lock and then flag_mutex, so nesting them in the
+	   reverse order here would risk an AB-BA deadlock. */
+	if (!enabled && rtp_session->bundle_video_frame_lock) {
+		switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+		rtp_session->bundle_video_frame_in_progress = 0;
+		rtp_session->bundle_video_frame_open_us = 0;
+		switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+	}
+}
+
+SWITCH_DECLARE(void) switch_rtp_set_bundle_audio_pt(switch_rtp_t *rtp_session, switch_payload_t pt)
+{
+	if (!rtp_session) {
+		return;
+	}
+	switch_mutex_lock(rtp_session->flag_mutex);
+	rtp_session->bundle_audio_pt = pt;
+	switch_mutex_unlock(rtp_session->flag_mutex);
+}
+
+SWITCH_DECLARE(void) switch_rtp_set_bundle_video_ssrcs(switch_rtp_t *rtp_session, uint32_t local_ssrc, uint32_t remote_ssrc)
+{
+	if (!rtp_session) {
+		return;
+	}
+
+	switch_mutex_lock(rtp_session->flag_mutex);
+	rtp_session->rtcp_fb_local_ssrc = local_ssrc;
+	rtp_session->rtcp_fb_remote_ssrc = remote_ssrc;
+	switch_mutex_unlock(rtp_session->flag_mutex);
+}
+
 SWITCH_DECLARE(void) switch_rtp_set_flag(switch_rtp_t *rtp_session, switch_rtp_flag_t flag)
 {
 	int old_flag;
@@ -8620,13 +8780,22 @@ SWITCH_DECLARE(void) switch_rtp_clear_flag(switch_rtp_t *rtp_session, switch_rtp
 
 static void set_dtmf_delay(switch_rtp_t *rtp_session, uint32_t ms)
 {
-	int upsamp = ms * (rtp_session->samples_per_second / 1000);
-	rtp_session->queue_delay =  ms * (rtp_session->samples_per_second / 1000);
-	rtp_session->next_dtmf_send_time = switch_micro_time_now() + (ms * 1000);
+	uint32_t upsamp = ms * (rtp_session->samples_per_second / 1000);
+
 	rtp_session->sending_dtmf = 0;
+	rtp_session->queue_delay = upsamp;
+
 	if (rtp_session->flags[SWITCH_RTP_FLAG_USE_TIMER]) {
+		/* Floor and ceiling are the same instant: the queued digit is held until
+		   the media clock reaches next_write_samplecount and released right there.
+		   Upstream arms a 10x ceiling for the interdigit case, but in this fork
+		   queue_delay is only cleared by an outbound write, so a stalled write
+		   path would turn that window into an extra hold of up to 10x the delay. */
+		rtp_session->next_write_samplecount = rtp_session->timer.samplecount + upsamp;
+		rtp_session->max_next_write_samplecount = rtp_session->next_write_samplecount;
 		rtp_session->last_write_ts += upsamp;
 	}
+
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "Queue digit delay of %dms\n", ms);
 }
 
@@ -8640,7 +8809,7 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 	//switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG1, "do_2833 %s / %p\n", rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName", (void*) rtp_session);
 
 	if (rtp_session->dtmf_data.out_digit_dur > 0) {
-		int x, loops = 1;
+		int x, loops = 1, end_packets_sent = 0;
 		switch_time_t now_us = switch_micro_time_now();
 
 		/* Ignore sub-ptime wakeups so tight read loops cannot collapse the digit. */
@@ -8687,7 +8856,7 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 
 		for (x = 0; x < loops; x++) {
 
-			switch_size_t wrote = 0;
+			int wrote = 0;
 
 			if (rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS) {
 				wrote = switch_rtp_write_manual(rtp_session,
@@ -8697,8 +8866,18 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 				wrote = switch_rtp_write_manual(rtp_session, rtp_session->dtmf_data.out_digit_packet, 4, 0, rtp_session->te, rtp_session->dtmf_data.timestamp_dtmf, &flags);
 			}
 
-			rtp_session->stats.outbound.raw_bytes += wrote;
-			rtp_session->stats.outbound.dtmf_packet_count++;
+			/* switch_rtp_write_manual() returns -1 when RTP is not writable or the socket
+			   /SRTP send failed, and 0 when the packet was dropped before it reached the
+			   socket. Only count what left the switch: the previous unsigned assignment
+			   turned -1 into SIZE_MAX and added it to raw_bytes. */
+			if (wrote > 0) {
+				rtp_session->stats.outbound.raw_bytes += wrote;
+				rtp_session->stats.outbound.dtmf_packet_count++;
+
+				if (loops != 1) {
+					end_packets_sent++;
+				}
+			}
 
 			if (loops == 1) {
 				rtp_session->last_write_ts += samples;
@@ -8732,6 +8911,25 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 				rtp_session->last_write_samplecount = rtp_session->write_timer.samplecount;
 			}
 
+			/* The end packets are on the wire: this digit is done, confirm what we sent.
+			   Nothing is confirmed when every end write was rejected -- claiming a digit
+			   the socket never accepted is the exact false positive this event removes.
+
+			   out_digit_sofar is a whole number of packet intervals and this branch is
+			   only reached once it has passed out_digit_dur, so within one clock domain
+			   the reported figure lands on or past the requested one: it measures
+			   overshoot from scheduling gaps, never a short digit. A digit cut short by
+			   teardown never gets here and is reported by nothing at all. */
+			if (rtp_session->session && end_packets_sent) {
+				switch_dtmf_t sent_dtmf = { rtp_session->dtmf_data.out_digit,
+											rtp_session->dtmf_data.out_digit_dur,
+											rtp_session->dtmf_data.out_digit_flags,
+											rtp_session->dtmf_data.out_digit_source };
+
+				switch_channel_fire_dtmf_sent_event(switch_core_session_get_channel(rtp_session->session), &sent_dtmf,
+													rtp_session->dtmf_data.out_digit_sofar, rtp_session->samples_per_second, "RFC2833");
+			}
+
 			rtp_session->dtmf_data.out_digit_dur = 0;
 
 			if (rtp_session->interdigit_delay) {
@@ -8744,11 +8942,6 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 
 	if (!rtp_session->dtmf_data.out_digit_dur && rtp_session->dtmf_data.dtmf_queue && switch_queue_size(rtp_session->dtmf_data.dtmf_queue)) {
 		void *pop;
-
-
-		if (rtp_session->queue_delay && rtp_session->next_dtmf_send_time >  switch_micro_time_now()) {
-			return;
-		}
 
 		if (rtp_session->flags[SWITCH_RTP_FLAG_USE_TIMER]) {
 			//switch_core_timer_sync(&rtp_session->write_timer);
@@ -8774,9 +8967,6 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 
 		if (rtp_session->queue_delay) {
 			return;
-		} else {
-			rtp_session->next_dtmf_send_time = 0;
-			rtp_session->queue_delay = 0;
 		}
 
 		if (!rtp_session->sending_dtmf) {
@@ -8785,7 +8975,7 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 
 		if (switch_queue_trypop(rtp_session->dtmf_data.dtmf_queue, &pop) == SWITCH_STATUS_SUCCESS) {
 			switch_dtmf_t *rdigit = pop;
-			switch_size_t wrote;
+			int wrote;
 			uint32_t shift = 0, new_ts = 0;
 
 			if (rdigit->digit == 'w') {
@@ -8805,6 +8995,8 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 			rtp_session->dtmf_data.out_digit_sub_sofar = samples;
 			rtp_session->dtmf_data.out_digit_dur = rdigit->duration;
 			rtp_session->dtmf_data.out_digit = rdigit->digit;
+			rtp_session->dtmf_data.out_digit_flags = rdigit->flags;
+			rtp_session->dtmf_data.out_digit_source = rdigit->source;
 			rtp_session->dtmf_data.out_digit_last_progress_us = switch_micro_time_now(); /* seed gate */
 			rtp_session->dtmf_data.out_digit_packet[0] = (unsigned char) switch_char_to_rfc2833(rdigit->digit);
 			rtp_session->dtmf_data.out_digit_packet[1] = 13;
@@ -8874,8 +9066,10 @@ SWITCH_DECLARE(void) do_2833(switch_rtp_t *rtp_session)
 						rtp_session->te, rtp_session->dtmf_data.timestamp_dtmf, &flags);
 
 
-				rtp_session->stats.outbound.raw_bytes += wrote;
-				rtp_session->stats.outbound.dtmf_packet_count++;
+				if (wrote > 0) {
+					rtp_session->stats.outbound.raw_bytes += wrote;
+					rtp_session->stats.outbound.dtmf_packet_count++;
+				}
 
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "Send start packet for [%c] ts=%u dur=%d/%d/%d seq=%d lw=%u\n",
 						rtp_session->dtmf_data.out_digit,
@@ -9052,29 +9246,65 @@ static switch_size_t do_flush(switch_rtp_t *rtp_session, int force, switch_size_
 	return bytes_out;
 }
 
-static int check_recv_payload(switch_rtp_t *rtp_session)
+static switch_bool_t rtp_payload_is_negotiated(switch_rtp_t *rtp_session, switch_payload_t pt, payload_map_t **pmapP)
 {
-	int ok = 1;
+	payload_map_t *pmap;
+	switch_bool_t ok = SWITCH_TRUE;
 
-	if (!(rtp_session->rtp_bugs & RTP_BUG_ACCEPT_ANY_PAYLOAD) && rtp_session->pmaps && *rtp_session->pmaps) {
-		payload_map_t *pmap;
-		ok = 0;
-
-		switch_mutex_lock(rtp_session->flag_mutex);
-
-		for (pmap = *rtp_session->pmaps; pmap && pmap->allocated; pmap = pmap->next) {
-			if (!pmap->negotiated) {
-				continue;
-			}
-
-			if (rtp_session->last_rtp_hdr.pt == pmap->pt) {
-				ok = 1;
-			}
-		}
-		switch_mutex_unlock(rtp_session->flag_mutex);
+	if (pmapP) {
+		*pmapP = NULL;
 	}
 
+	if (!(rtp_session->pmaps && *rtp_session->pmaps)) {
+		return SWITCH_TRUE;
+	}
+
+	ok = SWITCH_FALSE;
+	switch_mutex_lock(rtp_session->flag_mutex);
+
+	for (pmap = *rtp_session->pmaps; pmap && pmap->allocated; pmap = pmap->next) {
+		if (!pmap->negotiated) {
+			continue;
+		}
+
+		if (pt == pmap->pt) {
+			ok = SWITCH_TRUE;
+			if (pmapP) {
+				*pmapP = pmap;
+			}
+			break;
+		}
+	}
+	switch_mutex_unlock(rtp_session->flag_mutex);
+
 	return ok;
+}
+
+static switch_bool_t rtp_should_bypass_audio_jb(switch_rtp_t *rtp_session)
+{
+	switch_payload_t pt;
+
+	if (!rtp_session->has_rtp ||
+		rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] ||
+		rtp_session->flags[SWITCH_RTP_FLAG_PROXY_MEDIA] ||
+		rtp_session->flags[SWITCH_RTP_FLAG_UDPTL] ||
+		!rtp_session->flags[SWITCH_RTP_FLAG_BUNDLE_ACCEPT_ANY_PT]) {
+		return SWITCH_FALSE;
+	}
+
+	pt = rtp_session->last_rtp_hdr.pt;
+
+	if (pt == 13 || pt == rtp_session->recv_te || pt == rtp_session->cng_pt) {
+		return SWITCH_FALSE;
+	}
+
+	return rtp_payload_is_negotiated(rtp_session, pt, NULL) ? SWITCH_FALSE : SWITCH_TRUE;
+}
+
+static int check_recv_payload(switch_rtp_t *rtp_session)
+{
+	return (rtp_session->rtp_bugs & RTP_BUG_ACCEPT_ANY_PAYLOAD) ||
+		rtp_payload_is_negotiated(rtp_session, rtp_session->last_rtp_hdr.pt, NULL) ? 1 : 0;
 }
 
 static int get_recv_payload(switch_rtp_t *rtp_session)
@@ -9635,7 +9865,8 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 				rtp_session->last_rtp_hdr.pt != rtp_session->recv_te &&
 				rtp_session->last_rtp_hdr.pt != rtp_session->cng_pt) {
 
-				if (!(rtp_session->rtp_bugs & RTP_BUG_ACCEPT_ANY_PAYLOAD) && 
+				if (!(rtp_session->flags[SWITCH_RTP_FLAG_BUNDLE_ACCEPT_ANY_PT]) &&
+					!(rtp_session->rtp_bugs & RTP_BUG_ACCEPT_ANY_PAYLOAD) &&
 					!(rtp_session->rtp_bugs & RTP_BUG_ACCEPT_ANY_PACKETS) && rtp_session->pmaps && *rtp_session->pmaps) {
 					payload_map_t *pmap;
 					accept_packet = 0;
@@ -10010,6 +10241,7 @@ fork_done:
 			switch_mutex_lock(rtp_session->ice_mutex);
 			if (rtp_session->flags[SWITCH_RTP_FLAG_SECURE_RECV] && rtp_session->has_rtp &&
 				(check_recv_payload(rtp_session) ||
+				 rtp_session->flags[SWITCH_RTP_FLAG_BUNDLE_ACCEPT_ANY_PT] ||
 				 rtp_session->last_rtp_hdr.pt == rtp_session->recv_te ||
 				 rtp_session->last_rtp_hdr.pt == rtp_session->cng_pt)) {
 				//if (rtp_session->flags[SWITCH_RTP_FLAG_SECURE_RECV] && (!rtp_session->ice.ice_user || rtp_session->has_rtp)) {
@@ -10138,20 +10370,18 @@ fork_done:
 
 fork_end:
 
-		switch_rtp_handle_extensions(rtp_session);
+		if (switch_rtp_handle_extensions(rtp_session, *bytes) != SWITCH_STATUS_SUCCESS) {
+			*bytes = 0;
+			goto more;
+		}
 
 		rtp_session->last_recv_bytes = *bytes;
 		if (rtp_session->has_rtp) {
-			if (rtp_session->recv_msg.header.cc > 0) { /* Contributing Source Identifiers (4 bytes = sizeof CSRC header)*/
-				rtp_session->recv_msg.ebody = RTP_BODY(rtp_session) + (rtp_session->recv_msg.header.cc * 4);
-			}
-
 			/* recalculate body length in case rtp extension used */
 			if (!rtp_session->flags[SWITCH_RTP_FLAG_PROXY_MEDIA] && !rtp_session->flags[SWITCH_RTP_FLAG_UDPTL] &&
 				rtp_session->recv_msg.header.x) { /* header extensions */
 				uint16_t length;
 
-				rtp_session->recv_msg.ext = (switch_rtp_hdr_ext_t *) RTP_BODY(rtp_session);
 				length = ntohs((uint16_t)rtp_session->recv_msg.ext->length);
 
 				if (length < SWITCH_RTP_MAX_BUF_LEN_WORDS) {
@@ -10185,6 +10415,11 @@ fork_end:
 
 
 		}
+		/* skip stats/JB for video packets on audio session */
+		if (*bytes && rtp_should_bypass_audio_jb(rtp_session)) {
+			return SWITCH_STATUS_SUCCESS;
+		}
+
 
 
 		rtp_session->stats.inbound.raw_bytes += *bytes;
@@ -10238,6 +10473,7 @@ fork_end:
 
 	}
 
+
 	if (rtp_session->has_rtp && *bytes) {
 		uint32_t read_ssrc = ntohl(rtp_session->last_rtp_hdr.ssrc);
 
@@ -10284,7 +10520,9 @@ fork_end:
 			}
 		} else {
 			if (rtp_session->last_rtp_hdr.m && rtp_session->last_rtp_hdr.pt != rtp_session->recv_te &&
-				!rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] && !(rtp_session->rtp_bugs & RTP_BUG_IGNORE_MARK_BIT) && 
+				!rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] &&
+				!rtp_session->flags[SWITCH_RTP_FLAG_BUNDLE_ACCEPT_ANY_PT] &&
+				!(rtp_session->rtp_bugs & RTP_BUG_IGNORE_MARK_BIT) &&
 				rtp_session->last_read_ts - rtp_session->prev_read_ts < rtp_session->samples_per_interval * 3) {  
 				switch_rtp_set_flag(rtp_session, SWITCH_RTP_FLAG_FLUSH);
 			} else if (rtp_session->last_jb_read_ssrc && rtp_session->last_jb_read_ssrc != read_ssrc) {
@@ -10589,7 +10827,7 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 					  "RTCP packet bytes %" SWITCH_SIZE_T_FMT " type %d pad %d\n",
 					  bytes, msg->header.type, msg->header.p);
 
-	if (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] && (msg->header.type == _RTCP_PT_RTPFB || msg->header.type == _RTCP_PT_PSFB || msg->header.type < 200)) {
+	if (rtp_has_video_feedback(rtp_session) && (msg->header.type == _RTCP_PT_RTPFB || msg->header.type == _RTCP_PT_PSFB || msg->header.type < 200)) {
 		rtcp_ext_msg_t *extp = (rtcp_ext_msg_t *) msg;
 
 		if (extp->header.fmt != 15) { // <---- REMOVE WHEN BRIA STOPS SENDING UNSOLICITED REMB
@@ -10599,6 +10837,12 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 
 		if (msg->header.type == _RTCP_PT_FIR ||
 			(msg->header.type == _RTCP_PT_PSFB && (extp->header.fmt == _RTCP_PSFB_FIR || extp->header.fmt == _RTCP_PSFB_PLI))) {
+			if (rtp_session->flags[SWITCH_RTP_FLAG_DEBUG_RTP_READ]) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG_CLEAN(rtp_session->session), SWITCH_LOG_CONSOLE,
+					"RTCP feedback recv %s sender_ssrc=%u media_ssrc=%u\n",
+					extp->header.fmt == _RTCP_PSFB_PLI ? "PLI" : "FIR",
+					ntohl(extp->header.send_ssrc), ntohl(extp->header.recv_ssrc));
+			}
 #if 0
 			if (msg->header.type == _RTCP_PT_FIR) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "Ancient FIR Received. Hello from 1996!\n");
@@ -10613,11 +10857,45 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 			if (switch_core_session_media_flow(rtp_session->session, SWITCH_MEDIA_TYPE_VIDEO) == SWITCH_MEDIA_FLOW_RECVONLY) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG2, "%s Ignoring FIR/PLI from a sendonly stream.\n", 
 								  switch_core_session_get_name(rtp_session->session));
+			} else if (rtp_session->bundle_has_video && !rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
+				/* BUNDLE shared audio session received FIR/PLI from the far end (e.g. Safari).
+				 * The video refresh must propagate to the bridged partner (SIP caller) whose
+				 * video engine can forward it to the actual video source (SIP callee).
+				 * Do it directly to avoid the CF_VIDEO_REFRESH_REQ race between the two
+				 * bridge threads, but keep it throttled through VIDEO_REFRESH_FREQ. A forced
+				 * request here runs once per inbound FIR/PLI and has been observed to flood
+				 * browsers at 10+ FIR/s, stalling the encoder during call setup.
+				 *
+				 * BUNDLE hangup-race guard: a stray RTCP packet can be drained after the
+				 * local BUNDLE channel has begun teardown. Calling refresh propagation on the
+				 * partner during that window has been observed to delay the partner's
+				 * CS_HANGUP transition (partner stuck in CS_EXCHANGE_MEDIA until the far-end
+				 * timeout fires). Skip partner propagation once either side is no longer up. */
+				switch_channel_t *local_channel = switch_core_session_get_channel(rtp_session->session);
+
+				if (switch_channel_up_nosig(local_channel)) {
+					switch_core_session_t *partner_session = NULL;
+
+					if (switch_core_session_get_partner(rtp_session->session, &partner_session) == SWITCH_STATUS_SUCCESS) {
+						switch_channel_t *partner_channel = switch_core_session_get_channel(partner_session);
+
+						if (switch_channel_up_nosig(partner_channel)) {
+							switch_core_media_gen_key_frame(partner_session);
+							switch_core_session_request_video_refresh(partner_session);
+							switch_channel_set_flag(partner_channel, CF_VIDEO_REFRESH_REQ);
+						}
+						switch_core_session_rwunlock(partner_session);
+					} else {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
+									  "BUNDLE RTCP recv FIR/PLI %s but no bridged partner found\n",
+									  switch_core_session_get_name(rtp_session->session));
+					}
+					/* Also flag local channel for bridge thread b_channel visibility (belt-and-suspenders) */
+					switch_channel_set_flag(local_channel, CF_VIDEO_REFRESH_REQ);
+				}
 			} else {
 				switch_core_media_gen_key_frame(rtp_session->session);
 				switch_core_session_request_video_refresh(rtp_session->session);
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG2, "%s Got FIR/PLI\n", 
-								  switch_core_session_get_name(rtp_session->session));
 				switch_channel_set_flag(switch_core_session_get_channel(rtp_session->session), CF_VIDEO_REFRESH_REQ);
 			}
 		}
@@ -10626,9 +10904,11 @@ static switch_status_t process_rtcp_report(switch_rtp_t *rtp_session, rtcp_msg_t
 			uint32_t *nack = (uint32_t *) extp->body;
 			int i, nack_count = rtcp_nack_fci_count(extp, bytes);
 
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG2, "%s Got NACK count %d\n", 
-							  switch_core_session_get_name(rtp_session->session), nack_count);
-
+			if (rtp_session->flags[SWITCH_RTP_FLAG_DEBUG_RTP_READ]) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG_CLEAN(rtp_session->session), SWITCH_LOG_CONSOLE,
+					"RTCP feedback recv NACK sender_ssrc=%u media_ssrc=%u entries=%d\n",
+					ntohl(extp->header.send_ssrc), ntohl(extp->header.recv_ssrc), nack_count);
+			}
 
 			for (i = 0; i < nack_count; i++) {
 				handle_nack(rtp_session, nack[i]);
@@ -11253,6 +11533,8 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 		bytes = 0;
 
 		if (rtp_session->flags[SWITCH_RTP_FLAG_USE_TIMER] &&
+			!(io_flags & SWITCH_IO_FLAG_BUNDLE_DRAIN) &&
+			!(io_flags & SWITCH_IO_FLAG_NOBLOCK) &&
 			!rtp_session->flags[SWITCH_RTP_FLAG_PROXY_MEDIA] &&
 			!rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] &&
 			!rtp_session->flags[SWITCH_RTP_FLAG_UDPTL] &&
@@ -11265,6 +11547,11 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 					if (status == SWITCH_STATUS_GENERR) {
 						ret = -1;
 						goto end;
+					}
+
+					if (bytes && rtp_should_bypass_audio_jb(rtp_session)) {
+						read_pretriggered = 1;
+						break;
 					}
 
 					if ((*flags & SFF_RTCP)) {
@@ -11395,7 +11682,13 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 			break;
 		}
 
-		if (!rtp_session->flags[SWITCH_RTP_FLAG_USE_TIMER] && rtp_session->read_pollfd) {
+		if ((io_flags & SWITCH_IO_FLAG_BUNDLE_DRAIN) && rtp_session->read_pollfd) {
+			int pt = (io_flags & SWITCH_IO_FLAG_NOBLOCK) ? 0 : 1000;
+
+			do_2833(rtp_session);
+			poll_status = switch_poll(rtp_session->read_pollfd, 1, &fdr, pt);
+
+		} else if (!rtp_session->flags[SWITCH_RTP_FLAG_USE_TIMER] && rtp_session->read_pollfd) {
 			int pt = poll_sec * 1000000;
 
 			do_2833(rtp_session);
@@ -11439,7 +11732,9 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 
 		}
 
-		if (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
+		if (io_flags & SWITCH_IO_FLAG_BUNDLE_DRAIN) {
+			got_jb = SWITCH_FALSE;
+		} else if (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
 			got_jb = (rtp_session->vb && !rtp_session->pause_jb && switch_jb_poll(rtp_session->vb));
 		} else {
 			got_jb = SWITCH_TRUE;
@@ -11785,6 +12080,7 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 		if (bytes && rtp_session->last_rtp_hdr.m && rtp_session->last_rtp_hdr.pt != rtp_session->recv_te &&
 			!rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] &&
 			!rtp_session->flags[SWITCH_RTP_FLAG_TEXT] &&
+			!rtp_session->flags[SWITCH_RTP_FLAG_BUNDLE_ACCEPT_ANY_PT] &&
 			!(rtp_session->rtp_bugs & RTP_BUG_IGNORE_MARK_BIT)) {
 			rtp_flush_read_buffer(rtp_session, SWITCH_RTP_FLUSH_ONCE);
 		}
@@ -11910,7 +12206,12 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 			*flags |= SFF_CNG;
 			*payload_type = (switch_payload_t) rtp_session->last_rtp_hdr.pt;
 			ret = 2 + rtp_header_len;
-			rtp_session->stats.inbound.skip_packet_count++;
+			/* BUNDLE drain thread poll-timeouts produce CNG returns at ~1ms
+			 * intervals. These are not real packet skips -- do not inflate the counter
+			 * which is shared with the video engine stats via BUNDLE RTP session. */
+			if (!(io_flags & SWITCH_IO_FLAG_BUNDLE_DRAIN)) {
+				rtp_session->stats.inbound.skip_packet_count++;
+			}
 			goto end;
 		}
 
@@ -12252,6 +12553,11 @@ static int rtp_write_ready(switch_rtp_t *rtp_session, uint32_t bytes, int line)
 	return 1;
 }
 
+SWITCH_DECLARE(int) switch_rtp_write_ready(switch_rtp_t *rtp_session, uint32_t bytes)
+{
+	return rtp_write_ready(rtp_session, bytes, __LINE__);
+}
+
 #define RTP_EXT_MIN_AUDIO_LEVEL -127
 #define RTP_EXT_MAX_AUDIO_LEVEL 0
 
@@ -12321,7 +12627,7 @@ static int rtp_add_extension_header(switch_rtp_t *rtp_session, rtp_msg_t *send_m
 }
 
 static int rtp_common_write(switch_rtp_t *rtp_session,
-							rtp_msg_t *send_msg, void *data, uint32_t datalen, switch_payload_t payload, uint32_t timestamp, switch_frame_flag_t *flags)
+							rtp_msg_t *send_msg, void *data, uint32_t datalen, switch_payload_t payload, uint32_t timestamp, switch_frame_flag_t *flags, switch_rtp_write_state_t *write_state, uint32_t ssrc, uint8_t mid_ext_id, const char *mid, switch_bool_t force_video, switch_size_t trusted_payload_offset)
 {
 	switch_size_t bytes;
 	uint8_t send = 1;
@@ -12329,6 +12635,27 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 	int ret;
 	switch_time_t now;
 	uint8_t m = 0;
+	uint16_t *seq = NULL;
+	uint32_t *ts = NULL;
+	uint32_t *last_write_ts = NULL;
+	uint32_t *last_write_samplecount = NULL;
+	switch_time_t *last_write_timestamp = NULL;
+	uint32_t *reset = NULL;
+	uint8_t *need_mark = NULL;
+	ts_normalize_t *ts_norm = NULL;
+	uint16_t *last_write_seq = NULL;
+	uint8_t *video_delta_mode = NULL;
+	uint8_t video_frame_commit_marker = 0;
+	uint32_t video_frame_commit_src_ts = 0;
+	uint32_t video_frame_commit_out_ts = 0;
+	switch_time_t video_frame_commit_timestamp = 0;
+	uint8_t *video_frame_open = NULL;
+	uint8_t *video_frame_last_set = NULL;
+	uint32_t *video_frame_src_ts = NULL;
+	uint32_t *video_frame_out_ts = NULL;
+	uint32_t *video_frame_last_src_ts = NULL;
+	uint32_t *video_frame_last_out_ts = NULL;
+	switch_time_t *video_frame_last_timestamp = NULL;
 #if DEBUG_RTP
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "RTP: common_write, timestamp: %s %u %p/%p\n", rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName", timestamp, (void*)rtp_session->session, (void*)rtp_session);
 #endif
@@ -12341,7 +12668,51 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 	}
 
 	WRITE_INC(rtp_session);
-	
+
+	if (write_state) {
+		if (!write_state->initialized) {
+			write_state->seq = switch_rtp_request_sequence();
+			write_state->last_write_timestamp = switch_micro_time_now();
+			write_state->initialized = 1;
+		}
+
+		seq = &write_state->seq;
+		ts = &write_state->ts;
+		last_write_ts = &write_state->last_write_ts;
+		last_write_samplecount = &write_state->last_write_samplecount;
+		last_write_timestamp = &write_state->last_write_timestamp;
+		reset = &write_state->reset;
+		need_mark = &write_state->need_mark;
+		ts_norm = &write_state->ts_norm;
+		last_write_seq = &write_state->last_write_seq;
+		video_delta_mode = &write_state->video_delta_mode;
+		video_frame_open = &write_state->video_frame_open;
+		video_frame_last_set = &write_state->video_frame_last_set;
+		video_frame_src_ts = &write_state->video_frame_src_ts;
+		video_frame_out_ts = &write_state->video_frame_out_ts;
+		video_frame_last_src_ts = &write_state->video_frame_last_src_ts;
+		video_frame_last_out_ts = &write_state->video_frame_last_out_ts;
+		video_frame_last_timestamp = &write_state->video_frame_last_timestamp;
+	} else {
+		seq = &rtp_session->seq;
+		ts = &rtp_session->ts;
+		last_write_ts = &rtp_session->last_write_ts;
+		last_write_samplecount = &rtp_session->last_write_samplecount;
+		last_write_timestamp = &rtp_session->last_write_timestamp;
+		reset = &rtp_session->flags[SWITCH_RTP_FLAG_RESET];
+		need_mark = &rtp_session->need_mark;
+		ts_norm = &rtp_session->ts_norm;
+		last_write_seq = &rtp_session->last_write_seq;
+		video_delta_mode = &rtp_session->video_delta_mode;
+		video_frame_open = &rtp_session->video_frame_open;
+		video_frame_last_set = &rtp_session->video_frame_last_set;
+		video_frame_src_ts = &rtp_session->video_frame_src_ts;
+		video_frame_out_ts = &rtp_session->video_frame_out_ts;
+		video_frame_last_src_ts = &rtp_session->video_frame_last_src_ts;
+		video_frame_last_out_ts = &rtp_session->video_frame_last_out_ts;
+		video_frame_last_timestamp = &rtp_session->video_frame_last_timestamp;
+	}
+
 	if (rtp_session->flags[SWITCH_RTP_FLAG_USE_TIMER]) {
 		//switch_core_timer_sync(&rtp_session->write_timer);
 	}
@@ -12353,22 +12724,22 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 		bytes = datalen;
 
 		m = (uint8_t) send_msg->header.m;
-		if (!(rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS)) {
+		if (!write_state && !(rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS)) {
 			{
 				uint32_t ts_delta;
 				this_ts = ntohl(send_msg->header.ts);
-				ts_delta = abs((int32_t)(this_ts - rtp_session->last_write_ts));
+				ts_delta = abs((int32_t)(this_ts - *last_write_ts));
 
 				if (ts_delta > rtp_session->samples_per_second * 2) {
-					rtp_session->ts = rtp_session->last_write_ts + rtp_session->samples_per_interval;
-					send_msg->header.ts = htonl(rtp_session->ts);
+					*ts = *last_write_ts + rtp_session->samples_per_interval;
+					send_msg->header.ts = htonl(*ts);
 #if DEBUG_RTP
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "RTP: common_write: %s [NO RESET] sticking to linear timestamp (last: %u this: %u) %p/%p\n", rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName", rtp_session->last_write_ts, rtp_session->ts, (void*)rtp_session->session, (void*) rtp_session);
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "RTP: common_write: %s [NO RESET] sticking to linear timestamp (last: %u this: %u) %p/%p\n", rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName", *last_write_ts, *ts, (void*)rtp_session->session, (void*) rtp_session);
 #endif
 				}
 			}
 		}
-		rtp_session->ts = ntohl(send_msg->header.ts);
+		*ts = ntohl(send_msg->header.ts);
 
 		if (flags && *flags & SFF_RFC2833) {
 #if DEBUG_RTP
@@ -12382,6 +12753,21 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 				goto end;
 			}
 			send_msg->header.pt = rtp_session->te;
+		}
+		/* BUNDLE shared send_msg buffer can carry a stale video PT into an audio
+		 * write because the audio defer clusters audio packets at video frame boundaries
+		 * (where header.pt was just stamped 107). Re-stamp PT defensively on BUNDLE audio
+		 * writes — guarded by bundle_has_video and !force_video so this is a no-op for
+		 * video writes and non-BUNDLE sessions. payload is the correct PT from the caller. */
+		if (rtp_session->bundle_has_video && !force_video && payload != INVALID_PT && send_msg->header.pt != payload) {
+			uint32_t restamped = ++rtp_session->bundle_audio_pt_restamped_total;
+			uint8_t stale_pt = send_msg->header.pt;
+			send_msg->header.pt = payload;
+			if (restamped <= 5 || (restamped % 500) == 0) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
+					"BUNDLE audio PT contamination: had=%u expected=%u ssrc=%u seq=%u total=%u — restamping\n",
+					stale_pt, payload, ntohl(send_msg->header.ssrc), ntohs(send_msg->header.seq), restamped);
+			}
 		}
 		data = send_msg->body;
 		if (datalen > rtp_header_len) {
@@ -12406,29 +12792,42 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 		}
 
 		send_msg = &rtp_session->send_msg;
+		send_msg->header.x = 0;
+		send_msg->ext = NULL;
+		send_msg->ebody = NULL;
 		send_msg->header.pt = payload;
 
-		m = get_next_write_ts(rtp_session, timestamp);
+		if (write_state) {
+			if (timestamp) {
+				*ts = timestamp;
+			} else {
+				*ts = *last_write_ts + rtp_session->samples_per_interval;
+			}
+			m = 0;
+		} else {
+			m = get_next_write_ts(rtp_session, timestamp);
+			*ts = rtp_session->ts;
+		}
 #if DEBUG_RTP
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "RTP: common_write: %s [!send_msg] next ts: %u %p/%p\n", rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName", rtp_session->ts, (void*)rtp_session->session, (void*)rtp_session);
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "RTP: common_write: %s [!send_msg] next ts: %u %p/%p\n", rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName", *ts, (void*)rtp_session->session, (void*)rtp_session);
 #endif
 
-		rtp_session->send_msg.header.ts = htonl(rtp_session->ts);
+		rtp_session->send_msg.header.ts = htonl(*ts);
 
 		memcpy(send_msg->body, data, datalen);
 		bytes = datalen + rtp_header_len;
 	}
 
-	if (!switch_rtp_test_flag(rtp_session, SWITCH_RTP_FLAG_VIDEO)) {
+	if (!force_video && !switch_rtp_test_flag(rtp_session, SWITCH_RTP_FLAG_VIDEO)) {
 		
 		if ((rtp_session->rtp_bugs & RTP_BUG_NEVER_SEND_MARKER)) {
 			m = 0;
 		} else {
-			int delta = rtp_session->ts - rtp_session->last_write_ts;
+			int delta = *ts - *last_write_ts;
 
 			if (!rtp_session->flags[SWITCH_RTP_FLAG_UDPTL] &&
-				((!rtp_session->flags[SWITCH_RTP_FLAG_RESET] && (abs(delta) > rtp_session->samples_per_interval * 10))
-				|| rtp_session->ts == rtp_session->samples_per_interval)) {
+				((!*reset && (abs(delta) > rtp_session->samples_per_interval * 10))
+				|| *ts == rtp_session->samples_per_interval)) {
 				m++;
 			}
 
@@ -12437,12 +12836,12 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 			}
 
 			if (rtp_session->flags[SWITCH_RTP_FLAG_USE_TIMER] &&
-				(rtp_session->write_timer.samplecount - rtp_session->last_write_samplecount) > rtp_session->samples_per_interval * 10) {
+				(rtp_session->write_timer.samplecount - *last_write_samplecount) > rtp_session->samples_per_interval * 10) {
 				m++;
 			}
 
 			if (!rtp_session->flags[SWITCH_RTP_FLAG_USE_TIMER] &&
-				((unsigned) ((switch_micro_time_now() - rtp_session->last_write_timestamp))) 
+				((unsigned) ((switch_micro_time_now() - *last_write_timestamp)))
 					/ (switch_rtp_test_flag(rtp_session, SWITCH_RTP_FLAG_USE_MILLISECONDS_PER_PACKET) ? 1000:1) > (rtp_session->ms_per_packet * 10)) {
 				m++;
 			}
@@ -12452,41 +12851,112 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 				m++;
 			}
 
-			if (rtp_session->need_mark && !rtp_session->sending_dtmf) {
+			if (*need_mark && !rtp_session->sending_dtmf) {
 				m++;
-				rtp_session->need_mark = 0;
+				*need_mark = 0;
 			}
 		}
 
 		if (m) {
-			rtp_session->flags[SWITCH_RTP_FLAG_RESET] = 1;
+			*reset = 1;
 			if (!(rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS)) {
-				rtp_session->ts = 0;
+				*ts = 0;
 			}
 		}
 
 		/* If the marker was set, and the timestamp seems to have started over - set a new SSRC, to indicate this is a new stream */
 		if (m && !switch_rtp_test_flag(rtp_session, SWITCH_RTP_FLAG_SECURE_SEND) && (rtp_session->rtp_bugs & RTP_BUG_CHANGE_SSRC_ON_MARKER) &&
-			(rtp_session->flags[SWITCH_RTP_FLAG_RESET] || (rtp_session->ts <= rtp_session->last_write_ts && rtp_session->last_write_ts > 0))) {
+			(*reset || (*ts <= *last_write_ts && *last_write_ts > 0))) {
 			switch_rtp_set_ssrc(rtp_session, (uint32_t) ((intptr_t) rtp_session + (switch_time_t) switch_epoch_time_now(NULL)));
 		}
 
-		if (!switch_rtp_test_flag(rtp_session, SWITCH_RTP_FLAG_VIDEO) && !switch_rtp_test_flag(rtp_session, SWITCH_RTP_FLAG_UDPTL)) {
+		if (!force_video && !switch_rtp_test_flag(rtp_session, SWITCH_RTP_FLAG_VIDEO) && !switch_rtp_test_flag(rtp_session, SWITCH_RTP_FLAG_UDPTL)) {
 			send_msg->header.m = (m && !(rtp_session->rtp_bugs & RTP_BUG_NEVER_SEND_MARKER)) ? 1 : 0;
 		}
 	}
 
-	if (switch_rtp_test_flag(rtp_session, SWITCH_RTP_FLAG_VIDEO)) {
+	if (force_video || switch_rtp_test_flag(rtp_session, SWITCH_RTP_FLAG_VIDEO)) {
 		int external = (flags && *flags & SFF_EXTERNAL);
+
+		if ((force_video || rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) && external) {
+			uint32_t src_ts = ntohl(send_msg->header.ts);
+			switch_time_t frame_now = switch_micro_time_now();
+
+			/* Some WebRTC sources advance the RTP timestamp on individual
+			   fragments.  Do not treat every source timestamp change as a new
+			   output video frame; keep one output timestamp until the source
+			   marker closes the frame.  If the source never sends a marker and
+			   the timestamp drift grows past ~100ms, synthesize a marker to avoid
+			   pinning the downstream jitter buffer forever. */
+			if (*video_frame_open && src_ts != *video_frame_src_ts && !send_msg->header.m) {
+				uint32_t open_src_delta = src_ts - *video_frame_src_ts;
+
+				if (open_src_delta > 9000) {
+					send_msg->header.m = 1;
+				}
+			}
+
+			if (!*video_frame_open) {
+				uint32_t out_ts = src_ts;
+
+				if (*video_frame_last_set) {
+					uint32_t src_delta = src_ts - *video_frame_last_src_ts;
+					uint32_t clock_delta = 1;
+
+					if (frame_now > *video_frame_last_timestamp) {
+						switch_time_t elapsed = frame_now - *video_frame_last_timestamp;
+						clock_delta = (uint32_t) ((elapsed * 90) / 1000);
+					}
+
+					/* Some upstream video sources provide RTP timestamps that are static or
+					   advance per packet instead of per encoded frame. Hold one timestamp
+					   for all fragments in a marker-bounded frame and synthesize a
+					   conservative 30fps delta when the source delta is implausible for a
+					   90 kHz video clock. Packet burst timing can be much shorter than the
+					   encoded frame interval, so do not let wall-clock fallback produce
+					   one-tick frames. */
+					if (!src_delta || src_delta < 90 || src_delta > 90000) {
+						if (clock_delta < 3000 || clock_delta > 90000) {
+							clock_delta = 3000;
+						}
+						out_ts = *video_frame_last_out_ts + clock_delta;
+					} else {
+						out_ts = *video_frame_last_out_ts + src_delta;
+					}
+				}
+
+				*video_frame_src_ts = src_ts;
+				*video_frame_out_ts = out_ts;
+				*video_frame_open = 1;
+
+				/* Signal audio writer that a video frame is being emitted. */
+				if (rtp_session->bundle_has_video) {
+					switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+					rtp_session->bundle_video_frame_open_us = frame_now;
+					rtp_session->bundle_video_frame_in_progress = 1;
+					switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+				}
+			}
+
+			send_msg->header.ts = htonl(*video_frame_out_ts);
+
+			if (send_msg->header.m) {
+				video_frame_commit_marker = 1;
+				video_frame_commit_src_ts = src_ts;
+				video_frame_commit_out_ts = *video_frame_out_ts;
+				video_frame_commit_timestamp = frame_now;
+			}
+		}
+
 		/* Normalize the timestamps to our own base by generating a made up starting point then adding the measured deltas to that base
 		   so if the timestamps and ssrc of the source change, it will not break the other end's jitter buffer / decoder etc *cough* CHROME *cough*
 		 */
 
-		if (!rtp_session->ts_norm.ts) {
-			rtp_session->ts_norm.ts = (uint32_t) switch_rand() % 1000000 + 1;
+		if (!ts_norm->ts) {
+			ts_norm->ts = (uint32_t) switch_rand() % 1000000 + 1;
 		}
 
-		if (!rtp_session->ts_norm.last_ssrc || send_msg->header.ssrc != rtp_session->ts_norm.last_ssrc || rtp_session->ts_norm.last_external != external) {
+		if (!ts_norm->last_ssrc || send_msg->header.ssrc != ts_norm->last_ssrc || ts_norm->last_external != external) {
 			switch_core_session_t *other_session;
 			
 			switch_core_session_request_video_refresh(rtp_session->session);
@@ -12498,39 +12968,39 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 				switch_core_session_rwunlock(other_session);
 			}
 
-			if (rtp_session->ts_norm.last_ssrc) {
-				rtp_session->ts_norm.delta_ttl = 0;
-				rtp_session->ts_norm.ts++;
+			if (ts_norm->last_ssrc) {
+				ts_norm->delta_ttl = 0;
+				ts_norm->ts++;
 			}
 
-			rtp_session->ts_norm.last_ssrc = send_msg->header.ssrc;
-			rtp_session->ts_norm.last_frame = ntohl(send_msg->header.ts);
+			ts_norm->last_ssrc = send_msg->header.ssrc;
+			ts_norm->last_frame = ntohl(send_msg->header.ts);
 		}
 
-		rtp_session->ts_norm.last_external = external;
+		ts_norm->last_external = external;
 
-		if (ntohl(send_msg->header.ts) != rtp_session->ts_norm.last_frame) {
-			int32_t delta = ntohl(send_msg->header.ts) - rtp_session->ts_norm.last_frame;
+		if (ntohl(send_msg->header.ts) != ts_norm->last_frame) {
+			int32_t delta = ntohl(send_msg->header.ts) - ts_norm->last_frame;
 
 			if (delta < 0 || delta > 90000) {
 				switch_core_media_gen_key_frame(rtp_session->session);
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG1, 
 								  "Timestamp shift detected last: %d this: %d delta: %d stick with prev delta: %d\n", 
-								  rtp_session->ts_norm.last_frame, ntohl(send_msg->header.ts), delta, rtp_session->ts_norm.delta);
+								  ts_norm->last_frame, ntohl(send_msg->header.ts), delta, ts_norm->delta);
 			} else {
-				rtp_session->ts_norm.delta = delta;
+				ts_norm->delta = delta;
 			}
 
-			rtp_session->ts_norm.ts += rtp_session->ts_norm.delta;
+			ts_norm->ts += ts_norm->delta;
 
 		}
 		
-		rtp_session->ts_norm.last_frame = ntohl(send_msg->header.ts);
-		send_msg->header.ts = htonl(rtp_session->ts_norm.ts);
-		this_ts = rtp_session->ts_norm.ts;
+		ts_norm->last_frame = ntohl(send_msg->header.ts);
+		send_msg->header.ts = htonl(ts_norm->ts);
+		this_ts = ts_norm->ts;
+		*ts = this_ts;
 	}
-
-	send_msg->header.ssrc = htonl(rtp_session->ssrc);
+	send_msg->header.ssrc = htonl(ssrc ? ssrc : rtp_session->ssrc);
 
 	if (rtp_session->flags[SWITCH_RTP_FLAG_GOOGLEHACK] && rtp_session->send_msg.header.pt == 97) {
 		rtp_session->last_rtp_hdr.pt = 102;
@@ -12651,16 +13121,16 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 		}
 	}
 
-	if (!switch_rtp_test_flag(rtp_session, SWITCH_RTP_FLAG_VIDEO)) {
+	if (!force_video && !switch_rtp_test_flag(rtp_session, SWITCH_RTP_FLAG_VIDEO)) {
 		uint32_t ts_delta;
 		this_ts = ntohl(send_msg->header.ts);
-		ts_delta = abs((int32_t)(this_ts - rtp_session->last_write_ts));
+		ts_delta = abs((int32_t)(this_ts - *last_write_ts));
 
 		if (ts_delta > rtp_session->samples_per_second * 2) {
-			rtp_session->flags[SWITCH_RTP_FLAG_RESET] = 1;
+			*reset = 1;
 		}
 #ifdef DEBUG_TS_ROLLOVER
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "WRITE TS LAST:%u THIS:%u DELTA:%u\n", rtp_session->last_write_ts, this_ts, ts_delta);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "WRITE TS LAST:%u THIS:%u DELTA:%u\n", *last_write_ts, this_ts, ts_delta);
 #endif
 		if ((!(flags && *flags & SFF_RFC2833) && ts_delta == 0) || !switch_rtp_ready(rtp_session) || rtp_session->sending_dtmf) {
 			send = 0;
@@ -12677,13 +13147,13 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 	if (send) {
 		int delta = 1;
 
-		if (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] && (*flags & SFF_EXTERNAL) && 
+		if ((force_video || rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) && (*flags & SFF_EXTERNAL) &&
 			rtp_session->stats.outbound.packet_count && rtp_session->flags[SWITCH_RTP_FLAG_PASSTHRU]) {
-			int32_t x = rtp_session->last_write_seq;
+			int32_t x = *last_write_seq;
 			int32_t y = ntohs(send_msg->header.seq);
 
-			if (!rtp_session->video_delta_mode) {
-				rtp_session->video_delta_mode = 1;
+			if (!*video_delta_mode) {
+				*video_delta_mode = 1;
 			} else {
 				if (x > UINT16_MAX / 2 && y < UINT16_MAX / 2) {
 					x -= (int32_t)UINT16_MAX+1;
@@ -12692,16 +13162,16 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 				delta = y-x;
 			}
 			
-			rtp_session->last_write_seq = y;
+			*last_write_seq = y;
 		}
 
 		if (!rtp_session->flags[SWITCH_RTP_FLAG_PASSTHRU]) {
-			rtp_session->video_delta_mode = 0;
+			*video_delta_mode = 0;
 		}
 
-		rtp_session->seq += delta;
+		*seq += delta;
 
-		send_msg->header.seq = htons(rtp_session->seq);
+		send_msg->header.seq = htons(*seq);
 		
 		if (rtp_session->flags[SWITCH_RTP_FLAG_BYTESWAP] && send_msg->header.pt == rtp_session->payload) {
 			switch_swap_linear((int16_t *)send_msg->body, (int) datalen);
@@ -12778,27 +13248,69 @@ fork_done:
 				rtp_add_extension_header(rtp_session, send_msg, abs(score), data, &bytes);
 			}
 		}
-#if HAVE_MID_EXT
-		if (rtp_session->ext_mid.enabled && rtp_session->ext_mid.ext_id > 0) {
-			rtp_add_mid_extension(rtp_session, send_msg, &bytes);
-		}
+			if ((mid_ext_id > 0 && mid && *mid) || (rtp_session->ext_mid.enabled && rtp_session->ext_mid.ext_id > 0)) {
+				/* Stamp MID on all outbound packets including BUNDLE audio.
+				   On a BUNDLE shared session, the session-level ext_mid contains the
+				   AUDIO MID value (local_mid is set by the audio m-line in
+				   gen_local_sdp / activate_rtp; the video m-line path guards against
+				   overwriting it on the shared session).  Audio packets need MID for
+				   the browser to demux audio from video on the shared transport
+				   (RFC 9143 BUNDLE).  Without MID, Safari cannot associate audio
+				   packets with the correct m-line, which degrades video quality.
+				   rtp_add_mid_extension() drops peer-scoped inbound header extensions
+				   and rebuilds a clean BEDE header with the outbound MID before SRTP.
+				   Video writes arrive via
+				   force_video with an explicit mid_ext_id/mid carrying the VIDEO MID. */
+				{
+					switch_bool_t drop_peer_extensions = (flags && (*flags & (SFF_RAW_RTP | SFF_RAW_RTP_PARSE_FRAME | SFF_EXTERNAL | SFF_PROXY_PACKET))) ? SWITCH_TRUE : SWITCH_FALSE;
+					switch_status_t mid_status = rtp_add_mid_extension(rtp_session, send_msg, &bytes, mid_ext_id, mid, drop_peer_extensions, trusted_payload_offset);
 
-		if (send_msg->header.x && send_msg->ext) {
-			uint16_t ext_words = ntohs(send_msg->ext->length);
-			/* 4 bytes (profile+length) + 4*words of extension data */
-			bytes = (switch_size_t)(datalen + rtp_header_len + 4 + (ext_words * 4));
-		}
-#endif
+					if (mid_status != SWITCH_STATUS_SUCCESS) {
+						if (mid_ext_id > 0 && mid && *mid) {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR,
+								"Unable to apply RTP MID extension override id=%u mid=%s\n", mid_ext_id, switch_str_nil(mid));
+							ret = -1;
+							goto end;
+						}
+
+						/* Without a trusted payload boundary, attempting a fallback rewrite can
+						 * move extension bytes into media. Drop only this packet, roll back its
+						 * sequence allocation, and report a write failure. A zero return is
+						 * reserved for transport-not-ready so the media layer does not re-arm
+						 * pre-DTLS keyframe recovery for a malformed packet. */
+						rtp_log_mid_rewrite_drop(rtp_session, send_msg, bytes, trusted_payload_offset, "common");
+						*seq -= delta;
+						ret = -1;
+						goto end;
+					}
+				}
+			}
+
 
 		/* Apply normalised timestamps before SRTP protection so the authentication
 		   tag covers the correct timestamp value in the RTP header.
 		   Commit is deferred until after successful send to avoid advancing
 		   ts_normalised.ts on failed-send paths. */
-		if (rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS) {
+		if (!write_state && rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS) {
 			uint32_t norm_ts = normalised_ts_get_next(rtp_session);
 			send_msg->header.ts = htonl(norm_ts);
-			rtp_session->ts = norm_ts;
+			*ts = norm_ts;
 			this_ts = norm_ts;
+		}
+
+		/* Defensive pre-SRTP re-stamp: on a BUNDLE shared session the video
+		   write path can leave a stale video PT in the shared send_msg buffer.
+		   Force the correct audio PT right before SRTP so the auth tag covers
+		   the right value.  No-op for non-BUNDLE or video writes. */
+		if (rtp_session->bundle_has_video && !force_video && payload != INVALID_PT && send_msg->header.pt != payload) {
+			uint32_t restamped = ++rtp_session->bundle_audio_pt_restamped_total;
+			uint8_t stale_pt = send_msg->header.pt;
+			send_msg->header.pt = payload;
+			if (restamped <= 5 || (restamped % 500) == 0) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
+					"BUNDLE audio PT contamination pre-SRTP: had=%u expected=%u ssrc=%u seq=%u total=%u -- restamping\n",
+					stale_pt, payload, ntohl(send_msg->header.ssrc), ntohs(send_msg->header.seq), restamped);
+			}
 		}
 
 #ifdef ENABLE_SRTP
@@ -12834,8 +13346,17 @@ fork_done:
 			}
 
 			if (stat) {
+				char *srtp_err = NULL;
+				switch_srtp_err_to_txt(stat, &srtp_err);
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR,
-								  "Error: %s SRTP protection failed with code %d\n", rtp_type(rtp_session), stat);
+							  "BUNDLE SRTP protect failed common media=%s code=%d text=%s pt=%u seq=%u ts=%u ssrc=%u marker=%d bytes_before=%" SWITCH_SIZE_T_FMT " bytes_after=%d flags=0x%x secure_mki=%d mid_override=%s mid_ext_id=%u header_x=%d ext=%p\n",
+							  rtp_type(rtp_session), stat, switch_str_nil(srtp_err), send_msg->header.pt, ntohs(send_msg->header.seq),
+							  ntohl(send_msg->header.ts), ntohl(send_msg->header.ssrc), send_msg->header.m, bytes, sbytes,
+							  flags ? *flags : 0, rtp_session->flags[SWITCH_RTP_FLAG_SECURE_SEND_MKI], switch_str_nil(mid),
+							  mid_ext_id, send_msg->header.x, (void *)send_msg->ext);
+				ret = -1;
+				switch_mutex_unlock(rtp_session->ice_mutex);
+				goto end;
 			}
 
 			bytes = sbytes;
@@ -12909,7 +13430,7 @@ fork_done:
 								  "Simulate dropping packet ......... ts: %u seq: %u\n", ntohl(send_msg->header.ts), ntohs(send_msg->header.seq));
 			} else {
 				if (switch_rtp_sendto(rtp_session, rtp_session->sock_output, rtp_session->remote_addr, 0, (void *) send_msg, &bytes) != SWITCH_STATUS_SUCCESS) {
-					rtp_session->seq--;
+					(*seq)--;
 					ret = -1;
 					goto end;
 				}
@@ -12924,21 +13445,35 @@ fork_done:
 		//}
 
 			if (switch_rtp_sendto(rtp_session, rtp_session->sock_output, rtp_session->remote_addr, 0, (void *) send_msg, &bytes) != SWITCH_STATUS_SUCCESS) {
-				rtp_session->seq -= delta;
+				*seq -= delta;
 
 				ret = -1;
 				goto end;
 			}
 #endif
 
-		rtp_session->last_write_ts = this_ts;
-		rtp_session->flags[SWITCH_RTP_FLAG_RESET] = 0;
+		if (video_frame_commit_marker) {
+			*video_frame_last_src_ts = video_frame_commit_src_ts;
+			*video_frame_last_out_ts = video_frame_commit_out_ts;
+			*video_frame_last_timestamp = video_frame_commit_timestamp;
+			*video_frame_last_set = 1;
+			*video_frame_open = 0;
+			/* Frame fully emitted -- release deferred audio. */
+			if (rtp_session->bundle_has_video) {
+				switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+				rtp_session->bundle_video_frame_in_progress = 0;
+				switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+			}
+		}
 
-		if (rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS) {
+		*last_write_ts = this_ts;
+		*reset = 0;
+
+		if (!write_state && rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS) {
 			normalised_ts_commit(rtp_session, this_ts);
 		}
 
-		if (rtp_session->queue_delay) {
+		if (!write_state && rtp_session->queue_delay) {
 			rtp_session->delay_samples = rtp_session->queue_delay;
 			rtp_session->queue_delay = 0;
 		}
@@ -12959,15 +13494,24 @@ fork_done:
 
 		if (rtp_session->flags[SWITCH_RTP_FLAG_USE_TIMER]) {
 			//switch_core_timer_sync(&rtp_session->write_timer);
-			rtp_session->last_write_samplecount = rtp_session->write_timer.samplecount;
+			*last_write_samplecount = rtp_session->write_timer.samplecount;
 		}
 
-		rtp_session->last_write_timestamp = switch_micro_time_now();
+		*last_write_timestamp = switch_micro_time_now();
 	}
 
 	ret = (int) bytes;
 
  end:
+
+	/* Error path: if a video frame was opened but send failed before
+	   marker-commit, clear the in-progress flag so it cannot get stuck. */
+	if (ret < 0 && video_frame_open && *video_frame_open && rtp_session->bundle_has_video) {
+		switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+		rtp_session->bundle_video_frame_in_progress = 0;
+		rtp_session->bundle_video_frame_open_us = 0;
+		switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+	}
 
 	WRITE_DEC(rtp_session);
 
@@ -13123,6 +13667,109 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_offer_audio_level_extension(switch_co
 
 SWITCH_DECLARE(int) switch_rtp_write_frame(switch_rtp_t *rtp_session, switch_frame_t *frame)
 {
+	return switch_rtp_write_frame_ex(rtp_session, frame, 0, 0, NULL);
+}
+
+/* Hard upper bound for how long a single audio packet may defer waiting
+   for an open BUNDLE video frame to drain.  Real video frames span up
+   to ~205ms (mean ~33ms) of fragments on the wire, so the primary exit
+   is "frame closed (in_progress == 0)"; this bound is only a starvation
+   guard for the case where the video thread stalls or the marker is
+   lost.
+
+   Deliberate tradeoff: 150ms is below the observed ~205ms worst-case
+   frame, so a rare frame longer than 150ms (typically a bootstrap
+   keyframe, ~1 per call) can still see audio released into its tail.
+   Accepted: the visible blockiness was driven by steady-state 50-150ms
+   frames, which this fully covers; capping audio one-way delay at 150ms
+   is preferred over fully protecting outlier frames. Raise toward
+   ~250ms if a retest shows residual blockiness on the long-frame tail. */
+#define BUNDLE_AUDIO_DEFER_MAX_US 150000
+
+/* Frame-boundary defer: hold an audio/CNG/DTMF packet on a BUNDLE
+   transport until the open video frame closes (marker emitted) so VP8
+   fragments stay contiguous on the shared socket.  Primary exit is
+   bundle_video_frame_in_progress == 0; the deadline is only a safety
+   bound (BUNDLE_AUDIO_DEFER_MAX_US) that releases the audio if
+   the frame never closes.  All flag reads are under
+   bundle_video_frame_lock (brief lock/copy/unlock per poll); the mutex
+   is NEVER held across switch_yield -- deadlock-safe.  The absolute
+   deadline lets the caller share one safety budget across the pre-lock
+   call and the per-packet re-check loop so worst-case audio latency
+   cannot accumulate beyond a single deadline. */
+static void bundle_audio_defer_until(switch_rtp_t *rtp_session, switch_time_t deadline_us)
+{
+	switch_time_t defer_start;
+	switch_time_t frame_open_us;
+	uint8_t in_progress;
+	switch_time_t age_us = 0;
+
+	if (!rtp_session->bundle_has_video) return;
+
+	/* Snapshot the flag under lock. */
+	switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+	in_progress = rtp_session->bundle_video_frame_in_progress;
+	frame_open_us = rtp_session->bundle_video_frame_open_us;
+	switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+
+	if (!in_progress) return;
+
+	defer_start = switch_micro_time_now();
+	age_us = (frame_open_us && defer_start > frame_open_us) ? (defer_start - frame_open_us) : 0;
+
+	if (age_us > BUNDLE_AUDIO_DEFER_MAX_US) {
+		/* Stale frame: open longer than the safety bound, presumed stuck
+		   (encoder stall or lost marker) -- force-clear so audio cannot starve. */
+		switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+		if (rtp_session->bundle_video_frame_in_progress) {
+			rtp_session->bundle_video_frame_in_progress = 0;
+			rtp_session->bundle_video_frame_open_us = 0;
+		}
+		switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+	} else if (defer_start >= deadline_us) {
+		/* Caller already burned the shared budget; do not wait further. */
+	} else {
+		while (1) {
+			switch_time_t now_us;
+			switch_time_t open_us;
+
+			switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+			in_progress = rtp_session->bundle_video_frame_in_progress;
+			open_us = rtp_session->bundle_video_frame_open_us;
+			switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+
+			if (!in_progress) break;
+
+			now_us = switch_micro_time_now();
+			if (now_us >= deadline_us) break;
+			if (open_us && now_us > open_us && (now_us - open_us) > BUNDLE_AUDIO_DEFER_MAX_US) {
+				switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+				if (rtp_session->bundle_video_frame_in_progress) {
+					rtp_session->bundle_video_frame_in_progress = 0;
+					rtp_session->bundle_video_frame_open_us = 0;
+				}
+				switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+				break;
+			}
+			switch_yield(500);
+		}
+	}
+}
+
+/* Thin wrapper: callers without a shared deadline (CNG/DTMF) get their
+   own fresh safety budget; primary exit is still frame close. */
+static void bundle_audio_defer(switch_rtp_t *rtp_session)
+{
+	bundle_audio_defer_until(rtp_session, switch_micro_time_now() + BUNDLE_AUDIO_DEFER_MAX_US);
+}
+
+SWITCH_DECLARE(int) switch_rtp_write_frame_ex(switch_rtp_t *rtp_session, switch_frame_t *frame, uint32_t ssrc, uint8_t mid_ext_id, const char *mid)
+{
+	return switch_rtp_write_frame_ex_state(rtp_session, frame, NULL, ssrc, mid_ext_id, mid, SWITCH_FALSE, INVALID_PT);
+}
+
+SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, switch_frame_t *frame, switch_rtp_write_state_t *write_state, uint32_t ssrc, uint8_t mid_ext_id, const char *mid, switch_bool_t force_video, switch_payload_t payload_override)
+{
 	uint8_t fwd = 0;
 	void *data = NULL;
 	uint32_t len, ts = 0;
@@ -13131,6 +13778,9 @@ SWITCH_DECLARE(int) switch_rtp_write_frame(switch_rtp_t *rtp_session, switch_fra
 	srtp_hdr_t local_header;
 	int r = 0;
 	switch_status_t status;
+	switch_time_t audio_defer_deadline = 0;
+	switch_bool_t bundle_video_frame_lock_held = SWITCH_FALSE;
+	switch_size_t trusted_payload_offset = 0;
 
 #if DEBUG_RTP
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "RTP: write frame %s %p/%p\n", rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName", (void*)rtp_session->session, (void*)rtp_session);
@@ -13144,8 +13794,22 @@ SWITCH_DECLARE(int) switch_rtp_write_frame(switch_rtp_t *rtp_session, switch_fra
 		return 0;
 	}
 
+	if (frame->packet && frame->data) {
+		const uint8_t *packet_start = (const uint8_t *) frame->packet;
+		const uint8_t *payload_start = (const uint8_t *) frame->data;
+
+		if (payload_start >= packet_start &&
+			(switch_size_t)(payload_start - packet_start) <= frame->packetlen) {
+			trusted_payload_offset = (switch_size_t)(payload_start - packet_start);
+		}
+	}
+
+	/* Bundled video borrows the audio RTP transport, but it must not inherit
+	   audio-session proxy-media/UDPTL write shortcuts.  Those shortcuts can
+	   return 0 for non-proxy video frames, which makes BUNDLE video disappear
+	   before it reaches rtp_common_write(). */
 	if (switch_test_flag(frame, SFF_PROXY_PACKET) || switch_test_flag(frame, SFF_UDPTL_PACKET) ||
-		rtp_session->flags[SWITCH_RTP_FLAG_PROXY_MEDIA] || rtp_session->flags[SWITCH_RTP_FLAG_UDPTL]) {
+		(!force_video && (rtp_session->flags[SWITCH_RTP_FLAG_PROXY_MEDIA] || rtp_session->flags[SWITCH_RTP_FLAG_UDPTL]))) {
 
 		switch_size_t bytes;
 
@@ -13162,15 +13826,52 @@ SWITCH_DECLARE(int) switch_rtp_write_frame(switch_rtp_t *rtp_session, switch_fra
 		}
 		bytes = frame->packetlen;
 		send_msg = frame->packet;
+		WRITE_INC(rtp_session);
+
+		if (write_state && !write_state->initialized) {
+			write_state->seq = switch_rtp_request_sequence();
+			write_state->last_write_timestamp = switch_micro_time_now();
+			write_state->initialized = 1;
+		}
 
 		if (!rtp_session->flags[SWITCH_RTP_FLAG_UDPTL] && !switch_test_flag(frame, SFF_UDPTL_PACKET)) {
 
-			if (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] && rtp_session->payload > 0) {
-				send_msg->header.pt = rtp_session->payload;
+			if (force_video && payload_override != INVALID_PT) {
+				send_msg->header.pt = payload_override;
+			} else if (!force_video && rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] && rtp_session->payload > 0) {
+				/* On a shared BUNDLE session rtp_session->payload holds the VIDEO PT
+				 * (set_default_payload overwrote it when the video engine reused the audio
+				 * session). frame->payload carries the bridge PEER's audio PT on a bridged
+				 * leg, not the local egress PT. Prefer the captured local audio PT. */
+				if (rtp_session->bundle_has_video && rtp_session->bundle_audio_pt != INVALID_PT) {
+					send_msg->header.pt = rtp_session->bundle_audio_pt;
+				} else if (rtp_session->bundle_has_video && frame->payload != INVALID_PT) {
+					send_msg->header.pt = frame->payload;
+				} else {
+					send_msg->header.pt = rtp_session->payload;
+				}
 			}
 
-			send_msg->header.ssrc = htonl(rtp_session->ssrc);
-			send_msg->header.seq = htons(++rtp_session->seq);
+			send_msg->header.seq = htons(write_state ? ++write_state->seq : ++rtp_session->seq);
+			send_msg->header.ssrc = htonl(ssrc ? ssrc : rtp_session->ssrc);
+			if ((mid_ext_id > 0 && mid && *mid) || (rtp_session->ext_mid.enabled && rtp_session->ext_mid.ext_id > 0)) {
+				if (rtp_add_mid_extension(rtp_session, send_msg, &bytes, mid_ext_id, mid, SWITCH_TRUE, trusted_payload_offset) != SWITCH_STATUS_SUCCESS) {
+					if (mid_ext_id > 0 && mid && *mid) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR,
+							"Unable to apply RTP MID extension override id=%u mid=%s on proxy packet\n", mid_ext_id, switch_str_nil(mid));
+						WRITE_DEC(rtp_session);
+						return -1;
+					}
+					rtp_log_mid_rewrite_drop(rtp_session, send_msg, bytes, trusted_payload_offset, "proxy");
+					if (write_state) {
+						write_state->seq--;
+					} else {
+						rtp_session->seq--;
+					}
+					WRITE_DEC(rtp_session);
+					return -1;
+				}
+			}
 		}
 
 		if (rtp_session->flags[SWITCH_RTP_FLAG_DEBUG_RTP_WRITE]) {
@@ -13204,6 +13905,7 @@ SWITCH_DECLARE(int) switch_rtp_write_frame(switch_rtp_t *rtp_session, switch_fra
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG_CLEAN(rtp_session->session), SWITCH_LOG_ERROR, "bytes: %" SWITCH_SIZE_T_FMT ", status: %d", bytes, status);
 			}
 
+			WRITE_DEC(rtp_session);
 			return -1 * status;
 		}
 
@@ -13211,15 +13913,17 @@ SWITCH_DECLARE(int) switch_rtp_write_frame(switch_rtp_t *rtp_session, switch_fra
 		rtp_session->stats.outbound.media_bytes += bytes;
 		rtp_session->stats.outbound.media_packet_count++;
 		rtp_session->stats.outbound.packet_count++;
+		WRITE_DEC(rtp_session);
 		return (int) bytes;
 	}
 
 	fwd = (rtp_session->flags[SWITCH_RTP_FLAG_RAW_WRITE] &&
 		   (switch_test_flag(frame, SFF_RAW_RTP) || switch_test_flag(frame, SFF_RAW_RTP_PARSE_FRAME))) ? 1 : 0;
+	if (fwd && !frame->packet) { fwd = 0; }   /* never raw-forward without a packet */
 #if DEBUG_RTP
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "RTP: write frame fwd: %s %u (%u %u %u / %u %u %u) %p/%p\n", rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName",fwd, rtp_session->flags[SWITCH_RTP_FLAG_RAW_WRITE], switch_test_flag(frame, SFF_RAW_RTP), switch_test_flag(frame, SFF_RAW_RTP_PARSE_FRAME), rtp_session->sending_dtmf, rtp_session->queue_delay, (rtp_session->rtp_bugs & RTP_BUG_GEN_ONE_GEN_ALL), (void*)rtp_session->session, (void*)rtp_session);
 #endif
-	if (!fwd && !rtp_session->sending_dtmf && !rtp_session->queue_delay && !rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] &&
+	if (!fwd && !force_video && !rtp_session->sending_dtmf && !rtp_session->queue_delay && !rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] &&
 		rtp_session->flags[SWITCH_RTP_FLAG_RAW_WRITE] && (rtp_session->rtp_bugs & RTP_BUG_GEN_ONE_GEN_ALL)) {
 
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "Generating RTP locally but timestamp passthru is configured, disabling.... %s\n", rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName");
@@ -13249,7 +13953,19 @@ SWITCH_DECLARE(int) switch_rtp_write_frame(switch_rtp_t *rtp_session, switch_fra
 			return (int) frame->packetlen;
 		}
 	} else {
-		payload = rtp_session->payload;
+		payload = payload_override != INVALID_PT ? payload_override : rtp_session->payload;
+		/* On a shared BUNDLE session rtp_session->payload holds the VIDEO PT
+		 * (e.g. 107) because the video engine reused the audio RTP session and
+		 * set_default_payload overwrote it. frame->payload carries the bridge PEER's
+		 * audio PT (e.g. 102) on a bridged leg, NOT the local egress audio PT. Prefer
+		 * the captured local audio PT (e.g. 111 from the WebRTC answer). */
+		if (!force_video && rtp_session->bundle_has_video) {
+			if (rtp_session->bundle_audio_pt != INVALID_PT) {
+				payload = rtp_session->bundle_audio_pt;
+			} else if (frame->payload != INVALID_PT) {
+				payload = frame->payload;
+			}
+		}
 #if DEBUG_RTP
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "RTP: write frame fwd: %s %u pt: %u %p/%p\n", rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName", fwd, payload, (void*)rtp_session->session, (void*)rtp_session); 
 #endif
@@ -13267,24 +13983,70 @@ SWITCH_DECLARE(int) switch_rtp_write_frame(switch_rtp_t *rtp_session, switch_fra
 
 //after:
 
+	/* Frame-boundary defer: audio packets on BUNDLE wait for the open
+	   video frame to close (marker emitted) so VP8 fragments stay
+	   contiguous on the shared socket.  One shared safety deadline
+	   (BUNDLE_AUDIO_DEFER_MAX_US) is threaded into the pre-lock
+	   helper AND the re-check-loop helper below, so the cumulative wait
+	   for a single audio packet is hard-capped at the safety bound
+	   (not per-call). */
+	if (!force_video) {
+		audio_defer_deadline = switch_micro_time_now() + BUNDLE_AUDIO_DEFER_MAX_US;
+		bundle_audio_defer_until(rtp_session, audio_defer_deadline);
+	}
+
+	/* BUNDLE audio/video packet serialization (per-packet).
+	   Serialize each individual packet write against the shared UDP socket to prevent
+	   kernel-level reordering between audio and video on the BUNDLE transport.
+	   Per-PACKET (not per-frame): holding the lock across an entire video frame burst
+	   caused fatal deadlocks when the video bridge thread exited mid-frame (lock held
+	   forever, audio thread blocked permanently -> SIP caller stuck in CS_EXCHANGE_MEDIA).
+	   Per-packet is safe: the browser demuxes by SSRC regardless of interleave order. */
+	if (rtp_session->bundle_has_video) {
+		int recheck_count = 0;
+		switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+		bundle_video_frame_lock_held = SWITCH_TRUE;
+		/* Re-check: a video frame may have opened while we waited for the
+		   per-packet lock.  Re-defer if so, bounded by recheck_count AND by
+		   the shared audio_defer_deadline so total wait stays within the
+		   safety bound (BUNDLE_AUDIO_DEFER_MAX_US). */
+		while (!force_video && rtp_session->bundle_video_frame_in_progress && recheck_count < 2) {
+			recheck_count++;
+			switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+			bundle_video_frame_lock_held = SWITCH_FALSE;
+			bundle_audio_defer_until(rtp_session, audio_defer_deadline);
+			switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+			bundle_video_frame_lock_held = SWITCH_TRUE;
+		}
+	}
+
 	if (switch_test_flag(frame, SFF_RTP_HEADER) || rtp_session->flags[SWITCH_RTP_FLAG_TEXT]) {
-		switch_size_t wrote;
+		int wrote;
+		wrote = rtp_write_manual_state(rtp_session, write_state, frame->data, frame->datalen,
+								   frame->m, force_video && payload_override != INVALID_PT ? payload_override : frame->payload, (uint32_t) (frame->timestamp), &frame->flags,
+								   force_video ? ssrc : 0, force_video ? mid_ext_id : 0, force_video ? mid : NULL,
+								   frame->payload, frame->seq, frame->ssrc);
 
-		wrote = switch_rtp_write_manual(rtp_session, frame->data, frame->datalen,
-										frame->m, frame->payload, (uint32_t) (frame->timestamp), &frame->flags);
-
-		rtp_session->stats.outbound.raw_bytes += wrote;
-		rtp_session->stats.outbound.media_bytes += wrote;
-		rtp_session->stats.outbound.media_packet_count++;
-		rtp_session->stats.outbound.packet_count++;
+		if (wrote > 0) {
+			rtp_session->stats.outbound.raw_bytes += (switch_size_t)wrote;
+			rtp_session->stats.outbound.media_bytes += (switch_size_t)wrote;
+			rtp_session->stats.outbound.media_packet_count++;
+			rtp_session->stats.outbound.packet_count++;
+		}
 #if DEBUG_RTP
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "RTP: write frame fwd: %u WROTE_MANUAL %p/%p\n", fwd, (void*)rtp_session->session, (void*)rtp_session);
 #endif
 
+		/* Release per-packet BUNDLE lock after manual write path */
+		if (bundle_video_frame_lock_held) {
+			switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+			bundle_video_frame_lock_held = SWITCH_FALSE;
+		}
+
 		return wrote;
 	}
 
-	if (frame->pmap && rtp_session->pmaps && *rtp_session->pmaps) {
+	if (!force_video && frame->pmap && rtp_session->pmaps && *rtp_session->pmaps) {
 		payload_map_t *pmap;
 
 		switch_mutex_lock(rtp_session->flag_mutex);
@@ -13320,7 +14082,12 @@ SWITCH_DECLARE(int) switch_rtp_write_frame(switch_rtp_t *rtp_session, switch_fra
 	} else {
 		data = frame->data;
 		len = frame->datalen;
-		ts = rtp_session->flags[SWITCH_RTP_FLAG_RAW_WRITE] ? (uint32_t) frame->timestamp : 0;
+		if (rtp_session->flags[SWITCH_RTP_FLAG_RAW_WRITE] || force_video ||
+			(rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] && frame->timestamp)) {
+			ts = (uint32_t) frame->timestamp;
+		} else {
+			ts = 0;
+		}
 	}
 
 	/*
@@ -13330,7 +14097,14 @@ SWITCH_DECLARE(int) switch_rtp_write_frame(switch_rtp_t *rtp_session, switch_fra
 	*/
 
 
-	r = rtp_common_write(rtp_session, send_msg, data, len, payload, ts, &frame->flags);
+	r = rtp_common_write(rtp_session, send_msg, data, len, payload, ts, &frame->flags, write_state, ssrc, mid_ext_id, mid, force_video,
+		fwd ? trusted_payload_offset : 0);
+
+	/* Release per-packet BUNDLE lock after common write path */
+	if (bundle_video_frame_lock_held) {
+		switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+		bundle_video_frame_lock_held = SWITCH_FALSE;
+	}
 
 	if (send_msg) {
 		send_msg->header = local_header;
@@ -13372,6 +14146,7 @@ SWITCH_DECLARE(int) switch_rtp_write_manual(switch_rtp_t *rtp_session,
 {
 	switch_size_t bytes;
 	int ret = -1;
+	switch_bool_t bundle_video_frame_lock_held = SWITCH_FALSE;
 
 	if (!switch_rtp_ready(rtp_session) || !rtp_session->remote_addr || datalen > SWITCH_RTP_MAX_BUF_LEN) {
 		return -1;
@@ -13385,9 +14160,21 @@ SWITCH_DECLARE(int) switch_rtp_write_manual(switch_rtp_t *rtp_session,
 		return 0;
 	}
 
+	/* Drain-open-frame-first: defer CNG/DTMF while a video frame is mid-emission. */
+	bundle_audio_defer(rtp_session);
+
+	/* Block audio/DTMF while BUNDLE video frame burst in progress */
+	if (rtp_session->bundle_has_video) {
+		switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+		bundle_video_frame_lock_held = SWITCH_TRUE;
+	}
+
 	WRITE_INC(rtp_session);
 
 	rtp_session->write_msg = rtp_session->send_msg;
+	rtp_session->write_msg.header.x = 0;
+	rtp_session->write_msg.ext = NULL;
+	rtp_session->write_msg.ebody = NULL;
 	rtp_session->write_msg.header.seq = htons(++rtp_session->seq);
 	rtp_session->write_msg.header.ts = htonl(ts);
 	rtp_session->write_msg.header.pt = payload;
@@ -13410,6 +14197,208 @@ SWITCH_DECLARE(int) switch_rtp_write_manual(switch_rtp_t *rtp_session,
 	ret = (int) bytes;
 
  end:
+
+	WRITE_DEC(rtp_session);
+
+	/* Release BUNDLE video frame burst lock */
+	if (bundle_video_frame_lock_held) {
+		switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+		bundle_video_frame_lock_held = SWITCH_FALSE;
+	}
+
+	return ret;
+}
+
+static int rtp_write_manual_state(switch_rtp_t *rtp_session, switch_rtp_write_state_t *write_state,
+							  void *data, uint32_t datalen, uint8_t m, switch_payload_t payload, uint32_t ts,
+							  switch_frame_flag_t *flags, uint32_t ssrc, uint8_t mid_ext_id, const char *mid,
+							  switch_payload_t in_payload, uint16_t in_seq, uint32_t in_ssrc)
+{
+	switch_size_t bytes;
+	uint16_t *seq;
+	uint32_t *last_write_ts;
+	uint32_t *reset;
+	uint8_t *video_frame_open;
+	uint8_t *video_frame_last_set;
+	uint32_t *video_frame_src_ts;
+	uint32_t *video_frame_out_ts;
+	uint32_t *video_frame_last_src_ts;
+	uint32_t *video_frame_last_out_ts;
+	switch_time_t *video_frame_last_timestamp;
+	uint8_t video_frame_commit_marker = 0;
+	uint32_t video_frame_commit_src_ts = 0;
+	uint32_t video_frame_commit_out_ts = 0;
+	switch_time_t video_frame_commit_timestamp = 0;
+	int ret = -1;
+
+	if (!switch_rtp_ready(rtp_session) || !rtp_session->remote_addr || datalen > SWITCH_RTP_MAX_BUF_LEN) {
+		return -1;
+	}
+
+	if (!rtp_write_ready(rtp_session, datalen, __LINE__)) {
+		return 0;
+	}
+
+	if (payload == INVALID_PT) {
+		return 0;
+	}
+
+	WRITE_INC(rtp_session);
+
+	if (write_state) {
+		if (!write_state->initialized) {
+			write_state->seq = switch_rtp_request_sequence();
+			write_state->last_write_timestamp = switch_micro_time_now();
+			write_state->initialized = 1;
+		}
+
+		seq = &write_state->seq;
+		last_write_ts = &write_state->last_write_ts;
+		reset = &write_state->reset;
+		video_frame_open = &write_state->video_frame_open;
+		video_frame_last_set = &write_state->video_frame_last_set;
+		video_frame_src_ts = &write_state->video_frame_src_ts;
+		video_frame_out_ts = &write_state->video_frame_out_ts;
+		video_frame_last_src_ts = &write_state->video_frame_last_src_ts;
+		video_frame_last_out_ts = &write_state->video_frame_last_out_ts;
+		video_frame_last_timestamp = &write_state->video_frame_last_timestamp;
+	} else {
+		seq = &rtp_session->seq;
+		last_write_ts = &rtp_session->last_write_ts;
+		reset = &rtp_session->flags[SWITCH_RTP_FLAG_RESET];
+		video_frame_open = &rtp_session->video_frame_open;
+		video_frame_last_set = &rtp_session->video_frame_last_set;
+		video_frame_src_ts = &rtp_session->video_frame_src_ts;
+		video_frame_out_ts = &rtp_session->video_frame_out_ts;
+		video_frame_last_src_ts = &rtp_session->video_frame_last_src_ts;
+		video_frame_last_out_ts = &rtp_session->video_frame_last_out_ts;
+		video_frame_last_timestamp = &rtp_session->video_frame_last_timestamp;
+	}
+
+	if (flags && ((*flags) & SFF_EXTERNAL) && ssrc && mid_ext_id > 0 && mid && *mid) {
+		switch_time_t frame_now = switch_micro_time_now();
+		uint32_t src_ts = ts;
+
+		/* Manual BUNDLE video writes can carry per-fragment source timestamps.
+		   Hold one output timestamp until a source marker closes the frame, but
+		   synthesize a marker if timestamp drift grows past ~100ms without one. */
+		if (*video_frame_open && src_ts != *video_frame_src_ts && !m) {
+			uint32_t open_src_delta = src_ts - *video_frame_src_ts;
+
+			if (open_src_delta > 9000) {
+				m = 1;
+			}
+		}
+
+		if (!*video_frame_open) {
+			uint32_t out_ts = src_ts;
+
+			if (*video_frame_last_set) {
+				uint32_t src_delta = src_ts - *video_frame_last_src_ts;
+				uint32_t clock_delta = 1;
+
+				if (frame_now > *video_frame_last_timestamp) {
+					switch_time_t elapsed = frame_now - *video_frame_last_timestamp;
+					clock_delta = (uint32_t) ((elapsed * 90) / 1000);
+				}
+
+				if (!src_delta || src_delta < 90 || src_delta > 90000) {
+					if (clock_delta < 3000 || clock_delta > 90000) {
+						clock_delta = 3000;
+					}
+					out_ts = *video_frame_last_out_ts + clock_delta;
+				} else {
+					out_ts = *video_frame_last_out_ts + src_delta;
+				}
+			}
+
+			*video_frame_src_ts = src_ts;
+			*video_frame_out_ts = out_ts;
+			*video_frame_open = 1;
+
+			/* Signal audio writer that a video frame is being emitted. */
+			if (rtp_session->bundle_has_video) {
+				switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+				rtp_session->bundle_video_frame_open_us = frame_now;
+				rtp_session->bundle_video_frame_in_progress = 1;
+				switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+			}
+		}
+
+		ts = *video_frame_out_ts;
+
+		if (m) {
+			video_frame_commit_marker = 1;
+			video_frame_commit_src_ts = src_ts;
+			video_frame_commit_out_ts = *video_frame_out_ts;
+			video_frame_commit_timestamp = frame_now;
+		}
+	}
+
+	rtp_session->write_msg = rtp_session->send_msg;
+	rtp_session->write_msg.header.x = 0;
+	rtp_session->write_msg.ext = NULL;
+	rtp_session->write_msg.ebody = NULL;
+	rtp_session->write_msg.header.seq = htons(++(*seq));
+	rtp_session->write_msg.header.ts = htonl(ts);
+	rtp_session->write_msg.header.pt = payload;
+	rtp_session->write_msg.header.m = m;
+	rtp_session->write_msg.header.ssrc = htonl(ssrc ? ssrc : rtp_session->ssrc);
+	memcpy(rtp_session->write_msg.body, data, datalen);
+
+	bytes = rtp_header_len + datalen;
+	if ((mid_ext_id > 0 && mid && *mid) || (rtp_session->ext_mid.enabled && rtp_session->ext_mid.ext_id > 0)) {
+		if (rtp_add_mid_extension(rtp_session, &rtp_session->write_msg, &bytes, mid_ext_id, mid, (flags && (*flags & (SFF_RAW_RTP | SFF_RAW_RTP_PARSE_FRAME | SFF_EXTERNAL | SFF_PROXY_PACKET))) ? SWITCH_TRUE : SWITCH_FALSE, 0) != SWITCH_STATUS_SUCCESS) {
+			if (mid_ext_id > 0 && mid && *mid) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR,
+					"Unable to apply RTP MID extension override id=%u mid=%s on manual packet\n", mid_ext_id, switch_str_nil(mid));
+				(*seq)--;
+				goto end;
+			}
+			rtp_log_mid_rewrite_drop(rtp_session, &rtp_session->write_msg, bytes, 0, "manual");
+			(*seq)--;
+			ret = -1;
+			goto end;
+		}
+	}
+
+	if (switch_rtp_write_raw(rtp_session, (void *) &rtp_session->write_msg, &bytes, SWITCH_TRUE) != SWITCH_STATUS_SUCCESS) {
+		(*seq)--;
+		ret = -1;
+		goto end;
+	}
+
+	if (video_frame_commit_marker) {
+		*video_frame_last_src_ts = video_frame_commit_src_ts;
+		*video_frame_last_out_ts = video_frame_commit_out_ts;
+		*video_frame_last_timestamp = video_frame_commit_timestamp;
+		*video_frame_last_set = 1;
+		*video_frame_open = 0;
+		/* Frame fully emitted -- release deferred audio. */
+		if (rtp_session->bundle_has_video) {
+			switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+			rtp_session->bundle_video_frame_in_progress = 0;
+			switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+		}
+	}
+
+	if (flags && ((*flags) & SFF_RTP_HEADER)) {
+		*last_write_ts = ts;
+		*reset = 0;
+	}
+
+	ret = (int) bytes;
+
+ end:
+
+	/* Error path: if a video frame was opened but send failed before
+	   marker-commit, clear the in-progress flag so it cannot get stuck. */
+	if (ret < 0 && video_frame_open && *video_frame_open && rtp_session->bundle_has_video) {
+		switch_mutex_lock(rtp_session->bundle_video_frame_lock);
+		rtp_session->bundle_video_frame_in_progress = 0;
+		rtp_session->bundle_video_frame_open_us = 0;
+		switch_mutex_unlock(rtp_session->bundle_video_frame_lock);
+	}
 
 	WRITE_DEC(rtp_session);
 
@@ -13442,16 +14431,6 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_write_raw(switch_rtp_t *rtp_session, 
 			int sbytes = (int) *bytes;
 			srtp_err_status_t stat;
 
-#if HAVE_MID_EXT
-			if (rtp_session->write_msg.header.x && rtp_session->write_msg.ext) {
-				uint16_t ext_words = ntohs(rtp_session->write_msg.ext->length);
-				 /* 4 bytes (profile+length) + 4*words of extension data */
-				int ext_bytes = 4 + ((int)ext_words * 4);
-
-				sbytes += ext_bytes;
-				*bytes += ext_bytes;
-			}
-#endif
 
 			if (rtp_session->flags[SWITCH_RTP_FLAG_SECURE_SEND_RESET]) {
 				switch_rtp_clear_flag(rtp_session, SWITCH_RTP_FLAG_SECURE_SEND_RESET);
@@ -13476,7 +14455,17 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_write_raw(switch_rtp_t *rtp_session, 
 			}
 
 			if (stat) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR, "Error: SRTP protection failed with code %d\n", stat);
+				char *srtp_err = NULL;
+				switch_srtp_err_to_txt(stat, &srtp_err);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR,
+							  "BUNDLE SRTP protect failed raw media=%s code=%d text=%s pt=%u seq=%u ts=%u ssrc=%u marker=%d bytes_before=%" SWITCH_SIZE_T_FMT " bytes_after=%d secure_mki=%d header_x=%d ext=%p\n",
+							  rtp_type(rtp_session), stat, switch_str_nil(srtp_err), rtp_session->write_msg.header.pt,
+							  ntohs(rtp_session->write_msg.header.seq), ntohl(rtp_session->write_msg.header.ts),
+							  ntohl(rtp_session->write_msg.header.ssrc), rtp_session->write_msg.header.m, *bytes, sbytes,
+							  rtp_session->flags[SWITCH_RTP_FLAG_SECURE_SEND_MKI], rtp_session->write_msg.header.x, (void *)rtp_session->write_msg.ext);
+				status = SWITCH_STATUS_FALSE;
+				switch_mutex_unlock(rtp_session->ice_mutex);
+				goto end;
 			}
 			*bytes = sbytes;
 		}
@@ -13751,176 +14740,320 @@ rtp_extension_t *switch_rtp_find_extension(switch_rtp_t *rtp_session, uint8_t id
 	return NULL;
 }
 
-SWITCH_DECLARE(void) switch_rtp_handle_extensions(switch_rtp_t *rtp_session)
+SWITCH_DECLARE(switch_status_t) switch_rtp_handle_extensions(switch_rtp_t *rtp_session, switch_size_t packet_bytes)
 {
-	if (!rtp_session->has_rtp) return;
+	rtp_session->recv_msg.ext = NULL;
+	rtp_session->recv_msg.ebody = NULL;
+	rtp_session->recv_rtp_exts_size = 0;
+	rtp_session->ext_total_len = 0;
+
+	if (rtp_session->ext_mid.enabled) {
+		memset(rtp_session->ext_mid.remote_mid, 0, sizeof(rtp_session->ext_mid.remote_mid));
+	}
 
 	/* Do not advance recv_msg.ebody past the CSRC list here; read_rtp_packet() does that
 	 * once. Advancing it in both places double-counted CSRC, mislocating the extension so
 	 * it was never reliably stripped when cc > 0. This function only needs to *read* the
 	 * extension, so it locates it at body + CSRC locally below. */
 
-	if (rtp_session->recv_rtp_exts_size && !rtp_session->recv_msg.header.x) {
-		rtp_session->recv_rtp_exts_size = 0;
-	}
+	if (!rtp_session->has_rtp) return SWITCH_STATUS_SUCCESS;
+
+	{
+		uint8_t *packet_start = (uint8_t *) &rtp_session->recv_msg.header;
+		uint8_t *packet_end = packet_start + packet_bytes;
+		switch_size_t base_hdr_len = rtp_header_len + (rtp_session->recv_msg.header.cc * 4);
+
+		if (packet_bytes < base_hdr_len || packet_end < packet_start) {
+			return SWITCH_STATUS_FALSE;
+		}
+
+		rtp_session->recv_msg.ebody = (char *)packet_start + base_hdr_len;
+
 
 	if (!rtp_session->flags[SWITCH_RTP_FLAG_PROXY_MEDIA] &&
 		!rtp_session->flags[SWITCH_RTP_FLAG_UDPTL] &&
 		rtp_session->recv_msg.header.x) {
 
+		switch_rtp_hdr_ext_t *recv_ext = NULL;
 		uint16_t ext_len_field = 0;
 		uint16_t ext_profile = 0;
 		uint32_t total_ext_bytes = 0;
 		uint8_t *ext_data_ptr = NULL;
+		uint8_t *ext_end = NULL;
 		uint8_t ext_id = 0, ext_len = 0;
 		uint8_t ext_header_len = 1;
 		uint16_t ext_payload_len = 0;
-		uint32_t ssrc_recv = ntohl(rtp_session->recv_msg.header.ssrc);
 
-		rtp_session->recv_msg.ext = (switch_rtp_hdr_ext_t *) (RTP_BODY(rtp_session) + (rtp_session->recv_msg.header.cc * 4));
-		ext_len_field = ntohs(rtp_session->recv_msg.ext->length);
+		recv_ext = (switch_rtp_hdr_ext_t *) rtp_session->recv_msg.ebody;
+		if ((uint8_t *)recv_ext + 4 > packet_end) {
+			return SWITCH_STATUS_FALSE;
+		}
+		ext_len_field = ntohs(recv_ext->length);
+		total_ext_bytes = ext_len_field * 4;
+		ext_data_ptr = (uint8_t *) recv_ext + 4;
+		if (total_ext_bytes > (uint32_t)(packet_end - ext_data_ptr)) {
+			return SWITCH_STATUS_FALSE;
+		}
+
+		rtp_session->recv_msg.ext = recv_ext;
 
 		if (ext_len_field > 0) {
-			rtp_session->recv_rtp_exts_size = ext_len_field * 4 + 4;
-			ext_profile = ntohs(rtp_session->recv_msg.ext->profile);
+			rtp_session->recv_rtp_exts_size = total_ext_bytes + 4;
+			ext_profile = ntohs(recv_ext->profile);
 
 			if (ext_profile == 0xbede) {
-				total_ext_bytes = ext_len_field * 4;
-				ext_data_ptr = (uint8_t *) rtp_session->recv_msg.ext + 4;
+				ext_end = ext_data_ptr + total_ext_bytes;
 
-				while (total_ext_bytes >= 1) {
+				while (ext_data_ptr < ext_end) {
+					uint32_t remaining_ext_bytes = (uint32_t)(ext_end - ext_data_ptr);
 					ext_id = (*ext_data_ptr & 0xF0) >> 4;
 					ext_len = *ext_data_ptr & 0x0F;
 					ext_payload_len = ext_len + 1;
 
 					if (ext_id == 0) {
-						if (ext_len > 0) {
-							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
-								"[%u] RTP extension parsing error: ID=0, LEN=%u\n", ssrc_recv, ext_len);
+						if (*ext_data_ptr == 0x00) {
+							ext_data_ptr++;
+							continue;
 						}
-						ext_data_ptr += 1;
-						total_ext_bytes -= 1;
-						continue;
+						/* RFC 8285 padding is only zero bytes. A non-zero id=0 nibble
+						 * is not a valid one-byte element, but the RTP payload itself is
+						 * still usable; stop parsing extensions instead of dropping media. */
+						break;
+					}
+
+					if (ext_id == 15) {
+						/* Reserved in the one-byte header form. Treat it as end-of-parse,
+						 * not a packet-level failure. */
+						break;
+					}
+
+					if ((uint32_t)(ext_header_len + ext_payload_len) > remaining_ext_bytes) {
+						return SWITCH_STATUS_FALSE;
 					}
 
 					if (rtp_session->ext_mid.enabled && ext_id == rtp_session->ext_mid.ext_id) {
-						const size_t copy_len = (ext_payload_len > sizeof(rtp_session->ext_mid.mid) - 1) ? sizeof(rtp_session->ext_mid.mid) - 1 : ext_payload_len;
+						const size_t copy_len = (ext_payload_len > sizeof(rtp_session->ext_mid.remote_mid) - 1) ? sizeof(rtp_session->ext_mid.remote_mid) - 1 : ext_payload_len;
 
-						memset(rtp_session->ext_mid.mid, 0, sizeof(rtp_session->ext_mid.mid));
-						memcpy(rtp_session->ext_mid.mid, ext_data_ptr + 1, copy_len);
+						memset(rtp_session->ext_mid.remote_mid, 0, sizeof(rtp_session->ext_mid.remote_mid));
+						memcpy(rtp_session->ext_mid.remote_mid, ext_data_ptr + 1, copy_len);
 					}
 
 					rtp_session->ext_total_len = ext_header_len + ext_payload_len;
 					ext_data_ptr += rtp_session->ext_total_len;
-					total_ext_bytes = (total_ext_bytes > rtp_session->ext_total_len) ? (total_ext_bytes - rtp_session->ext_total_len) : 0;
 				}
 			}
 		}
 	}
+	}
+	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_enable_mid_receive(switch_rtp_t *rtp_session, uint8_t ext_id)
+{
+	if (!rtp_session || !ext_id || ext_id > 14) return SWITCH_STATUS_FALSE;
+
+	rtp_session->ext_mid.ext_id = ext_id;
+	rtp_session->ext_mid.enabled = 1;
+	memset(rtp_session->ext_mid.local_mid, 0, sizeof(rtp_session->ext_mid.local_mid));
+	memset(rtp_session->ext_mid.remote_mid, 0, sizeof(rtp_session->ext_mid.remote_mid));
+
+	return SWITCH_STATUS_SUCCESS;
 }
 
 SWITCH_DECLARE(switch_status_t) switch_rtp_enable_mid(switch_rtp_t *rtp_session, uint8_t ext_id, const char *mid)
 {
 	size_t L;
 
-	if (!rtp_session || !mid || !ext_id || ext_id > 14) return SWITCH_STATUS_FALSE;
+	if (!rtp_session || !mid) return SWITCH_STATUS_FALSE;
 
 	L = strlen(mid);
 	if (!L) return SWITCH_STATUS_FALSE;
-    if (L > 16) L = 16;
+	if (L > 16) L = 16;
 
-    memset(rtp_session->ext_mid.mid, 0, sizeof(rtp_session->ext_mid.mid));
-    memcpy(rtp_session->ext_mid.mid, mid, L);
-    rtp_session->ext_mid.ext_id  = ext_id;
-    rtp_session->ext_mid.enabled = 1;
+	if (switch_rtp_enable_mid_receive(rtp_session, ext_id) != SWITCH_STATUS_SUCCESS) {
+		return SWITCH_STATUS_FALSE;
+	}
 
-    return SWITCH_STATUS_SUCCESS;
+	memset(rtp_session->ext_mid.local_mid, 0, sizeof(rtp_session->ext_mid.local_mid));
+	memcpy(rtp_session->ext_mid.local_mid, mid, L);
+
+	return SWITCH_STATUS_SUCCESS;
 }
 
-#if HAVE_MID_EXT
-static void rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_t *send_msg, switch_size_t *bytes)
+SWITCH_DECLARE(const char *) switch_rtp_get_received_mid(switch_rtp_t *rtp_session)
 {
-    uint8_t *ext_ptr;
-    uint16_t words, new_words;
-    size_t payload_len, ext_bytes, need_bytes = 0;
-    uint8_t len_field, pad;
-
-    if (!rtp_session->ext_mid.enabled) return;
-
-	payload_len = strlen(rtp_session->ext_mid.mid);
-	if (!payload_len) return;
-	if (payload_len > 16) payload_len = 16;
-
-	{
-		uint16_t words_now = 0;
-		size_t needed = 4 /* profile+length */ + 1 /* id/len */ + payload_len;
-		
-		if (send_msg->header.x && send_msg->ext) {
-			words_now = ntohs(send_msg->ext->length);
-			needed += (size_t)words_now * 4;
-		}
-		if (needed > SWITCH_RTP_MAX_BUF_LEN) return;
+	if (!rtp_session || !rtp_session->ext_mid.enabled || zstr(rtp_session->ext_mid.remote_mid)) {
+		return NULL;
 	}
 
-    if (!send_msg->header.x) {
-        uint8_t len_field_tmp = (uint8_t)(payload_len - 1);
-        size_t ext_data_bytes = 1 + payload_len;
-        uint8_t pad_tmp = (uint8_t)((4 - (ext_data_bytes & 3)) & 3);
-        need_bytes = 4 + ext_data_bytes + pad_tmp;
-
-        memmove(send_msg->body + need_bytes, send_msg->body, (size_t)(*bytes - rtp_header_len));
-        send_msg->header.x = 1;
-        send_msg->ebody = send_msg->body; /* ext header starts here */
-        send_msg->ext = (switch_rtp_hdr_ext_t *) send_msg->ebody;
-        send_msg->ext->profile = htons(0xBEDE);
-        send_msg->ext->length  = 0;
-
-        ext_ptr = (uint8_t *)send_msg->ext + 4;
-        *ext_ptr++ = (rtp_session->ext_mid.ext_id << 4) | (len_field_tmp & 0x0F);
-        memcpy(ext_ptr, rtp_session->ext_mid.mid, payload_len);
-        ext_ptr += payload_len;
-        if (pad_tmp) {
-            memset(ext_ptr, 0, pad_tmp);
-            ext_ptr += pad_tmp;
-        }
-
-        /* Length is in 32-bit words following the 4-byte header */
-        send_msg->ext->length = htons((uint16_t)((ext_ptr - ((uint8_t *)send_msg->ext + 4)) / 4));
-
-        *bytes += (switch_size_t)need_bytes;
-        return;
-    } else if (!send_msg->ext) {
-        /* If x is set but ext is NULL, initialize it */
-        send_msg->ext = (switch_rtp_hdr_ext_t *) send_msg->ebody;
-        if (!send_msg->ext) return;
-        send_msg->ext->profile = htons(0xBEDE);
-        send_msg->ext->length = 0;
-    }
-
-    if (!send_msg->ext || ntohs(send_msg->ext->profile) != 0xBEDE) return;
-
-    words = ntohs(send_msg->ext->length);
-    ext_ptr = (uint8_t *)send_msg->ext + 4 + (words * 4);
-
-    len_field = (uint8_t)(payload_len - 1);
-    *ext_ptr++ = (rtp_session->ext_mid.ext_id << 4) | (len_field & 0x0F);
-    memcpy(ext_ptr, rtp_session->ext_mid.mid, payload_len);
-    ext_ptr += payload_len;
-
-    ext_bytes = (size_t)(ext_ptr - ((uint8_t *)send_msg->ext + 4));
-    pad = (4 - (ext_bytes & 3)) & 3;
-    if (pad) {
-        memset(ext_ptr, 0, pad);
-        ext_ptr += pad;
-        ext_bytes += pad;
-		*bytes += pad;
-	}
-
-    new_words = (uint16_t)(ext_bytes / 4);
-    send_msg->ext->length = htons(new_words);
-	*bytes += (switch_size_t)(1 + payload_len);
+	return rtp_session->ext_mid.remote_mid;
 }
-#endif
+
+static switch_status_t rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_t *send_msg, switch_size_t *bytes, uint8_t ext_id, const char *mid, switch_bool_t drop_peer_extensions, switch_size_t trusted_payload_offset)
+{
+	uint8_t *ext_ptr, *ext_data;
+	uint16_t words;
+	size_t payload_len, ext_data_bytes, ext_data_padded, old_ext_data_bytes = 0, old_ext_total = 0, new_ext_total, payload_bytes, off;
+	size_t csrc_bytes, body_header_bytes;
+	uint8_t len_field, pad, mid_ext_id = ext_id;
+	const char *mid_value = mid;
+
+	if (!send_msg || !bytes || *bytes < rtp_header_len) return SWITCH_STATUS_FALSE;
+
+	csrc_bytes = (size_t)send_msg->header.cc * sizeof(uint32_t);
+	body_header_bytes = csrc_bytes;
+
+	if (*bytes < rtp_header_len + body_header_bytes) return SWITCH_STATUS_FALSE;
+
+	if (!mid_ext_id) {
+		if (!rtp_session) return SWITCH_STATUS_FALSE;
+		mid_ext_id = rtp_session->ext_mid.ext_id;
+	}
+
+	if (zstr(mid_value)) {
+		if (!rtp_session) return SWITCH_STATUS_FALSE;
+		mid_value = rtp_session->ext_mid.local_mid;
+	}
+
+	if (!mid_ext_id || mid_ext_id > 14 || zstr(mid_value)) return SWITCH_STATUS_FALSE;
+
+	payload_len = strlen(mid_value);
+	if (!payload_len) return SWITCH_STATUS_FALSE;
+	/* One-byte RTP header extensions can carry at most 16 bytes per element.
+	 * Never truncate an explicit negotiated MID override, because BUNDLE MID
+	 * matching is exact. */
+	if (payload_len > 16) {
+		if (ext_id > 0 && mid && *mid) {
+			return SWITCH_STATUS_FALSE;
+		}
+		payload_len = 16;
+	}
+	if (send_msg->header.x) {
+		if (!send_msg->ext) {
+			send_msg->ebody = send_msg->body + body_header_bytes;
+			send_msg->ext = (switch_rtp_hdr_ext_t *) send_msg->ebody;
+		}
+
+		if (!send_msg->ext) return SWITCH_STATUS_FALSE;
+
+		words = ntohs(send_msg->ext->length);
+		old_ext_data_bytes = (size_t)words * 4;
+		old_ext_total = 4 + old_ext_data_bytes;
+
+		if (*bytes < rtp_header_len + body_header_bytes + old_ext_total) {
+			if (trusted_payload_offset >= rtp_header_len + body_header_bytes + 4 &&
+				trusted_payload_offset <= *bytes) {
+				/* The declared extension length is malformed, but the source frame
+				 * supplied a trusted payload pointer. Skip the actual extension span
+				 * and rebuild it; never reinterpret extension bytes as media. */
+				old_ext_total = trusted_payload_offset - rtp_header_len - body_header_bytes;
+				old_ext_data_bytes = 0;
+			} else {
+				return SWITCH_STATUS_FALSE;
+			}
+		}
+
+		if (old_ext_total && ntohs(send_msg->ext->profile) == 0xBEDE && drop_peer_extensions) {
+			/* RTP header-extension ids are scoped to the negotiated leg.  When
+			   forwarding peer media across legs, never preserve the inbound BEDE
+			   extension block while stamping the outbound MID: Chrome may send
+			   sdes:mid as id 4 while Safari negotiated sdes:mid as id 1, and
+			   forwarding both elements makes Safari discard audio.  Keep
+			   old_ext_total so payload_bytes below skips the inbound extension
+			   block, then rebuild a clean block containing only the negotiated
+			   outbound MID. */
+			old_ext_data_bytes = 0;
+		} else if (old_ext_total && ntohs(send_msg->ext->profile) == 0xBEDE) {
+			ext_data = (uint8_t *)send_msg->ext + 4;
+
+			for (off = 0; off < old_ext_data_bytes;) {
+				uint8_t hdr = ext_data[off];
+				uint8_t elem_id;
+				size_t elem_payload_len, elem_len;
+
+				if (!hdr) {
+					off++;
+					continue;
+				}
+
+				elem_id = (uint8_t)(hdr >> 4);
+				elem_payload_len = (size_t)((hdr & 0x0F) + 1);
+				elem_len = 1 + elem_payload_len;
+				if (off + elem_len > old_ext_data_bytes) return SWITCH_STATUS_FALSE;
+
+				if (elem_id == mid_ext_id) {
+					/* For locally generated outbound extensions, preserve negotiated
+					   elements such as audio-level and replace only any existing MID. */
+					memmove(ext_data + off, ext_data + off + elem_len, old_ext_data_bytes - off - elem_len);
+					old_ext_data_bytes -= elem_len;
+					memset(ext_data + old_ext_data_bytes, 0, elem_len);
+					continue;
+				}
+
+				off += elem_len;
+			}
+
+			while (old_ext_data_bytes && !ext_data[old_ext_data_bytes - 1]) {
+				old_ext_data_bytes--;
+			}
+		} else {
+			/* BUNDLE writes must stamp the negotiated MID for the outbound leg.
+			   If the forwarded packet carries a different RTP extension profile,
+			   strip that extension and replace it with the one-byte BEDE MID rather
+			   than failing the whole media write. The RTP extension header length is
+			   profile-independent, so payload_bytes below still skips it safely. */
+			old_ext_data_bytes = 0;
+		}
+	}
+
+	ext_data_bytes = old_ext_data_bytes + 1 + payload_len;
+	pad = (uint8_t)((4 - (ext_data_bytes & 3)) & 3);
+	ext_data_padded = ext_data_bytes + pad;
+	new_ext_total = 4 + ext_data_padded;
+	payload_bytes = *bytes - rtp_header_len - body_header_bytes - old_ext_total;
+
+	/* BUNDLE explicit bound: compute the final post-rewrite total bytes and verify
+	 * we will not overflow send_msg->body[SWITCH_RTP_MAX_BUF_LEN+...]. The packet body
+	 * after rewrite is body_header_bytes + new_ext_total + payload_bytes; reject any
+	 * write that would exceed SWITCH_RTP_MAX_BUF_LEN rather than corrupt the buffer. */
+	if (body_header_bytes + new_ext_total + payload_bytes > SWITCH_RTP_MAX_BUF_LEN) {
+		return SWITCH_STATUS_FALSE;
+	}
+	/* BUNDLE sanity: ensure the existing packet was large enough that payload_bytes
+	 * is a valid (non-negative) span. Combined with the earlier "*bytes < rtp_header_len
+	 * + body_header_bytes + old_ext_total" guard, this means the source memmove range is
+	 * fully inside the input packet. */
+	if (*bytes < rtp_header_len + body_header_bytes + old_ext_total) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	memmove(send_msg->body + body_header_bytes + new_ext_total,
+			send_msg->body + body_header_bytes + old_ext_total,
+			payload_bytes);
+	send_msg->header.x = 1;
+	send_msg->ebody = send_msg->body + body_header_bytes;
+	send_msg->ext = (switch_rtp_hdr_ext_t *) send_msg->ebody;
+	send_msg->ext->profile = htons(0xBEDE);
+	send_msg->ext->length = htons((uint16_t)(ext_data_padded / 4));
+
+	ext_ptr = (uint8_t *)send_msg->ext + 4 + old_ext_data_bytes;
+	len_field = (uint8_t)(payload_len - 1);
+	*ext_ptr++ = (mid_ext_id << 4) | (len_field & 0x0F);
+	memcpy(ext_ptr, mid_value, payload_len);
+	ext_ptr += payload_len;
+	if (pad) {
+		memset(ext_ptr, 0, pad);
+	}
+
+	*bytes = (switch_size_t)(rtp_header_len + body_header_bytes + new_ext_total + payload_bytes);
+	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_test_rewrite_mid_extension(switch_rtp_packet_t *packet, switch_size_t *bytes, uint8_t ext_id, const char *mid, switch_bool_t drop_peer_extensions, switch_size_t trusted_payload_offset)
+{
+	if (!packet) return SWITCH_STATUS_FALSE;
+	return rtp_add_mid_extension(NULL, (rtp_msg_t *) packet, bytes, ext_id, mid, drop_peer_extensions, trusted_payload_offset);
+}
 
 SWITCH_DECLARE(void) switch_rtp_set_ice_candidate_cb(switch_rtp_t *rtp_session, switch_ice_candidate_cb_t cb, void *user_data)
 {

@@ -131,6 +131,7 @@
 #include "switch_resample.h"
 #include "switch_ivr.h"
 #include "switch_rtp.h"
+#include "switch_bundle.h"
 #include "switch_log.h"
 #include "switch_xml.h"
 #include "switch_xml_config.h"

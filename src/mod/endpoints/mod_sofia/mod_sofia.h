@@ -663,6 +663,9 @@ struct sofia_profile {
 	char *rtpip[MAX_RTPIP];
 	char *rtpip6[MAX_RTPIP];
 	char *jb_msec;
+	/* Value stamped on inbound channels as telnyx-strict-codec-match. NULL means the
+	   profile said nothing, leaving the global variable to decide. */
+	char *strict_codec_match;
 	switch_payload_t te;
 	switch_payload_t recv_te;
 	uint32_t rtpip_index;
