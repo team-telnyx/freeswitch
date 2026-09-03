@@ -7,6 +7,7 @@ noinst_PROGRAMS += test_tts_format
 noinst_PROGRAMS += switch_core_media
 noinst_PROGRAMS += test_mod_verto
 noinst_PROGRAMS += test_mod_event_socket
+noinst_PROGRAMS += switch_timer
 
 noinst_PROGRAMS += switch_hold switch_sip switch_mod_telnyx switch_mod_gstt switch_3pcc test_inuse_race switch_jb_deadlock switch_cjson switch_sockaddr test_rtp_set_flag_null_crash test_write_frame_foreign_codec test_video_bridge_engine_race switch_apr_cleanup test_dtmf_sent_event
 
