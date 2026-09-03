@@ -37,6 +37,9 @@ typedef struct {
 		char last_sent_id[13];
 		switch_time_t last_ok;
 		uint8_t cand_responsive;
+		/* upstream v1.11.2 (03485e1f4c): set when the peer's ICE mode requires
+		 * MESSAGE-INTEGRITY verification on inbound STUN. */
+		uint8_t verify_integrity;
 		uint8_t dtls_handshake;
 		switch_time_t first_responsive_us;
 		uint8_t promoted_to_controlling;

@@ -173,7 +173,6 @@ typedef struct sofia_dispatch_event_s {
 	int save;
 	switch_core_session_t *session;
 	switch_core_session_t *init_session;
-	switch_memory_pool_t *pool;
 	struct sofia_dispatch_event_s *next;
 } sofia_dispatch_event_t;
 
@@ -332,6 +331,8 @@ typedef enum {
 	PFLAG_HANDLE_UPDATE,
 	PFLAG_IGNORE_RTP_DURING_DTMF,
 	PFLAG_PASS_603_NETWORK_BLOCKED,
+	PFLAG_ENABLE_CHAT_API_PROTO,
+
 	/* No new flags below this line */
 	PFLAG_MAX
 } PFLAGS;

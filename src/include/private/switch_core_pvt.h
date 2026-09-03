@@ -306,6 +306,7 @@ struct switch_runtime {
 	uint32_t log_truncate;
 	switch_call_cause_t shutdown_cause;
 	switch_bool_t add_media_bug_last;
+	uint32_t uuid_version;
 };
 
 extern struct switch_runtime runtime;
