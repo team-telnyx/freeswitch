@@ -98,12 +98,29 @@ typedef struct {
 	switch_sockaddr_t *selected_addr;
 } switch_rtp_pvt_ice_tuple_t;
 
+typedef struct {
+	switch_core_media_ice_type_t ice_type;
+	switch_bool_t ice_ready;
+	switch_bool_t ice_rready;
+	switch_bool_t rtp_chosen;
+	switch_bool_t rtcp_chosen;
+	dtls_state_t dtls_state;
+	const void *dtls_context;
+	const void *dtls_ssl;
+	const void *socket;
+} switch_rtp_pvt_transport_snapshot_t;
+
 SWITCH_DECLARE(void) switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *data, switch_size_t len);
+SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_handle_ice_from(switch_rtp_t *rtp_session, ice_proto_t proto,
+	const char *host, switch_port_t port, void *data, switch_size_t len);
 SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_get_ice_state(switch_rtp_t *rtp_session, ice_proto_t proto,
 	char *ice_user, switch_size_t ice_user_len, char *local_pwd, switch_size_t local_pwd_len,
 	char *remote_pwd, switch_size_t remote_pwd_len, switch_bool_t *has_addr);
+SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_get_transport_snapshot(switch_rtp_t *rtp_session,
+	ice_proto_t proto, switch_rtp_pvt_transport_snapshot_t *snapshot);
 SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_should_preserve_active_dtls_tuple(switch_sockaddr_t *current_addr,
 	switch_sockaddr_t *handshake_peer_addr, dtls_state_t dtls_state, switch_bool_t handshake_peer_set, switch_bool_t is_rtcp);
+SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_ice_selection_complete(const ice_t *ice, switch_bool_t rtcp_muxed);
 SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_should_preserve_trickle_dtls(switch_bool_t new_ice,
 	switch_bool_t rtp_ready, const switch_rtp_pvt_ice_tuple_t *rtp_tuple,
 	switch_bool_t rtcp_muxed, const char *active_remote_ufrag, const char *active_remote_pwd,
