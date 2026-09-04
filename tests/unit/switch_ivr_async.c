@@ -62,6 +62,18 @@ static switch_status_t partial_play_and_collect_input_callback(switch_core_sessi
 	return status;
 }
 
+/* switch_core_get_variable() hands back the live pointer, which a concurrent
+ * set frees, so every read here takes a copy. */
+static int asr_test_var_true(const char *name)
+{
+	char *val = switch_core_get_variable_dup(name);
+	int result = switch_true(val);
+
+	switch_safe_free(val);
+
+	return result;
+}
+
 FST_CORE_BEGIN("./conf_async")
 {
 	FST_SUITE_BEGIN(switch_ivr_play_async)
@@ -193,6 +205,39 @@ FST_CORE_BEGIN("./conf_async")
 			fst_xcheck(switch_channel_var_true(fst_channel, "record_post_process_test_pass"), "Expect record_post_process_test_pass channel variable set to true");
 
 			unlink(record_filename);
+		}
+		FST_SESSION_END()
+
+		FST_SESSION_BEGIN(detect_speech_stop_during_get_results)
+		{
+			switch_status_t status;
+
+			switch_core_set_variable("mod_test_asr_in_get_results", NULL);
+			switch_core_set_variable("mod_test_asr_use_after_close", NULL);
+
+			status = switch_ivr_detect_speech(fst_session, "test", "test", "test", "", NULL);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+
+			// A no-input timeout is enough to make mod_test report a result, so no speech is needed.
+			// The delay then parks the core speech thread inside asr_get_results for 800ms, well past
+			// the 500ms of audio below, so the close runs while it is still in there.
+			fst_requires(switch_ivr_set_param_detect_speech(fst_session, "no-input-timeout", "200") == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_ivr_set_param_detect_speech(fst_session, "get-results-delay-ms", "800") == SWITCH_STATUS_SUCCESS);
+
+			// Drives the media bug until the no-input timeout fires, and has to stop before the close:
+			// once mod_test reports a result every read callback blocks on the speech thread's mutex
+			// while holding bug_rwlock, starving switch_core_media_bug_remove() of its write lock.
+			switch_ivr_play_file(fst_session, NULL, "silence_stream://500,0", NULL);
+
+			// Not timing luck: the close below is only the race this test exists for if the speech
+			// thread is inside the module right now.
+			fst_requires(asr_test_var_true("mod_test_asr_in_get_results"));
+
+			status = switch_ivr_stop_detect_speech(fst_session);
+			fst_xcheck(status == SWITCH_STATUS_SUCCESS, "Expect switch_ivr_stop_detect_speech() to have closed the media bug");
+
+			fst_xcheck(!asr_test_var_true("mod_test_asr_use_after_close"),
+					   "Expect asr_close not to run while the speech thread is still inside the module");
 		}
 		FST_SESSION_END()
 	}
