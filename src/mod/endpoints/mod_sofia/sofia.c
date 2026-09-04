@@ -6131,6 +6131,17 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 							sofia_clear_pflag(profile, PFLAG_3PCC_EARLY_OFFER);
 							sofia_clear_pflag(profile, PFLAG_3PCC_EARLY_OFFER_DIALPLAN);
 						}
+					} else if (!strcasecmp(var, "enable-ring-ready-early-media")) {
+						/* Promote the 180 that ring_ready would send into a reliable 183 carrying
+						   our own SDP offer, so a no-SDP INVITE gets its offer in the first
+						   reliable provisional. Builds on the early-offer flow above and is
+						   validated against it after the full profile is parsed. Override per
+						   session with the ring_ready_early_media channel variable. */
+						if (switch_true(val)) {
+							sofia_set_pflag(profile, PFLAG_RING_READY_EARLY_MEDIA);
+						} else {
+							sofia_clear_pflag(profile, PFLAG_RING_READY_EARLY_MEDIA);
+						}
 					} else if (!strcasecmp(var, "rtp-secure-media-3pcc-offer-both")) {
 						if (switch_true(val)) {
 							sofia_set_pflag(profile, PFLAG_RTP_SECURE_MEDIA_3PCC_OFFER_BOTH);
@@ -6178,6 +6189,16 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						/* per RFC 4028: minimum_session_expires must be > 90 */
 						if (profile->minimum_session_expires < 90) {
 							profile->minimum_session_expires = 90;
+						}
+					} else if (!strcasecmp(var, "enable-reliable-180-without-sdp")) {
+						/* A 180 carries no session description, so on an INVITE that arrived
+						   without one a reliable 180 would be the first reliable non-failure
+						   message and would then be required to carry the offer. Such 180s are
+						   sent unreliably; enable this only for a peer that insists otherwise. */
+						if (switch_true(val)) {
+							sofia_set_pflag(profile, PFLAG_RELIABLE_180_NOSDP);
+						} else {
+							sofia_clear_pflag(profile, PFLAG_RELIABLE_180_NOSDP);
 						}
 					} else if (!strcasecmp(var, "enable-100rel")) {
 						if (switch_true(val)) {
@@ -6700,6 +6721,8 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						profile->default_ringback = switch_core_strdup(profile->pool, val);
 					} else if (!strcasecmp(var, "ringback-on-mismatch-media")) {
 						profile->ringback_on_mismatch_media = switch_core_strdup(profile->pool, val);
+					} else if (!strcasecmp(var, "ring-ready-early-media-ringback")) {
+						profile->ring_ready_early_media_ringback = switch_core_strdup(profile->pool, val);
 					} else if (!strcasecmp(var, "proxy-notify-events")) {
 						profile->proxy_notify_events = switch_core_strdup(profile->pool, val);
 					} else if (!strcasecmp(var, "proxy-info-content-types")) {
@@ -6785,6 +6808,13 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 					sofia_clear_pflag(profile, PFLAG_3PCC_EARLY_OFFER_DIALPLAN);
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
 									  "enable-3pcc-early-offer requires reliable provisional responses; disabling it because enable-100rel is off\n");
+				}
+
+				if (sofia_test_pflag(profile, PFLAG_RING_READY_EARLY_MEDIA)
+					&& !sofia_test_pflag(profile, PFLAG_3PCC_EARLY_OFFER) && !sofia_test_pflag(profile, PFLAG_3PCC_EARLY_OFFER_DIALPLAN)) {
+					sofia_clear_pflag(profile, PFLAG_RING_READY_EARLY_MEDIA);
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+									  "enable-ring-ready-early-media has nothing to offer without enable-3pcc-early-offer; disabling it\n");
 				}
 
 				if (!profile->sipip) {
@@ -7301,7 +7331,16 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 			if (switch_core_session_get_partner(session, &other_session) == SWITCH_STATUS_SUCCESS) {
 				if(switch_core_session_compare(session, other_session)) {
 					private_object_t *other_tech_pvt = switch_core_session_get_private(other_session);
-					if (sofia_test_flag(other_tech_pvt, TFLAG_3PCC)) {
+					switch_channel_t *other_chan = switch_core_session_get_channel(other_session);
+					/* Dropping a provisional discards its SDP with it, leaving this leg without a
+					   codec, so only do it while the other leg genuinely cannot take early media:
+					   its offer/answer is still outstanding. TFLAG_3PCC alone does not mean that --
+					   it survives the ACK that completes a classic 3PCC call, and an early-offer
+					   call answers in a PRACK to a 183 generated from this very event. */
+					if (sofia_test_flag(other_tech_pvt, TFLAG_3PCC) &&
+						!switch_channel_test_flag(other_chan, CF_ANSWERED) &&
+						!sofia_test_flag(other_tech_pvt, TFLAG_3PCC_EARLY_OFFER) &&
+						!switch_channel_var_true(other_chan, "enable_3pcc_early_offer")) {
 						sofia_set_flag_locked(tech_pvt, TFLAG_SKIP_EARLY);
 					}
 				}
@@ -11984,8 +12023,10 @@ void sofia_handle_sip_i_invite(switch_core_session_t *session, nua_t *nua, sofia
 		}
 	}
 
-	if (sip && sip->sip_supported && !sofia_test_pflag(profile, PFLAG_DISABLE_100REL)) {
-		int supported_100rel = sip_has_feature(sip->sip_supported, "100rel");
+	if (sip && (sip->sip_supported || sip->sip_require) && !sofia_test_pflag(profile, PFLAG_DISABLE_100REL)) {
+		/* Require implies support: a UAC may demand 100rel without listing it in Supported, and
+		   those calls need the same handling. sip_has_feature() tolerates a NULL list. */
+		int supported_100rel = sip_has_feature(sip->sip_supported, "100rel") || sip_has_feature(sip->sip_require, "100rel");
 		if (supported_100rel) {
 			const char *sync = switch_channel_get_variable(channel, "apply_100rel_sync");
 			if (sync) {
@@ -12003,6 +12044,17 @@ void sofia_handle_sip_i_invite(switch_core_session_t *session, nua_t *nua, sofia
 					switch_channel_set_variable(channel, "enable_3pcc_early_offer", switch_true(early_offer) ? "true" : "false");
 				} else if (sofia_test_pflag(profile, PFLAG_3PCC_EARLY_OFFER)) {
 					switch_channel_set_variable(channel, "enable_3pcc_early_offer", "true");
+				}
+			}
+
+			/* Same per-session override shape for promoting ring_ready to early media. Read again
+			   at the ring_ready indication so the dialplan can still turn it off per call. */
+			{
+				const char *ring_ready_early = switch_channel_get_variable(channel, "ring_ready_early_media");
+				if (ring_ready_early) {
+					switch_channel_set_variable(channel, "ring_ready_early_media", switch_true(ring_ready_early) ? "true" : "false");
+				} else if (sofia_test_pflag(profile, PFLAG_RING_READY_EARLY_MEDIA)) {
+					switch_channel_set_variable(channel, "ring_ready_early_media", "true");
 				}
 			}
 

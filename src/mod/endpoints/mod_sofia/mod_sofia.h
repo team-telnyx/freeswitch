@@ -243,6 +243,8 @@ typedef enum {
 	PFLAG_3PCC_PROXY,
 	PFLAG_3PCC_EARLY_OFFER,
 	PFLAG_3PCC_EARLY_OFFER_DIALPLAN,
+	PFLAG_RING_READY_EARLY_MEDIA,
+	PFLAG_RELIABLE_180_NOSDP,
 	PFLAG_RTP_SECURE_MEDIA_3PCC_OFFER_BOTH,
 	PFLAG_3PCC_REINVITE_BRIDGED_ON_ACK,
 	PFLAG_CALLID_AS_UUID,
@@ -355,6 +357,7 @@ typedef enum {
 	TFLAG_EARLY_MEDIA,
 	TFLAG_3PCC,
 	TFLAG_3PCC_EARLY_OFFER,
+	TFLAG_EARLY_OFFER_SENT,
 	TFLAG_READY,
 	TFLAG_REFER,
 	TFLAG_NOHUP,
@@ -861,6 +864,7 @@ struct sofia_profile {
 	char *acl_proxy_x_token_header;
 	char *default_ringback;
 	char *ringback_on_mismatch_media;
+	char *ring_ready_early_media_ringback;
 	char *ignore_reason_header_by_sip_code;
 	uint8_t rfc8760_algs_count;
 	sofia_auth_algs_t auth_algs[SOFIA_MAX_REG_ALGS];
