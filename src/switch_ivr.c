@@ -3482,6 +3482,10 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_generate_json_cdr(switch_core_session
 	switch_ivr_set_json_call_stats(callStats, session, SWITCH_MEDIA_TYPE_AUDIO);
 	switch_ivr_set_json_call_stats(callStats, session, SWITCH_MEDIA_TYPE_VIDEO);
 
+	/* The stamps have been sitting on the heap since hangup; check them here,
+	   where they are read, not only where they were written. */
+	switch_channel_repair_timestamps(channel);
+
 	variables = cJSON_CreateObject();
 	cJSON_AddItemToObject(cdr, "variables", variables);
 	switch_ivr_set_json_chan_vars(variables, channel, urlencode);
