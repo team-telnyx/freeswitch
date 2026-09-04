@@ -127,6 +127,60 @@ FST_TEST_BEGIN(is_file_path)
 }
 FST_TEST_END()
 
+FST_TEST_BEGIN(redact_file_target)
+{
+    char buf[512];
+    const char *out;
+
+    /* mod_av appends "pubUser=... pubPasswd=..." to the RTMP target, and record_session
+     * carries its own {} parameters, so neither may reach a log verbatim. */
+    out = switch_redact_file_target("{auth_username=alice,auth_password=hunter2}"
+                                    "rtmp://recorder.example.com/live/streamkey", buf, sizeof(buf));
+    fst_check_string_equals(out, "rtmp://recorder.example.com/...");
+    fst_check(strstr(out, "hunter2") == NULL);
+    fst_check(strstr(out, "streamkey") == NULL);
+
+    out = switch_redact_file_target("rtmp://recorder.example.com/live/streamkey "
+                                    "pubUser=alice pubPasswd=hunter2 flashver=FMLE/3.0", buf, sizeof(buf));
+    fst_check_string_equals(out, "rtmp://recorder.example.com/...");
+    fst_check(strstr(out, "hunter2") == NULL);
+
+    /* Several parameter groups, and the [] form the record path also accepts. */
+    out = switch_redact_file_target("{a=1}{auth_password=hunter2} [b=2]rtmp://host.example.com/app", buf, sizeof(buf));
+    fst_check_string_equals(out, "rtmp://host.example.com/...");
+
+    /* Userinfo in the authority goes too. */
+    out = switch_redact_file_target("rtmps://bob:s3cret@recorder.example.com:1935/live/key", buf, sizeof(buf));
+    fst_check_string_equals(out, "rtmps://recorder.example.com:1935/...");
+    fst_check(strstr(out, "s3cret") == NULL);
+
+    /* So does a query string. */
+    out = switch_redact_file_target("rtmp://recorder.example.com?token=abc123", buf, sizeof(buf));
+    fst_check_string_equals(out, "rtmp://recorder.example.com/...");
+
+    /* A host-only target keeps its shape rather than gaining a phantom path. */
+    out = switch_redact_file_target("rtmp://recorder.example.com", buf, sizeof(buf));
+    fst_check_string_equals(out, "rtmp://recorder.example.com");
+
+    /* A local path holds no secret, and the log is more useful naming it. */
+    out = switch_redact_file_target("/var/lib/freeswitch/recordings/call.wav", buf, sizeof(buf));
+    fst_check_string_equals(out, "/var/lib/freeswitch/recordings/call.wav");
+
+    out = switch_redact_file_target("{av_record_audio_only=true}/tmp/call.mp4", buf, sizeof(buf));
+    fst_check_string_equals(out, "/tmp/call.mp4");
+
+    /* Nothing usable to render. */
+    out = switch_redact_file_target(NULL, buf, sizeof(buf));
+    fst_check_string_equals(out, "(unknown)");
+    out = switch_redact_file_target("", buf, sizeof(buf));
+    fst_check_string_equals(out, "(unknown)");
+
+    /* An unterminated parameter group would leave the secret in the remainder. */
+    out = switch_redact_file_target("{auth_password=hunter2 rtmp://host.example.com/app", buf, sizeof(buf));
+    fst_check_string_equals(out, "(unknown)");
+}
+FST_TEST_END()
+
 FST_SUITE_END()
 
 FST_MINCORE_END()
