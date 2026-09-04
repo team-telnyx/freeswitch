@@ -71,6 +71,7 @@ typedef struct {
 	switch_vad_t *vad;
 	int partial;
 	int get_results_delay_ms;
+	int in_get_results;
 	int closed;
 } test_asr_t;
 
@@ -251,6 +252,15 @@ static switch_status_t test_asr_check_results(switch_asr_handle_t *ah, switch_as
 
 	test_asr_report_use_after_close(context, "asr_check_results");
 
+	/* Reporting a result here makes the media bug callback take the core speech
+	 * thread's mutex, which that thread holds for as long as it is inside
+	 * asr_get_results below. The read loop would then block with bug_rwlock
+	 * held, starving switch_core_media_bug_remove() of its write lock for the
+	 * whole delay -- which is exactly the close a test wants to run in it. */
+	if (context->in_get_results) {
+		return SWITCH_STATUS_BREAK;
+	}
+
 	if (switch_test_flag(context, ASRFLAG_RETURNED_RESULT) || switch_test_flag(ah, SWITCH_ASR_FLAG_CLOSED)) {
 		return SWITCH_STATUS_BREAK;
 	}
@@ -284,10 +294,15 @@ static switch_status_t test_asr_get_results(switch_asr_handle_t *ah, char **resu
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
 
 	/* Only the core speech thread calls this, never the media bug callback, so
-	 * the delay parks that one thread inside the module and nothing else. */
+	 * the delay parks that one thread inside the module and nothing else. The
+	 * variable lets a test confirm the thread really is parked in here before it
+	 * closes the handle, rather than assuming it from timing alone. */
 	if (context->get_results_delay_ms > 0) {
+		context->in_get_results = 1;
 		switch_core_set_variable("mod_test_asr_in_get_results", "true");
 		switch_yield(context->get_results_delay_ms * 1000);
+		switch_core_set_variable("mod_test_asr_in_get_results", "false");
+		context->in_get_results = 0;
 	}
 
 	test_asr_report_use_after_close(context, "asr_get_results");
