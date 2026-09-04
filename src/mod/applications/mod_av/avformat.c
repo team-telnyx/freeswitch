@@ -200,6 +200,8 @@ struct av_file_context {
 	 * and read by interrupt_cb on whichever thread is blocked inside ffmpeg -- so it
 	 * is atomic rather than a plain int, which the reader may cache. */
 	switch_atomic_t abort_io;
+	/* Redacted form of the target, safe to log; see switch_redact_file_target(). */
+	const char *log_target;
 	/* Connect postponed to the writer thread; deferred_file is what to connect to. */
 	int deferred_open;
 	int open_failed;
@@ -572,7 +574,7 @@ static void io_deadline_report(av_file_context_t *context, const char *what)
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
 					  "Timed out after %lldms during %s on '%s'; the recording will be stopped\n",
 					  (long long) (context->io_armed_timeout_us / 1000), what,
-					  context->handle && context->handle->file_path ? context->handle->file_path : "(unknown)");
+					  context->log_target ? context->log_target : "(unknown)");
 }
 
 /* Establish the output connection, arming the connect deadline around it.  Called from
@@ -624,7 +626,7 @@ static switch_status_t open_output_avio(av_file_context_t *context, const char *
 		while ((unused = av_dict_get(dict, "", unused, AV_DICT_IGNORE_SUFFIX))) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
 							  "Option '%s' not honoured by this ffmpeg build for '%s'; that timeout is NOT in force\n",
-							  unused->key, file);
+							  unused->key, context->log_target);
 		}
 	}
 
@@ -636,10 +638,10 @@ static switch_status_t open_output_avio(av_file_context_t *context, const char *
 		if (context->io_timed_out) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
 							  "Could not open '%s': timed out after %lldms (connect timeout %lldms)\n",
-							  file, (long long) ((switch_mono_micro_time_now() - context->connect_start_time) / 1000),
+							  context->log_target, (long long) ((switch_mono_micro_time_now() - context->connect_start_time) / 1000),
 							  (long long) (context->io_connect_timeout_us / 1000));
 		} else {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Could not open '%s': %s\n", file, get_error_text(ret, ebuf, sizeof(ebuf)));
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Could not open '%s': %s\n", context->log_target, get_error_text(ret, ebuf, sizeof(ebuf)));
 		}
 
 		return SWITCH_STATUS_GENERR;
@@ -2500,6 +2502,7 @@ static switch_status_t av_file_open(switch_file_handle_t *handle, const char *pa
 #endif
 	const char *format = NULL;
 	char file[1024];
+	char safe_file[512];
 	int disable_write_buffer = 0;
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
 
@@ -2553,6 +2556,7 @@ static switch_status_t av_file_open(switch_file_handle_t *handle, const char *pa
 	context->handle = handle;
 	context->audio_timer = 1;
 	context->colorspace = avformat_globals.colorspace;
+	context->log_target = switch_core_strdup(handle->memory_pool, switch_redact_file_target(file, safe_file, sizeof(safe_file)));
 	
 	if (handle->params) {
 		if ((tmp = switch_event_get_header(handle->params, "av_video_offset"))) {
@@ -2705,7 +2709,7 @@ static switch_status_t av_file_open(switch_file_handle_t *handle, const char *pa
 				if (context->io_is_network && net.max_rw_timeout_us) {
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
 									  "rw_timeout '%s' is not a plain integer; passing it through unclamped for '%s'\n",
-									  context->rw_timeout, file);
+									  context->rw_timeout, context->log_target);
 				}
 			} else if (caller_us <= 0) {
 				/* Explicit 0/negative means "no timeout"; treat it as unset so a
@@ -2714,7 +2718,7 @@ static switch_status_t av_file_open(switch_file_handle_t *handle, const char *pa
 			} else if (context->io_is_network && net.max_rw_timeout_us && caller_us > net.max_rw_timeout_us) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
 								  "Clamping rw_timeout %lldus to configured maximum %lldus for '%s'\n",
-								  (long long) caller_us, (long long) net.max_rw_timeout_us, file);
+								  (long long) caller_us, (long long) net.max_rw_timeout_us, context->log_target);
 				switch_snprintf(context->rw_timeout_buf, sizeof(context->rw_timeout_buf), "%lld",
 								(long long) net.max_rw_timeout_us);
 				rw_timeout_opt_resolved = context->rw_timeout_buf;
@@ -2748,7 +2752,7 @@ static switch_status_t av_file_open(switch_file_handle_t *handle, const char *pa
 			context->deferred_file = switch_core_strdup(handle->memory_pool, file);
 
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
-							  "Deferring connect for '%s' to the writer thread\n", file);
+							  "Deferring connect for '%s' to the writer thread\n", context->log_target);
 		} else if (open_output_avio(context, file) != SWITCH_STATUS_SUCCESS) {
 			switch_goto_status(SWITCH_STATUS_GENERR, end);
 		}
@@ -3288,7 +3292,7 @@ static switch_status_t av_file_command(switch_file_handle_t *handle, switch_file
 		/* DEBUG, not WARNING: whoever asked for the abort is expected to say why, and
 		 * during a recorder stall this would otherwise double every such report. */
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Aborting I/O on %s\n",
-						  handle->file_path ? handle->file_path : "(unknown)");
+						  context->log_target ? context->log_target : "(unknown)");
 		break;
 	case SCFC_RESUME_WRITE:
 		if (context->eh.record_timer_paused) {
