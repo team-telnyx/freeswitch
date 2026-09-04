@@ -43,17 +43,17 @@
     #define ISNAN(x) (!!(_isnan(x)))
     #define ISINF(x) (isinf(x))
 #else
-    int __isnan(double);
-    int __isinf(double);
-    #define ISNAN(x) (__isnan(x))
-    #define ISINF(x) (__isinf(x))
+    #define ISNAN(x) (isnan(x))
+    #define ISINF(x) (isinf(x))
 #endif
 
 #include "avmd_buffer.h"
+#include "avmd_candidate.h"
 #include "avmd_desa2_tweaked.h"
 #include "avmd_sma_buf.h"
 #include "avmd_options.h"
 #include "avmd_fir.h"
+#include "avmd_spectral.h"
 
 #include "avmd_fast_acosf.h"
 
@@ -99,10 +99,23 @@
  * identified uniquely.
  */
 #define AVMD_MAX_FREQUENCY (2000.0)
+#define AVMD_CONFIG_MAX_FREQUENCY (12000.0)
 /*! Maximum frequency as digital normalized frequency */
 #define AVMD_MAX_FREQUENCY_R(r) ((2.0 * M_PI * AVMD_MAX_FREQUENCY) / (r))
 #define AVMD_VARIANCE_RSD_THRESHOLD (0.000025)
 #define AVMD_AMPLITUDE_RSD_THRESHOLD (0.0148)
+#define AVMD_SPECTRAL_WINDOW_MS_DEFAULT (100u)
+#define AVMD_SPECTRAL_WINDOW_MS_MIN (20u)
+#define AVMD_SPECTRAL_WINDOW_MS_MAX (250u)
+#define AVMD_SPECTRAL_MIN_PURITY_DEFAULT (0.80)
+#define AVMD_SPECTRAL_SEARCH_RADIUS_HZ (80.0)
+#define AVMD_SPECTRAL_SEARCH_STEP_HZ (1.0)
+#define AVMD_SPECTRAL_MAX_CONFIRMATION_ATTEMPTS (3u)
+#define AVMD_SPECTRAL_REARM_COOLDOWN_MS (1000u)
+#define AVMD_SPECTRAL_MAX_FRAME_HISTORY_MS (120u)
+#define AVMD_MIN_TONE_DURATION_MS_DEFAULT ((uint16_t)AVMD_BEEP_TIME)
+#define AVMD_MIN_TONE_DURATION_MS_MAX (5000u)
+#define AVMD_MS_TO_SAMPLES(r, ms) ((((size_t)(r)) * ((size_t)(ms))) / 1000u)
 
 /*! Syntax of the API call. */
 #define AVMD_SYNTAX "<uuid> < start | stop | set [inbound|outbound|default] | get [sessions|detectors] | load [inbound|outbound] | reload | show >"
@@ -112,7 +125,7 @@
 #define AVMD_PARAMS_API_MAX 2u
 #define AVMD_PARAMS_APP_MAX 30u
 #define AVMD_PARAMS_APP_START_MIN 0u
-#define AVMD_PARAMS_APP_START_MAX 20u
+#define AVMD_PARAMS_APP_START_MAX 30u
 
 #define AVMD_READ_REPLACE	0
 #define AVMD_WRITE_REPLACE	1
@@ -176,6 +189,13 @@ struct avmd_settings {
     uint8_t     detectors_n;
     uint8_t     detectors_lagged_n;
     uint16_t    detectors_idle_time;
+    double      min_frequency;
+    double      max_frequency;
+    uint8_t     spectral_confirmation;
+    uint8_t     spectral_reject_fax_cng;
+    uint16_t    spectral_window_ms;
+    double      spectral_min_purity;
+    uint16_t    min_tone_duration_ms;
 };
 
 /*! Status of the beep detection */
@@ -219,6 +239,8 @@ struct avmd_detector {
     struct avmd_buffer          buffer;
     avmd_session_t              *s;
     size_t                      samples;
+    uint16_t                    samples_to_skip;
+    avmd_candidate_segment_t    candidate_segment;
     uint8_t                     idx;
     uint8_t                     lagged, lag;
 };
@@ -236,11 +258,15 @@ struct avmd_session {
     avmd_state_t    state;
     switch_time_t   start_time, stop_time, detection_start_time, detection_stop_time;
     size_t          frame_n;
+    size_t          total_samples;
     uint8_t         frame_n_to_skip;
 
     switch_mutex_t          *mutex_detectors_done;
     switch_thread_cond_t    *cond_detectors_done;
     struct avmd_detector    *detectors;
+    double          *spectral_samples;
+    size_t          spectral_samples_capacity;
+    avmd_candidate_state_t candidate;
     uint8_t closed;
 };
 
@@ -265,7 +291,7 @@ static void avmd_fire_event(enum avmd_event type, switch_core_session_t *fs_s, d
 
 static void avmd_fire_failed_event(switch_core_session_t *fs_s);
 
-static enum avmd_detection_mode avmd_process_sample(avmd_session_t *s, circ_buffer_t *b, size_t sample_n, size_t pos, struct avmd_detector *d);
+static enum avmd_detection_mode avmd_process_sample(avmd_session_t *s, circ_buffer_t *b, size_t sample_n, size_t pos, struct avmd_detector *d, double *observed_frequency, uint8_t *observed_frequency_valid);
 
 /* API [set default], reset to factory settings */
 static void avmd_set_xml_default_configuration(switch_mutex_t *mutex);
@@ -398,6 +424,7 @@ static switch_status_t init_avmd_session_data(avmd_session_t *avmd_session, swit
 {
     uint8_t         idx, resolution, offset;
     size_t          buf_sz;
+    size_t          raw_history_samples;
     struct avmd_detector *d;
     switch_status_t status = SWITCH_STATUS_SUCCESS;
 
@@ -408,10 +435,28 @@ static switch_status_t init_avmd_session_data(avmd_session_t *avmd_session, swit
 
     /*! This is a worst case sample rate estimate */
     avmd_session->rate = 48000;
-    INIT_CIRC_BUFFER(&avmd_session->b, (size_t) AVMD_BEEP_LEN(avmd_session->rate), (size_t) AVMD_FRAME_LEN(avmd_session->rate), fs_session);
+    raw_history_samples = (size_t)AVMD_BEEP_LEN(avmd_session->rate);
+    if (avmd_session->settings.spectral_confirmation == 1) {
+        raw_history_samples = AVMD_MS_TO_SAMPLES(avmd_session->rate, avmd_session->settings.spectral_window_ms);
+        if (raw_history_samples < AVMD_MS_TO_SAMPLES(avmd_session->rate,
+                    AVMD_SPECTRAL_MAX_FRAME_HISTORY_MS)) {
+            raw_history_samples = AVMD_MS_TO_SAMPLES(avmd_session->rate,
+                    AVMD_SPECTRAL_MAX_FRAME_HISTORY_MS);
+        }
+    }
+    INIT_CIRC_BUFFER(&avmd_session->b, raw_history_samples, (size_t) AVMD_FRAME_LEN(avmd_session->rate), fs_session);
     if (avmd_session->b.buf == NULL) {
         status =  SWITCH_STATUS_MEMERR;
         goto end;
+    }
+    if (avmd_session->settings.spectral_confirmation == 1) {
+        avmd_session->spectral_samples_capacity = raw_history_samples;
+        avmd_session->spectral_samples = (double *)switch_core_session_alloc(fs_session,
+                avmd_session->spectral_samples_capacity * sizeof(*avmd_session->spectral_samples));
+        if (avmd_session->spectral_samples == NULL) {
+            status = SWITCH_STATUS_MEMERR;
+            goto end;
+        }
     }
     avmd_session->session_uuid = switch_core_session_strdup(fs_session, switch_core_session_get_uuid(fs_session));
     avmd_session->session = fs_session;
@@ -421,9 +466,11 @@ static switch_status_t init_avmd_session_data(avmd_session_t *avmd_session, swit
     avmd_session->state.beep_state = BEEP_NOTDETECTED;
     switch_mutex_init(&avmd_session->mutex, SWITCH_MUTEX_DEFAULT, switch_core_session_get_pool(fs_session));
     avmd_session->frame_n = 0;
+    avmd_session->total_samples = 0;
     avmd_session->detection_start_time = 0;
     avmd_session->detection_stop_time = 0;
     avmd_session->frame_n_to_skip = 0;
+    avmd_candidate_reset(&avmd_session->candidate);
 
     buf_sz = AVMD_BEEP_LEN((uint32_t)avmd_session->rate) / (uint32_t) AVMD_SINE_LEN(avmd_session->rate);
     if (buf_sz < 1) {
@@ -451,6 +498,8 @@ static switch_status_t init_avmd_session_data(avmd_session_t *avmd_session, swit
             d->flag_processing_done = 1;
             d->flag_should_exit = 1;
             d->idx = idx;
+            d->samples_to_skip = 0;
+            avmd_candidate_segment_reset(&d->candidate_segment);
             d->thread = NULL;
             switch_mutex_init(&d->mutex, SWITCH_MUTEX_DEFAULT, switch_core_session_get_pool(fs_session));
             switch_thread_cond_create(&d->cond_start_processing, switch_core_session_get_pool(fs_session));
@@ -471,6 +520,8 @@ static switch_status_t init_avmd_session_data(avmd_session_t *avmd_session, swit
             d->flag_processing_done = 1;
             d->flag_should_exit = 1;
             d->idx = avmd_session->settings.detectors_n + idx;
+            d->samples_to_skip = 0;
+            avmd_candidate_segment_reset(&d->candidate_segment);
             d->thread = NULL;
             switch_mutex_init(&d->mutex, SWITCH_MUTEX_DEFAULT, switch_core_session_get_pool(fs_session));
             switch_thread_cond_create(&d->cond_start_processing, switch_core_session_get_pool(fs_session));
@@ -579,6 +630,20 @@ static switch_bool_t avmd_media_bug_init(avmd_session_t *avmd_session) {
                 avmd_session->rate = write_codec->implementation->samples_per_second;
             }
         }
+    }
+    if (avmd_session->settings.max_frequency > 0.25 * (double)avmd_session->rate) {
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                "AVMD max_frequency [%.2f Hz] exceeds the unambiguous DESA limit [%.2f Hz] for rate [%u]\n",
+                avmd_session->settings.max_frequency, 0.25 * (double)avmd_session->rate, avmd_session->rate);
+        return SWITCH_FALSE;
+    }
+    if (avmd_session->settings.spectral_confirmation == 1 &&
+            AVMD_MS_TO_SAMPLES(avmd_session->rate, avmd_session->settings.spectral_window_ms) >
+            avmd_session->spectral_samples_capacity) {
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                "AVMD spectral window [%u ms] exceeds the allocated sample capacity at rate [%u]\n",
+                avmd_session->settings.spectral_window_ms, avmd_session->rate);
+        return SWITCH_FALSE;
     }
     avmd_session->start_time = switch_micro_time_now();
     /* avmd_session->vmd_codec.channels =  read_codec->implementation->number_of_channels; */
@@ -847,6 +912,31 @@ int avmd_parse_u16_user_input(const char *input, uint16_t *output, uint16_t min,
     return 0;
 }
 
+static int avmd_parse_double_user_input(const char *input, double *output, double min, double max) {
+    char    *pCh;
+    double  helper;
+
+    if (input == NULL || output == NULL || min > max) {
+        return -1;
+    }
+    helper = strtod(input, &pCh);
+    if (helper < min || helper > max || ISNAN(helper) || ISINF(helper) ||
+            (pCh == input) || (*pCh != '\0')) {
+        return -1;
+    }
+    *output = helper;
+    return 0;
+}
+
+static int avmd_validate_frequency_range(const struct avmd_settings *settings) {
+    if (settings == NULL || settings->min_frequency <= 0.0 ||
+            settings->max_frequency > AVMD_CONFIG_MAX_FREQUENCY ||
+            settings->min_frequency >= settings->max_frequency) {
+        return -1;
+    }
+    return 0;
+}
+
 static void avmd_set_xml_default_configuration(switch_mutex_t *mutex) {
     if (mutex != NULL) {
         switch_mutex_lock(mutex);
@@ -867,6 +957,13 @@ static void avmd_set_xml_default_configuration(switch_mutex_t *mutex) {
     avmd_globals.settings.detectors_n = 36;
     avmd_globals.settings.detectors_lagged_n = 1;
     avmd_globals.settings.detectors_idle_time = 60;
+    avmd_globals.settings.min_frequency = AVMD_MIN_FREQUENCY;
+    avmd_globals.settings.max_frequency = AVMD_MAX_FREQUENCY;
+    avmd_globals.settings.spectral_confirmation = 0;
+    avmd_globals.settings.spectral_reject_fax_cng = 0;
+    avmd_globals.settings.spectral_window_ms = AVMD_SPECTRAL_WINDOW_MS_DEFAULT;
+    avmd_globals.settings.spectral_min_purity = AVMD_SPECTRAL_MIN_PURITY_DEFAULT;
+    avmd_globals.settings.min_tone_duration_ms = AVMD_MIN_TONE_DURATION_MS_DEFAULT;
 
     if (mutex != NULL) {
         switch_mutex_unlock(avmd_globals.mutex);
@@ -908,7 +1005,9 @@ static switch_status_t avmd_load_xml_configuration(switch_mutex_t *mutex) {
     uint8_t bad_debug = 1, bad_report = 1, bad_fast = 1, bad_req_cont = 1, bad_sample_n_cont = 1,
             bad_sample_n_to_skip = 1, bad_req_cont_amp = 1, bad_sample_n_cont_amp = 1, bad_simpl = 1,
             bad_inbound = 1, bad_outbound = 1, bad_mode = 1, bad_detectors = 1, bad_lagged = 1, bad = 0,
-            bad_idle_time = 1;
+            bad_idle_time = 1, bad_min_frequency = 1, bad_max_frequency = 1,
+            bad_spectral_confirmation = 1, bad_spectral_reject_fax_cng = 1, bad_spectral_window = 1,
+            bad_spectral_purity = 1, bad_min_tone_duration = 1;
 
     if (mutex != NULL) {
         switch_mutex_lock(mutex);
@@ -958,6 +1057,8 @@ static switch_status_t avmd_load_xml_configuration(switch_mutex_t *mutex) {
                 } else if (!strcmp(name, "simplified_estimation")) {
                     avmd_globals.settings.simplified_estimation = switch_true(value) ? 1 : 0;
                     bad_simpl = 0;
+                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
+                            "AVMD config parameter 'simplified_estimation' is deprecated and has no effect\n");
                 } else if (!strcmp(name, "inbound_channel")) {
                     avmd_globals.settings.inbound_channnel = switch_true(value) ? 1 : 0;
                     bad_inbound = 0;
@@ -979,6 +1080,34 @@ static switch_status_t avmd_load_xml_configuration(switch_mutex_t *mutex) {
                 } else if (!strcmp(name, "detectors_idle_time")) {
                     if(!avmd_parse_u16_user_input(value, &avmd_globals.settings.detectors_idle_time, 0, UINT16_MAX)) {
                         bad_idle_time = 0;
+                    }
+                } else if (!strcmp(name, "min_frequency")) {
+                    if (!avmd_parse_double_user_input(value, &avmd_globals.settings.min_frequency, 1.0, AVMD_CONFIG_MAX_FREQUENCY)) {
+                        bad_min_frequency = 0;
+                    }
+                } else if (!strcmp(name, "max_frequency")) {
+                    if (!avmd_parse_double_user_input(value, &avmd_globals.settings.max_frequency, 1.0, AVMD_CONFIG_MAX_FREQUENCY)) {
+                        bad_max_frequency = 0;
+                    }
+                } else if (!strcmp(name, "spectral_confirmation")) {
+                    avmd_globals.settings.spectral_confirmation = switch_true(value) ? 1 : 0;
+                    bad_spectral_confirmation = 0;
+                } else if (!strcmp(name, "spectral_reject_fax_cng")) {
+                    avmd_globals.settings.spectral_reject_fax_cng = switch_true(value) ? 1 : 0;
+                    bad_spectral_reject_fax_cng = 0;
+                } else if (!strcmp(name, "spectral_window_ms")) {
+                    if (!avmd_parse_u16_user_input(value, &avmd_globals.settings.spectral_window_ms,
+                                AVMD_SPECTRAL_WINDOW_MS_MIN, AVMD_SPECTRAL_WINDOW_MS_MAX)) {
+                        bad_spectral_window = 0;
+                    }
+                } else if (!strcmp(name, "spectral_min_purity")) {
+                    if (!avmd_parse_double_user_input(value, &avmd_globals.settings.spectral_min_purity, 0.01, 1.0)) {
+                        bad_spectral_purity = 0;
+                    }
+                } else if (!strcmp(name, "min_tone_duration_ms")) {
+                    if (!avmd_parse_u16_user_input(value, &avmd_globals.settings.min_tone_duration_ms,
+                                AVMD_BEEP_TIME, AVMD_MIN_TONE_DURATION_MS_MAX)) {
+                        bad_min_tone_duration = 0;
                     }
                 }
             } // for
@@ -1077,6 +1206,56 @@ static switch_status_t avmd_load_xml_configuration(switch_mutex_t *mutex) {
         avmd_globals.settings.detectors_idle_time = 60;
     }
 
+    if (bad_min_frequency) {
+        bad = 1;
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AVMD config parameter 'min_frequency' missing or invalid - using default\n");
+        avmd_globals.settings.min_frequency = AVMD_MIN_FREQUENCY;
+    }
+
+    if (bad_max_frequency) {
+        bad = 1;
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AVMD config parameter 'max_frequency' missing or invalid - using default\n");
+        avmd_globals.settings.max_frequency = AVMD_MAX_FREQUENCY;
+    }
+
+    if (avmd_validate_frequency_range(&avmd_globals.settings) != 0) {
+        bad = 1;
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                "AVMD min_frequency/max_frequency range is invalid - using defaults\n");
+        avmd_globals.settings.min_frequency = AVMD_MIN_FREQUENCY;
+        avmd_globals.settings.max_frequency = AVMD_MAX_FREQUENCY;
+    }
+
+    if (bad_spectral_confirmation) {
+        bad = 1;
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AVMD config parameter 'spectral_confirmation' missing or invalid - using default\n");
+        avmd_globals.settings.spectral_confirmation = 0;
+    }
+
+    if (bad_spectral_reject_fax_cng) {
+        bad = 1;
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AVMD config parameter 'spectral_reject_fax_cng' missing or invalid - using default\n");
+        avmd_globals.settings.spectral_reject_fax_cng = 0;
+    }
+
+    if (bad_spectral_window) {
+        bad = 1;
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AVMD config parameter 'spectral_window_ms' missing or invalid - using default\n");
+        avmd_globals.settings.spectral_window_ms = AVMD_SPECTRAL_WINDOW_MS_DEFAULT;
+    }
+
+    if (bad_spectral_purity) {
+        bad = 1;
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AVMD config parameter 'spectral_min_purity' missing or invalid - using default\n");
+        avmd_globals.settings.spectral_min_purity = AVMD_SPECTRAL_MIN_PURITY_DEFAULT;
+    }
+
+    if (bad_min_tone_duration) {
+        bad = 1;
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AVMD config parameter 'min_tone_duration_ms' missing or invalid - using default\n");
+        avmd_globals.settings.min_tone_duration_ms = AVMD_MIN_TONE_DURATION_MS_DEFAULT;
+    }
+
     /**
      * Hint.
      */
@@ -1155,6 +1334,13 @@ static void avmd_show(switch_stream_handle_t *stream, switch_mutex_t *mutex) {
     stream->write_function(stream, "sessions                       \t%"PRId64"\n", avmd_globals.session_n);
     stream->write_function(stream, "detectors n                    \t%u\n", avmd_globals.settings.detectors_n);
     stream->write_function(stream, "detectors lagged n             \t%u\n", avmd_globals.settings.detectors_lagged_n);
+    stream->write_function(stream, "min frequency (Hz)             \t%.2f\n", avmd_globals.settings.min_frequency);
+    stream->write_function(stream, "max frequency (Hz)             \t%.2f\n", avmd_globals.settings.max_frequency);
+    stream->write_function(stream, "spectral confirmation          \t%u\n", avmd_globals.settings.spectral_confirmation);
+    stream->write_function(stream, "spectral reject fax CNG        \t%u\n", avmd_globals.settings.spectral_reject_fax_cng);
+    stream->write_function(stream, "spectral window (ms)           \t%u\n", avmd_globals.settings.spectral_window_ms);
+    stream->write_function(stream, "spectral minimum purity        \t%.3f\n", avmd_globals.settings.spectral_min_purity);
+    stream->write_function(stream, "minimum tone duration (ms)     \t%u\n", avmd_globals.settings.min_tone_duration_ms);
     stream->write_function(stream, "\n\n");
 
     if (mutex != NULL) {
@@ -1262,10 +1448,13 @@ void avmd_config_dump(avmd_session_t *s) {
     settings = &s->settings;
     switch_log_printf(SWITCH_CHANNEL_UUID_LOG(s->session_uuid), SWITCH_LOG_INFO, "Avmd dynamic configuration: debug [%u], report_status [%u], fast_math [%u],"
             " require_continuous_streak [%u], sample_n_continuous_streak [%u], sample_n_to_skip [%u], require_continuous_streak_amp [%u], sample_n_continuous_streak_amp [%u],"
-           " simplified_estimation [%u], inbound_channel [%u], outbound_channel [%u], detection_mode [%u], detectors_n [%u], detectors_lagged_n [%u]\n",
+           " simplified_estimation [%u], inbound_channel [%u], outbound_channel [%u], detection_mode [%u], detectors_n [%u], detectors_lagged_n [%u],"
+           " min_frequency [%.2f], max_frequency [%.2f], spectral_confirmation [%u], spectral_reject_fax_cng [%u], spectral_window_ms [%u], spectral_min_purity [%.3f], min_tone_duration_ms [%u]\n",
             settings->debug, settings->report_status, settings->fast_math, settings->require_continuous_streak, settings->sample_n_continuous_streak,
             settings->sample_n_to_skip, settings->require_continuous_streak_amp, settings->sample_n_continuous_streak_amp,
-            settings->simplified_estimation, settings->inbound_channnel, settings->outbound_channnel, settings->mode, settings->detectors_n, settings->detectors_lagged_n);
+            settings->simplified_estimation, settings->inbound_channnel, settings->outbound_channnel, settings->mode, settings->detectors_n, settings->detectors_lagged_n,
+            settings->min_frequency, settings->max_frequency, settings->spectral_confirmation, settings->spectral_reject_fax_cng, settings->spectral_window_ms,
+            settings->spectral_min_purity, settings->min_tone_duration_ms);
     return;
 }
 
@@ -1340,6 +1529,32 @@ static switch_status_t avmd_parse_cmd_data_one_entry(char *candidate, struct avm
         }
     } else if (!strcmp(key, "detectors_idle_time")) {
         if(avmd_parse_u16_user_input(val, &settings->detectors_idle_time, 0, UINT16_MAX) == -1) {
+            return SWITCH_STATUS_FALSE;
+        }
+    } else if (!strcmp(key, "min_frequency")) {
+        if (avmd_parse_double_user_input(val, &settings->min_frequency, 1.0, AVMD_CONFIG_MAX_FREQUENCY) == -1) {
+            return SWITCH_STATUS_FALSE;
+        }
+    } else if (!strcmp(key, "max_frequency")) {
+        if (avmd_parse_double_user_input(val, &settings->max_frequency, 1.0, AVMD_CONFIG_MAX_FREQUENCY) == -1) {
+            return SWITCH_STATUS_FALSE;
+        }
+    } else if (!strcmp(key, "spectral_confirmation")) {
+        settings->spectral_confirmation = (uint8_t) switch_true(val);
+    } else if (!strcmp(key, "spectral_reject_fax_cng")) {
+        settings->spectral_reject_fax_cng = (uint8_t) switch_true(val);
+    } else if (!strcmp(key, "spectral_window_ms")) {
+        if (avmd_parse_u16_user_input(val, &settings->spectral_window_ms,
+                    AVMD_SPECTRAL_WINDOW_MS_MIN, AVMD_SPECTRAL_WINDOW_MS_MAX) == -1) {
+            return SWITCH_STATUS_FALSE;
+        }
+    } else if (!strcmp(key, "spectral_min_purity")) {
+        if (avmd_parse_double_user_input(val, &settings->spectral_min_purity, 0.01, 1.0) == -1) {
+            return SWITCH_STATUS_FALSE;
+        }
+    } else if (!strcmp(key, "min_tone_duration_ms")) {
+        if (avmd_parse_u16_user_input(val, &settings->min_tone_duration_ms,
+                    AVMD_BEEP_TIME, AVMD_MIN_TONE_DURATION_MS_MAX) == -1) {
             return SWITCH_STATUS_FALSE;
         }
     } else {
@@ -1436,6 +1651,12 @@ static switch_status_t avmd_parse_cmd_data(avmd_session_t *s, switch_core_sessio
     }
 
 end_copy:
+    if (avmd_validate_frequency_range(&settings) != 0) {
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                "Invalid AVMD frequency range: min_frequency [%.2f], max_frequency [%.2f]\n",
+                settings.min_frequency, settings.max_frequency);
+        return SWITCH_STATUS_FALSE;
+    }
     memcpy(&s->settings, &settings, sizeof (struct avmd_settings)); /* commit the change */
     return SWITCH_STATUS_SUCCESS;
 fail:
@@ -1495,6 +1716,10 @@ SWITCH_STANDARD_APP(avmd_start_app) {
     }
     
     report = avmd_session->settings.report_status;
+    if (!zstr(data) && strstr(data, "simplified_estimation") != NULL) {
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                "AVMD option 'simplified_estimation' is deprecated and has no effect\n");
+    }
 
     status = init_avmd_session_data(avmd_session, session, avmd_globals.mutex);
     if (status != SWITCH_STATUS_SUCCESS) {
@@ -2011,7 +2236,7 @@ avmd_decision_freq(const avmd_session_t *s, const struct avmd_buffer *b, double 
     double f, rsd;
     size_t lpos;
     f = AVMD_TO_HZ(s->rate, fabs(b->sma_b_fir.sma));
-    if ((f < AVMD_MIN_FREQUENCY) || (f > AVMD_MAX_FREQUENCY)) {
+    if ((f < s->settings.min_frequency) || (f > s->settings.max_frequency)) {
         return 0;
     }
     lpos = b->sma_b.lpos;
@@ -2113,19 +2338,237 @@ avmd_detection_in_progress(avmd_session_t *s) {
     return 0;
 }
 
-static enum avmd_detection_mode
-avmd_detection_result(avmd_session_t *s) {
-    enum avmd_detection_mode res;
+static struct avmd_detector *avmd_detection_candidate(avmd_session_t *s) {
     uint8_t idx = 0;
+
     while (idx < (s->settings.detectors_n + s->settings.detectors_lagged_n)) {
-        res = s->detectors[idx].result;
-        if (res != AVMD_DETECT_NONE) {
-            avmd_report_detection(s, res, &s->detectors[idx]);
-            return res;
+        if (s->detectors[idx].result != AVMD_DETECT_NONE) {
+            return &s->detectors[idx];
         }
         ++idx;
     }
-    return AVMD_DETECT_NONE;
+    return NULL;
+}
+
+static void avmd_reset_detection_results(avmd_session_t *s) {
+    uint8_t idx = 0;
+
+    while (idx < (s->settings.detectors_n + s->settings.detectors_lagged_n)) {
+        s->detectors[idx].result = AVMD_DETECT_NONE;
+        ++idx;
+    }
+}
+
+static void avmd_reset_candidate(avmd_session_t *s) {
+    avmd_candidate_reset(&s->candidate);
+}
+
+static int avmd_copy_samples_ending_at(avmd_session_t *s,
+        size_t samples_n,
+        size_t end_sample) {
+    size_t start;
+    size_t idx;
+    size_t age;
+
+    if (s->spectral_samples == NULL || samples_n == 0 ||
+            samples_n > s->spectral_samples_capacity ||
+            end_sample > s->total_samples) {
+        return 0;
+    }
+    age = s->total_samples - end_sample;
+    if (age > s->b.backlog || samples_n > s->b.backlog - age) {
+        return 0;
+    }
+
+    start = (s->b.pos - age - samples_n) & s->b.mask;
+    for (idx = 0; idx < samples_n; idx++) {
+        s->spectral_samples[idx] = GET_SAMPLE(&s->b, start + idx);
+    }
+    return 1;
+}
+
+static void avmd_handle_detection_candidate(avmd_session_t *s,
+        struct avmd_detector *d,
+        size_t frame_samples) {
+    enum avmd_detection_mode mode;
+    double frequency;
+    double tolerance;
+    size_t required_samples;
+    size_t retry_samples;
+    size_t spectral_samples_n;
+    size_t qualifying_samples;
+    size_t confirmation_end_sample;
+    size_t confirmation_start_sample;
+    avmd_spectral_result_t spectral_result;
+    int spectral_status;
+    int fax_cng;
+
+    if (d == NULL) {
+        avmd_reset_candidate(s);
+        return;
+    }
+
+    mode = d->result;
+    if (mode == AVMD_DETECT_AMP) {
+        avmd_report_detection(s, mode, d);
+        return;
+    }
+
+    if (s->settings.spectral_confirmation == 0 &&
+            s->settings.min_tone_duration_ms == AVMD_MIN_TONE_DURATION_MS_DEFAULT) {
+        avmd_report_detection(s, mode, d);
+        return;
+    }
+
+    frequency = AVMD_TO_HZ(s->rate, fabs(d->buffer.sma_b_fir.sma));
+    tolerance = 0.05 * frequency;
+    if (tolerance < 20.0) {
+        tolerance = 20.0;
+    }
+
+    if (s->settings.spectral_confirmation == 1) {
+        /* The spectral window, not a frame containing a DESA hit, is the unit
+         * credited toward hardened tone duration. */
+        qualifying_samples = frame_samples;
+    } else {
+        qualifying_samples = avmd_candidate_segment_samples(&d->candidate_segment);
+    }
+    if (qualifying_samples == 0) {
+        avmd_reset_candidate(s);
+        return;
+    }
+
+    avmd_candidate_observe(&s->candidate,
+            frequency,
+            tolerance,
+            qualifying_samples,
+            s->settings.spectral_confirmation == 1 ? 1 : d->candidate_segment.starts_at_frame_start,
+            AVMD_MS_TO_SAMPLES(s->rate, AVMD_SPECTRAL_REARM_COOLDOWN_MS),
+            AVMD_SPECTRAL_MAX_CONFIRMATION_ATTEMPTS);
+
+    if (s->settings.debug) {
+        switch_log_printf(SWITCH_CHANNEL_UUID_LOG(s->session_uuid), SWITCH_LOG_INFO,
+                "AVMD candidate observed: frequency [%.2f Hz], accumulated [%zu samples/%zu ms]\n",
+                s->candidate.frequency, s->candidate.samples,
+                (s->candidate.samples * 1000u) / s->rate);
+    }
+
+    required_samples = AVMD_MS_TO_SAMPLES(s->rate, s->settings.min_tone_duration_ms);
+    spectral_samples_n = 0;
+    if (s->settings.spectral_confirmation == 1) {
+        spectral_samples_n = AVMD_MS_TO_SAMPLES(s->rate, s->settings.spectral_window_ms);
+    }
+
+    if (s->settings.spectral_confirmation == 0) {
+        if (s->candidate.samples < required_samples) {
+            return;
+        }
+        avmd_report_detection(s, mode, d);
+        return;
+    }
+
+    retry_samples = spectral_samples_n / 2u;
+    if (retry_samples == 0) {
+        retry_samples = 1;
+    }
+    if (s->candidate.confirmation_attempts >= AVMD_SPECTRAL_MAX_CONFIRMATION_ATTEMPTS ||
+            s->candidate.samples < spectral_samples_n) {
+        return;
+    }
+
+    for (;;) {
+        if (s->candidate.confirmation_attempts >= AVMD_SPECTRAL_MAX_CONFIRMATION_ATTEMPTS) {
+            return;
+        }
+        confirmation_end_sample = avmd_candidate_confirmation_window_end(
+                &s->candidate, s->total_samples, spectral_samples_n, s->b.backlog);
+        if (confirmation_end_sample == 0 ||
+                !avmd_copy_samples_ending_at(s, spectral_samples_n,
+                    confirmation_end_sample)) {
+            return;
+        }
+        confirmation_start_sample = confirmation_end_sample - spectral_samples_n;
+        if (s->candidate.confirmed_samples != 0 &&
+                confirmation_start_sample > s->candidate.confirmed_end_sample) {
+            s->candidate.confirmed_samples = 0;
+            s->candidate.confirmed_start_sample = 0;
+            s->candidate.confirmed_end_sample = 0;
+        }
+        if (!avmd_spectral_window_is_continuous(s->spectral_samples,
+                    spectral_samples_n, s->rate)) {
+            avmd_candidate_record_rejection(&s->candidate);
+            s->candidate.next_confirmation_sample = confirmation_end_sample + retry_samples;
+            if (s->settings.debug) {
+                switch_log_printf(SWITCH_CHANNEL_UUID_LOG(s->session_uuid), SWITCH_LOG_INFO,
+                        "AVMD spectral confirmation rejected candidate: unconfirmed audio gap in range [%zu,%zu), attempt [%u/%u]\n",
+                        confirmation_start_sample, confirmation_end_sample,
+                        (unsigned int)s->candidate.confirmation_attempts,
+                        (unsigned int)AVMD_SPECTRAL_MAX_CONFIRMATION_ATTEMPTS);
+            }
+            continue;
+        }
+        if (!avmd_spectral_window_has_continuous_candidate(
+                    s->spectral_samples,
+                    spectral_samples_n,
+                    s->rate,
+                    s->candidate.frequency)) {
+            avmd_candidate_record_rejection(&s->candidate);
+            s->candidate.next_confirmation_sample = confirmation_end_sample + retry_samples;
+            if (s->settings.debug) {
+                switch_log_printf(SWITCH_CHANNEL_UUID_LOG(s->session_uuid), SWITCH_LOG_INFO,
+                        "AVMD spectral confirmation rejected candidate: candidate frequency is not continuous in range [%zu,%zu), attempt [%u/%u]\n",
+                        confirmation_start_sample, confirmation_end_sample,
+                        (unsigned int)s->candidate.confirmation_attempts,
+                        (unsigned int)AVMD_SPECTRAL_MAX_CONFIRMATION_ATTEMPTS);
+            }
+            continue;
+        }
+        spectral_status = avmd_spectral_analyze(s->spectral_samples,
+                spectral_samples_n,
+                s->rate,
+                s->candidate.frequency,
+                s->settings.min_frequency,
+                s->settings.max_frequency,
+                AVMD_SPECTRAL_SEARCH_RADIUS_HZ,
+                AVMD_SPECTRAL_SEARCH_STEP_HZ,
+                &spectral_result);
+        fax_cng = spectral_status == 1 &&
+                avmd_spectral_is_fax_cng(spectral_result.dominant_frequency);
+        if (spectral_status == 1 &&
+                avmd_spectral_result_accepted(&spectral_result,
+                    s->settings.spectral_min_purity,
+                    s->settings.spectral_reject_fax_cng)) {
+            avmd_candidate_record_acceptance(&s->candidate,
+                    confirmation_start_sample, confirmation_end_sample);
+            s->candidate.next_confirmation_sample = confirmation_end_sample + spectral_samples_n;
+            if (s->settings.debug) {
+                switch_log_printf(SWITCH_CHANNEL_UUID_LOG(s->session_uuid), SWITCH_LOG_INFO,
+                        "AVMD spectral confirmation accepted candidate: DESA [%.2f Hz], dominant [%.2f Hz], purity [%.3f], secondary [%.2f Hz/%.3f], confirmed [%zu samples/%zu ms]\n",
+                        s->candidate.frequency, spectral_result.dominant_frequency, spectral_result.purity,
+                        spectral_result.secondary_frequency, spectral_result.secondary_purity,
+                        s->candidate.confirmed_samples,
+                        (s->candidate.confirmed_samples * 1000u) / s->rate);
+            }
+            if (s->candidate.confirmed_samples < required_samples) {
+                continue;
+            }
+            avmd_report_detection(s, mode, d);
+            return;
+        }
+
+        avmd_candidate_record_rejection(&s->candidate);
+        s->candidate.next_confirmation_sample = confirmation_end_sample + retry_samples;
+        if (s->settings.debug) {
+            switch_log_printf(SWITCH_CHANNEL_UUID_LOG(s->session_uuid), SWITCH_LOG_INFO,
+                    "AVMD spectral confirmation rejected candidate: DESA [%.2f Hz], dominant [%.2f Hz], purity [%.3f], secondary [%.2f Hz/%.3f], required purity [%.3f], fax_cng [%d], attempt [%u/%u]\n",
+                    s->candidate.frequency, spectral_result.dominant_frequency, spectral_result.purity,
+                    spectral_result.secondary_frequency, spectral_result.secondary_purity,
+                    s->settings.spectral_min_purity,
+                    fax_cng,
+                    (unsigned int)s->candidate.confirmation_attempts,
+                    (unsigned int)AVMD_SPECTRAL_MAX_CONFIRMATION_ATTEMPTS);
+        }
+    }
 }
 
 /*! \brief Process one frame of data with avmd algorithm.
@@ -2136,6 +2579,7 @@ static void avmd_process(avmd_session_t *s, switch_frame_t *frame, uint8_t direc
     circ_buffer_t           *b;
     uint8_t                 idx;
     struct avmd_detector    *d;
+    struct avmd_detector    *candidate;
 
 
     b = &s->b;
@@ -2164,6 +2608,7 @@ static void avmd_process(avmd_session_t *s, switch_frame_t *frame, uint8_t direc
     }
 
     INSERT_INT16_FRAME(b, (int16_t *)(frame->data), frame->samples);    /* Insert frame of 16 bit samples into buffer */
+    s->total_samples += frame->samples;
 
     idx = 0;
     while (idx < (s->settings.detectors_n + s->settings.detectors_lagged_n)) {
@@ -2173,6 +2618,7 @@ static void avmd_process(avmd_session_t *s, switch_frame_t *frame, uint8_t direc
         if (d->result == AVMD_DETECT_NONE) {
             d->flag_processing_done = 0;
             d->samples = (s->frame_n == 0 ? frame->samples - AVMD_P : frame->samples);
+            d->samples_to_skip = s->settings.sample_n_to_skip;
             switch_thread_cond_signal(d->cond_start_processing);
         }
         switch_mutex_unlock(d->mutex);
@@ -2183,7 +2629,9 @@ static void avmd_process(avmd_session_t *s, switch_frame_t *frame, uint8_t direc
     while (avmd_detection_in_progress(s) == 1) {
         switch_thread_cond_wait(s->cond_detectors_done, s->mutex_detectors_done);
     }
-    avmd_detection_result(s);
+    candidate = avmd_detection_candidate(s);
+    avmd_handle_detection_candidate(s, candidate, frame->samples);
+    avmd_reset_detection_results(s);
     switch_mutex_unlock(s->mutex_detectors_done);
 
     ++s->frame_n;
@@ -2201,9 +2649,8 @@ static void avmd_reloadxml_event_handler(switch_event_t *event) {
     avmd_load_xml_configuration(avmd_globals.mutex);
 }
 
-static enum avmd_detection_mode avmd_process_sample(avmd_session_t *s, circ_buffer_t *b, size_t sample_n, size_t pos, struct avmd_detector *d) {
+static enum avmd_detection_mode avmd_process_sample(avmd_session_t *s, circ_buffer_t *b, size_t sample_n, size_t pos, struct avmd_detector *d, double *observed_frequency, uint8_t *observed_frequency_valid) {
     struct avmd_buffer          *buffer = &d->buffer;
-    uint16_t                    sample_to_skip_n = s->settings.sample_n_to_skip;
     enum avmd_detection_mode    mode = s->settings.mode;
     uint8_t     valid_amplitude = 1, valid_omega = 1;
     double      omega = 0.0, amplitude = 0.0;
@@ -2219,8 +2666,15 @@ static enum avmd_detection_mode avmd_process_sample(avmd_session_t *s, circ_buff
     sma_buffer_t    *sma_amp_b = &buffer->sma_amp_b;
     sma_buffer_t    *sqa_amp_b = &buffer->sqa_amp_b;
 
-	if (sample_to_skip_n > 0) {
+	if (observed_frequency != NULL) {
+		*observed_frequency = 0.0;
+	}
+	if (observed_frequency_valid != NULL) {
+		*observed_frequency_valid = 0;
+	}
 
+	if (d->samples_to_skip > 0) {
+		--d->samples_to_skip;
 		return AVMD_DETECT_NONE;
 	}
 
@@ -2285,6 +2739,14 @@ static enum avmd_detection_mode avmd_process_sample(avmd_session_t *s, circ_buff
                 f = 0.5 * acos(omega);
 #endif /* !WIN32 && AVMD_FAST_MATH */
                 f_fir = sma_b->pos > 1 ? (AVMD_MEDIAN_FILTER(sma_b->data[sma_b->pos - 2], sma_b->data[sma_b->pos - 1], f)) : f;
+				if (observed_frequency != NULL) {
+					*observed_frequency = AVMD_TO_HZ(s->rate, fabs(f_fir));
+				}
+				if (observed_frequency_valid != NULL && observed_frequency != NULL &&
+						*observed_frequency >= s->settings.min_frequency &&
+						*observed_frequency <= s->settings.max_frequency) {
+					*observed_frequency_valid = 1;
+				}
 
                 APPEND_SMA_VAL(sma_b, f);                                                                           /* append frequency             */
                 APPEND_SMA_VAL(sqa_b, f * f);
@@ -2330,14 +2792,22 @@ static void* SWITCH_THREAD_FUNC
 avmd_detector_func(switch_thread_t *thread, void *arg) {
     size_t      sample_n = 0, samples = AVMD_P;
     size_t      pos;
-    uint8_t     resolution, offset;
+    uint8_t     resolution, offset, hardened, track_exact_duration, first_evaluated_sample;
     avmd_session_t  *s;
     enum avmd_detection_mode res = AVMD_DETECT_NONE;
+    enum avmd_detection_mode sample_result;
+    avmd_candidate_segment_t candidate_segment;
+    double sample_frequency;
+    uint8_t sample_frequency_valid;
     struct avmd_detector *d;
 
 
     d = (struct avmd_detector*) arg;
     s = d->s;
+    hardened = (uint8_t)(s->settings.spectral_confirmation == 1 ||
+            s->settings.min_tone_duration_ms != AVMD_MIN_TONE_DURATION_MS_DEFAULT);
+    track_exact_duration = (uint8_t)(s->settings.spectral_confirmation == 0 &&
+            s->settings.min_tone_duration_ms != AVMD_MIN_TONE_DURATION_MS_DEFAULT);
     pos = s->pos;
     while (1) {
         switch_mutex_lock(d->mutex);
@@ -2358,6 +2828,9 @@ avmd_detector_func(switch_thread_t *thread, void *arg) {
         resolution = d->buffer.resolution;
         offset = d->buffer.offset;
         samples = d->samples;
+        res = AVMD_DETECT_NONE;
+        avmd_candidate_segment_reset(&candidate_segment);
+        first_evaluated_sample = 1;
 
         if (samples) {
             if (d->lagged == 1) {
@@ -2365,15 +2838,36 @@ avmd_detector_func(switch_thread_t *thread, void *arg) {
                     --d->lag;
                     goto done;
                 }
-                pos += AVMD_P;
             }
+            /* Hardened candidate tracking must inspect each newly inserted frame,
+             * including lagged detectors once their initial lag has elapsed. */
+            pos = avmd_candidate_frame_position(pos,
+                    s->pos,
+                    AVMD_P,
+                    d->lagged,
+                    hardened);
 
             switch_mutex_unlock(d->mutex);
             sample_n = 1;
             while (sample_n <= samples) {
                 if (((sample_n + offset) % resolution) == 0) {
-                    res = avmd_process_sample(d->s, &s->b, sample_n, pos, d);
-                    if (res != AVMD_DETECT_NONE) {
+                    sample_result = avmd_process_sample(d->s, &s->b, sample_n, pos, d,
+                            &sample_frequency, &sample_frequency_valid);
+                    if (track_exact_duration) {
+                        avmd_candidate_segment_observe_frequency(&candidate_segment,
+                                sample_n,
+                                sample_frequency,
+                                sample_frequency_valid,
+                                first_evaluated_sample);
+                        first_evaluated_sample = 0;
+                        if (sample_result != AVMD_DETECT_NONE) {
+                            avmd_candidate_segment_mark_detection(&candidate_segment);
+                            res = sample_result;
+                        } else if (!candidate_segment.detection_seen) {
+                            res = AVMD_DETECT_NONE;
+                        }
+                    } else if (sample_result != AVMD_DETECT_NONE) {
+                        res = sample_result;
                         break;
                     }
                 }
@@ -2385,6 +2879,7 @@ avmd_detector_func(switch_thread_t *thread, void *arg) {
         switch_mutex_lock(d->mutex);
 done:
         d->flag_processing_done = 1;
+        d->candidate_segment = candidate_segment;
         d->result = res;
         switch_mutex_unlock(d->mutex);
 

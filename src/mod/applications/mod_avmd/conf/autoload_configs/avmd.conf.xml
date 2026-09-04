@@ -48,9 +48,8 @@
 			<param name="require_continuous_streak_amp" value="1"/>
 			<param name="sample_n_continuous_streak_amp" value="3"/>
 
-			<!-- define/undefine this to enable/disable simplified estimation
-				 of frequency based on approximation of sin(x) with (x)
-				 in the range x=[0,PI/2] -->
+			<!-- Deprecated compatibility-only option. It is accepted but has no
+				 effect in the current detector implementation. -->
 			<param name="simplified_estimation" value="1"/>
 
 			<!-- define/undefine to enable/disable avmd on internal channel -->
@@ -68,7 +67,28 @@
 			<!-- number of lagged detection threads running per each avmd session -->
 			<param name="detectors_lagged_n" value="1"/>
 
+			<!-- DESA candidate frequency limits. These retain the historical
+				 440-2000 Hz behavior unless explicitly overridden per session. -->
+			<param name="min_frequency" value="440"/>
+			<param name="max_frequency" value="2000"/>
+
+			<!-- Optional bounded confirmation for frequency-mode candidates.
+				 It is disabled by default for backward compatibility. When enabled,
+				 a dominant single tone must explain spectral_min_purity of the
+				 buffered spectral_window_ms audio window. -->
+			<param name="spectral_confirmation" value="0"/>
+			<!-- Optionally reject the ITU-T fax calling-tone band (1100 +/- 40 Hz).
+				 This remains disabled by default because a voicemail beep in that
+				 narrow band is otherwise indistinguishable in a short window. -->
+			<param name="spectral_reject_fax_cng" value="0"/>
+			<param name="spectral_window_ms" value="100"/>
+			<param name="spectral_min_purity" value="0.80"/>
+
+			<!-- Minimum continuous candidate duration. The historical 2 ms
+				 value is retained by default. Spectral confirmation also requires
+				 enough audio to fill spectral_window_ms. -->
+			<param name="min_tone_duration_ms" value="2"/>
+
 		<!-- Per call settings end -->
 	</settings>
 </configuration>
-
