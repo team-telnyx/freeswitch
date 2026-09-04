@@ -76,6 +76,19 @@ typedef struct switch_channel_timetable switch_channel_timetable_t;
 */
 SWITCH_DECLARE(switch_channel_state_t) switch_channel_get_state(switch_channel_t *channel);
 SWITCH_DECLARE(switch_channel_state_t) switch_channel_get_running_state(switch_channel_t *channel);
+
+/*!
+  \brief Mark a newly installed caller profile as not yet routed
+  \param channel channel to mark
+*/
+SWITCH_DECLARE(void) switch_channel_inc_transfer_generation(switch_channel_t *channel);
+
+/*!
+  \brief Read a channel's transfer generation; compare with != only, it wraps
+  \param channel channel to read
+  \return the current generation
+*/
+SWITCH_DECLARE(uint32_t) switch_channel_get_transfer_generation(switch_channel_t *channel);
 SWITCH_DECLARE(int) switch_channel_check_signal(switch_channel_t *channel, switch_bool_t in_thread_only);
 
 /*!

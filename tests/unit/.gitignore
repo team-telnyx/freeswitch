@@ -7,11 +7,13 @@
 *.trs
 [0-9]*/**
 conf_sofia/[0-9]*/**
+conf_transfer_handoff/[0-9]*/**
 .libs/
 perf.data
 perf.data.old
 Makefile.in
 freeswitch.xml.fsxml.tmp
+test_transfer_handoff_window
 switch_console
 switch_core
 switch_core_codec
