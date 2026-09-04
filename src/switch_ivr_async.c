@@ -6201,12 +6201,17 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_detect_speech_init(switch_core_sessio
 		return status;
 	}
 
+	/* Published before the hook is added, not after: switch_ivr_stop_detect_speech()
+	 * only tears the media bug down when it finds this key, and takes a try_cancel-only
+	 * path when it finds just the "_tmp" one.  Called below with the key unset, it would
+	 * leave the bug attached and the handle open. */
+	switch_channel_set_private(channel, SWITCH_SPEECH_KEY, sth);
+
 	if ((status = switch_core_event_hook_add_recv_dtmf(session, speech_on_dtmf)) != SWITCH_STATUS_SUCCESS) {
 		switch_ivr_stop_detect_speech(session);
 		return status;
 	}
 
-	switch_channel_set_private(channel, SWITCH_SPEECH_KEY, sth);
 	switch_channel_set_private(channel, SWITCH_SPEECH_KEY "_tmp", NULL);
 
 	return SWITCH_STATUS_SUCCESS;
