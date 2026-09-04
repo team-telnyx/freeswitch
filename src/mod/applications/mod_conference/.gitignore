@@ -3,3 +3,5 @@ test/images/logo-*.png
 test/images/signalwire-scaled-*.png
 test/test_image
 test/test_member
+test/test_member_media_reset
+test/test_record_teardown
