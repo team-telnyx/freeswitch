@@ -1181,6 +1181,7 @@ struct record_helper {
 	switch_bool_t stop_write_on_error;
 	switch_codec_implementation_t read_impl;
 	switch_bool_t speech_detected;
+	uint32_t pending_native_rate;
 	switch_buffer_t *thread_buffer;
 	switch_thread_t *thread;
 	switch_mutex_t *buffer_mutex;
@@ -1260,6 +1261,7 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 	switch_event_t *event;
 
 	if (rh->fh) {
+		uint32_t rate = rh->fh->samplerate ? rh->fh->samplerate : read_impl->actual_samples_per_second;
 		switch_size_t current_samples_out = rh->fh->samples_out;
 		switch_size_t updated_samples_out = current_samples_out;
 		const char *last_record_index_str = switch_channel_get_variable(channel, "last_record_index");
@@ -1276,9 +1278,11 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 		}
 
 		switch_channel_set_variable_printf(channel, "record_samples", "%d", updated_samples_out);
-		if (read_impl->actual_samples_per_second) {
-			switch_size_t current_record_seconds = rh->fh->samples_out / read_impl->actual_samples_per_second;
-			switch_size_t current_record_ms = rh->fh->samples_out / (read_impl->actual_samples_per_second / 1000);
+
+		/* samples_out counts samples in the file, so it counts in the file's rate */
+		if (rate >= 1000) {
+			switch_size_t current_record_seconds = rh->fh->samples_out / rate;
+			switch_size_t current_record_ms = rh->fh->samples_out / (rate / 1000);
 			switch_size_t updated_record_seconds = current_record_seconds;
 			switch_size_t updated_record_ms = current_record_ms;
 			const char *prev_record_sec_str = switch_channel_get_variable(channel, "record_seconds");
@@ -1404,6 +1408,39 @@ static void send_record_error_event(switch_channel_t *channel, const char* file,
 	}
 }
 
+/* The bug hands out audio at the session read codec rate, which can change mid-call.  The
+   file keeps the rate it was opened with, so tell the file handle the new input rate and let
+   it resample.  A recording thread owns the file handle, so it applies the change itself. */
+static void record_follow_frame_rate(struct record_helper *rh, switch_core_session_t *session, switch_frame_t *frame)
+{
+	uint32_t old_rate;
+
+	if (!rh->fh || !frame->rate) {
+		return;
+	}
+
+	if (rh->thread_buffer) {
+		switch_mutex_lock(rh->buffer_mutex);
+		old_rate = rh->pending_native_rate ? rh->pending_native_rate : rh->fh->native_rate;
+
+		if (frame->rate != old_rate) {
+			rh->pending_native_rate = frame->rate;
+		}
+		switch_mutex_unlock(rh->buffer_mutex);
+	} else {
+		old_rate = rh->fh->native_rate;
+
+		if (frame->rate != old_rate) {
+			rh->fh->native_rate = frame->rate;
+		}
+	}
+
+	if (frame->rate != old_rate) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+						  "Record session %s input sample rate changed: %d -> %d\n", rh->file, old_rate, frame->rate);
+	}
+}
+
 static void *SWITCH_THREAD_FUNC recording_thread(switch_thread_t *thread, void *obj)
 {
 	switch_media_bug_t *bug = (switch_media_bug_t *) obj;
@@ -1475,6 +1512,13 @@ static void *SWITCH_THREAD_FUNC recording_thread(switch_thread_t *thread, void *
 		}
 
 		samples = switch_buffer_read(rh->thread_buffer, data, bsize) / 2 / channels;
+
+		if (rh->pending_native_rate) {
+			/* the chunk we just read can still hold a few samples recorded at the old rate */
+			rh->fh->native_rate = rh->pending_native_rate;
+			rh->pending_native_rate = 0;
+		}
+
 		switch_mutex_unlock(rh->buffer_mutex);
 
 		if (switch_core_file_write(rh->fh, data, &samples) != SWITCH_STATUS_SUCCESS) {
@@ -1779,6 +1823,8 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 				while (switch_core_media_bug_read(bug, &frame, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
 					len = (switch_size_t) frame.datalen / 2;
 
+					record_follow_frame_rate(rh, session, &frame);
+
 					if (len && switch_core_file_write(rh->fh, mask ? null_data : data, &len) != SWITCH_STATUS_SUCCESS) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error writing %s\n", rh->file);
 						/* File write failed */
@@ -1871,6 +1917,8 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 					break;
 				} else {
 					len = (switch_size_t) frame.datalen / 2 / frame.channels;
+
+					record_follow_frame_rate(rh, session, &frame);
 
 					if (rh->thread_buffer) {
 						switch_mutex_lock(rh->buffer_mutex);
