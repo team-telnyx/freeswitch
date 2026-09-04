@@ -4748,6 +4748,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 				engine->read_frame.pmap = NULL;
 				if (engine->read_frame.datalen) {
 					status = SWITCH_STATUS_SUCCESS;
+				} else {
+					status = SWITCH_STATUS_BREAK;
 				}
 				switch_frame_free(&audio_fb_frame);
 			} else if (apop == (void *)1) {
