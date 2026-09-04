@@ -1205,8 +1205,9 @@ struct record_helper {
 	switch_size_t buffer_dropped_bytes;
 	switch_time_t last_drop_log;
 	/* Set by the recording thread as it exits, so the close path can tell "still
-	 * flushing" from "wedged" without an untimed join. */
-	int thread_done;
+	 * flushing" from "wedged" without an untimed join.  Written by that thread and
+	 * polled by the closing one, so it is atomic rather than a plain int. */
+	switch_atomic_t thread_done;
 	int close_timeout_ms;
 	/* Consecutive write failures, and when the run of them began. */
 	uint32_t write_errors;
@@ -1572,7 +1573,7 @@ static void *SWITCH_THREAD_FUNC recording_thread(switch_thread_t *thread, void *
 
 	/* Last thing before exiting: the close path polls this to decide whether the thread
 	 * is still flushing normally or is stuck and needs its I/O aborted. */
-	rh->thread_done = 1;
+	switch_atomic_set(&rh->thread_done, 1);
 
 	return NULL;
 }
@@ -1866,7 +1867,7 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 						 * has stopped shrinking means the writer is wedged.  The total
 						 * cap is the backstop, so trickling progress cannot hold the
 						 * channel up indefinitely either. */
-						while (!rh->thread_done && stalled_ms < rh->close_timeout_ms && total_ms < max_total_ms) {
+						while (!switch_atomic_read(&rh->thread_done) && stalled_ms < rh->close_timeout_ms && total_ms < max_total_ms) {
 							switch_size_t inuse;
 
 							switch_yield(10000);
@@ -1882,7 +1883,7 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 							last_inuse = inuse;
 						}
 
-						if (!rh->thread_done) {
+						if (!switch_atomic_read(&rh->thread_done)) {
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
 											  "Recording thread for %s made no progress for %dms (%dms total); aborting its I/O "
 											  "so the channel can go down\n", rh->file, stalled_ms, total_ms);
