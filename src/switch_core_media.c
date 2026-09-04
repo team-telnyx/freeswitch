@@ -5121,7 +5121,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 				}
 
 				/* check for timing issues */
-				if (smh->media_flags[SCMF_AUTOFIX_TIMING] && type == SWITCH_MEDIA_TYPE_AUDIO && engine->read_impl.samples_per_second) {
+				if (smh->media_flags[SCMF_AUTOFIX_TIMING] && type == SWITCH_MEDIA_TYPE_AUDIO && engine->read_impl.samples_per_second &&
+					switch_core_media_codec_ptime_autofix_ok(&engine->read_impl)) {
 					char is_vbr;
 					is_vbr = engine->read_impl.encoded_bytes_per_packet?0:1;
 
@@ -11836,6 +11837,24 @@ SWITCH_DECLARE(switch_bool_t) switch_core_session_in_video_thread(switch_core_se
 	return switch_thread_equal(switch_thread_self(), v_engine->thread_id) ? SWITCH_TRUE : SWITCH_FALSE;
 }
 
+
+/* TELCORE-363: the PTIME autofix computes remote ptime from RTP timestamp
+ * deltas / samples_per_second. That is only valid when the RTP clock equals
+ * the actual sampling rate. G722 (RFC 3551 4.5.2) uses an 8 kHz RTP clock at
+ * a 16 kHz sample rate, so the autofix can wrongly rewrite 20 ms -> 40 ms and
+ * quarter the produced audio. Only allow the autofix when the clocks match. */
+SWITCH_DECLARE(switch_bool_t) switch_core_media_codec_ptime_autofix_ok(const switch_codec_implementation_t *imp)
+{
+	if (!imp) {
+		return SWITCH_FALSE;
+	}
+
+	if (!imp->samples_per_second || !imp->actual_samples_per_second) {
+		return SWITCH_FALSE;
+	}
+
+	return imp->samples_per_second == imp->actual_samples_per_second ? SWITCH_TRUE : SWITCH_FALSE;
+}
 
 SWITCH_DECLARE(void) switch_core_media_parse_media_flags(switch_core_session_t *session)
 {
