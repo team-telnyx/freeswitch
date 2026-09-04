@@ -1214,6 +1214,9 @@ struct record_helper {
 	switch_time_t first_write_error;
 	switch_time_t last_write_error_log;
 	int write_error_grace_ms;
+	/* rh->file as the caller gave it, reduced to a form that is safe to log: it can
+	 * carry {auth_username=...,auth_password=...} and, for RTMP, a stream key. */
+	const char *log_file;
 	switch_thread_t *thread;
 	switch_mutex_t *buffer_mutex;
 	int thread_ready;
@@ -1538,7 +1541,7 @@ static void *SWITCH_THREAD_FUNC recording_thread(switch_thread_t *thread, void *
 			if (rh->write_errors == 1 || (now - rh->last_write_error_log) > 5000000) {
 				rh->last_write_error_log = now;
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
-								  "Error writing %s (%u consecutive)\n", rh->file, rh->write_errors);
+								  "Error writing %s (%u consecutive)\n", rh->log_file, rh->write_errors);
 			}
 
 			/* File write failed */
@@ -1555,7 +1558,7 @@ static void *SWITCH_THREAD_FUNC recording_thread(switch_thread_t *thread, void *
 			if (rh->stop_write_on_error || (now - rh->first_write_error) >= (switch_time_t) rh->write_error_grace_ms * 1000) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
 								  "Giving up on %s after %u write errors over %dms (grace %dms); stopping this recording\n",
-								  rh->file, rh->write_errors, (int) ((now - rh->first_write_error) / 1000),
+								  rh->log_file, rh->write_errors, (int) ((now - rh->first_write_error) / 1000),
 								  rh->write_error_grace_ms);
 				switch_set_flag(bug, SMBF_PRUNE);
 				break;
@@ -1886,7 +1889,7 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 						if (!switch_atomic_read(&rh->thread_done)) {
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
 											  "Recording thread for %s made no progress for %dms (%dms total); aborting its I/O "
-											  "so the channel can go down\n", rh->file, stalled_ms, total_ms);
+											  "so the channel can go down\n", rh->log_file, stalled_ms, total_ms);
 							set_completion_cause(rh, "uri-failure");
 							switch_core_file_command(rh->fh, SCFC_ABORT_IO);
 						}
@@ -2040,7 +2043,7 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 							rh->last_drop_log = switch_micro_time_now();
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
 											  "Recording buffer for %s is full; discarding oldest audio (%" SWITCH_SIZE_T_FMT " bytes dropped so far)\n",
-											  rh->file, rh->buffer_dropped_bytes);
+											  rh->log_file, rh->buffer_dropped_bytes);
 						}
 
 						if (switch_mutex_trylock(rh->cond_mutex) == SWITCH_STATUS_SUCCESS) {
@@ -3582,6 +3585,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 	int file_flags = SWITCH_FILE_FLAG_WRITE | SWITCH_FILE_DATA_SHORT;
 	switch_bool_t hangup_on_error = SWITCH_FALSE;
 	char *file_path = NULL;
+	char redacted[512];
 	char *ext;
 	char *in_file = NULL, *out_file = NULL;
 	/* Keep file as the caller-visible recording identity; file_open_path may
@@ -4094,6 +4098,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 
 	rh->fh = fh;
 	rh->file = switch_core_strdup(rh->helper_pool, file);
+	rh->log_file = switch_core_strdup(rh->helper_pool, switch_redact_file_target(file, redacted, sizeof(redacted)));
 	rh->packet_len = read_impl.decoded_bytes_per_packet;
 
 	if (file_flags & SWITCH_FILE_WRITE_APPEND) {
