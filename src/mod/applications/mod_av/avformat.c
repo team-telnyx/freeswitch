@@ -196,8 +196,10 @@ struct av_file_context {
 	switch_time_t io_deadline;
 	int io_timed_out;
 	int io_timeout_logged;
-	/* Set from another thread via SCFC_ABORT_IO to break out of a blocked read/write. */
-	int abort_io;
+	/* Set from another thread via SCFC_ABORT_IO to break out of a blocked read/write,
+	 * and read by interrupt_cb on whichever thread is blocked inside ffmpeg -- so it
+	 * is atomic rather than a plain int, which the reader may cache. */
+	switch_atomic_t abort_io;
 	/* Connect postponed to the writer thread; deferred_file is what to connect to. */
 	int deferred_open;
 	int open_failed;
@@ -450,7 +452,7 @@ static int interrupt_cb(void *cp)
 		return 0;
 	}
 
-	if (context->closed || context->abort_io) {
+	if (context->closed || switch_atomic_read(&context->abort_io)) {
 		return 1;
 	}
 
@@ -656,7 +658,7 @@ static switch_status_t ensure_output_open(av_file_context_t *context)
 
 	/* Never connect on the way out: av_file_close sets closed before flushing, and
 	 * dialling a recorder we are about to abandon would block the closing thread. */
-	if (context->closed || context->abort_io) {
+	if (context->closed || switch_atomic_read(&context->abort_io)) {
 		context->deferred_open = 0;
 		context->open_failed = 1;
 		return SWITCH_STATUS_FALSE;
@@ -2955,7 +2957,7 @@ static switch_status_t av_file_write(switch_file_handle_t *handle, void *data, s
 	/* Once aborted or failed to connect, fail fast rather than blocking again on the
 	 * same dead peer.  The caller turns this into a write error and stops the
 	 * recording, which is how a deferred connect failure surfaces. */
-	if (context->abort_io || context->open_failed) {
+	if (switch_atomic_read(&context->abort_io) || context->open_failed) {
 		return SWITCH_STATUS_FALSE;
 	}
 
@@ -3154,7 +3156,7 @@ GCC_DIAG_ON(deprecated-declarations)
 					 * is not going to recover, and the error code is AVERROR_EXIT rather
 					 * than one of the connection errors checked below.  Fail now instead
 					 * of reporting success for another thousand frames. */
-					if (context->io_timed_out || context->abort_io) {
+					if (context->io_timed_out || switch_atomic_read(&context->abort_io)) {
 						context->errs = 1001;
 					}
 
@@ -3210,7 +3212,7 @@ GCC_DIAG_ON(deprecated-declarations)
 					 * is not going to recover, and the error code is AVERROR_EXIT rather
 					 * than one of the connection errors checked below.  Fail now instead
 					 * of reporting success for another thousand frames. */
-					if (context->io_timed_out || context->abort_io) {
+					if (context->io_timed_out || switch_atomic_read(&context->abort_io)) {
 						context->errs = 1001;
 					}
 
@@ -3282,7 +3284,7 @@ static switch_status_t av_file_command(switch_file_handle_t *handle, switch_file
 		 * local files would leave a genuinely hung write (a wedged disk or NFS mount)
 		 * with nothing to interrupt it, and the caller waiting on it forever: losing the
 		 * file is the better trade against wedging the channel. */
-		context->abort_io = 1;
+		switch_atomic_set(&context->abort_io, 1);
 		/* DEBUG, not WARNING: whoever asked for the abort is expected to say why, and
 		 * during a recorder stall this would otherwise double every such report. */
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Aborting I/O on %s\n",
@@ -3817,7 +3819,7 @@ static switch_status_t av_file_write_video(switch_file_handle_t *handle, switch_
 
 	/* Same fast-fail as the audio path: once aborted or unable to connect, stop rather
 	 * than entering ffmpeg per frame only to be interrupted back out again. */
-	if (context->abort_io || context->open_failed) {
+	if (switch_atomic_read(&context->abort_io) || context->open_failed) {
 		return SWITCH_STATUS_FALSE;
 	}
 
