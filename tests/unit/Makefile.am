@@ -8,6 +8,10 @@ noinst_PROGRAMS += switch_hold switch_sip switch_mod_telnyx switch_mod_gstt swit
 
 # Regression: a zero write-error grace must never give up.
 noinst_PROGRAMS += test_record_write_error_grace
+# Regression: switch_core_session_read_frame() must not unlock the codec mutex by
+# re-dereferencing session->read_codec, which a concurrent switch_core_codec_destroy()
+# may have zeroed.
+noinst_PROGRAMS += test_read_frame_codec_teardown
 
 # Regression: a transfer landing in the state-machine handoff window must
 # still be routed. See switch_channel_inc_transfer_generation().
