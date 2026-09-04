@@ -5625,6 +5625,34 @@ struct speech_thread_handle {
 	int stopped;
 };
 
+/* Wake speech_thread and wait until it can no longer be inside the ASR module.
+ *
+ * Taking the mutex at all is what makes it stop: the holder is either parked in
+ * switch_thread_cond_wait() and takes the signal, or has not locked yet, and
+ * then its own lock orders it after the closing store -- which a bare read of a
+ * predicate written from this thread does not guarantee. So the retry is only
+ * for the case where the mutex cannot be taken, which is a thread wedged inside
+ * a module callback.
+ *
+ * sth->stopped is only a hint: it is written without the mutex, so it has no
+ * release/acquire pairing and may be seen late. Nothing depends on it -- the
+ * join is what actually guarantees the thread is gone -- and a missed read
+ * costs at most one more pass.
+ */
+static int speech_thread_wait_stop(struct speech_thread_handle *sth, switch_time_t expires)
+{
+	while (!sth->stopped && switch_micro_time_now() < expires) {
+		if (switch_mutex_trylock(sth->mutex) == SWITCH_STATUS_SUCCESS) {
+			switch_thread_cond_signal(sth->cond);
+			switch_mutex_unlock(sth->mutex);
+			return 1;
+		}
+		switch_yield(1000);
+	}
+
+	return sth->stopped;
+}
+
 static void *SWITCH_THREAD_FUNC speech_thread(switch_thread_t *thread, void *obj)
 {
 	struct speech_thread_handle *sth = (struct speech_thread_handle *) obj;
@@ -5820,7 +5848,7 @@ static switch_bool_t speech_callback(switch_media_bug_t *bug, void *user_data, s
 			switch_status_t st;
 			switch_core_session_t *session = switch_core_media_bug_get_session(bug);
 			switch_channel_t *channel = switch_core_session_get_channel(session);
-			int signalled = 0;
+			int quiesced = 1;
 
 			switch_channel_set_private(channel, SWITCH_SPEECH_KEY, NULL);
 			switch_channel_set_private(channel, SWITCH_SPEECH_KEY "_tmp", NULL);
@@ -5829,43 +5857,40 @@ static switch_bool_t speech_callback(switch_media_bug_t *bug, void *user_data, s
 			sth->closing = 1;
 
 			if (sth->thread) {
-				int sanity = SPEECH_THREAD_STOP_TIMEOUT_MS;
+				switch_time_t started = switch_micro_time_now();
 
-				/* Holding the mutex once is what makes the thread stop, so the
-				 * retry is only for the case where it cannot be taken. Whoever
-				 * holds it is either parked in switch_thread_cond_wait() and
-				 * takes the signal, or has not locked yet -- and then its own
-				 * lock orders it after the store above, which a bare read of a
-				 * predicate written from this thread does not guarantee. Only a
-				 * thread wedged inside a module callback keeps failing it.
-				 */
-				while (!signalled && !sth->stopped && sanity-- > 0) {
-					if (switch_mutex_trylock(sth->mutex) == SWITCH_STATUS_SUCCESS) {
-						switch_thread_cond_signal(sth->cond);
-						switch_mutex_unlock(sth->mutex);
-						signalled = 1;
-					} else {
-						switch_yield(1000);
-					}
+				quiesced = speech_thread_wait_stop(sth, started + (SPEECH_THREAD_STOP_TIMEOUT_MS * 1000) / 2);
+
+				if (!quiesced) {
+					/* Ask the module to abandon the request. That is what
+					 * releases a thread blocked inside it, and unlike the close
+					 * below it frees nothing, so the handle stays valid for the
+					 * thread still reading it. A module without asr_try_cancel
+					 * simply does nothing here.
+					 */
+					switch_core_asr_try_cancel(sth->ah);
+					quiesced = speech_thread_wait_stop(sth, started + SPEECH_THREAD_STOP_TIMEOUT_MS * 1000);
 				}
 			}
 
-			if (sth->thread && !signalled && !sth->stopped) {
-				/* Wedged inside a module callback that only asr_close can
-				 * unblock, which a module doing network I/O in check_results
-				 * can be. Close first so it returns, giving up the window this
-				 * ordering exists to shut: liveness wins over the narrower race.
+			if (!quiesced) {
+				/* try_cancel did not release it either. Close first so the
+				 * module returns, giving up the window this ordering exists to
+				 * shut: liveness wins over the narrower race.
 				 */
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
 								  "Speech thread still in the ASR module after %d ms, closing handle first\n",
 								  SPEECH_THREAD_STOP_TIMEOUT_MS);
 				switch_core_asr_close(sth->ah, &flags);
-				switch_thread_join(&st, sth->thread);
-			} else {
-				switch_thread_join(&st, sth->thread);
-				switch_core_asr_close(sth->ah, &flags);
 			}
 
+			if (sth->thread) {
+				switch_thread_join(&st, sth->thread);
+			}
+
+			if (quiesced) {
+				switch_core_asr_close(sth->ah, &flags);
+			}
 		}
 		break;
 	case SWITCH_ABC_TYPE_READ_REPLACE:
