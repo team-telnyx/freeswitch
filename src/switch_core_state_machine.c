@@ -871,8 +871,26 @@ SWITCH_DECLARE(void) switch_core_session_hangup_state(switch_core_session_t *ses
 	switch_channel_set_hangup_time(session->channel);
 
 	switch_core_media_bug_remove_all(session);
-
 	switch_channel_stop_broadcast(session->channel);
+
+	/* A bridged peer may be blocked in a broadcast playback loop and cannot
+	 * detect this hangup on its own. Stop its broadcast so it can exit. */
+	{
+		switch_core_session_t *partner_session = NULL;
+
+		if (switch_core_session_get_partner(session, &partner_session) == SWITCH_STATUS_SUCCESS) {
+			switch_channel_t *partner_channel = switch_core_session_get_channel(partner_session);
+
+			if (switch_channel_test_flag(partner_channel, CF_BROADCAST)) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+								  "%s Stopping broadcast on bridge partner %s due to hangup\n",
+								  switch_channel_get_name(session->channel), switch_channel_get_name(partner_channel));
+				switch_channel_stop_broadcast(partner_channel);
+			}
+
+			switch_core_session_rwunlock(partner_session);
+		}
+	}
 
 	switch_channel_set_variable(session->channel, "hangup_cause", switch_channel_cause2str(cause));
 	switch_channel_set_variable_printf(session->channel, "hangup_cause_q850", "%d", cause_q850);
