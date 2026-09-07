@@ -8489,7 +8489,11 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 					if (switch_core_media_choose_port(tech_pvt->session, SWITCH_MEDIA_TYPE_AUDIO, 0) != SWITCH_STATUS_SUCCESS) {
 						goto done;
 					}
-					switch_core_media_gen_local_sdp(session, SDP_TYPE_RESPONSE, NULL, 0, NULL, 0);
+					/* Preserve active T.38 SDP instead of replacing it with audio and rejected image. */
+					if (!switch_channel_test_flag(channel, CF_IMAGE_SDP) ||
+						!switch_channel_test_app_flag_key("T38", channel, CF_APP_T38)) {
+						switch_core_media_gen_local_sdp(session, SDP_TYPE_RESPONSE, NULL, 0, NULL, 0);
+					}
 
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Processing updated SDP\n");
 					switch_channel_set_flag(tech_pvt->channel, CF_REINVITE);
@@ -9451,7 +9455,11 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 				if (switch_core_media_choose_port(tech_pvt->session, SWITCH_MEDIA_TYPE_AUDIO, 0) != SWITCH_STATUS_SUCCESS) {
 					goto done;
 				}
-				switch_core_media_gen_local_sdp(session, SDP_ANSWER, NULL, 0, NULL, 0);
+				/* Preserve active T.38 SDP instead of replacing it with audio and rejected image. */
+				if (!switch_channel_test_flag(channel, CF_IMAGE_SDP) ||
+					!switch_channel_test_app_flag_key("T38", channel, CF_APP_T38)) {
+					switch_core_media_gen_local_sdp(session, SDP_ANSWER, NULL, 0, NULL, 0);
+				}
 
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Processing updated SDP\n");
 				switch_channel_set_flag(tech_pvt->channel, CF_REINVITE);
