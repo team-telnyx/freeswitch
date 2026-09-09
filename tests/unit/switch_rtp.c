@@ -377,6 +377,64 @@ FST_TEARDOWN_END()
 		fst_check(!memcmp(body, expected_repaired_mid, sizeof(expected_repaired_mid)));
 	}
 	FST_TEST_END()
+	FST_TEST_BEGIN(test_mid_rewrite_respects_caller_packet_buffer_size)
+	{
+		/* Callers size frame->packet at SWITCH_RTP_MAX_BUF_LEN (16384), not
+		 * sizeof(switch_rtp_packet_t) (16424). ->ext and ->ebody at struct offsets
+		 * 16408 and 16416 then fall at +24 and +32 past the buffer, which for the
+		 * session-pool callers in switch_core_media.c is the next allocation.
+		 * switch_app_log::next is at offset 24. */
+		struct pool_neighbour {
+			uint8_t          packet_buf[SWITCH_RTP_MAX_BUF_LEN];
+			switch_app_log_t node1;
+			switch_app_log_t node2;
+			uint8_t          guard[64];
+		} *sim = malloc(sizeof(struct pool_neighbour));
+		char app_name[] = "playback";
+		char app_arg[] = "/tmp/greeting.wav";
+		switch_rtp_hdr_t *hdr;
+		switch_size_t bytes;
+		int guard_ok = 1;
+		size_t i;
+
+		fst_requires(sim != NULL);
+
+		memset(sim, 0, sizeof(struct pool_neighbour));
+		memset(sim->guard, 0xDD, sizeof(sim->guard));
+
+		sim->node1.app = app_name;
+		sim->node1.arg = app_arg;
+		sim->node1.next = &sim->node2;
+		sim->node2.app = app_name;
+		sim->node2.arg = app_arg;
+		sim->node2.next = NULL;
+
+		/* An ordinary outbound video packet: 12 byte header, no CSRC, no extension. */
+		hdr = (switch_rtp_hdr_t *) sim->packet_buf;
+		hdr->version = 2;
+		hdr->pt = 96;
+		memset(sim->packet_buf + SWITCH_RTP_HEADER_LEN, 0x41, 1200);
+		bytes = SWITCH_RTP_HEADER_LEN + 1200;
+
+		fst_check(switch_rtp_test_rewrite_mid_extension((switch_rtp_packet_t *) sim->packet_buf,
+			&bytes, 1, "0", SWITCH_FALSE, 0) == SWITCH_STATUS_SUCCESS);
+
+		/* The rewrite must stay inside the buffer it was given. */
+		fst_check(sim->node1.next == &sim->node2);
+		fst_check(sim->node1.app == app_name);
+		fst_check(sim->node2.app == app_name);
+		fst_check(sim->node2.arg == app_arg);
+
+		for (i = 0; i < sizeof(sim->guard); i++) {
+			if (sim->guard[i] != 0xDD) {
+				guard_ok = 0;
+			}
+		}
+		fst_check(guard_ok);
+
+		free(sim);
+	}
+	FST_TEST_END()
 	FST_TEST_BEGIN(test_mid_rewrite_drop_is_not_transport_deferred)
 	{
 		switch_memory_pool_t *test_pool = NULL;

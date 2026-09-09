@@ -12757,7 +12757,8 @@ fork_done:
 							  rtp_type(rtp_session), stat, switch_str_nil(srtp_err), send_msg->header.pt, ntohs(send_msg->header.seq),
 							  ntohl(send_msg->header.ts), ntohl(send_msg->header.ssrc), send_msg->header.m, bytes, sbytes,
 							  flags ? *flags : 0, rtp_session->flags[SWITCH_RTP_FLAG_SECURE_SEND_MKI], switch_str_nil(mid),
-							  mid_ext_id, send_msg->header.x, (void *)send_msg->ext);
+							  mid_ext_id, send_msg->header.x,
+							  (void *)(send_msg->body + (size_t)send_msg->header.cc * sizeof(uint32_t)));
 				ret = -1;
 				switch_mutex_unlock(rtp_session->ice_mutex);
 				goto end;
@@ -14301,6 +14302,7 @@ static switch_status_t rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_
 	size_t csrc_bytes, body_header_bytes;
 	uint8_t len_field, pad, mid_ext_id = ext_id;
 	const char *mid_value = mid;
+	switch_rtp_hdr_ext_t *ext_hdr;
 
 	if (!send_msg || !bytes || *bytes < rtp_header_len) return SWITCH_STATUS_FALSE;
 
@@ -14308,6 +14310,12 @@ static switch_status_t rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_
 	body_header_bytes = csrc_bytes;
 
 	if (*bytes < rtp_header_len + body_header_bytes) return SWITCH_STATUS_FALSE;
+
+	/* send_msg->ext and ->ebody are rtp_msg_t fields at offsets 16408 and 16416.
+	 * Callers pass frame->packet, sized SWITCH_RTP_MAX_BUF_LEN (16384), so reading
+	 * or writing them runs past the buffer. The extension header is always at
+	 * body + body_header_bytes. */
+	ext_hdr = (switch_rtp_hdr_ext_t *) (send_msg->body + body_header_bytes);
 
 	if (!mid_ext_id) {
 		if (!rtp_session) return SWITCH_STATUS_FALSE;
@@ -14333,14 +14341,7 @@ static switch_status_t rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_
 		payload_len = 16;
 	}
 	if (send_msg->header.x) {
-		if (!send_msg->ext) {
-			send_msg->ebody = send_msg->body + body_header_bytes;
-			send_msg->ext = (switch_rtp_hdr_ext_t *) send_msg->ebody;
-		}
-
-		if (!send_msg->ext) return SWITCH_STATUS_FALSE;
-
-		words = ntohs(send_msg->ext->length);
+		words = ntohs(ext_hdr->length);
 		old_ext_data_bytes = (size_t)words * 4;
 		old_ext_total = 4 + old_ext_data_bytes;
 
@@ -14357,7 +14358,7 @@ static switch_status_t rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_
 			}
 		}
 
-		if (old_ext_total && ntohs(send_msg->ext->profile) == 0xBEDE && drop_peer_extensions) {
+		if (old_ext_total && ntohs(ext_hdr->profile) == 0xBEDE && drop_peer_extensions) {
 			/* RTP header-extension ids are scoped to the negotiated leg.  When
 			   forwarding peer media across legs, never preserve the inbound BEDE
 			   extension block while stamping the outbound MID: Chrome may send
@@ -14367,8 +14368,8 @@ static switch_status_t rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_
 			   block, then rebuild a clean block containing only the negotiated
 			   outbound MID. */
 			old_ext_data_bytes = 0;
-		} else if (old_ext_total && ntohs(send_msg->ext->profile) == 0xBEDE) {
-			ext_data = (uint8_t *)send_msg->ext + 4;
+		} else if (old_ext_total && ntohs(ext_hdr->profile) == 0xBEDE) {
+			ext_data = (uint8_t *)ext_hdr + 4;
 
 			for (off = 0; off < old_ext_data_bytes;) {
 				uint8_t hdr = ext_data[off];
@@ -14435,12 +14436,10 @@ static switch_status_t rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_
 			send_msg->body + body_header_bytes + old_ext_total,
 			payload_bytes);
 	send_msg->header.x = 1;
-	send_msg->ebody = send_msg->body + body_header_bytes;
-	send_msg->ext = (switch_rtp_hdr_ext_t *) send_msg->ebody;
-	send_msg->ext->profile = htons(0xBEDE);
-	send_msg->ext->length = htons((uint16_t)(ext_data_padded / 4));
+	ext_hdr->profile = htons(0xBEDE);
+	ext_hdr->length = htons((uint16_t)(ext_data_padded / 4));
 
-	ext_ptr = (uint8_t *)send_msg->ext + 4 + old_ext_data_bytes;
+	ext_ptr = (uint8_t *)ext_hdr + 4 + old_ext_data_bytes;
 	len_field = (uint8_t)(payload_len - 1);
 	*ext_ptr++ = (mid_ext_id << 4) | (len_field & 0x0F);
 	memcpy(ext_ptr, mid_value, payload_len);
