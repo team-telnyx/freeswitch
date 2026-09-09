@@ -417,7 +417,9 @@
              the dialplan never calls pre_answer. Requires enable-3pcc-early-offer (it
              is silently disabled otherwise). Override per call with the channel
              variable ring_ready_early_media, which is honoured up to the ring_ready
-             indication, so the dialplan can still turn it off after routing.
+             indication, so the dialplan can still turn it off after routing. The
+             promoted 183 requires 100rel, so it is only sent to a peer whose INVITE
+             advertised it, whatever the variable says.
 
              Because the 180 is replaced, the caller's network no longer generates
              local ringback, and this path plays no audio of its own: the caller hears

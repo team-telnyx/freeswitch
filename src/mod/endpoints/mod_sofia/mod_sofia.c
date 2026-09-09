@@ -2955,8 +2955,14 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 					   reliable 180, and the far end is entitled to one in the first reliable
 					   provisional, so send a 183 carrying it instead. The answer arrives in the
 					   PRACK; nothing is waited on here. Skipped when this leg originated a bridge,
-					   because the outbound leg's codecs are not inherited until later. */
+					   because the outbound leg's codecs are not inherited until later.
+
+					   The 183 requires 100rel, so the peer must have advertised it. The profile
+					   default is only applied to such peers, but the per-call variable can be set
+					   from the dialplan or a pre-routing source that never consulted the peer, so
+					   revalidate here against what the INVITE actually carried. */
 					if (switch_channel_var_true(channel, "ring_ready_early_media") &&
+						switch_channel_var_true(channel, "sip_remote_supports_100rel") &&
 						switch_channel_test_flag(channel, CF_3PCC) &&
 						sofia_test_flag(tech_pvt, TFLAG_LATE_NEGOTIATION) &&
 						!sofia_test_flag(tech_pvt, TFLAG_EARLY_OFFER_SENT) &&
