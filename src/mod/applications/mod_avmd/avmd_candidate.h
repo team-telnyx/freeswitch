@@ -71,4 +71,15 @@ size_t avmd_candidate_frame_position(size_t detector_position,
 		uint8_t lagged,
 		uint8_t hardened);
 
+uint8_t avmd_candidate_lagged_detector_count(uint8_t configured,
+		uint8_t primary_configured,
+		uint8_t hardened);
+
+uint16_t avmd_candidate_frame_skip_samples(uint16_t configured,
+		size_t frame_samples);
+
+uint8_t avmd_candidate_analysis_budget(size_t frame_samples,
+		size_t window_samples,
+		uint8_t max_analyses);
+
 #endif

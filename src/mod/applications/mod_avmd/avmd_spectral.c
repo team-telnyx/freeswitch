@@ -13,6 +13,7 @@
 #define AVMD_SPECTRAL_ACTIVITY_MIN_RATIO (0.02)
 #define AVMD_SPECTRAL_CANDIDATE_BLOCK_MS (2u)
 #define AVMD_SPECTRAL_CANDIDATE_MIN_PURITY (0.70)
+#define AVMD_SPECTRAL_MAX_SEARCH_BINS (512u)
 
 extern int avmd_spectral_is_fax_cng(double frequency)
 {
@@ -25,6 +26,11 @@ extern int avmd_spectral_result_accepted(const avmd_spectral_result_t *result,
 		uint8_t reject_fax_cng)
 {
 	if (result == NULL || result->purity < min_purity) {
+		return 0;
+	}
+	if (result->dominant_power <= 0.0 ||
+			result->secondary_power >= result->dominant_power *
+			AVMD_SPECTRAL_MAX_SECONDARY_RATIO) {
 		return 0;
 	}
 	return !reject_fax_cng ||
@@ -168,7 +174,9 @@ extern int avmd_spectral_analyze(const double *samples,
 	double scale;
 	double secondary_power = 0.0;
 	double secondary_frequency = 0.0;
+	double powers[AVMD_SPECTRAL_MAX_SEARCH_BINS];
 	size_t i;
+	size_t bins;
 
 	if (result == NULL) {
 		return 0;
@@ -207,26 +215,31 @@ extern int avmd_spectral_analyze(const double *samples,
 		return 0;
 	}
 
+	bins = 0;
 	frequency = start_frequency;
 	while (frequency <= stop_frequency + (0.5 * search_step)) {
+		if (bins >= AVMD_SPECTRAL_MAX_SEARCH_BINS) {
+			return 0;
+		}
 		power = avmd_goertzel(samples, num, rate, frequency, mean);
+		powers[bins] = power;
 		if (power > result->dominant_power) {
 			result->dominant_power = power;
 			result->dominant_frequency = frequency;
 		}
+		++bins;
 		frequency += search_step;
 	}
 
-	frequency = start_frequency;
-	while (frequency <= stop_frequency + (0.5 * search_step)) {
+	for (i = 0; i < bins; ++i) {
+		frequency = start_frequency + ((double)i * search_step);
 		if (fabs(frequency - result->dominant_frequency) >= AVMD_SPECTRAL_SECONDARY_GUARD_HZ) {
-			power = avmd_goertzel(samples, num, rate, frequency, mean);
+			power = powers[i];
 			if (power > secondary_power) {
 				secondary_power = power;
 				secondary_frequency = frequency;
 			}
 		}
-		frequency += search_step;
 	}
 
 	result->secondary_power = secondary_power;

@@ -305,6 +305,55 @@ def run_case(case, profile, pcap_dir, extractor, output_dir, log_path):
         fs_cli("uuid_kill %s" % call_uuid, check=False)
 
 
+def run_start_path_regressions(log_path):
+    """Exercise initialization failures and hardened lagged-only startup."""
+    checks = []
+
+    invalid_uuid = str(uuid.uuid4())
+    try:
+        originate_output = fs_cli(
+            "originate {origination_uuid=%s,absolute_codec_string=PCMU}loopback/app=park &park"
+            % invalid_uuid
+        )
+        if not originate_output.lstrip().startswith("+OK"):
+            raise RuntimeError("validation-path loopback originate failed: %r" % originate_output.strip())
+        log_offset = log_path.stat().st_size
+        fs_cli(
+            "uuid_broadcast %s avmd_start::max_frequency=2001 aleg" % invalid_uuid
+        )
+        time.sleep(0.25)
+        log_text = read_log_since(log_path, log_offset)
+        if "Invalid AVMD frequency range [440.00-2001.00 Hz] for codec rate [8000]" not in log_text:
+            raise RuntimeError("app start did not report the codec-rate validation error")
+        stop_output = fs_cli("avmd %s stop" % invalid_uuid, check=False)
+        if "has not yet been started" not in stop_output:
+            raise RuntimeError("invalid codec-rate configuration unexpectedly started AVMD")
+        checks.append({"id": "invalid-codec-rate-app-start", "passed": True})
+    finally:
+        fs_cli("uuid_kill %s" % invalid_uuid, check=False)
+
+    lagged_uuid = str(uuid.uuid4())
+    try:
+        originate_output = fs_cli(
+            "originate {origination_uuid=%s}loopback/app=park &park" % lagged_uuid
+        )
+        if not originate_output.lstrip().startswith("+OK"):
+            raise RuntimeError("lagged-only loopback originate failed: %r" % originate_output.strip())
+        fs_cli(
+            "uuid_broadcast %s avmd_start::spectral_confirmation=1,min_tone_duration_ms=300,detectors_n=0,detectors_lagged_n=1 aleg"
+            % lagged_uuid
+        )
+        time.sleep(0.25)
+        stop_output = fs_cli("avmd %s stop" % lagged_uuid)
+        if "stopped" not in stop_output:
+            raise RuntimeError("hardened lagged-only AVMD session did not start")
+        checks.append({"id": "hardened-lagged-only-app-start", "passed": True})
+    finally:
+        fs_cli("uuid_kill %s" % lagged_uuid, check=False)
+
+    return checks
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     script_dir = Path(__file__).resolve().parent
@@ -359,6 +408,7 @@ def main():
 
     started = False
     results = []
+    start_path_checks = []
     try:
         command_output(["freeswitch", "-nonat", "-nc"])
         started = True
@@ -368,6 +418,7 @@ def main():
             raise RuntimeError("unable to load mod_loopback: %s" % loopback_load.strip())
         fs_cli("unload mod_avmd", check=False)
         fs_cli("load %s" % args.module)
+        start_path_checks = run_start_path_regressions(args.log)
         for case in corpus["cases"]:
             profile_name = case.get("profile", "hardened")
             if profile_name == "legacy":
@@ -394,8 +445,10 @@ def main():
         "legacy_profile": corpus["legacy_profile"],
         "module": str(args.module),
         "module_sha256": sha256_file(args.module),
+        "start_path_checks": start_path_checks,
         "results": results,
-        "passed": all(result["passed"] for result in results),
+        "passed": all(check["passed"] for check in start_path_checks) and
+        all(result["passed"] for result in results),
     }
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0 if report["passed"] else 1

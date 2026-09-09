@@ -105,12 +105,13 @@
 #define AVMD_VARIANCE_RSD_THRESHOLD (0.000025)
 #define AVMD_AMPLITUDE_RSD_THRESHOLD (0.0148)
 #define AVMD_SPECTRAL_WINDOW_MS_DEFAULT (100u)
-#define AVMD_SPECTRAL_WINDOW_MS_MIN (20u)
+#define AVMD_SPECTRAL_WINDOW_MS_MIN (80u)
 #define AVMD_SPECTRAL_WINDOW_MS_MAX (250u)
 #define AVMD_SPECTRAL_MIN_PURITY_DEFAULT (0.80)
 #define AVMD_SPECTRAL_SEARCH_RADIUS_HZ (80.0)
 #define AVMD_SPECTRAL_SEARCH_STEP_HZ (1.0)
 #define AVMD_SPECTRAL_MAX_CONFIRMATION_ATTEMPTS (3u)
+#define AVMD_SPECTRAL_MAX_ANALYSES_PER_FRAME (4u)
 #define AVMD_SPECTRAL_REARM_COOLDOWN_MS (1000u)
 #define AVMD_SPECTRAL_MAX_FRAME_HISTORY_MS (120u)
 #define AVMD_MIN_TONE_DURATION_MS_DEFAULT ((uint16_t)AVMD_BEEP_TIME)
@@ -423,6 +424,7 @@ static switch_status_t avmd_init_buffer(struct avmd_buffer *b, size_t buf_sz, ui
 static switch_status_t init_avmd_session_data(avmd_session_t *avmd_session, switch_core_session_t *fs_session, switch_mutex_t *mutex)
 {
     uint8_t         idx, resolution, offset;
+    uint32_t        allocation_rate;
     size_t          buf_sz;
     size_t          raw_history_samples;
     struct avmd_detector *d;
@@ -434,13 +436,13 @@ static switch_status_t init_avmd_session_data(avmd_session_t *avmd_session, swit
     }
 
     /*! This is a worst case sample rate estimate */
-    avmd_session->rate = 48000;
-    raw_history_samples = (size_t)AVMD_BEEP_LEN(avmd_session->rate);
+    allocation_rate = 48000;
+    raw_history_samples = (size_t)AVMD_BEEP_LEN(allocation_rate);
     if (avmd_session->settings.spectral_confirmation == 1) {
-        raw_history_samples = AVMD_MS_TO_SAMPLES(avmd_session->rate, avmd_session->settings.spectral_window_ms);
-        if (raw_history_samples < AVMD_MS_TO_SAMPLES(avmd_session->rate,
+        raw_history_samples = AVMD_MS_TO_SAMPLES(allocation_rate, avmd_session->settings.spectral_window_ms);
+        if (raw_history_samples < AVMD_MS_TO_SAMPLES(allocation_rate,
                     AVMD_SPECTRAL_MAX_FRAME_HISTORY_MS)) {
-            raw_history_samples = AVMD_MS_TO_SAMPLES(avmd_session->rate,
+            raw_history_samples = AVMD_MS_TO_SAMPLES(allocation_rate,
                     AVMD_SPECTRAL_MAX_FRAME_HISTORY_MS);
         }
     }
@@ -587,8 +589,6 @@ static void avmd_session_close(avmd_session_t *s) {
 }
 
 static switch_bool_t avmd_media_bug_init(avmd_session_t *avmd_session) {
-    switch_codec_t          *read_codec;
-    switch_codec_t          *write_codec;
     switch_core_session_t   *session = avmd_session->session;
     switch_channel_t        *channel = NULL;
 
@@ -603,34 +603,6 @@ static switch_bool_t avmd_media_bug_init(avmd_session_t *avmd_session) {
         return SWITCH_FALSE;
     }
 
-    if ((SWITCH_CALL_DIRECTION_OUTBOUND == switch_channel_direction(channel)) && (avmd_session->settings.outbound_channnel == 1)) {
-        read_codec = switch_core_session_get_read_codec(session);
-        if (read_codec == NULL) {
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "No read codec assigned, default session rate to 8000 samples/s\n");
-            avmd_session->rate = 8000;
-        } else {
-            if (read_codec->implementation == NULL) {
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "No read codec implementation assigned, default session rate to 8000 samples/s\n");
-                avmd_session->rate = 8000;
-            } else {
-                avmd_session->rate = read_codec->implementation->samples_per_second;
-            }
-        }
-    }
-    if ((SWITCH_CALL_DIRECTION_INBOUND == switch_channel_direction(channel)) && (avmd_session->settings.inbound_channnel == 1)) {
-        write_codec = switch_core_session_get_write_codec(session);
-        if (write_codec == NULL) {
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "No write codec assigned, default session rate to 8000 samples/s\n");
-            avmd_session->rate = 8000;
-        } else {
-            if (write_codec->implementation == NULL) {
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "No write codec implementation assigned, default session rate to 8000 samples/s\n");
-                avmd_session->rate = 8000;
-            } else {
-                avmd_session->rate = write_codec->implementation->samples_per_second;
-            }
-        }
-    }
     if (avmd_session->settings.max_frequency > 0.25 * (double)avmd_session->rate) {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
                 "AVMD max_frequency [%.2f Hz] exceeds the unambiguous DESA limit [%.2f Hz] for rate [%u]\n",
@@ -935,6 +907,46 @@ static int avmd_validate_frequency_range(const struct avmd_settings *settings) {
         return -1;
     }
     return 0;
+}
+
+static int avmd_validate_frequency_range_for_rate(
+        const struct avmd_settings *settings,
+        uint32_t rate) {
+    if (avmd_validate_frequency_range(settings) != 0 || rate == 0 ||
+            settings->max_frequency > 0.25 * (double)rate) {
+        return -1;
+    }
+    return 0;
+}
+
+static uint32_t avmd_get_session_rate(switch_core_session_t *session,
+        const struct avmd_settings *settings) {
+    switch_channel_t *channel;
+    switch_codec_t *codec;
+    const char *codec_direction;
+
+    channel = switch_core_session_get_channel(session);
+    codec = NULL;
+    codec_direction = NULL;
+    if (SWITCH_CALL_DIRECTION_OUTBOUND == switch_channel_direction(channel) &&
+            settings->outbound_channnel == 1) {
+        codec = switch_core_session_get_read_codec(session);
+        codec_direction = "read";
+    } else if (SWITCH_CALL_DIRECTION_INBOUND == switch_channel_direction(channel) &&
+            settings->inbound_channnel == 1) {
+        codec = switch_core_session_get_write_codec(session);
+        codec_direction = "write";
+    }
+    if (codec_direction == NULL) {
+        return 8000;
+    }
+    if (codec == NULL || codec->implementation == NULL) {
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                "No %s codec implementation assigned, default session rate to 8000 samples/s\n",
+                codec_direction);
+        return 8000;
+    }
+    return codec->implementation->samples_per_second;
 }
 
 static void avmd_set_xml_default_configuration(switch_mutex_t *mutex) {
@@ -1571,6 +1583,7 @@ static switch_status_t avmd_parse_cmd_data(avmd_session_t *s, switch_core_sessio
     char *mydata;
     struct avmd_settings    settings;
     int argc = 0, idx;
+    uint8_t effective_lagged_detectors;
     char *argv[AVMD_PARAMS_APP_MAX * 2] = { 0 };
     switch_status_t status = SWITCH_STATUS_SUCCESS;
 
@@ -1657,10 +1670,31 @@ end_copy:
                 settings.min_frequency, settings.max_frequency);
         return SWITCH_STATUS_FALSE;
     }
+    effective_lagged_detectors = avmd_candidate_lagged_detector_count(
+            settings.detectors_lagged_n,
+            settings.detectors_n,
+            (uint8_t)(settings.spectral_confirmation == 1 ||
+                settings.min_tone_duration_ms != AVMD_MIN_TONE_DURATION_MS_DEFAULT));
+    if (effective_lagged_detectors != settings.detectors_lagged_n) {
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                "AVMD hardened candidate tracking disables duplicate lagged detectors\n");
+        settings.detectors_lagged_n = effective_lagged_detectors;
+    }
     memcpy(&s->settings, &settings, sizeof (struct avmd_settings)); /* commit the change */
     return SWITCH_STATUS_SUCCESS;
 fail:
     return status;
+}
+
+static switch_status_t avmd_initialize_session_data(avmd_session_t *avmd_session,
+        switch_core_session_t *session,
+        switch_mutex_t *mutex) {
+    avmd_session->rate = avmd_get_session_rate(session, &avmd_session->settings);
+    if (avmd_validate_frequency_range_for_rate(&avmd_session->settings,
+                avmd_session->rate) != 0) {
+        return SWITCH_STATUS_GENERR;
+    }
+    return init_avmd_session_data(avmd_session, session, mutex);
 }
 
 SWITCH_STANDARD_APP(avmd_start_app) {
@@ -1714,14 +1748,14 @@ SWITCH_STANDARD_APP(avmd_start_app) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to set dynamic parameteres for avmd session. Unknown error\n");
             goto end;
     }
-    
+
     report = avmd_session->settings.report_status;
     if (!zstr(data) && strstr(data, "simplified_estimation") != NULL) {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
                 "AVMD option 'simplified_estimation' is deprecated and has no effect\n");
     }
 
-    status = init_avmd_session_data(avmd_session, session, avmd_globals.mutex);
+    status = avmd_initialize_session_data(avmd_session, session, avmd_globals.mutex);
     if (status != SWITCH_STATUS_SUCCESS) {
         switch (status) {
             case SWITCH_STATUS_MEMERR:
@@ -1732,6 +1766,14 @@ SWITCH_STANDARD_APP(avmd_start_app) {
                 break;
             case SWITCH_STATUS_FALSE:
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to init avmd session. SMA buffers error\n");
+                break;
+            case SWITCH_STATUS_GENERR:
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                        "Failed to init avmd session. Invalid AVMD frequency range [%.2f-%.2f Hz] for codec rate [%u]; maximum is [%.2f Hz]\n",
+                        avmd_session->settings.min_frequency,
+                        avmd_session->settings.max_frequency,
+                        avmd_session->rate,
+                        0.25 * (double)avmd_session->rate);
                 break;
             default:
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to init avmd session. Unknown error\n");
@@ -2148,7 +2190,17 @@ SWITCH_STANDARD_API(avmd_api_main) {
     }
 
     avmd_session = (avmd_session_t *) switch_core_session_alloc(fs_session, sizeof(avmd_session_t)); /* Allocate memory attached to this FreeSWITCH session for use in the callback routine and to store state information */
-    status = init_avmd_session_data(avmd_session, fs_session, NULL);
+    if (avmd_session == NULL) {
+        status = SWITCH_STATUS_MEMERR;
+        goto end;
+    }
+    memset(avmd_session, 0, sizeof(*avmd_session));
+    status = avmd_parse_cmd_data(avmd_session, fs_session, NULL, AVMD_APP_START_APP);
+    if (status != SWITCH_STATUS_SUCCESS) {
+        stream->write_function(stream, "-ERR, failed to load avmd settings\n for FreeSWITCH session [%s]\n", uuid);
+        goto end;
+    }
+    status = avmd_initialize_session_data(avmd_session, fs_session, NULL);
     if (status != SWITCH_STATUS_SUCCESS) {
         stream->write_function(stream, "-ERR, failed to initialize avmd session\n for FreeSWITCH session [%s]\n", uuid);
         switch (status) {
@@ -2163,6 +2215,20 @@ SWITCH_STANDARD_API(avmd_api_main) {
             case SWITCH_STATUS_FALSE:
                 stream->write_function(stream, "-ERR, SMA buffer error\n\n");
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(fs_session), SWITCH_LOG_ERROR, "Failed to init avmd session. SMA buffers error\n");
+                break;
+            case SWITCH_STATUS_GENERR:
+                stream->write_function(stream,
+                        "-ERR, invalid AVMD frequency range [%.2f-%.2f Hz] for codec rate [%u]; maximum is [%.2f Hz]\n\n",
+                        avmd_session->settings.min_frequency,
+                        avmd_session->settings.max_frequency,
+                        avmd_session->rate,
+                        0.25 * (double)avmd_session->rate);
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(fs_session), SWITCH_LOG_ERROR,
+                        "Failed to init avmd session. Invalid AVMD frequency range [%.2f-%.2f Hz] for codec rate [%u]; maximum is [%.2f Hz]\n",
+                        avmd_session->settings.min_frequency,
+                        avmd_session->settings.max_frequency,
+                        avmd_session->rate,
+                        0.25 * (double)avmd_session->rate);
                 break;
             default:
                 stream->write_function(stream, "-ERR, unknown error\n\n");
@@ -2402,6 +2468,8 @@ static void avmd_handle_detection_candidate(avmd_session_t *s,
     avmd_spectral_result_t spectral_result;
     int spectral_status;
     int fax_cng;
+    uint8_t analyses;
+    uint8_t analysis_budget;
 
     if (d == NULL) {
         avmd_reset_candidate(s);
@@ -2476,10 +2544,17 @@ static void avmd_handle_detection_candidate(avmd_session_t *s,
         return;
     }
 
+    analyses = 0;
+    analysis_budget = avmd_candidate_analysis_budget(frame_samples,
+            spectral_samples_n, AVMD_SPECTRAL_MAX_ANALYSES_PER_FRAME);
     for (;;) {
         if (s->candidate.confirmation_attempts >= AVMD_SPECTRAL_MAX_CONFIRMATION_ATTEMPTS) {
             return;
         }
+        if (analyses >= analysis_budget) {
+            return;
+        }
+        ++analyses;
         confirmation_end_sample = avmd_candidate_confirmation_window_end(
                 &s->candidate, s->total_samples, spectral_samples_n, s->b.backlog);
         if (confirmation_end_sample == 0 ||
@@ -2618,7 +2693,8 @@ static void avmd_process(avmd_session_t *s, switch_frame_t *frame, uint8_t direc
         if (d->result == AVMD_DETECT_NONE) {
             d->flag_processing_done = 0;
             d->samples = (s->frame_n == 0 ? frame->samples - AVMD_P : frame->samples);
-            d->samples_to_skip = s->settings.sample_n_to_skip;
+            d->samples_to_skip = avmd_candidate_frame_skip_samples(
+                    s->settings.sample_n_to_skip, d->samples);
             switch_thread_cond_signal(d->cond_start_processing);
         }
         switch_mutex_unlock(d->mutex);
@@ -2671,11 +2747,6 @@ static enum avmd_detection_mode avmd_process_sample(avmd_session_t *s, circ_buff
 	}
 	if (observed_frequency_valid != NULL) {
 		*observed_frequency_valid = 0;
-	}
-
-	if (d->samples_to_skip > 0) {
-		--d->samples_to_skip;
-		return AVMD_DETECT_NONE;
 	}
 
     omega = avmd_desa2_tweaked(b, pos + sample_n, &amplitude);
@@ -2850,7 +2921,9 @@ avmd_detector_func(switch_thread_t *thread, void *arg) {
             switch_mutex_unlock(d->mutex);
             sample_n = 1;
             while (sample_n <= samples) {
-                if (((sample_n + offset) % resolution) == 0) {
+                if (d->samples_to_skip > 0) {
+                    --d->samples_to_skip;
+                } else if (((sample_n + offset) % resolution) == 0) {
                     sample_result = avmd_process_sample(d->s, &s->b, sample_n, pos, d,
                             &sample_frequency, &sample_frequency_valid);
                     if (track_exact_duration) {

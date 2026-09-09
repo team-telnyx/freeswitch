@@ -39,10 +39,9 @@
 				smaller the probability of getting false detection -->
 			<param name="sample_n_continuous_streak" value="3"/>
 
-			<!-- define number of samples to skip starting from the beginning
-				 of the frame and/or after reset  has happened. This serves the purpose of skipping first few
-				estimations on each frame, as these estimations may be inaccurate. This parameter also helps
-				to give more robust detections when it's value is increased (up to scertain limit of about 60). -->
+			<!-- Number of raw input samples to skip at the beginning of each frame.
+				 This is applied before detector-resolution subsampling and is clamped
+				 to the current frame size. -->
 			<param name="sample_n_to_skip" value="0"/>
 
 			<param name="require_continuous_streak_amp" value="1"/>
@@ -64,7 +63,10 @@
 			<!-- number of detection threads running per each avmd session -->
 			<param name="detectors_n" value="36"/>
 
-			<!-- number of lagged detection threads running per each avmd session -->
+			<!-- Number of lagged detection threads used by the legacy detector.
+				 Hardened candidate tracking disables them when a primary detector is
+				 configured because its frame-synchronous cursor would otherwise be a
+				 duplicate. A lagged detector is preserved for lagged-only configurations. -->
 			<param name="detectors_lagged_n" value="1"/>
 
 			<!-- DESA candidate frequency limits. These retain the historical
@@ -73,20 +75,25 @@
 			<param name="max_frequency" value="2000"/>
 
 			<!-- Optional bounded confirmation for frequency-mode candidates.
-				 It is disabled by default for backward compatibility. When enabled,
+				 The hardened rollout remains opt-in pending corpus evaluation. Set this
+				 to 1 and min_tone_duration_ms to the selected rollout duration. When enabled,
 				 a dominant single tone must explain spectral_min_purity of the
-				 buffered spectral_window_ms audio window. -->
+				 buffered spectral_window_ms audio window and must not have a comparable
+				 secondary tone. -->
 			<param name="spectral_confirmation" value="0"/>
 			<!-- Optionally reject the ITU-T fax calling-tone band (1100 +/- 40 Hz).
 				 This remains disabled by default because a voicemail beep in that
 				 narrow band is otherwise indistinguishable in a short window. -->
 			<param name="spectral_reject_fax_cng" value="0"/>
+			<!-- 80-250 ms. Shorter windows cannot reliably distinguish a single
+				 tone from nearby dual-tone energy such as 440+480 Hz ringback. -->
 			<param name="spectral_window_ms" value="100"/>
 			<param name="spectral_min_purity" value="0.80"/>
 
 			<!-- Minimum continuous candidate duration. The historical 2 ms
-				 value is retained by default. Spectral confirmation also requires
-				 enough audio to fill spectral_window_ms. -->
+				 value is retained by default. A non-default value selects the
+				 frame-synchronous exact-duration tracker. Spectral confirmation also
+				 requires enough audio to fill spectral_window_ms. -->
 			<param name="min_tone_duration_ms" value="2"/>
 
 		<!-- Per call settings end -->

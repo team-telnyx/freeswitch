@@ -5,6 +5,7 @@
 #include "avmd_candidate.h"
 
 #define TEST_MAX_ATTEMPTS 3u
+#define TEST_MAX_ANALYSES 4u
 #define TEST_REARM_SAMPLES 8000u
 
 static unsigned int failures;
@@ -334,8 +335,68 @@ static void test_frame_positions(void)
 			"legacy lagged detector advances by overlap");
 	check_result(avmd_candidate_frame_position(100u, 200u, 5u, 0u, 1u) == 200u,
 			"hardened detector uses current frame cursor");
-	check_result(avmd_candidate_frame_position(100u, 200u, 5u, 1u, 1u) == 200u,
-			"hardened lagged detector uses current frame cursor");
+	check_result(avmd_candidate_lagged_detector_count(1u, 1u, 0u) == 1u,
+			"legacy mode preserves configured lagged detectors");
+	check_result(avmd_candidate_lagged_detector_count(1u, 1u, 1u) == 0u,
+			"hardened mode disables duplicate lagged detectors");
+	check_result(avmd_candidate_lagged_detector_count(1u, 0u, 1u) == 1u,
+			"hardened lagged-only mode preserves its only detector");
+}
+
+static void test_frame_sample_skip(void)
+{
+	check_result(avmd_candidate_frame_skip_samples(20u, 160u) == 20u,
+			"sample skip counts raw frame samples before detector subsampling");
+	check_result(avmd_candidate_frame_skip_samples(20u, 16u) == 16u,
+			"sample skip is clamped to the current frame size");
+}
+
+static void test_bounded_analysis_budget_keeps_pace(void)
+{
+	avmd_candidate_state_t state;
+	size_t frame_end;
+	size_t history_samples;
+	size_t confirmation_end;
+	uint8_t analyses;
+	uint8_t budget;
+	unsigned int frame;
+
+	check_result(avmd_candidate_analysis_budget(20u, 100u,
+			TEST_MAX_ANALYSES) == 1u,
+			"a sub-window frame permits one analysis");
+	check_result(avmd_candidate_analysis_budget(120u, 100u,
+			TEST_MAX_ANALYSES) == 2u,
+			"a 120-sample frame can catch up across a 100-sample window");
+	check_result(avmd_candidate_analysis_budget(240u, 100u,
+			TEST_MAX_ANALYSES) == 3u,
+			"a 240-sample frame can catch up without losing confirmation history");
+	check_result(avmd_candidate_analysis_budget(1000u, 100u,
+			TEST_MAX_ANALYSES) == TEST_MAX_ANALYSES,
+			"analysis work remains hard capped for an oversized frame");
+
+	avmd_candidate_reset(&state);
+	frame_end = 0;
+	for (frame = 0; frame < 50u; ++frame) {
+		frame_end += 120u;
+		avmd_candidate_observe(&state, 660.0, 33.0, 120u,
+				(uint8_t)(frame != 0u), TEST_REARM_SAMPLES,
+				TEST_MAX_ATTEMPTS);
+		budget = avmd_candidate_analysis_budget(120u, 100u,
+				TEST_MAX_ANALYSES);
+		history_samples = frame_end < 600u ? frame_end : 600u;
+		for (analyses = 0; analyses < budget; ++analyses) {
+			confirmation_end = avmd_candidate_confirmation_window_end(&state,
+					frame_end, 100u, history_samples);
+			if (confirmation_end == 0) {
+				break;
+			}
+			avmd_candidate_record_acceptance(&state,
+					confirmation_end - 100u, confirmation_end);
+			state.next_confirmation_sample = confirmation_end + 100u;
+		}
+	}
+	check_result(state.confirmed_samples == 6000u,
+			"bounded catch-up proves a five-second configured duration without falling behind");
 }
 
 int main(void)
@@ -352,6 +413,8 @@ int main(void)
 	test_confirmed_range_290_300_ms_boundary();
 	test_non_divisible_frame_window_endpoints();
 	test_frame_positions();
+	test_frame_sample_skip();
+	test_bounded_analysis_budget_keeps_pace();
 
 	if (failures != 0u) {
 		fprintf(stderr, "%u candidate test(s) failed\n", failures);

@@ -15,6 +15,7 @@
 #endif
 
 #define TEST_WINDOW_MS (100u)
+#define TEST_MIN_WINDOW_MS (80u)
 #define TEST_SEARCH_RADIUS_HZ (80.0)
 #define TEST_SEARCH_STEP_HZ (1.0)
 #define TEST_PURITY_THRESHOLD (0.80)
@@ -104,6 +105,34 @@ static void test_single_tone(uint32_t rate, double phase, double amplitude)
 	check_result(avmd_spectral_window_has_continuous_candidate(samples, num,
 				rate, 657.5),
 			"single tone preserves candidate-frequency continuity across short blocks");
+
+	free(samples);
+}
+
+static void test_minimum_window_discrimination(uint32_t rate)
+{
+	size_t num;
+	double *samples;
+	avmd_spectral_result_t result;
+
+	num = ((size_t)rate * TEST_MIN_WINDOW_MS) / 1000u;
+	samples = (double *)calloc(num, sizeof(*samples));
+	check_result(samples != NULL, "minimum-window allocation");
+	if (samples == NULL) {
+		return;
+	}
+
+	generate_tone(samples, num, rate, 660.0, 6000.0, M_PI / 17.0);
+	result = analyze(samples, num, rate, 660.0);
+	check_result(avmd_spectral_result_accepted(&result,
+			TEST_PURITY_THRESHOLD, 0u),
+			"minimum accepted window preserves a pure 660 Hz tone");
+
+	generate_tone(samples, num, rate, 440.0, 6000.0, 0.0);
+	add_tone(samples, num, rate, 480.0, 6000.0, M_PI / 3.0);
+	result = analyze(samples, num, rate, 457.6);
+	check_result(!avmd_spectral_result_accepted(&result, 0.40, 0u),
+			"minimum accepted window rejects comparable 440+480 Hz energy");
 
 	free(samples);
 }
@@ -564,6 +593,8 @@ static void test_transfer_ringback(uint32_t rate)
 	check_result(result.purity > 0.40 && result.purity < 0.60,
 			"ringback dominant tone explains about half the energy");
 	check_result(result.secondary_purity > 0.40, "ringback exposes a comparable second peak");
+	check_result(!avmd_spectral_result_accepted(&result, 0.40, 0u),
+			"comparable dual tones remain rejected with a permissive purity setting");
 
 	free(samples);
 }
@@ -801,6 +832,7 @@ int main(void)
 	for (i = 0; i < sizeof(rates) / sizeof(rates[0]); i++) {
 		test_single_tone(rates[i], 0.0, 12000.0);
 		test_single_tone(rates[i], M_PI / 5.0, 1200.0);
+		test_minimum_window_discrimination(rates[i]);
 		test_frequency_boundaries(rates[i]);
 		test_noisy_single_tone(rates[i]);
 		test_greeting_like_interference(rates[i]);

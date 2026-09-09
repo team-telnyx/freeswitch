@@ -236,3 +236,38 @@ size_t avmd_candidate_frame_position(size_t detector_position,
 	}
 	return detector_position;
 }
+
+uint8_t avmd_candidate_lagged_detector_count(uint8_t configured,
+		uint8_t primary_configured,
+		uint8_t hardened)
+{
+	return hardened && primary_configured > 0u ? 0u : configured;
+}
+
+uint16_t avmd_candidate_frame_skip_samples(uint16_t configured,
+		size_t frame_samples)
+{
+	if (frame_samples < (size_t)configured) {
+		return (uint16_t)frame_samples;
+	}
+	return configured;
+}
+
+uint8_t avmd_candidate_analysis_budget(size_t frame_samples,
+		size_t window_samples,
+		uint8_t max_analyses)
+{
+	size_t budget;
+
+	if (window_samples == 0 || max_analyses == 0) {
+		return 0;
+	}
+	budget = frame_samples / window_samples;
+	if (frame_samples % window_samples != 0 || budget == 0) {
+		++budget;
+	}
+	if (budget > max_analyses) {
+		budget = max_analyses;
+	}
+	return (uint8_t)budget;
+}

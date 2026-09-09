@@ -20,6 +20,7 @@ typedef struct {
 
 #define AVMD_FAX_CNG_FREQUENCY_HZ (1100.0)
 #define AVMD_FAX_CNG_TOLERANCE_HZ (40.0)
+#define AVMD_SPECTRAL_MAX_SECONDARY_RATIO (0.50)
 
 extern int avmd_spectral_is_fax_cng(double frequency);
 extern int avmd_spectral_result_accepted(const avmd_spectral_result_t *result,
@@ -38,8 +39,8 @@ extern int avmd_spectral_window_has_continuous_candidate(
 
 /*
  * Search a narrow band around the DESA candidate. A true single tone should
- * explain most of the window energy. Equal-power dual tones explain roughly
- * half of it at either component and are rejected by a high purity threshold.
+ * explain most of the window energy. A separate dominant/secondary ratio gate
+ * rejects comparable dual tones even when the configured purity is permissive.
  */
 extern int avmd_spectral_analyze(const double *samples,
 		size_t num,
