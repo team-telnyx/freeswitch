@@ -6721,8 +6721,6 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						profile->default_ringback = switch_core_strdup(profile->pool, val);
 					} else if (!strcasecmp(var, "ringback-on-mismatch-media")) {
 						profile->ringback_on_mismatch_media = switch_core_strdup(profile->pool, val);
-					} else if (!strcasecmp(var, "ring-ready-early-media-ringback")) {
-						profile->ring_ready_early_media_ringback = switch_core_strdup(profile->pool, val);
 					} else if (!strcasecmp(var, "proxy-notify-events")) {
 						profile->proxy_notify_events = switch_core_strdup(profile->pool, val);
 					} else if (!strcasecmp(var, "proxy-info-content-types")) {
