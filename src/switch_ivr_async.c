@@ -5622,26 +5622,23 @@ struct speech_thread_handle {
 	switch_thread_t *thread;
 	int ready;
 	int closing;
-	int stopped;
 };
 
 /* Wake speech_thread and wait until it can no longer be inside the ASR module.
  *
- * Taking the mutex at all is what makes it stop: the holder is either parked in
- * switch_thread_cond_wait() and takes the signal, or has not locked yet, and
- * then its own lock orders it after the closing store -- which a bare read of a
- * predicate written from this thread does not guarantee. So the retry is only
- * for the case where the mutex cannot be taken, which is a thread wedged inside
- * a module callback.
- *
- * sth->stopped is only a hint: it is written without the mutex, so it has no
- * release/acquire pairing and may be seen late. Nothing depends on it -- the
- * join is what actually guarantees the thread is gone -- and a missed read
- * costs at most one more pass.
+ * Taking the mutex is the whole test. speech_thread holds it for its entire run
+ * and gives it up only inside switch_thread_cond_wait() and once on the way
+ * out, so a successful trylock means the thread is parked in the cond wait and
+ * takes the signal, has not locked yet -- and then its own lock orders it after
+ * the closing store -- or has already left. Any of those means it is not inside
+ * a module callback. Failing to take it is the wedged case, and that is all the
+ * retry is for. No separate predicate is read here: an unsynchronised flag
+ * would be a data race, and a synchronised one would say nothing the lock does
+ * not already say.
  */
 static int speech_thread_wait_stop(struct speech_thread_handle *sth, switch_time_t expires)
 {
-	while (!sth->stopped && switch_micro_time_now() < expires) {
+	while (switch_micro_time_now() < expires) {
 		if (switch_mutex_trylock(sth->mutex) == SWITCH_STATUS_SUCCESS) {
 			switch_thread_cond_signal(sth->cond);
 			switch_mutex_unlock(sth->mutex);
@@ -5650,7 +5647,7 @@ static int speech_thread_wait_stop(struct speech_thread_handle *sth, switch_time
 		switch_yield(1000);
 	}
 
-	return sth->stopped;
+	return 0;
 }
 
 static void *SWITCH_THREAD_FUNC speech_thread(switch_thread_t *thread, void *obj)
@@ -5663,7 +5660,6 @@ static void *SWITCH_THREAD_FUNC speech_thread(switch_thread_t *thread, void *obj
 
 	if (switch_core_session_read_lock(sth->session) != SWITCH_STATUS_SUCCESS) {
 		sth->ready = 0;
-		sth->stopped = 1;
 		return NULL;
 	}
 
@@ -5805,8 +5801,6 @@ static void *SWITCH_THREAD_FUNC speech_thread(switch_thread_t *thread, void *obj
 			switch_event_destroy(&event);
 		}
 	}
-
-	sth->stopped = 1;
 
 	switch_mutex_unlock(sth->mutex);
 	switch_core_session_rwunlock(sth->session);
