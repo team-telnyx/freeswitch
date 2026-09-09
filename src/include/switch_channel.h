@@ -631,6 +631,35 @@ SWITCH_DECLARE(void) switch_channel_flush_dtmf(_In_ switch_channel_t *channel);
 SWITCH_DECLARE(switch_size_t) switch_channel_dequeue_dtmf_string(_In_ switch_channel_t *channel, _Out_opt_bytecapcount_(len)
 																 char *dtmf_str, _In_ switch_size_t len);
 
+/*! Subclass of the CUSTOM event fired once an outbound digit has been transmitted. */
+#define SWITCH_EVENT_SUBCLASS_DTMF_SENT "telnyx::dtmf_sent"
+
+/*!
+  \brief Fire the confirmation event for a digit we finished sending
+  \param channel channel the digit was sent on
+  \param dtmf the digit being sent; its duration is the one we set out to send, which
+              may already have been clamped to the min/max dtmf duration
+  \param sent_duration duration actually transmitted, in samples_per_second samples
+                       (not in dtmf->duration's 8kHz domain -- the two only coincide
+                       on an 8kHz session)
+  \param samples_per_second rate sent_duration is expressed in, 0 if unknown
+  \param method transport the digit was sent with ("RFC2833")
+  \note Unlike SWITCH_EVENT_DTMF, which is a receive-side event, this is fired
+        only after the digit has left the switch. It also always goes to the event
+        bus, where SWITCH_EVENT_DTMF honours CF_DIVERT_EVENTS.
+  \note sent_duration is not a truncation check. A transport emits whole packet
+        intervals and only reports once it has covered the requested duration, so
+        compared like for like it lands on or past dtmf->duration and measures
+        overshoot from scheduling gaps. A digit abandoned before it finished -- the
+        genuinely truncated case -- fires nothing, so a consumer needs a timeout
+        rather than a short duration to detect it. The two figures can still
+        disagree downwards across clock domains, which is what the millisecond
+        headers exist to expose.
+*/
+SWITCH_DECLARE(void) switch_channel_fire_dtmf_sent_event(_In_ switch_channel_t *channel, _In_ const switch_dtmf_t *dtmf,
+														 _In_ uint32_t sent_duration, _In_ uint32_t samples_per_second,
+														 _In_z_ const char *method);
+
 /*!
   \brief Render the name of the provided state enum
   \param state state to get name of

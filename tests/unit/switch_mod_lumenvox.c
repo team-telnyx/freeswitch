@@ -111,6 +111,12 @@ FST_CORE_BEGIN("./conf_lumenvox")
 			switch_asr_handle_t ah = { 0 };
 			fst_requires(lv_open(&ah, fst_pool) == SWITCH_STATUS_SUCCESS);
 
+			/* Keep this test about bookkeeping only. By default (matching
+			 * mod_unimrcp) loading a grammar disables the others and starts
+			 * recognition immediately, which would make every assertion below
+			 * depend on the ASR engine being provisioned server-side. */
+			switch_core_asr_text_param(&ah, "start-recognize", "false");
+
 			/* load two grammars */
 			fst_check(switch_core_asr_load_grammar(&ah, "builtin:digits", "g1") == SWITCH_STATUS_SUCCESS);
 			fst_check(switch_core_asr_load_grammar(&ah, "builtin:boolean", "g2") == SWITCH_STATUS_SUCCESS);
@@ -160,6 +166,17 @@ FST_CORE_BEGIN("./conf_lumenvox")
 			switch_core_asr_numeric_param(&ah, "confidence-threshold", 500);
 			switch_core_asr_numeric_param(&ah, "n-best-list-length", 3);
 			switch_core_asr_float_param(&ah, "confidence-threshold", 0.5);
+
+			/* The core only ever routes params through asr_text_param, so the
+			 * numeric/float params must also be reachable as text. Both
+			 * confidence-threshold spellings are exercised: integer (0-1000)
+			 * and float (0.0-1.0). */
+			switch_core_asr_text_param(&ah, "no-input-timeout", "5000");
+			switch_core_asr_text_param(&ah, "recognition-timeout", "10000");
+			switch_core_asr_text_param(&ah, "speech-complete-timeout", "2000");
+			switch_core_asr_text_param(&ah, "n-best-list-length", "3");
+			switch_core_asr_text_param(&ah, "confidence-threshold", "500");
+			switch_core_asr_text_param(&ah, "confidence-threshold", "0.5");
 
 			/* nothing recognized yet */
 			fst_check(switch_core_asr_check_results(&ah, &flags) != SWITCH_STATUS_SUCCESS);
@@ -244,6 +261,388 @@ FST_CORE_BEGIN("./conf_lumenvox")
 			for (i = 0; i < 2; i++) {
 				switch_core_asr_resume(&ah);
 				fst_check(switch_core_asr_pause(&ah) == SWITCH_STATUS_SUCCESS);
+			}
+
+			fst_requires(lv_close(&ah) == SWITCH_STATUS_SUCCESS);
+			}
+		}
+		FST_TEST_END()
+
+		/* builtin:special/cpa and /amd select CPA and AMD interactions instead
+		 * of a grammar recognition. The classification is case-insensitive and
+		 * tolerates a ?query suffix. Asserted through load+enable bookkeeping
+		 * with recognition suppressed, so this does not depend on CPA being
+		 * provisioned. Live-only: needs an open handle. */
+		FST_TEST_BEGIN(asr_cpa_amd_grammar_classification)
+		{
+			if (lv_live()) {
+			switch_asr_handle_t ah = { 0 };
+			fst_requires(lv_open(&ah, fst_pool) == SWITCH_STATUS_SUCCESS);
+
+			/* Nothing may start on load; the starts below are the assertions. */
+			switch_core_asr_text_param(&ah, "start-recognize", "false");
+
+			fst_check(switch_core_asr_load_grammar(&ah, "builtin:special/cpa", "cpa") == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_load_grammar(&ah, "BUILTIN:SPECIAL/AMD", "amd") == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_load_grammar(&ah, "builtin:special/cpa?x=1", "cpaq") == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_load_grammar(&ah, "builtin:digits", "plain") == SWITCH_STATUS_SUCCESS);
+
+			/* load_grammar succeeds for any non-empty string, so it proves
+			 * nothing about classification on its own. What the kind is only
+			 * becomes observable through the mixed-mode guard: a start succeeds
+			 * when every enabled grammar classifies the same way, and fails
+			 * when they disagree. Each case below is chosen so that a
+			 * classify_grammar() which stopped recognising these URIs -- and
+			 * therefore returned ASR for all of them -- flips the result. */
+
+			/* Canonical and ?query-suffixed forms agree, so this starts. If the
+			 * suffix stopped matching, this would be CPA + ASR and fail. */
+			fst_check(switch_core_asr_disable_all_grammars(&ah) == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_enable_grammar(&ah, "cpa") == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_enable_grammar(&ah, "cpaq") == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_resume(&ah) == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_pause(&ah) == SWITCH_STATUS_SUCCESS);
+
+			/* Upper-case AMD against CPA: two different kinds, so rejected.
+			 * If matching were case-sensitive the AMD entry would fall through
+			 * to ASR -- still a mismatch -- so this case alone is not enough,
+			 * which is what the previous case covers. */
+			fst_check(switch_core_asr_disable_all_grammars(&ah) == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_enable_grammar(&ah, "cpa") == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_enable_grammar(&ah, "amd") == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_resume(&ah) != SWITCH_STATUS_SUCCESS);
+
+			/* An ordinary grammar against CPA is likewise rejected. This is the
+			 * case that fails if builtin:special/cpa is no longer recognised,
+			 * because then both would be ASR and the start would be allowed. */
+			fst_check(switch_core_asr_disable_all_grammars(&ah) == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_enable_grammar(&ah, "plain") == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_enable_grammar(&ah, "cpa") == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_resume(&ah) != SWITCH_STATUS_SUCCESS);
+
+			fst_requires(lv_close(&ah) == SWITCH_STATUS_SUCCESS);
+			}
+		}
+		FST_TEST_END()
+
+		/* CPA and AMD cannot run in one recognition: lv_session tracks a single
+		 * interaction. The start must fail cleanly rather than picking one
+		 * arbitrarily or crashing. This is stricter than mod_unimrcp, which
+		 * would have passed both URIs to the MRCP server. Live-only. */
+		FST_TEST_BEGIN(asr_mixed_cpa_amd_rejected)
+		{
+			if (lv_live()) {
+			switch_asr_handle_t ah = { 0 };
+			fst_requires(lv_open(&ah, fst_pool) == SWITCH_STATUS_SUCCESS);
+			switch_core_asr_text_param(&ah, "start-recognize", "false");
+
+			fst_check(switch_core_asr_load_grammar(&ah, "builtin:special/cpa", "cpa") == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_load_grammar(&ah, "builtin:special/amd", "amd") == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_enable_grammar(&ah, "cpa") == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_enable_grammar(&ah, "amd") == SWITCH_STATUS_SUCCESS);
+
+			fst_check(switch_core_asr_resume(&ah) != SWITCH_STATUS_SUCCESS);
+
+			/* Disabling one of them makes the recognition startable again. */
+			fst_check(switch_core_asr_disable_grammar(&ah, "amd") == SWITCH_STATUS_SUCCESS);
+
+			fst_requires(lv_close(&ah) == SWITCH_STATUS_SUCCESS);
+			}
+		}
+		FST_TEST_END()
+
+		/* start-input-timers=false defers the no-input timer, and arming it
+		 * makes the module enforce the timeout itself: the withheld timeout is
+		 * not sent to the server, so the completion below is generated locally
+		 * and does not depend on any engine being provisioned.
+		 *
+		 * Asserts the whole deferred-timer mechanism end to end: cause 002, the
+		 * mod_unimrcp sentinel body, and the ASR-Completion-Cause header.
+		 * Live-only: creating the interaction needs a reachable server. */
+		FST_TEST_BEGIN(asr_deferred_no_input_fires)
+		{
+			if (lv_live()) {
+			switch_asr_handle_t ah = { 0 };
+			switch_asr_flag_t flags = SWITCH_ASR_FLAG_NONE;
+			int16_t frame[160];                 /* 20 ms @ 8 kHz mono L16 */
+			char *xmlstr = NULL;
+			switch_event_t *headers = NULL;
+			int i, got = 0;
+
+			memset(frame, 0, sizeof(frame));
+			fst_requires(lv_open(&ah, fst_pool) == SWITCH_STATUS_SUCCESS);
+			switch_core_asr_text_param(&ah, "start-input-timers", "false");
+			switch_core_asr_text_param(&ah, "no-input-timeout", "300");
+
+			fst_check(switch_core_asr_load_grammar(&ah, "builtin:special/cpa", "cpa") == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_start_input_timers(&ah) == SWITCH_STATUS_SUCCESS);
+
+			/* The deadline is evaluated from check_results, which the core
+			 * drives from the media bug on every frame. Drive it the same way. */
+			for (i = 0; i < 100 && !got; i++) {
+				switch_core_asr_feed(&ah, frame, sizeof(frame), &flags);
+				if (switch_core_asr_check_results(&ah, &flags) == SWITCH_STATUS_SUCCESS) {
+					got = 1;
+					break;
+				}
+				switch_sleep(20000);
+			}
+			fst_check(got == 1);
+
+			if (got) {
+				fst_check(switch_core_asr_get_results(&ah, &xmlstr, &flags) == SWITCH_STATUS_SUCCESS);
+				fst_check(xmlstr != NULL);
+				if (xmlstr) {
+					fst_check(strstr(xmlstr, "Completion-Cause: 002") != NULL);
+					switch_safe_free(xmlstr);
+				}
+				fst_check(switch_core_asr_get_result_headers(&ah, &headers, &flags) == SWITCH_STATUS_SUCCESS);
+				if (headers) {
+					const char *cause = switch_event_get_header(headers, "ASR-Completion-Cause");
+					fst_check(cause != NULL && !strcmp(cause, "002"));
+					switch_event_destroy(&headers);
+				}
+			}
+
+			fst_requires(lv_close(&ah) == SWITCH_STATUS_SUCCESS);
+			}
+		}
+		FST_TEST_END()
+
+		/* The deferred timeout must survive a restart. Withholding it from the
+		 * create request must not consume the configured value, or the second
+		 * interaction silently defers nothing -- which is exactly the shape of
+		 * a sequential CPA-then-AMD run, the documented way to use both.
+		 * Live-only. */
+		FST_TEST_BEGIN(asr_deferred_no_input_survives_restart)
+		{
+			if (lv_live()) {
+			switch_asr_handle_t ah = { 0 };
+			switch_asr_flag_t flags = SWITCH_ASR_FLAG_NONE;
+			int16_t frame[160];
+			char *xmlstr = NULL;
+			int round, i, got;
+
+			memset(frame, 0, sizeof(frame));
+			fst_requires(lv_open(&ah, fst_pool) == SWITCH_STATUS_SUCCESS);
+			switch_core_asr_text_param(&ah, "start-input-timers", "false");
+			switch_core_asr_text_param(&ah, "no-input-timeout", "300");
+
+			for (round = 0; round < 2; round++) {
+				got = 0;
+				fst_check(switch_core_asr_load_grammar(&ah, "builtin:special/cpa", "cpa") == SWITCH_STATUS_SUCCESS);
+				fst_check(switch_core_asr_start_input_timers(&ah) == SWITCH_STATUS_SUCCESS);
+
+				for (i = 0; i < 100 && !got; i++) {
+					switch_core_asr_feed(&ah, frame, sizeof(frame), &flags);
+					if (switch_core_asr_check_results(&ah, &flags) == SWITCH_STATUS_SUCCESS) {
+						got = 1;
+						break;
+					}
+					switch_sleep(20000);
+				}
+				/* The second round is the regression: it fails if the first
+				 * consumed the configured timeout. */
+				fst_check(got == 1);
+				if (got && switch_core_asr_get_results(&ah, &xmlstr, &flags) == SWITCH_STATUS_SUCCESS) {
+					switch_safe_free(xmlstr);
+				}
+				fst_check(switch_core_asr_pause(&ah) == SWITCH_STATUS_SUCCESS);
+			}
+
+			fst_requires(lv_close(&ah) == SWITCH_STATUS_SUCCESS);
+			}
+		}
+		FST_TEST_END()
+
+		/* Pausing disarms the deadline. check_results keeps being called while
+		 * paused, so an armed deadline would otherwise expire and deliver a
+		 * no-input for a recognition that is no longer running. Live-only. */
+		FST_TEST_BEGIN(asr_paused_deadline_does_not_fire)
+		{
+			if (lv_live()) {
+			switch_asr_handle_t control = { 0 };
+			switch_asr_handle_t ah = { 0 };
+			switch_asr_flag_t flags = SWITCH_ASR_FLAG_NONE;
+			int i, got = 0;
+
+			/* Positive control first. "No result after pausing" is only
+			 * meaningful if the deadline would otherwise have fired -- without
+			 * this, a deadline that was never armed at all would pass the
+			 * assertion below just as happily. */
+			fst_requires(lv_open(&control, fst_pool) == SWITCH_STATUS_SUCCESS);
+			switch_core_asr_text_param(&control, "start-input-timers", "false");
+			switch_core_asr_text_param(&control, "no-input-timeout", "200");
+			fst_check(switch_core_asr_load_grammar(&control, "builtin:special/cpa", "cpa") == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_start_input_timers(&control) == SWITCH_STATUS_SUCCESS);
+			for (i = 0; i < 100 && !got; i++) {
+				if (switch_core_asr_check_results(&control, &flags) == SWITCH_STATUS_SUCCESS) {
+					got = 1;
+					break;
+				}
+				switch_sleep(10000);
+			}
+			fst_check(got == 1);
+			fst_requires(lv_close(&control) == SWITCH_STATUS_SUCCESS);
+
+			/* Same setup, but paused straight after arming: the deadline must
+			 * not fire for a recognition that is no longer running. */
+			fst_requires(lv_open(&ah, fst_pool) == SWITCH_STATUS_SUCCESS);
+			switch_core_asr_text_param(&ah, "start-input-timers", "false");
+			switch_core_asr_text_param(&ah, "no-input-timeout", "200");
+
+			fst_check(switch_core_asr_load_grammar(&ah, "builtin:special/cpa", "cpa") == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_start_input_timers(&ah) == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_asr_pause(&ah) == SWITCH_STATUS_SUCCESS);
+
+			/* Well past the deadline the control just demonstrated. */
+			for (i = 0; i < 30; i++) {
+				fst_check(switch_core_asr_check_results(&ah, &flags) != SWITCH_STATUS_SUCCESS);
+				switch_sleep(20000);
+			}
+
+			fst_requires(lv_close(&ah) == SWITCH_STATUS_SUCCESS);
+			}
+		}
+		FST_TEST_END()
+
+		/* Arming the timer after start-of-input has fired is a no-op, mirroring
+		 * mod_unimrcp: a late start-input-timers must not kill a recognition
+		 * that is already underway. With no recognition in flight the call is
+		 * simply harmless, which is what is asserted offline-safely here.
+		 * Live-only: needs an open handle. */
+		FST_TEST_BEGIN(asr_start_input_timers_is_idempotent)
+		{
+			if (lv_live()) {
+			switch_asr_handle_t ah = { 0 };
+			switch_asr_flag_t flags = SWITCH_ASR_FLAG_NONE;
+
+			switch_time_t started;
+			int i, rearmed = 0, got = 0, elapsed_ms = 0;
+
+			fst_requires(lv_open(&ah, fst_pool) == SWITCH_STATUS_SUCCESS);
+			switch_core_asr_text_param(&ah, "start-input-timers", "false");
+			switch_core_asr_text_param(&ah, "no-input-timeout", "400");
+			fst_check(switch_core_asr_load_grammar(&ah, "builtin:special/cpa", "cpa") == SWITCH_STATUS_SUCCESS);
+
+			/* Arm once, arm again part-way, and measure when the deadline
+			 * lands. Asserting only that the calls return SUCCESS proves
+			 * nothing -- every path returns SUCCESS, including one that
+			 * re-armed. The timing is what separates the two: measured from
+			 * the first arming the result is due at ~400 ms, whereas a re-arm
+			 * at 250 ms would push it to ~650 ms. */
+			started = switch_time_now();
+			fst_check(switch_core_asr_start_input_timers(&ah) == SWITCH_STATUS_SUCCESS);
+
+			for (i = 0; i < 200 && !got; i++) {
+				elapsed_ms = (int) ((switch_time_now() - started) / 1000);
+				if (!rearmed && elapsed_ms >= 250) {
+					fst_check(switch_core_asr_start_input_timers(&ah) == SWITCH_STATUS_SUCCESS);
+					rearmed = 1;
+				}
+				if (switch_core_asr_check_results(&ah, &flags) == SWITCH_STATUS_SUCCESS) {
+					got = 1;
+					break;
+				}
+				switch_sleep(10000);
+			}
+
+			fst_check(rearmed == 1);   /* the re-arm actually happened */
+			fst_check(got == 1);
+			elapsed_ms = (int) ((switch_time_now() - started) / 1000);
+			fst_check(elapsed_ms < 600);
+
+			fst_requires(lv_close(&ah) == SWITCH_STATUS_SUCCESS);
+			}
+		}
+		FST_TEST_END()
+
+		/* End-to-end CPA classification through the module: feed real speech
+		 * and assert the deployment classifies it, with the NLSML and the
+		 * completion headers arriving the way a dialplan would see them.
+		 *
+		 * Needs a speech sample, so it is gated on LV_TEST_AUDIO (raw 8 kHz
+		 * mono S16LE) as well as LV_TEST_TARGET -- no suitable audio ships in
+		 * the tree. Generate one with any TTS, e.g. AWS Polly with
+		 * OutputFormat=pcm and SampleRate=8000.
+		 *
+		 * Note what CPA does and does not tell you: it returns HUMAN RESIDENCE,
+		 * HUMAN BUSINESS, UNKNOWN SPEECH or UNKNOWN SILENCE, and *every* one of
+		 * them is completion cause 000. There is no MACHINE classification --
+		 * an answering machine surfaces as UNKNOWN SPEECH, which is
+		 * indistinguishable from a human who talks past human-business-time.
+		 * So the assertion here is on the transcript, never on the cause. */
+		FST_TEST_BEGIN(asr_cpa_classifies_speech)
+		{
+			const char *audio_path = getenv("LV_TEST_AUDIO");
+			if (lv_live() && audio_path && *audio_path) {
+			switch_asr_handle_t ah = { 0 };
+			switch_asr_flag_t flags = SWITCH_ASR_FLAG_NONE;
+			int16_t frame[160];                 /* 20 ms @ 8 kHz mono L16 */
+			char *xmlstr = NULL;
+			switch_event_t *headers = NULL;
+			FILE *f = fopen(audio_path, "rb");
+			int got = 0, i;
+			size_t n;
+
+			fst_requires(f != NULL);
+			fst_requires(lv_open(&ah, fst_pool) == SWITCH_STATUS_SUCCESS);
+
+			/* Exercise the CPA param surface on the way through, so a field
+			 * the server rejects shows up as a failure to classify rather than
+			 * passing unnoticed -- a rejected request is only a warning now.
+			 * speech-complete-timeout is VadSettings.eos_delay_ms, which the
+			 * Call Control API drives as after_greeting_silence_millis. */
+			switch_core_asr_text_param(&ah, "cpa-human-business-time", "4000");
+			switch_core_asr_text_param(&ah, "speech-complete-timeout", "1200");
+
+			/* start-recognize defaults true, so loading starts the CPA
+			 * interaction immediately -- the production shape. */
+			fst_check(switch_core_asr_load_grammar(&ah, "builtin:special/cpa", "cpa") == SWITCH_STATUS_SUCCESS);
+
+			/* Feed at roughly twice real time. The classifier measures speech
+			 * in audio duration, not wall clock, but pacing keeps the audio
+			 * queue well inside its bound. */
+			while ((n = fread(frame, 1, sizeof(frame), f)) > 0 && !got) {
+				if (switch_core_asr_feed(&ah, frame, (unsigned int) n, &flags) != SWITCH_STATUS_SUCCESS) {
+					break;
+				}
+				if (switch_core_asr_check_results(&ah, &flags) == SWITCH_STATUS_SUCCESS) {
+					got = 1;
+					break;
+				}
+				switch_sleep(10000);
+			}
+			fclose(f);
+
+			/* Audio may run out before the classifier commits; keep polling. */
+			memset(frame, 0, sizeof(frame));
+			for (i = 0; i < 400 && !got; i++) {
+				switch_core_asr_feed(&ah, frame, sizeof(frame), &flags);
+				if (switch_core_asr_check_results(&ah, &flags) == SWITCH_STATUS_SUCCESS) {
+					got = 1;
+					break;
+				}
+				switch_sleep(10000);
+			}
+
+			fst_check(got == 1);
+			if (got) {
+				fst_check(switch_core_asr_get_results(&ah, &xmlstr, &flags) == SWITCH_STATUS_SUCCESS);
+				fst_check(xmlstr != NULL);
+				if (xmlstr) {
+					/* A real classification, not the no-result sentinel. */
+					fst_check(strstr(xmlstr, "Completion-Cause:") == NULL);
+					fst_check(strstr(xmlstr, "<interpretation") != NULL);
+					fst_check(strstr(xmlstr, "HUMAN") != NULL || strstr(xmlstr, "UNKNOWN") != NULL);
+					switch_safe_free(xmlstr);
+				}
+				fst_check(switch_core_asr_get_result_headers(&ah, &headers, &flags) == SWITCH_STATUS_SUCCESS);
+				if (headers) {
+					const char *cause = switch_event_get_header(headers, "ASR-Completion-Cause");
+					fst_check(cause != NULL && !strcmp(cause, "000"));
+					switch_event_destroy(&headers);
+				}
 			}
 
 			fst_requires(lv_close(&ah) == SWITCH_STATUS_SUCCESS);

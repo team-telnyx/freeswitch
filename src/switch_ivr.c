@@ -530,6 +530,20 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 
 	switch_channel_set_flag_recursive(channel, CF_EVENT_PARSE);
 
+	/* Clear stale break flags before the lead-frames wait so any break
+	 * raised after this point (during the wait, file_open, or playback)
+	 * is durable. Previously, CF_STOP_BROADCAST was cleared after the wait and
+	 * CF_BREAK was cleared by switch_core_session_exec, making any stop
+	 * arriving during the lead-frames wait silently discarded.
+	 *
+	 * This must stay ahead of the lead-frames wait below. Moving it later --
+	 * into the app_name block, or into the loops iteration -- reinstates the
+	 * bug, because the wait is where most stops land. */
+	if (cmd_hash == CMD_EXECUTE) {
+		switch_channel_clear_flag(channel, CF_STOP_BROADCAST);
+		switch_channel_clear_flag(channel, CF_BREAK);
+	}
+
 	if (switch_true(event_lock)) {
 		switch_channel_set_flag_recursive(channel, CF_EVENT_LOCK);
 		el = 1;
@@ -579,8 +593,6 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 			int x;
 			const char *b_uuid = NULL;
 			switch_core_session_t *b_session = NULL;
-
-			switch_channel_clear_flag(channel, CF_STOP_BROADCAST);
 
 			if (!switch_channel_test_flag(channel, CF_BRIDGED) || switch_channel_test_flag(channel, CF_HOLD_BLEG)) {
 				inner++;
@@ -632,6 +644,16 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 			for (x = 0; x < loops || loops < 0; x++) {
 				switch_time_t b4, aftr;
 
+				/* Reset the break between iterations only. The application no
+				 * longer clears CF_BREAK for us, so a break raised late in
+				 * iteration N and never consumed would otherwise abort N+1 and
+				 * terminate the whole loop (e.g. silencing looped hold music).
+				 * Iteration 0 must NOT be cleared: a break raised while this
+				 * command was waiting on lead-frames belongs to it. */
+				if (x > 0) {
+					switch_channel_clear_flag(channel, CF_BREAK);
+				}
+
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s Command Execute [depth=%d] %s(%s)\n",
 								  switch_channel_get_name(channel), switch_core_session_stack_count(session, 0), app_name, switch_str_nil(app_arg));
 				b4 = switch_micro_time_now();
@@ -646,7 +668,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 				switch_channel_set_variable_printf(channel, "current_loop", "%d", x + 1);
 				switch_channel_set_variable_printf(channel, "total_loops", "%d", loops);
 
-				if (switch_core_session_execute_application(session, app_name, app_arg) != SWITCH_STATUS_SUCCESS) {
+				if (switch_core_session_execute_application_event(session, app_name, app_arg) != SWITCH_STATUS_SUCCESS) {
 					if (!inner || switch_channel_test_flag(channel, CF_STOP_BROADCAST)) switch_channel_clear_flag(channel, CF_BROADCAST);
 					break;
 				}

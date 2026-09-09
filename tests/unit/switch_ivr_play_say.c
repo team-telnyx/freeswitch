@@ -471,6 +471,83 @@ FST_CORE_BEGIN("./conf_playsay")
 			unlink(record_filename);
 		}
 		FST_SESSION_END()
+
+		/*
+		 * break_during_lead_frames_stops_playback: end-to-end guard for the
+		 * playback_stop race. A queued broadcast waits out its lead-frames
+		 * before the app runs; a break raised inside that wait must survive
+		 * into switch_ivr_play_file and stop the file.
+		 *
+		 * Before the fix, switch_ivr_parse_event cleared CF_STOP_BROADCAST
+		 * after the wait and switch_core_session_exec cleared CF_BREAK just
+		 * before the app, so the stop was discarded and the whole 20s file
+		 * played. The duration assertion is what detects that: ~3-6s of
+		 * lead-frames plus an immediate break, versus 20s+ of playback.
+		 */
+		FST_SESSION_BEGIN(break_during_lead_frames_stops_playback)
+		{
+			switch_event_t *event = NULL;
+			switch_stream_handle_t stream = { 0 };
+			switch_status_t status;
+			char cmd[256];
+
+			fst_requires_module("mod_commands");
+
+			/*
+			 * The lead-frames wait is gated on media being up, and both
+			 * assertions below depend on that wait actually running. Assert it
+			 * rather than letting the test quietly measure something else.
+			 */
+			fst_requires(switch_channel_media_ready(fst_channel));
+
+			fst_requires(switch_event_create(&event, SWITCH_EVENT_COMMAND) == SWITCH_STATUS_SUCCESS);
+			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "call-command", "execute");
+			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-name", "playback");
+			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-arg", "silence_stream://20000");
+			/* same header switch_ivr_broadcast stamps on every queued command */
+			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "lead-frames", "150");
+
+			/* fire the break ~2s from now, i.e. inside the lead-frames wait */
+			switch_snprintf(cmd, sizeof(cmd), "+2 none uuid_break %s", switch_core_session_get_uuid(fst_session));
+			SWITCH_STANDARD_STREAM(stream);
+			fst_requires(switch_api_execute("sched_api", cmd, NULL, &stream) == SWITCH_STATUS_SUCCESS);
+			switch_safe_free(stream.data);
+
+			fst_time_mark();
+			status = switch_ivr_parse_event(fst_session, event);
+
+			/*
+			 * SUCCESS, not BREAK. Two things have to line up for that.
+			 *
+			 * switch_ivr_play_file consumes the flag -- it clears CF_BREAK
+			 * before returning -- and parse_event's return expression is
+			 * "test_flag(CF_BREAK) ? BREAK : status", so the flag is already
+			 * gone by then. Nothing re-raises it, because CF_STOP_BROADCAST is
+			 * never set: parse_event raises CF_BROADCAST itself, but only
+			 * after the lead-frames wait, and uuid_break fires during the
+			 * wait. Seeing CF_BROADCAST still clear, uuid_break takes its else
+			 * branch and sets CF_BREAK alone.
+			 *
+			 * That ordering is exactly what the media_ready guard above
+			 * protects. Without media the wait is skipped, CF_BROADCAST is
+			 * already up when uuid_break fires, it calls stop_broadcast
+			 * instead, and the post-loop CF_STOP_BROADCAST branch re-raises
+			 * CF_BREAK -- parse_event would return BREAK and this would fail.
+			 */
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+
+			/*
+			 * Duration is the real assertion. With media up the wait runs 150
+			 * non-CNG frames, a 3000ms floor capped at 6000ms by max_frames,
+			 * then the surviving break cuts playback immediately. 1500-7500
+			 * covers that range with margin and still fails hard on the
+			 * regression, which is 20s+ of audio.
+			 */
+			fst_check_duration(4500, 3000);
+
+			switch_event_destroy(&event);
+		}
+		FST_SESSION_END()
 	}
 	FST_SUITE_END()
 }

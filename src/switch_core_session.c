@@ -2919,8 +2919,14 @@ SWITCH_DECLARE(void) switch_core_session_video_reset(switch_core_session_t *sess
 	switch_core_session_request_video_refresh(session);
 }
 
-SWITCH_DECLARE(switch_status_t) switch_core_session_execute_application_get_flags(switch_core_session_t *session, const char *app,
-																				  const char *arg, int32_t *flags)
+/* forward declaration -- execute_application_impl calls exec_impl
+ * before its own definition later in this file. */
+static switch_status_t switch_core_session_exec_impl(switch_core_session_t *session,
+								     const switch_application_interface_t *application_interface,
+								     const char *arg, switch_bool_t clear_break);
+
+static switch_status_t switch_core_session_execute_application_impl(switch_core_session_t *session, const char *app,
+																				  const char *arg, int32_t *flags, switch_bool_t from_event)
 {
 	switch_application_interface_t *application_interface;
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
@@ -3020,7 +3026,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_execute_application_get_flag
 
  exec:
 
-	switch_core_session_exec(session, application_interface, arg);
+	switch_core_session_exec_impl(session, application_interface, arg, !from_event);
 
   done:
 
@@ -3029,8 +3035,20 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_execute_application_get_flag
 	return status;
 }
 
-SWITCH_DECLARE(switch_status_t) switch_core_session_exec(switch_core_session_t *session,
-														 const switch_application_interface_t *application_interface, const char *arg)
+SWITCH_DECLARE(switch_status_t) switch_core_session_execute_application_get_flags(switch_core_session_t *session, const char *app,
+										  const char *arg, int32_t *flags)
+{
+	return switch_core_session_execute_application_impl(session, app, arg, flags, SWITCH_FALSE);
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_session_execute_application_event(switch_core_session_t *session, const char *app,
+						      const char *arg)
+{
+	return switch_core_session_execute_application_impl(session, app, arg, NULL, SWITCH_TRUE);
+}
+
+static switch_status_t switch_core_session_exec_impl(switch_core_session_t *session,
+														 const switch_application_interface_t *application_interface, const char *arg, switch_bool_t clear_break)
 {
 	switch_app_log_t *log, *lp;
 	switch_event_t *event;
@@ -3148,7 +3166,12 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_exec(switch_core_session_t *
 		switch_event_fire(&event);
 	}
 
-	switch_channel_clear_flag(session->channel, CF_BREAK);
+	/* Only clear stale CF_BREAK for direct (dialplan) execution.
+	 * For private-event execution, a break raised after the event was queued
+	 * (e.g. telnyx_break during file-open) must survive into the app. */
+	if (clear_break) {
+		switch_channel_clear_flag(session->channel, CF_BREAK);
+	}
 
 	switch_assert(application_interface->application_function);
 
@@ -3185,6 +3208,12 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_exec(switch_core_session_t *
 	}
 
 	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_session_exec(switch_core_session_t *session,
+									 const switch_application_interface_t *application_interface, const char *arg)
+{
+	return switch_core_session_exec_impl(session, application_interface, arg, SWITCH_TRUE);
 }
 
 SWITCH_DECLARE(uint32_t) switch_core_session_stack_count(switch_core_session_t *session, int x)

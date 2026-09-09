@@ -38,6 +38,7 @@
 #include "amrwb_be.h"
 
 extern const int switch_amrwb_frame_sizes[];
+extern const int switch_amrwb_frame_bits[];
 
 /* Bandwidth Efficient AMR-WB */
 /* https://tools.ietf.org/html/rfc4867#page-17 */
@@ -74,7 +75,7 @@ extern switch_bool_t switch_amrwb_pack_be(unsigned char *shift_buf, int n)
 	*/
 
 	ft = save_toc >> 3 ; /* drop Q, P1, P2  */
-	ft &= ~(1 << 5); /* clear -  will mark just 1 frame - bit F */
+	ft &= ~(1 << 4); /* clear F: this encoder emits exactly one frame */
 
 	/* we only encode one frame, so bit 0 of TOC will be 0 */
 	shift_buf[0] |= (ft >> 1); /* first 3 bits of FT */
@@ -99,22 +100,35 @@ extern switch_bool_t switch_amrwb_unpack_be(unsigned char *encoded_buf, uint8_t 
 	uint8_t shift_tocs[2] = {0x00, 0x00};
 	uint8_t *shift_buf;
 
+	if (!encoded_buf || !tmp || encoded_len < 2) {
+		return SWITCH_FALSE;
+	}
+
 	memcpy(shift_tocs, encoded_buf, 2);
 	/* shift for BE */
 	switch_amr_array_lshift(4, shift_tocs, 2);
+	/* This implementation decodes exactly one 20 ms frame per payload. */
+	if (shift_tocs[0] & 0x80) {
+		return SWITCH_FALSE;
+	}
 	shift_buf = encoded_buf + 1; /* skip CMR */
 	/* shift for BE */
 	switch_amr_array_lshift(2, shift_buf, encoded_len - 1);
 	/* get frame size */
 	index = ((shift_tocs[0] >> 3) & 0x0f);
-	if (index > 10 && index != 0xe && index != 0xf) {
+	if (index >= 10 && index != 0xe && index != 0xf) {
 
 		return SWITCH_FALSE;
 	}
 
 	framesz = switch_amrwb_frame_sizes[index];
+	if (encoded_len * 8 < switch_amrwb_frame_bits[index] + 10) {
+		return SWITCH_FALSE;
+	}
 	tmp[0] = shift_tocs[0]; /* save TOC */
-	memcpy(&tmp[1], shift_buf, framesz);
+	if (framesz) {
+		memcpy(&tmp[1], shift_buf, framesz);
+	}
 
 	return SWITCH_TRUE;
 }

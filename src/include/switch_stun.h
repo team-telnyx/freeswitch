@@ -247,11 +247,14 @@ SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_software(switch_stun_pa
 SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_binded_address(switch_stun_packet_t *packet, char *ipstr, uint16_t port, int family);
 SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_xor_binded_address(switch_stun_packet_t *packet, char *ipstr, uint16_t port, int family);
 SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_integrity(switch_stun_packet_t *packet, const char *pass);
+SWITCH_DECLARE(uint8_t) switch_stun_packet_validate_auth(const void *data, uint32_t len, const char *pass);
 SWITCH_DECLARE(uint32_t) switch_crc32_8bytes(const void* data, size_t length);
 SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_fingerprint(switch_stun_packet_t *packet);
 SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_use_candidate(switch_stun_packet_t *packet);
 SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_controlling(switch_stun_packet_t *packet);
 SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_controlled(switch_stun_packet_t *packet);
+SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_controlling_value(switch_stun_packet_t *packet, const char *tie_breaker);
+SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_controlled_value(switch_stun_packet_t *packet, const char *tie_breaker);
 SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_priority(switch_stun_packet_t *packet, uint32_t priority);
 
 /*!

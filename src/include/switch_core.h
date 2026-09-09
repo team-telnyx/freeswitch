@@ -1163,6 +1163,15 @@ SWITCH_DECLARE(void) switch_core_session_video_reset(switch_core_session_t *sess
 SWITCH_DECLARE(switch_status_t) switch_core_session_execute_application_get_flags(_In_ switch_core_session_t *session,
 																				  _In_ const char *app, _In_opt_z_ const char *arg, _Out_opt_ int32_t *flags);
 
+/*! \brief Execute an application on a session from a private event (preserves CF_BREAK)
+ *  \param session the current session
+ *  \param app the application's name
+ *  \param arg application arguments
+ *  \return the application's return value
+ */
+SWITCH_DECLARE(switch_status_t) switch_core_session_execute_application_event(_In_ switch_core_session_t *session,
+																			      _In_ const char *app, _In_opt_z_ const char *arg);
+
 SWITCH_DECLARE(switch_status_t) switch_core_session_execute_application_async(switch_core_session_t *session, const char *app, const char *arg);
 
 SWITCH_DECLARE(switch_status_t) switch_core_session_get_app_flags(const char *app, int32_t *flags);
