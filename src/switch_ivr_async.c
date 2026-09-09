@@ -1182,6 +1182,7 @@ struct record_helper {
 	switch_codec_implementation_t read_impl;
 	switch_bool_t speech_detected;
 	uint32_t pending_native_rate;
+	switch_size_t pending_native_rate_offset;
 	switch_buffer_t *thread_buffer;
 	switch_thread_t *thread;
 	switch_mutex_t *buffer_mutex;
@@ -1279,10 +1280,12 @@ static void send_record_stop_event(switch_channel_t *channel, switch_codec_imple
 
 		switch_channel_set_variable_printf(channel, "record_samples", "%d", updated_samples_out);
 
-		/* samples_out counts samples in the file, so it counts in the file's rate */
+		/* samples_out counts samples in the file, so it counts in the file's rate.  Scale before
+		   dividing: record_sample_rate accepts 11025/22050/44100, and rate/1000 would truncate
+		   those to 11/22/44 and report a few tenths of a percent long. */
 		if (rate >= 1000) {
 			switch_size_t current_record_seconds = rh->fh->samples_out / rate;
-			switch_size_t current_record_ms = rh->fh->samples_out / (rate / 1000);
+			switch_size_t current_record_ms = (switch_size_t) ((uint64_t) rh->fh->samples_out * 1000 / rate);
 			switch_size_t updated_record_seconds = current_record_seconds;
 			switch_size_t updated_record_ms = current_record_ms;
 			const char *prev_record_sec_str = switch_channel_get_variable(channel, "record_seconds");
@@ -1408,9 +1411,35 @@ static void send_record_error_event(switch_channel_t *channel, const char* file,
 	}
 }
 
+/* Hand a new input rate to whoever owns fh->native_rate.
+
+   With a recording thread that owner is the thread, not us, so the rate travels with the
+   point in the buffer where it takes effect: pending_native_rate_offset is the number of
+   bytes of old-rate audio still queued ahead of the change.  The thread applies the new rate
+   only once it has drained that far and never reads across the boundary, so no chunk is ever
+   written at a rate it was not recorded at.  Publishing the rate on its own would be applied
+   to whatever chunk the thread happens to read next -- up to a full bsize of purely old-rate
+   audio, more if the thread is behind -- which is what this offset exists to prevent.
+
+   Only one change can be in flight.  A second one arriving before the first has drained
+   replaces it, which writes the audio between the two at the older rate; that needs two
+   renegotiations inside one chunk drain, and the alternative is a queue of rate changes for a
+   window measured in single frames. */
+static void record_set_native_rate(struct record_helper *rh, uint32_t rate)
+{
+	if (rh->thread_buffer) {
+		switch_mutex_lock(rh->buffer_mutex);
+		rh->pending_native_rate = rate;
+		rh->pending_native_rate_offset = switch_buffer_inuse(rh->thread_buffer);
+		switch_mutex_unlock(rh->buffer_mutex);
+	} else {
+		rh->fh->native_rate = rate;
+	}
+}
+
 /* The bug hands out audio at the session read codec rate, which can change mid-call.  The
    file keeps the rate it was opened with, so tell the file handle the new input rate and let
-   it resample.  A recording thread owns the file handle, so it applies the change itself. */
+   it resample. */
 static void record_follow_frame_rate(struct record_helper *rh, switch_core_session_t *session, switch_frame_t *frame)
 {
 	uint32_t old_rate;
@@ -1422,23 +1451,19 @@ static void record_follow_frame_rate(struct record_helper *rh, switch_core_sessi
 	if (rh->thread_buffer) {
 		switch_mutex_lock(rh->buffer_mutex);
 		old_rate = rh->pending_native_rate ? rh->pending_native_rate : rh->fh->native_rate;
-
-		if (frame->rate != old_rate) {
-			rh->pending_native_rate = frame->rate;
-		}
 		switch_mutex_unlock(rh->buffer_mutex);
 	} else {
 		old_rate = rh->fh->native_rate;
-
-		if (frame->rate != old_rate) {
-			rh->fh->native_rate = frame->rate;
-		}
 	}
 
-	if (frame->rate != old_rate) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-						  "Record session %s input sample rate changed: %d -> %d\n", rh->file, old_rate, frame->rate);
+	if (frame->rate == old_rate) {
+		return;
 	}
+
+	record_set_native_rate(rh, frame->rate);
+
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+					  "Record session %s input sample rate changed: %d -> %d\n", rh->file, old_rate, frame->rate);
 }
 
 static void *SWITCH_THREAD_FUNC recording_thread(switch_thread_t *thread, void *obj)
@@ -1447,7 +1472,7 @@ static void *SWITCH_THREAD_FUNC recording_thread(switch_thread_t *thread, void *
 	switch_core_session_t *session = switch_core_media_bug_get_session(bug);
 	switch_channel_t *channel = switch_core_session_get_channel(session);
 	struct record_helper *rh;
-	switch_size_t bsize = SWITCH_RECOMMENDED_BUFFER_SIZE, samples = 0, inuse = 0;
+	switch_size_t bsize = SWITCH_RECOMMENDED_BUFFER_SIZE, samples = 0, inuse = 0, readlen = 0, bytes = 0;
 	unsigned char *data;
 	int channels = 1;
 	switch_codec_implementation_t read_impl = { 0 };
@@ -1511,12 +1536,24 @@ static void *SWITCH_THREAD_FUNC recording_thread(switch_thread_t *thread, void *
 			continue;
 		}
 
-		samples = switch_buffer_read(rh->thread_buffer, data, bsize) / 2 / channels;
+		readlen = bsize;
 
 		if (rh->pending_native_rate) {
-			/* the chunk we just read can still hold a few samples recorded at the old rate */
-			rh->fh->native_rate = rh->pending_native_rate;
-			rh->pending_native_rate = 0;
+			if (!rh->pending_native_rate_offset) {
+				/* the audio recorded at the old rate has drained, so the change takes effect here */
+				rh->fh->native_rate = rh->pending_native_rate;
+				rh->pending_native_rate = 0;
+			} else if (rh->pending_native_rate_offset < readlen) {
+				/* stop short of the change so this chunk is all one rate */
+				readlen = rh->pending_native_rate_offset;
+			}
+		}
+
+		bytes = switch_buffer_read(rh->thread_buffer, data, readlen);
+		samples = bytes / 2 / channels;
+
+		if (rh->pending_native_rate_offset) {
+			rh->pending_native_rate_offset -= (bytes < rh->pending_native_rate_offset) ? bytes : rh->pending_native_rate_offset;
 		}
 
 		switch_mutex_unlock(rh->buffer_mutex);
@@ -1637,7 +1674,11 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 
 				if (rh->fh) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Record session sample rate: %d -> %d\n", rh->fh->native_rate, rh->fh->samplerate);
-					rh->fh->native_rate = rh->read_impl.actual_samples_per_second;
+					/* The recording thread is running and owns fh->native_rate, so go through the
+					   publisher rather than assigning it here.  That also drops any rate change the
+					   old session left pending, which would otherwise be applied on the thread's next
+					   chunk and overwrite the rate this transfer just set. */
+					record_set_native_rate(rh, rh->read_impl.actual_samples_per_second);
 					if (switch_core_file_has_video(rh->fh, SWITCH_TRUE)) {
 						switch_core_media_bug_set_media_params(bug, &rh->fh->mm);
 					}
@@ -1695,7 +1736,9 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 
 			if (rh->fh) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Record session sample rate: %d -> %d\n", rh->fh->native_rate, rh->fh->samplerate);
-				rh->fh->native_rate = rh->read_impl.actual_samples_per_second;
+				/* The recording thread was started just above and owns fh->native_rate from here on.
+				   Nothing is queued yet, so the publisher applies this before the first write. */
+				record_set_native_rate(rh, rh->read_impl.actual_samples_per_second);
 				if (switch_core_file_has_video(rh->fh, SWITCH_TRUE)) {
 					switch_core_media_bug_set_media_params(bug, &rh->fh->mm);
 					switch_core_session_request_video_refresh(session);
