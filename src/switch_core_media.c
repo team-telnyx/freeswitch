@@ -13608,6 +13608,16 @@ static void add_fb(char *buf, uint32_t buflen, int pt, int fir, int nack, int pl
 
 }
 
+/* Held by any of the three hold mechanisms: switch_core_media_toggle_hold()
+ * sets CF_PROTO_HOLD, switch_ivr_hold() sets CF_HOLD, and mod_sofia's
+ * INDICATE_HOLD handler sets only CF_LEG_HOLDING. */
+static int partner_is_held(switch_channel_t *channel)
+{
+	return switch_channel_test_flag(channel, CF_PROTO_HOLD) ||
+		switch_channel_test_flag(channel, CF_HOLD) ||
+		switch_channel_test_flag(channel, CF_LEG_HOLDING);
+}
+
 //?
 #define SDPBUFLEN 65536
 SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *session, switch_sdp_type_t sdp_type, const char *ip, switch_port_t port, const char *sr, int force)
@@ -14014,8 +14024,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 				} else if (new_smode == SWITCH_MEDIA_FLOW_INACTIVE &&
 						   !switch_channel_var_true(session->channel, "rtp_inactive_hold_propagate_legacy") &&
 						   other_engine->rmode != SWITCH_MEDIA_FLOW_INACTIVE &&
-						   !switch_channel_test_flag(switch_core_session_get_channel(other_session), CF_PROTO_HOLD) &&
-						   !switch_channel_test_flag(switch_core_session_get_channel(other_session), CF_HOLD)) {
+						   !partner_is_held(switch_core_session_get_channel(other_session))) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
 									  "Skipping partner media mode update for inactive hold; partner keeps smode %d\n",
 									  other_engine->smode);

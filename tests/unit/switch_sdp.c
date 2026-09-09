@@ -1112,6 +1112,8 @@ FST_CORE_BEGIN("./conf_sdp")
 				  SWITCH_MEDIA_FLOW_SENDRECV, 1, 0, 0, SWITCH_MEDIA_FLOW_INACTIVE },
 				{ "inactive answer, partner CF_HOLD still propagates", "inactive",
 				  SWITCH_MEDIA_FLOW_SENDRECV, 0, 1, 0, SWITCH_MEDIA_FLOW_INACTIVE },
+				{ "inactive answer, partner CF_LEG_HOLDING still propagates", "inactive",
+				  SWITCH_MEDIA_FLOW_SENDRECV, 0, 2, 0, SWITCH_MEDIA_FLOW_INACTIVE },
 				{ "inactive answer, legacy opt-out still propagates", "inactive",
 				  SWITCH_MEDIA_FLOW_SENDRECV, 0, 0, 1, SWITCH_MEDIA_FLOW_INACTIVE },
 				{ "sendonly answer unchanged", "sendonly",
@@ -1160,7 +1162,7 @@ FST_CORE_BEGIN("./conf_sdp")
 			if (partner) {
 				partner_channel = switch_core_session_get_channel(partner);
 				switch_channel_set_state(partner_channel, CS_SOFT_EXECUTE);
-				switch_channel_wait_for_state(partner_channel, NULL, CS_SOFT_EXECUTE);
+				fst_check(switch_channel_wait_for_state_timeout(partner_channel, CS_SOFT_EXECUTE, 5000) == SWITCH_TRUE);
 
 				mparams = switch_core_session_alloc(fst_session, sizeof(switch_core_media_params_t));
 				mparams->inbound_codec_string = switch_core_session_strdup(fst_session, "PCMU");
@@ -1204,10 +1206,16 @@ FST_CORE_BEGIN("./conf_sdp")
 							switch_channel_clear_flag(partner_channel, CF_PROTO_HOLD);
 						}
 
-						if (matrix[i].hold) {
+						if (matrix[i].hold == 1) {
 							switch_channel_set_flag(partner_channel, CF_HOLD);
 						} else {
 							switch_channel_clear_flag(partner_channel, CF_HOLD);
+						}
+
+						if (matrix[i].hold == 2) {
+							switch_channel_set_flag(partner_channel, CF_LEG_HOLDING);
+						} else {
+							switch_channel_clear_flag(partner_channel, CF_LEG_HOLDING);
 						}
 
 						switch_channel_set_variable(fst_channel, "rtp_inactive_hold_propagate_legacy",
@@ -1221,6 +1229,18 @@ FST_CORE_BEGIN("./conf_sdp")
 										  matrix[i].name, got, matrix[i].expect);
 						fst_xcheck(got == matrix[i].expect, matrix[i].name);
 					}
+
+					/* Every production SDP_ANSWER call site passes sr = NULL and lets
+					 * gen_local_sdp() derive it from a_engine->smode, so drive the full
+					 * chain once from a real a=inactive offer instead of an explicit sr. */
+					match = switch_core_media_negotiate_sdp(fst_session, inactive_offer, &p, SDP_OFFER);
+					fst_check(match == 1);
+					fst_xcheck(switch_core_session_media_flow(fst_session, SWITCH_MEDIA_TYPE_AUDIO) == SWITCH_MEDIA_FLOW_INACTIVE,
+							   "a=inactive offer drives the holding leg smode to inactive");
+					switch_core_media_set_smode(partner, SWITCH_MEDIA_TYPE_AUDIO, SWITCH_MEDIA_FLOW_SENDRECV, SDP_ANSWER);
+					switch_core_media_gen_local_sdp(fst_session, SDP_ANSWER, NULL, 0, NULL, 0);
+					fst_xcheck(switch_core_session_media_flow(partner, SWITCH_MEDIA_TYPE_AUDIO) == SWITCH_MEDIA_FLOW_SENDRECV,
+							   "derived-sr inactive answer skips the non-held partner");
 
 					/* The remaining row needs the partner's negotiated remote mode to be
 					 * inactive, which only switch_core_media_negotiate_sdp() can set. */
