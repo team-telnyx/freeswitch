@@ -15525,6 +15525,8 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 		switch_media_handle_t *other_smh = NULL;
 		switch_rtp_engine_t *other_engine = NULL;
 		const char *dummy_str = NULL;
+		int partner_held = 0;
+		int disable_inactive_partner_propagation = 0;
 
 		if (!strcasecmp(sr, "sendonly")) {
 			new_smode = SWITCH_MEDIA_FLOW_SENDONLY;
@@ -15540,16 +15542,24 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 			other_smh = other_session->media_handle;
 			if (other_smh) {
 				other_engine = &other_smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
-				/* Only update partner's smode if partner's endpoint is not on hold
-				 * When we transition to sendrecv/recvonly (can receive), only update if partner can send */
+				partner_held = switch_channel_test_flag(other_session->channel, CF_HOLD) ||
+					switch_channel_test_flag(other_session->channel, CF_LEG_HOLDING);
+				disable_inactive_partner_propagation = switch_channel_var_true(session->channel, "rtp_disable_inactive_partner_propagation") ||
+					switch_channel_var_true(other_session->channel, "rtp_disable_inactive_partner_propagation");
+				/* Only update partner's smode if partner's endpoint is not on hold.
+				 * When we transition to sendrecv/recvonly (can receive), only update if partner can send.
+				 * By default, inactive answers keep the historical propagation behavior.
+				 * Set rtp_disable_inactive_partner_propagation=true to keep non-held
+				 * partner legs writable for selected calls. */
 				if (new_smode == SWITCH_MEDIA_FLOW_SENDRECV || new_smode == SWITCH_MEDIA_FLOW_RECVONLY) {
 					if (other_engine->rmode != SWITCH_MEDIA_FLOW_INACTIVE) {
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG, 
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
 						"Updating partner media mode to %d\n", opp_smode);
 						other_engine->smode = opp_smode;
 					}
-				} else {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG, 
+				} else if (new_smode != SWITCH_MEDIA_FLOW_INACTIVE || !disable_inactive_partner_propagation ||
+						   other_engine->rmode == SWITCH_MEDIA_FLOW_INACTIVE || partner_held) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
 						"Updating partner media mode to %d\n", opp_smode);
 					other_engine->smode = opp_smode;
 				}
