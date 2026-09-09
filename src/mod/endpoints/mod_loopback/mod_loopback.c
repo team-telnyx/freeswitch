@@ -1642,8 +1642,15 @@ static switch_status_t null_tech_switch_rate(null_private_t *tech_pvt, switch_co
 	switch_core_session_set_write_codec(session, &tech_pvt->write_codec);
 
 	switch_core_timer_destroy(&tech_pvt->timer);
-	switch_core_timer_init(&tech_pvt->timer, "soft", read_impl->microseconds_per_packet / 1000,
+	status = switch_core_timer_init(&tech_pvt->timer, "soft", read_impl->microseconds_per_packet / 1000,
 			   read_impl->samples_per_packet * 4, switch_core_session_get_pool(session));
+
+	if (status != SWITCH_STATUS_SUCCESS) {
+		/* The old timer is already gone, so returning success here would leave
+		   null_channel_read_frame() pacing the read loop on a destroyed timer. */
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Can not init timer for %s/%d\n", iananame, rate);
+		goto end;
+	}
 
 	tech_pvt->null_buf = switch_core_session_alloc(session, sizeof(int16_t) * read_impl->samples_per_packet);
 
