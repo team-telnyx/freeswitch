@@ -283,7 +283,7 @@ FST_CORE_BEGIN("./conf")
 			fst_requires(attach_media_handle(session) == SWITCH_STATUS_SUCCESS);
 
 			pool = switch_core_session_get_pool(session);
-			rtp = switch_rtp_new("127.0.0.1", 12340, "127.0.0.1", 12342, 8, 8000, 20 * 1000,
+			rtp = switch_rtp_new("127.0.0.1", 12380, "127.0.0.1", 12382, 8, 8000, 20 * 1000,
 								 rtp_flags, "soft", &err, pool);
 			fst_requires(rtp);
 			fst_requires(switch_rtp_ready(rtp));
@@ -502,6 +502,10 @@ FST_CORE_BEGIN("./conf")
 							  "[TEST] read_frame status=%d frame=%p\n", st, (void *) out);
 			fst_requires(st == SWITCH_STATUS_SUCCESS);
 			fst_requires(out != NULL);
+			/* Without this the dummy CNG frame the branch returns on a pop miss would
+			 * satisfy every assertion below and the test would be vacuous. */
+			fst_requires(switch_core_media_test_get_read_fb_frame(session, SWITCH_MEDIA_TYPE_VIDEO) == clone);
+			fst_requires(out->data == clone->data);
 
 			/* THE CRUX: the frame handed out lives in the session pool, so it must
 			 * not advertise itself as heap-owned. */

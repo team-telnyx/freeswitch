@@ -30,6 +30,10 @@
  *
  */
 
+/* Makes the switch_core_media_test_* prototypes visible below so the definitions
+ * are checked against the header rather than silently drifting from it. */
+#define SWITCH_CORE_MEDIA_TEST_HOOKS
+
 #include <switch.h>
 #include <switch_ssl.h>
 #include <switch_stun.h>
@@ -4790,6 +4794,10 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 
 				stable_packet = veng->bundle_audio_read_packet;
 				engine->read_frame = *audio_fb_frame;
+				/* Same reason as the video branch: read_frame is embedded in the
+				 * session-pool media handle, so it must not inherit the clone's
+				 * SFF_DYNAMIC. read_frame.data is repointed at pool memory below. */
+				switch_clear_flag((&engine->read_frame), SFF_DYNAMIC);
 
 				/* Audio drained from the shared BUNDLE socket must re-enter the normal
 				 * audio write path as payload, not as a raw forwarded RTP packet.
@@ -14366,10 +14374,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 					status = SWITCH_STATUS_FALSE;
 					goto end;
 				}
-				switch_core_media_flush_queued_read_frames(v_engine);
-				/* Start the continuous drain thread. Stop first so BUNDLE restart
-				 * joins any exited-but-not-cleared drain thread and flushes stale audio. */
+				/* Stop first so BUNDLE restart joins any exited-but-not-cleared drain
+				 * thread, and flush only once it is gone -- flushing while it still
+				 * runs just lets it refill the queue behind us. */
 				bundle_drain_thread_stop(session);
+				switch_core_media_flush_queued_read_frames(v_engine);
 				switch_mutex_lock(smh->bundle_drain_mutex);
 				bundle_drain_thread_start(session);
 				switch_mutex_unlock(smh->bundle_drain_mutex);
@@ -22649,8 +22658,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_get_chosen_ice_candidate(switc
 
 /* struct switch_media_handle_s and struct switch_rtp_engine_s are private to this
  * file, so tests cannot reach the BUNDLE read state or the static helpers that
- * operate on it. These accessors exist only for tests/unit and are compiled out
- * otherwise. */
+ * operate on it. These accessors exist for tests/unit, but they are NOT compiled
+ * out of a release build -- they ship in libfreeswitch, the way
+ * switch_rtp_test_rewrite_mid_extension() does. Guarding them properly needs a
+ * configure-time switch; until then, treat them as internal and do not call them
+ * from a module. */
 
 static switch_rtp_engine_t *test_engine(switch_core_session_t *session, switch_media_type_t type)
 {
@@ -22773,8 +22785,13 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_test_prepare_bundle_drain(swit
 
 SWITCH_DECLARE(void) switch_core_media_test_drain_thread_start(switch_core_session_t *session)
 {
-	if (session) {
+	if (session && session->media_handle) {
+		/* bundle_drain_thread_start() documents that the caller holds this, and the
+		 * production call site does; without it the cond wait inside it would run on
+		 * an unheld mutex. */
+		switch_mutex_lock(session->media_handle->bundle_drain_mutex);
 		bundle_drain_thread_start(session);
+		switch_mutex_unlock(session->media_handle->bundle_drain_mutex);
 	}
 }
 
