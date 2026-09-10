@@ -4714,6 +4714,12 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 
 			engine->read_fb_frame = (switch_frame_t *) pop;
 			engine->read_frame = *engine->read_fb_frame;
+			/* The clone is heap allocated, but what the caller receives is
+			 * &engine->read_frame, embedded in the session-pool media handle.
+			 * Copying the flag wholesale would tell switch_frame_free() to free an
+			 * interior pointer into the pool and release the clone's packet out
+			 * from under engine->read_fb_frame. */
+			switch_clear_flag((&engine->read_frame), SFF_DYNAMIC);
 			engine->read_frame.codec = &engine->read_codec;
 			engine->read_frame.pmap = NULL;
 			if (engine->cur_payload_map) {
