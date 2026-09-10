@@ -22753,19 +22753,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_test_prepare_read_fb(switch_co
 	return SWITCH_STATUS_SUCCESS;
 }
 
-SWITCH_DECLARE(switch_status_t) switch_core_media_test_lock_read(switch_core_session_t *session, switch_media_type_t type)
-{
-	if (!test_engine(session, type) || !session->media_handle->read_mutex[type]) return SWITCH_STATUS_FALSE;
-	switch_mutex_lock(session->media_handle->read_mutex[type]);
-	return SWITCH_STATUS_SUCCESS;
-}
-
-SWITCH_DECLARE(void) switch_core_media_test_unlock_read(switch_core_session_t *session, switch_media_type_t type)
-{
-	if (!test_engine(session, type) || !session->media_handle->read_mutex[type]) return;
-	switch_mutex_unlock(session->media_handle->read_mutex[type]);
-}
-
 SWITCH_DECLARE(void) switch_core_media_test_flush_queued_read_frames(switch_core_session_t *session, switch_media_type_t type)
 {
 	switch_rtp_engine_t *engine = test_engine(session, type);
@@ -22808,6 +22795,40 @@ SWITCH_DECLARE(switch_thread_t *) switch_core_media_test_get_drain_thread(switch
 	switch_rtp_engine_t *v_engine = test_engine(session, SWITCH_MEDIA_TYPE_VIDEO);
 
 	return v_engine ? v_engine->bundle_drain_thread : NULL;
+}
+
+/* Holds the session write lock, so switch_core_session_read_lock() -- a trylock --
+ * fails for the drain thread while the channel is still UP. Hanging the channel up
+ * instead makes the failure indistinguishable from the thread running normally and
+ * exiting, since the loop condition then fails immediately too. */
+SWITCH_DECLARE(switch_status_t) switch_core_media_test_hold_session_write_lock(switch_core_session_t *session)
+{
+	if (!session || !session->rwlock) return SWITCH_STATUS_FALSE;
+
+	return switch_thread_rwlock_trywrlock(session->rwlock);
+}
+
+SWITCH_DECLARE(void) switch_core_media_test_release_session_write_lock(switch_core_session_t *session)
+{
+	if (session && session->rwlock) {
+		switch_thread_rwlock_unlock(session->rwlock);
+	}
+}
+
+/* Lets a test observe that the flush actually drained the queue, not just that it
+ * left the in-flight frame alone. */
+SWITCH_DECLARE(switch_frame_t *) switch_core_media_test_pop_read_fb(switch_core_session_t *session, switch_media_type_t type)
+{
+	switch_rtp_engine_t *engine = test_engine(session, type);
+	void *pop = NULL;
+
+	if (!engine || !engine->read_fb) return NULL;
+
+	if (switch_frame_buffer_trypop(engine->read_fb, &pop) != SWITCH_STATUS_SUCCESS) {
+		return NULL;
+	}
+
+	return (switch_frame_t *) pop;
 }
 
 SWITCH_DECLARE(void) switch_core_media_test_lock_bundle(switch_core_session_t *session)

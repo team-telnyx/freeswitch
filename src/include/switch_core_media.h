@@ -246,8 +246,9 @@ SWITCH_DECLARE(switch_media_handle_t *) switch_core_session_get_media_handle(swi
 /* tests/unit only: struct switch_media_handle_s and struct switch_rtp_engine_s are
  * private to switch_core_media.c, so the BUNDLE read state is otherwise unreachable. */
 SWITCH_DECLARE(switch_status_t) switch_core_media_test_prepare_read_fb(switch_core_session_t *session, switch_media_type_t type);
-SWITCH_DECLARE(switch_status_t) switch_core_media_test_lock_read(switch_core_session_t *session, switch_media_type_t type);
-SWITCH_DECLARE(void) switch_core_media_test_unlock_read(switch_core_session_t *session, switch_media_type_t type);
+SWITCH_DECLARE(switch_status_t) switch_core_media_test_hold_session_write_lock(switch_core_session_t *session);
+SWITCH_DECLARE(void) switch_core_media_test_release_session_write_lock(switch_core_session_t *session);
+SWITCH_DECLARE(switch_frame_t *) switch_core_media_test_pop_read_fb(switch_core_session_t *session, switch_media_type_t type);
 SWITCH_DECLARE(void) switch_core_media_test_flush_queued_read_frames(switch_core_session_t *session, switch_media_type_t type);
 SWITCH_DECLARE(void) switch_core_media_test_set_read_fb_frame(switch_core_session_t *session, switch_media_type_t type, switch_frame_t *frame);
 SWITCH_DECLARE(switch_frame_t *) switch_core_media_test_get_read_fb_frame(switch_core_session_t *session, switch_media_type_t type);

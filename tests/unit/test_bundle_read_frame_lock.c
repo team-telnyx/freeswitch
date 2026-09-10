@@ -152,6 +152,7 @@ FST_CORE_BEGIN("./conf")
 			switch_core_session_t *session = NULL;
 			switch_frame_t *frame = NULL;
 			switch_frame_t *queued = NULL;
+			switch_frame_t *popped = NULL;
 
 			session = originate_null_session();
 			fst_requires(session);
@@ -164,7 +165,8 @@ FST_CORE_BEGIN("./conf")
 			switch_core_media_test_set_read_fb_frame(session, SWITCH_MEDIA_TYPE_VIDEO, frame);
 			fst_requires(switch_core_media_test_get_read_fb_frame(session, SWITCH_MEDIA_TYPE_VIDEO) == frame);
 
-			/* Something still queued, so the flush has real work to do. */
+			/* Something queued, so the flush has real work to do -- and so this test
+			 * can tell "left the in-flight frame alone" from "did nothing at all". */
 			queued = make_dynamic_frame();
 			fst_requires(queued);
 			fst_requires(switch_core_media_test_push_read_fb(session, SWITCH_MEDIA_TYPE_VIDEO, queued) == SWITCH_STATUS_SUCCESS);
@@ -177,6 +179,13 @@ FST_CORE_BEGIN("./conf")
 							  (void *) switch_core_media_test_get_read_fb_frame(session, SWITCH_MEDIA_TYPE_VIDEO),
 							  (void *) frame);
 			fst_check(switch_core_media_test_get_read_fb_frame(session, SWITCH_MEDIA_TYPE_VIDEO) == frame);
+
+			/* THE OTHER HALF: the queue must be empty. Without this a flush whose body
+			 * is `return;` satisfies the assertion above and the test is vacuous. */
+			popped = switch_core_media_test_pop_read_fb(session, SWITCH_MEDIA_TYPE_VIDEO);
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+							  "[TEST] queued frame still in the buffer after flush = %p (expect NULL)\n", (void *) popped);
+			fst_check(popped == NULL);
 
 			switch_channel_hangup(switch_core_session_get_channel(session), SWITCH_CAUSE_NORMAL_CLEARING);
 			switch_core_session_rwunlock(session);
@@ -344,7 +353,7 @@ FST_CORE_BEGIN("./conf")
 			switch_rtp_t *rtp = NULL;
 			switch_rtp_flag_t rtp_flags[SWITCH_RTP_FLAG_INVALID] = { 0 };
 			const char *err = NULL;
-			int waited, state;
+			int waited, state, held_write_lock = 0;
 
 			session = originate_null_session();
 			fst_requires(session);
@@ -357,10 +366,15 @@ FST_CORE_BEGIN("./conf")
 			fst_requires(switch_core_media_test_prepare_bundle_drain(session, rtp) == SWITCH_STATUS_SUCCESS);
 			fst_requires(switch_core_media_test_get_drain_state(session) == 0);
 
-			/* Make the read lock fail: switch_core_session_read_lock() rejects a
-			 * channel that is already down. */
-			switch_channel_hangup(switch_core_session_get_channel(session), SWITCH_CAUSE_NORMAL_CLEARING);
-			fst_requires(switch_core_session_read_lock(session) != SWITCH_STATUS_SUCCESS);
+			/* Make the read lock fail while leaving the channel UP. Hanging up instead
+			 * would make this vacuous: with the channel down the thread promotes to
+			 * RUNNING, the loop condition fails immediately and the tail sets INACTIVE
+			 * anyway, so state 0 would be satisfied by a thread that never attempted
+			 * the lock at all. Holding the session write lock makes the trylock fail
+			 * and nothing else. */
+			switch_core_session_rwunlock(session);
+			held_write_lock = 1;
+			fst_requires(switch_core_media_test_hold_session_write_lock(session) == SWITCH_STATUS_SUCCESS);
 
 			switch_core_media_test_drain_thread_start(session);
 			fst_requires(switch_core_media_test_get_drain_thread(session) != NULL);
@@ -375,8 +389,15 @@ FST_CORE_BEGIN("./conf")
 							  "[TEST] drain state after a failed read lock = %d (expect 0 INACTIVE)\n", state);
 			fst_check(state == 0);
 
+			switch_core_media_test_release_session_write_lock(session);
+			held_write_lock = 0;
+			fst_requires(switch_core_session_read_lock(session) == SWITCH_STATUS_SUCCESS);
+
 			switch_core_media_test_drain_thread_stop(session);
+			switch_rtp_destroy(&rtp);
+			switch_channel_hangup(switch_core_session_get_channel(session), SWITCH_CAUSE_NORMAL_CLEARING);
 			switch_core_session_rwunlock(session);
+			(void) held_write_lock;
 		}
 		FST_TEST_END()
 
