@@ -3582,6 +3582,55 @@ SWITCH_DECLARE(char *) switch_url_encode(const char *url, char *buf, size_t len)
 	return switch_url_encode_opt(url, buf, len, SWITCH_FALSE);
 }
 
+SWITCH_DECLARE(const char *) switch_redact_file_target(const char *target, char *buf, switch_size_t buflen)
+{
+	const char *scheme_end, *host, *end, *e;
+
+	if (!buf || !buflen) {
+		return "(unknown)";
+	}
+
+	if (zstr(target)) {
+		return "(unknown)";
+	}
+
+	/* Leading {} and [] groups are caller-supplied parameters -- auth_username and
+	 * auth_password among them -- so they never belong in a log line. */
+	while (*target == '{' || *target == '[') {
+		if (!(e = switch_find_end_paren(target, *target, *target == '{' ? '}' : ']'))) {
+			return "(unknown)";
+		}
+
+		target = e + 1;
+
+		while (*target == ' ') {
+			target++;
+		}
+	}
+
+	if (!(scheme_end = strstr(target, SWITCH_URL_SEPARATOR))) {
+		/* A local path holds no secret, and the log is more useful naming it. */
+		switch_snprintf(buf, buflen, "%s", target);
+		return buf;
+	}
+
+	host = scheme_end + 3;
+
+	/* Stop at the path, the query, the fragment, or a space -- the last of which is
+	 * where mod_av's RTMP credentials begin.  Userinfo before an @ goes too. */
+	for (end = host; *end && *end != '/' && *end != '?' && *end != '#' && *end != ' '; end++) {
+		if (*end == '@') {
+			host = end + 1;
+		}
+	}
+
+	switch_snprintf(buf, buflen, "%.*s" SWITCH_URL_SEPARATOR "%.*s%s",
+					(int) (scheme_end - target), target, (int) (end - host), host,
+					*end ? "/..." : "");
+
+	return buf;
+}
+
 SWITCH_DECLARE(char *) switch_url_decode(char *s)
 {
 	char *o;
