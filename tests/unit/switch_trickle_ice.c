@@ -1,5 +1,6 @@
 #include <switch.h>
 #include <switch_rtp.h>
+#include <switch_stun.h>
 #include <test/switch_test.h>
 #include <private/switch_rtp_pvt.h>
 #include "switch_telnyx.h"
@@ -10,6 +11,69 @@
 extern char *fst_getenv_default(const char *, char *, switch_bool_t);
 static void _silence_unused(void) { (void)fst_getenv_default; }
 static const char *rx_host = "127.0.0.1";
+
+static switch_size_t build_authenticated_ice_request(uint8_t *buf, switch_size_t buflen,
+	const char *username, const char *password)
+{
+	static const char tie_breaker[8] = { 0x01, 0x23, 0x45, 0x67, 0x11, 0x22, 0x33, 0x44 };
+	switch_stun_packet_t *packet;
+	switch_size_t bytes;
+
+	switch_assert(buf);
+	switch_assert(buflen >= 128);
+	switch_assert(username);
+	switch_assert(password);
+	memset(buf, 0, buflen);
+	packet = switch_stun_packet_build_header(SWITCH_STUN_BINDING_REQUEST, NULL, buf);
+	switch_stun_packet_attribute_add_priority(packet, 0x6e0001ff);
+	switch_stun_packet_attribute_add_username(packet, (char *)username, (uint16_t)strlen(username));
+	switch_stun_packet_attribute_add_use_candidate(packet);
+	switch_stun_packet_attribute_add_controlling_value(packet, tie_breaker);
+	switch_stun_packet_attribute_add_integrity(packet, password);
+	switch_stun_packet_attribute_add_fingerprint(packet);
+	bytes = switch_stun_packet_length(packet);
+	switch_assert(bytes <= buflen);
+
+	return bytes;
+}
+
+static switch_status_t reverse_ice_username(const char *ice_user, char *incoming, switch_size_t incoming_len)
+{
+	const char *colon;
+	switch_size_t left_len;
+	switch_size_t right_len;
+
+	if (zstr(ice_user) || !incoming || !incoming_len || !(colon = strchr(ice_user, ':'))) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	left_len = (switch_size_t)(colon - ice_user);
+	right_len = strlen(colon + 1);
+	if (!left_len || !right_len || left_len + right_len + 2 > incoming_len) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	memcpy(incoming, colon + 1, right_len);
+	incoming[right_len] = ':';
+	memcpy(incoming + right_len + 1, ice_user, left_len);
+	incoming[right_len + left_len + 1] = '\0';
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static switch_status_t copy_sockaddr_tuple(switch_sockaddr_t *addr, char *host, switch_size_t host_len,
+	switch_port_t *port)
+{
+	if (!addr || !host || !host_len || !port) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	if (!switch_get_addr(host, host_len, addr)) {
+		return SWITCH_STATUS_FALSE;
+	}
+	*port = switch_sockaddr_get_port(addr);
+	return SWITCH_STATUS_SUCCESS;
+}
 
 static switch_status_t copy_sdp_attribute(const char *sdp, const char *attribute, char *value, switch_size_t value_len)
 {
@@ -506,6 +570,116 @@ FCT_BGN()
 			fst_check_string_equals(answer_local_ufrag, initial_local_ufrag);
 			fst_check_string_equals(answer_local_pwd, initial_local_pwd);
 			fst_check(has_addr == SWITCH_TRUE);
+
+			cleanup_session_media_and_sdp(session, sdp_session, parser);
+		}
+		FCT_TEST_END();
+
+		FCT_TEST_BGN(rtcp_mux_prflx_late_srflx_preserves_inflight_dtls)
+		{
+			switch_core_session_t *session = NULL;
+			switch_channel_t *channel = NULL;
+			switch_media_handle_t *smh = NULL;
+			switch_rtp_t *rtp = NULL;
+			void *sdp_session = NULL;
+			sdp_parser_t *parser = NULL;
+			switch_status_t status;
+			switch_rtp_pvt_transport_snapshot_t before;
+			switch_rtp_pvt_transport_snapshot_t nominated;
+			switch_rtp_pvt_transport_snapshot_t after;
+			char ice_user[256] = "";
+			char incoming_user[256] = "";
+			char local_pwd[256] = "";
+			char remote_pwd[256] = "";
+			char nominated_host[80] = "";
+			char after_host[80] = "";
+			char *chosen_addr = NULL;
+			switch_port_t chosen_port = 0;
+			switch_port_t nominated_port = 0;
+			switch_port_t after_port = 0;
+			switch_bool_t has_addr = SWITCH_FALSE;
+			uint8_t stun_packet[512];
+			switch_size_t stun_len;
+
+			status = make_session_and_rtp_with_sdp_ex(&session, &rtp, &sdp_session, &parser,
+				NULL, "PCMU", SWITCH_TRUE, SWITCH_FALSE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS && session && !rtp && sdp_session && parser);
+			channel = switch_core_session_get_channel(session);
+			smh = switch_core_session_get_media_handle(session);
+			fst_requires(channel != NULL && smh != NULL);
+
+			switch_channel_set_variable(channel, "rtp_ice_prflx_bootstrap", "true");
+			switch_channel_set_variable(channel, "rtp_ice_prflx_bootstrap_ms", "5000");
+			switch_channel_set_variable(channel, "rtp_ice_role", "controlled");
+			status = switch_core_media_activate_rtp(session);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			rtp = switch_core_media_get_rtp_session(session, SWITCH_MEDIA_TYPE_AUDIO);
+			fst_requires(rtp != NULL);
+
+			status = switch_rtp_pvt_get_ice_state(rtp, IPR_RTP,
+				ice_user, sizeof(ice_user), local_pwd, sizeof(local_pwd),
+				remote_pwd, sizeof(remote_pwd), &has_addr);
+			fst_requires(status == SWITCH_STATUS_SUCCESS && has_addr == SWITCH_FALSE);
+			fst_requires(reverse_ice_username(ice_user, incoming_user,
+				sizeof(incoming_user)) == SWITCH_STATUS_SUCCESS);
+			status = switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP, &before);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			fst_requires((before.ice_type & ICE_CONTROLLED) != 0);
+			fst_requires(before.dtls_state == DS_HANDSHAKE);
+			fst_requires(before.dtls_context != NULL && before.dtls_ssl != NULL &&
+				before.socket != NULL);
+			fst_check(before.rtp_chosen == SWITCH_FALSE);
+			fst_check(before.rtcp_chosen == SWITCH_FALSE);
+
+			stun_len = build_authenticated_ice_request(stun_packet, sizeof(stun_packet),
+				incoming_user, local_pwd);
+			status = switch_rtp_pvt_handle_ice_from(rtp, IPR_RTP, "192.0.2.10", 54302,
+				stun_packet, stun_len);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			status = switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP, &nominated);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			fst_requires(nominated.ice_ready == SWITCH_TRUE && nominated.ice_rready == SWITCH_TRUE);
+			fst_requires(nominated.rtp_chosen == SWITCH_TRUE);
+			fst_check(nominated.rtcp_chosen == SWITCH_FALSE);
+			fst_check(nominated.dtls_state == DS_HANDSHAKE);
+			fst_check(nominated.dtls_context == before.dtls_context);
+			fst_check(nominated.dtls_ssl == before.dtls_ssl);
+			fst_check(nominated.socket == before.socket);
+			status = switch_core_media_get_chosen_ice_candidate(session, SWITCH_MEDIA_TYPE_AUDIO,
+				&chosen_addr, &chosen_port);
+			fst_requires(status == SWITCH_STATUS_SUCCESS && chosen_addr != NULL);
+			fst_check_string_equals(chosen_addr, "192.0.2.10");
+			fst_check(chosen_port == 54302);
+			status = copy_sockaddr_tuple(switch_rtp_session_get_remote_addr(rtp), nominated_host,
+				sizeof(nominated_host), &nominated_port);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			fst_check_string_equals(nominated_host, "192.0.2.10");
+			fst_check(nominated_port == 54302);
+
+			status = switch_core_media_trickle_remote_candidate_and_recheck(
+				session, smh, sdp_session, SDP_TYPE_REQUEST, "0", 0,
+				"candidate:265031753 1 udp 1685921533 198.51.100.20 54302 typ srflx raddr 192.0.2.10 rport 54302", 0);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			status = switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP, &after);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			fst_check(after.ice_ready == nominated.ice_ready);
+			fst_check(after.ice_rready == nominated.ice_rready);
+			fst_check(after.rtp_chosen == nominated.rtp_chosen);
+			fst_check(after.rtcp_chosen == nominated.rtcp_chosen);
+			fst_check(after.dtls_state == DS_HANDSHAKE);
+			fst_check(after.dtls_context == before.dtls_context);
+			fst_check(after.dtls_ssl == before.dtls_ssl);
+			fst_check(after.socket == before.socket);
+			status = switch_core_media_get_chosen_ice_candidate(session, SWITCH_MEDIA_TYPE_AUDIO,
+				&chosen_addr, &chosen_port);
+			fst_requires(status == SWITCH_STATUS_SUCCESS && chosen_addr != NULL);
+			fst_check_string_equals(chosen_addr, "192.0.2.10");
+			fst_check(chosen_port == 54302);
+			status = copy_sockaddr_tuple(switch_rtp_session_get_remote_addr(rtp), after_host,
+				sizeof(after_host), &after_port);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			fst_check_string_equals(after_host, nominated_host);
+			fst_check(after_port == nominated_port);
 
 			cleanup_session_media_and_sdp(session, sdp_session, parser);
 		}

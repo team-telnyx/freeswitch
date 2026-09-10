@@ -473,6 +473,24 @@ FST_TEARDOWN_END()
 		switch_core_destroy_memory_pool(&pool);
 	}
 	FST_TEST_END()
+	FST_TEST_BEGIN(test_rtcp_mux_prflx_selection_blocks_late_candidate_reselection)
+	{
+		ice_t ice = { 0 };
+
+		fst_check(!switch_rtp_pvt_ice_selection_complete(NULL, SWITCH_TRUE));
+		fst_check(!switch_rtp_pvt_ice_selection_complete(&ice, SWITCH_TRUE));
+
+		/* Production ordering: authenticated peer-reflexive nomination selects
+		 * RTP before the late advertised host/srflx candidate is processed.
+		 * RTCP-mux makes that one selected component a complete ICE transport. */
+		ice.is_chosen[IPR_RTP] = 1;
+		fst_check(switch_rtp_pvt_ice_selection_complete(&ice, SWITCH_TRUE));
+		fst_check(!switch_rtp_pvt_ice_selection_complete(&ice, SWITCH_FALSE));
+
+		ice.is_chosen[IPR_RTCP] = 1;
+		fst_check(switch_rtp_pvt_ice_selection_complete(&ice, SWITCH_FALSE));
+	}
+	FST_TEST_END()
 	FST_TEST_BEGIN(test_same_generation_late_trickle_preserves_dtls_handshake)
 	{
 		switch_memory_pool_t *pool = NULL;
