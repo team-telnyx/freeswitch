@@ -326,6 +326,59 @@ FST_CORE_BEGIN("./conf")
 		}
 		FST_TEST_END()
 
+		/* bundle_drain_thread_func() takes the session read lock with a TRYlock that
+		 * also fails when the channel is already down, and it does that after
+		 * bundle_drain_thread_start() has published BUNDLE_DRAIN_STARTING. If the
+		 * failure path returns without unwinding that state, the drain state is
+		 * stranded at STARTING with a dead thread: start() then refuses forever
+		 * (state != INACTIVE) and an audio reader that lands on the STARTING branch
+		 * spins on switch_yield(1000) inside a loop whose only other condition,
+		 * SCMF_RUNNING, is never cleared anywhere in the tree.
+		 *
+		 * State values mirror the private defines: 0 INACTIVE, 1 STARTING. */
+		FST_TEST_BEGIN(test_drain_thread_unwinds_state_when_the_read_lock_fails)
+		{
+			switch_core_session_t *session = NULL;
+			switch_memory_pool_t *pool = NULL;
+			switch_rtp_t *rtp = NULL;
+			switch_rtp_flag_t rtp_flags[SWITCH_RTP_FLAG_INVALID] = { 0 };
+			const char *err = NULL;
+			int waited, state;
+
+			session = originate_null_session();
+			fst_requires(session);
+			fst_requires(attach_media_handle(session) == SWITCH_STATUS_SUCCESS);
+
+			pool = switch_core_session_get_pool(session);
+			rtp = switch_rtp_new("127.0.0.1", 12388, "127.0.0.1", 12390, 8, 8000, 20 * 1000,
+								 rtp_flags, "soft", &err, pool);
+			fst_requires(rtp);
+			fst_requires(switch_core_media_test_prepare_bundle_drain(session, rtp) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_core_media_test_get_drain_state(session) == 0);
+
+			/* Make the read lock fail: switch_core_session_read_lock() rejects a
+			 * channel that is already down. */
+			switch_channel_hangup(switch_core_session_get_channel(session), SWITCH_CAUSE_NORMAL_CLEARING);
+			fst_requires(switch_core_session_read_lock(session) != SWITCH_STATUS_SUCCESS);
+
+			switch_core_media_test_drain_thread_start(session);
+			fst_requires(switch_core_media_test_get_drain_thread(session) != NULL);
+
+			/* Let the thread reach its read-lock attempt and give up. */
+			for (waited = 0; waited < 200 && switch_core_media_test_get_drain_state(session) != 0; waited++) {
+				switch_yield(10000);
+			}
+
+			state = switch_core_media_test_get_drain_state(session);
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+							  "[TEST] drain state after a failed read lock = %d (expect 0 INACTIVE)\n", state);
+			fst_check(state == 0);
+
+			switch_core_media_test_drain_thread_stop(session);
+			switch_core_session_rwunlock(session);
+		}
+		FST_TEST_END()
+
 		/* bundle_frame_dup() marks its clones SFF_DYNAMIC (switch_core_media.c:4072,
 		 * :4098) because they are malloc-backed and released with switch_frame_free().
 		 * The bundled-video read branch then copies the whole frame, flags included,

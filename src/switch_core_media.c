@@ -4247,15 +4247,26 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 		return NULL;
 	}
 
-	/* Hold the session for the life of the thread, the way video_write_thread()
-	 * and video_helper_thread() do. Without it this thread dereferences session,
-	 * its channel and its media handle with nothing keeping the session alive. */
-	if (switch_core_session_read_lock(session) != SWITCH_STATUS_SUCCESS) {
-		return NULL;
-	}
-
 	a_engine = &smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
 	v_engine = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
+
+	/* Hold the session for the life of the thread, the way video_write_thread()
+	 * and video_helper_thread() do. Without it this thread dereferences session,
+	 * its channel and its media handle with nothing keeping the session alive.
+	 *
+	 * This is a trylock that also fails on an already-down channel, and it runs
+	 * after start() published STARTING, so the failure has to unwind that state.
+	 * Left at STARTING it strands the drain: start() refuses on state != INACTIVE,
+	 * and the audio read path's STARTING branch spins on switch_yield(1000) inside
+	 * a loop whose other condition, SCMF_RUNNING, is never cleared. */
+	if (switch_core_session_read_lock(session) != SWITCH_STATUS_SUCCESS) {
+		switch_mutex_lock(smh->bundle_drain_mutex);
+		if (v_engine->bundle_drain_state == BUNDLE_DRAIN_STARTING) {
+			v_engine->bundle_drain_state = BUNDLE_DRAIN_INACTIVE;
+		}
+		switch_mutex_unlock(smh->bundle_drain_mutex);
+		return NULL;
+	}
 
 
 	/* Promote STARTING -> RUNNING under the drain mutex. stop() can legally
@@ -22707,6 +22718,13 @@ SWITCH_DECLARE(switch_thread_t *) switch_core_media_test_get_drain_thread(switch
 	switch_rtp_engine_t *v_engine = test_engine(session, SWITCH_MEDIA_TYPE_VIDEO);
 
 	return v_engine ? v_engine->bundle_drain_thread : NULL;
+}
+
+SWITCH_DECLARE(int) switch_core_media_test_get_drain_state(switch_core_session_t *session)
+{
+	switch_rtp_engine_t *engine = test_engine(session, SWITCH_MEDIA_TYPE_VIDEO);
+
+	return engine ? (int) engine->bundle_drain_state : -1;
 }
 
 SWITCH_DECLARE(void) switch_core_media_test_drain_thread_stop(switch_core_session_t *session)
