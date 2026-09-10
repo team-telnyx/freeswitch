@@ -120,22 +120,6 @@ static void *SWITCH_THREAD_FUNC stop_thread_fn(switch_thread_t *thread, void *ob
 	return NULL;
 }
 
-struct flush_job {
-	switch_core_session_t *session;
-	switch_media_type_t type;
-	volatile int done;
-};
-
-static void *SWITCH_THREAD_FUNC flush_thread(switch_thread_t *thread, void *obj)
-{
-	struct flush_job *job = (struct flush_job *) obj;
-
-	switch_core_media_test_flush_queued_read_frames(job->session, job->type);
-	job->done = 1;
-
-	return NULL;
-}
-
 FST_CORE_BEGIN("./conf")
 {
 	FST_SUITE_BEGIN(bundle_read_frame_lock)
@@ -151,61 +135,47 @@ FST_CORE_BEGIN("./conf")
 		}
 		FST_TEARDOWN_END()
 
-		FST_TEST_BEGIN(test_flush_queued_read_frames_respects_video_read_lock)
+		/* The bundled video read branch leaves engine->read_frame aliasing the
+		 * popped clone and hands the caller &engine->read_frame, then releases
+		 * read_mutex before returning. So a flush that frees engine->read_fb_frame
+		 * pulls the block out from under a caller that is still using it -- taking
+		 * the read mutex inside the flush does not help, because the caller is no
+		 * longer holding it. The invariant is that the flush must not touch the
+		 * in-flight frame at all; the reader owns it until its next pop, and
+		 * switch_media_handle_destroy() owns it after teardown.
+		 *
+		 * The queue-draining half of the flush is unchanged, so it needs no new
+		 * assertion here. */
+		FST_TEST_BEGIN(test_flush_queued_read_frames_leaves_the_in_flight_frame)
 		{
 			switch_core_session_t *session = NULL;
-			switch_memory_pool_t *pool = NULL;
-			switch_threadattr_t *thd_attr = NULL;
-			switch_thread_t *thread = NULL;
-			switch_status_t st;
-			struct flush_job job;
 			switch_frame_t *frame = NULL;
-			int waited;
+			switch_frame_t *queued = NULL;
 
 			session = originate_null_session();
 			fst_requires(session);
 			fst_requires(attach_media_handle(session) == SWITCH_STATUS_SUCCESS);
 			fst_requires(switch_core_media_test_prepare_read_fb(session, SWITCH_MEDIA_TYPE_VIDEO) == SWITCH_STATUS_SUCCESS);
 
+			/* Stands in for the frame a reader has already been handed. */
 			frame = make_dynamic_frame();
 			fst_requires(frame);
 			switch_core_media_test_set_read_fb_frame(session, SWITCH_MEDIA_TYPE_VIDEO, frame);
 			fst_requires(switch_core_media_test_get_read_fb_frame(session, SWITCH_MEDIA_TYPE_VIDEO) == frame);
 
-			/* Stand in for the video reader: it holds this mutex for the whole of
-			 * the BUNDLE branch and leaves engine->read_frame pointing into the
-			 * queued frame afterwards. */
-			fst_requires(switch_core_media_test_lock_read(session, SWITCH_MEDIA_TYPE_VIDEO) == SWITCH_STATUS_SUCCESS);
+			/* Something still queued, so the flush has real work to do. */
+			queued = make_dynamic_frame();
+			fst_requires(queued);
+			fst_requires(switch_core_media_test_push_read_fb(session, SWITCH_MEDIA_TYPE_VIDEO, queued) == SWITCH_STATUS_SUCCESS);
 
-			pool = switch_core_session_get_pool(session);
-			job.session = session;
-			job.type = SWITCH_MEDIA_TYPE_VIDEO;
-			job.done = 0;
+			/* The realistic case: the reader has returned, so nothing holds the mutex. */
+			switch_core_media_test_flush_queued_read_frames(session, SWITCH_MEDIA_TYPE_VIDEO);
 
-			switch_threadattr_create(&thd_attr, pool);
-			switch_threadattr_detach_set(thd_attr, 0);
-			switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
-			fst_requires(switch_thread_create(&thread, thd_attr, flush_thread, &job, pool) == SWITCH_STATUS_SUCCESS);
-
-			switch_yield(300000);
-
-			/* THE CRUX. The reader still holds the lock, so nothing may have freed
-			 * the frame it is using. */
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-							  "[TEST] flush completed while the video read lock was held = %d (expect 0)\n", job.done);
-			fst_check(job.done == 0);
-
-			switch_core_media_test_unlock_read(session, SWITCH_MEDIA_TYPE_VIDEO);
-
-			for (waited = 0; waited < 500 && !job.done; waited++) {
-				switch_yield(10000);
-			}
-			fst_check(job.done == 1);
-
-			switch_thread_join(&st, thread);
-
-			/* Once it does run, it must have released the frame. */
-			fst_check(switch_core_media_test_get_read_fb_frame(session, SWITCH_MEDIA_TYPE_VIDEO) == NULL);
+							  "[TEST] in-flight frame after flush = %p (expect %p)\n",
+							  (void *) switch_core_media_test_get_read_fb_frame(session, SWITCH_MEDIA_TYPE_VIDEO),
+							  (void *) frame);
+			fst_check(switch_core_media_test_get_read_fb_frame(session, SWITCH_MEDIA_TYPE_VIDEO) == frame);
 
 			switch_channel_hangup(switch_core_session_get_channel(session), SWITCH_CAUSE_NORMAL_CLEARING);
 			switch_core_session_rwunlock(session);
