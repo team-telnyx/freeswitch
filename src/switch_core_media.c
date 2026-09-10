@@ -2847,7 +2847,7 @@ SWITCH_DECLARE(void) switch_core_media_set_stats(switch_core_session_t *session)
 
 
 
-static void switch_core_media_flush_queued_read_frames(switch_rtp_engine_t *engine);
+static void switch_core_media_flush_queued_read_frames(switch_media_handle_t *smh, switch_media_type_t type);
 static void bundle_audio_queue_flush(switch_frame_buffer_t *audio_fb);
 static void bundle_audio_queue_cleanup_locked(switch_core_session_t *session, switch_media_handle_t *smh, switch_rtp_engine_t *v_engine);
 
@@ -2897,7 +2897,7 @@ SWITCH_DECLARE(void) switch_media_handle_destroy(switch_core_session_t *session)
 
 	if (a_engine->write_fb) switch_frame_buffer_destroy(&a_engine->write_fb);
 
-	switch_core_media_flush_queued_read_frames(v_engine);
+	switch_core_media_flush_queued_read_frames(smh, SWITCH_MEDIA_TYPE_VIDEO);
 	if (v_engine->read_fb) switch_frame_buffer_destroy(&v_engine->read_fb);
 
 	/* cleanup audio drain frame buffer.
@@ -4010,12 +4010,27 @@ static void switch_core_media_release_queued_read_frame(switch_rtp_engine_t *eng
 	}
 }
 
-static void switch_core_media_flush_queued_read_frames(switch_rtp_engine_t *engine)
+/* Frees engine->read_fb_frame, which the bundled video read path is still
+ * referencing through engine->read_frame after it returns to its caller, so this
+ * must hold the same read mutex that path takes.  Called from the signalling
+ * thread while the drain thread is still producing and the reader consuming. */
+static void switch_core_media_flush_queued_read_frames(switch_media_handle_t *smh, switch_media_type_t type)
 {
+	switch_rtp_engine_t *engine;
 	void *pop = NULL;
 
-	if (!engine || !engine->read_fb) {
+	if (!smh || type >= SWITCH_MEDIA_TYPE_TOTAL) {
 		return;
+	}
+
+	engine = &smh->engines[type];
+
+	if (!engine->read_fb) {
+		return;
+	}
+
+	if (smh->read_mutex[type]) {
+		switch_mutex_lock(smh->read_mutex[type]);
 	}
 
 	switch_core_media_release_queued_read_frame(engine);
@@ -4024,6 +4039,10 @@ static void switch_core_media_flush_queued_read_frames(switch_rtp_engine_t *engi
 		switch_frame_t *frame = (switch_frame_t *) pop;
 		switch_frame_free(&frame);
 		pop = NULL;
+	}
+
+	if (smh->read_mutex[type]) {
+		switch_mutex_unlock(smh->read_mutex[type]);
 	}
 }
 
@@ -14300,7 +14319,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 					status = SWITCH_STATUS_FALSE;
 					goto end;
 				}
-				switch_core_media_flush_queued_read_frames(v_engine);
+				switch_core_media_flush_queued_read_frames(smh, SWITCH_MEDIA_TYPE_VIDEO);
 				/* Start the continuous drain thread. Stop first so BUNDLE restart
 				 * joins any exited-but-not-cleared drain thread and flushes stale audio. */
 				bundle_drain_thread_stop(session);
@@ -14311,7 +14330,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 				if (v_engine->bundled_with_audio) {
 					/* Stop drain thread before disabling BUNDLE */
 					bundle_drain_thread_stop(session);
-					switch_core_media_flush_queued_read_frames(v_engine);
+					switch_core_media_flush_queued_read_frames(smh, SWITCH_MEDIA_TYPE_VIDEO);
 					if (v_engine->bundle_write_state) {
 						switch_rtp_write_state_reset(v_engine->bundle_write_state);
 					}
@@ -22628,10 +22647,8 @@ SWITCH_DECLARE(void) switch_core_media_test_unlock_read(switch_core_session_t *s
 
 SWITCH_DECLARE(void) switch_core_media_test_flush_queued_read_frames(switch_core_session_t *session, switch_media_type_t type)
 {
-	switch_rtp_engine_t *engine = test_engine(session, type);
-
-	if (engine) {
-		switch_core_media_flush_queued_read_frames(engine);
+	if (test_engine(session, type)) {
+		switch_core_media_flush_queued_read_frames(session->media_handle, type);
 	}
 }
 
