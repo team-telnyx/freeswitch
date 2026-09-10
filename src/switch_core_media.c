@@ -479,6 +479,7 @@ struct switch_media_handle_s {
 
 	switch_mutex_t *mutex;
 	switch_mutex_t *sdp_mutex;
+	switch_mutex_t *bundle_mutex;
 	switch_mutex_t *control_mutex;
 	switch_mutex_t *bundle_drain_mutex;  /* protects drain thread start/stop */
 
@@ -2997,6 +2998,7 @@ SWITCH_DECLARE(switch_status_t) switch_media_handle_create(switch_media_handle_t
 
 		switch_mutex_init(&session->media_handle->mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 		switch_mutex_init(&session->media_handle->sdp_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
+		switch_mutex_init(&session->media_handle->bundle_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 		switch_mutex_init(&session->media_handle->control_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 		switch_mutex_init(&session->media_handle->bundle_drain_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 		switch_thread_cond_create(&session->media_handle->engines[SWITCH_MEDIA_TYPE_VIDEO].bundle_audio_read_cond, switch_core_session_get_pool(session));
@@ -4239,6 +4241,28 @@ static void bundle_audio_queue_cleanup_locked(switch_core_session_t *session, sw
  * 2. The alternative (feeding back into RTP internals) would require exposing
  *    JB internals and risks deadlocks on the shared RTP session.
  * 3. Raw packet delivery with queue timing provides adequate ordering. */
+/* Resolves the BUNDLE m-line for a received packet and copies out the only field
+ * either caller needs. Both the traversal and the m-line it returns live in
+ * smh->bundle, which the SIP thread re-initialises wholesale on every received
+ * SDP, so the lookup and the read of media_type have to happen together. */
+static switch_bool_t bundle_demux_media_type(switch_media_handle_t *smh, const char *mid, uint32_t ssrc,
+											 switch_payload_t pt, switch_media_type_t *type_out)
+{
+	switch_bundle_mline_t *mline;
+	switch_bool_t found = SWITCH_FALSE;
+
+	switch_mutex_lock(smh->bundle_mutex);
+
+	if ((mline = switch_bundle_group_demux_rtp(&smh->bundle, mid, ssrc, pt, NULL))) {
+		*type_out = mline->media_type;
+		found = SWITCH_TRUE;
+	}
+
+	switch_mutex_unlock(smh->bundle_mutex);
+
+	return found;
+}
+
 static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread, void *obj)
 {
 	switch_core_session_t *session = (switch_core_session_t *) obj;
@@ -4293,7 +4317,7 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 		   && v_engine->bundled_with_audio) {
 
 		switch_status_t st;
-		switch_bundle_mline_t *mline;
+		switch_media_type_t demux_type = SWITCH_MEDIA_TYPE_AUDIO;
 		const char *mid;
 
 		/* Zero out the local frame for each read */
@@ -4353,14 +4377,12 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 
 		/* Demux: determine if audio or video */
 		mid = switch_rtp_get_received_mid(a_engine->rtp_session);
-		mline = switch_bundle_group_demux_rtp(&smh->bundle, mid, drain_frame.ssrc,
-											 drain_frame.payload, NULL);
 
-		if (!mline) {
+		if (!bundle_demux_media_type(smh, mid, drain_frame.ssrc, drain_frame.payload, &demux_type)) {
 			continue;
 		}
 
-		if (mline->media_type == SWITCH_MEDIA_TYPE_VIDEO) {
+		if (demux_type == SWITCH_MEDIA_TYPE_VIDEO) {
 			/* Clone and queue to video read_fb. BUNDLE video read_fb stores
 			 * malloc-backed frame clones, not frame-buffer-owned clones. */
 			switch_frame_t *dupframe = NULL;
@@ -4369,7 +4391,7 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 				switch_frame_buffer_trypush(v_engine->read_fb, dupframe) != SWITCH_STATUS_SUCCESS) {
 				switch_frame_free(&dupframe);
 			}
-		} else if (mline->media_type == SWITCH_MEDIA_TYPE_AUDIO) {
+		} else if (demux_type == SWITCH_MEDIA_TYPE_AUDIO) {
 			/* Clone and queue to audio read_fb for the audio read path.
 			 * Serialize fb access with stop/teardown so the drain thread cannot
 			 * duplicate into a buffer while another thread is disabling BUNDLE. */
@@ -4553,7 +4575,7 @@ static void bundle_drain_thread_stop(switch_core_session_t *session)
 static switch_bool_t switch_core_media_route_bundled_rtp(switch_media_handle_t *smh, switch_rtp_engine_t *engine, switch_media_type_t type)
 {
 	switch_rtp_engine_t *v_engine;
-	switch_bundle_mline_t *mline;
+	switch_media_type_t demux_type = SWITCH_MEDIA_TYPE_AUDIO;
 	const char *mid;
 
 	if (!smh || !engine || type != SWITCH_MEDIA_TYPE_AUDIO || smh->bundle.state != SWITCH_BUNDLE_STATE_ACCEPTED) {
@@ -4566,17 +4588,16 @@ static switch_bool_t switch_core_media_route_bundled_rtp(switch_media_handle_t *
 	}
 
 	mid = switch_rtp_get_received_mid(engine->rtp_session);
-	mline = switch_bundle_group_demux_rtp(&smh->bundle, mid, engine->read_frame.ssrc, engine->read_frame.payload, NULL);
 
-	if (!mline) {
+	if (!bundle_demux_media_type(smh, mid, engine->read_frame.ssrc, engine->read_frame.payload, &demux_type)) {
 		return SWITCH_TRUE;
 	}
 
-	if (mline->media_type == SWITCH_MEDIA_TYPE_AUDIO) {
+	if (demux_type == SWITCH_MEDIA_TYPE_AUDIO) {
 		return SWITCH_FALSE;
 	}
 
-	if (mline->media_type == SWITCH_MEDIA_TYPE_VIDEO) {
+	if (demux_type == SWITCH_MEDIA_TYPE_VIDEO) {
 		switch_frame_t *dupframe = NULL;
 
 		if (!engine->read_frame.buflen) {
@@ -8397,6 +8418,12 @@ static void switch_core_media_bundle_populate_from_sdp(switch_media_handle_t *sm
 
 	channel = switch_core_session_get_channel(smh->session);
 	policy = switch_core_media_bundle_policy(smh);
+
+	/* The group is rebuilt from scratch here -- init() memsets it and the loop
+	 * below repopulates it -- while the drain thread and the audio read path
+	 * traverse it per packet. Hold them off for the rebuild. */
+	switch_mutex_lock(smh->bundle_mutex);
+
 	switch_bundle_group_init(&smh->bundle, policy);
 
 	for (attr = sdp->sdp_attributes; attr; attr = attr->a_next) {
@@ -8513,6 +8540,7 @@ static void switch_core_media_bundle_populate_from_sdp(switch_media_handle_t *sm
 	} else {
 		switch_channel_set_variable(channel, "rtp_group_bundle", NULL);
 	}
+	switch_mutex_unlock(smh->bundle_mutex);
 }
 
 SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *session, const char *r_sdp, uint8_t *proceed, switch_sdp_type_t sdp_type)
@@ -22746,6 +22774,30 @@ SWITCH_DECLARE(switch_thread_t *) switch_core_media_test_get_drain_thread(switch
 	switch_rtp_engine_t *v_engine = test_engine(session, SWITCH_MEDIA_TYPE_VIDEO);
 
 	return v_engine ? v_engine->bundle_drain_thread : NULL;
+}
+
+SWITCH_DECLARE(void) switch_core_media_test_lock_bundle(switch_core_session_t *session)
+{
+	if (session && session->media_handle) {
+		switch_mutex_lock(session->media_handle->bundle_mutex);
+	}
+}
+
+SWITCH_DECLARE(void) switch_core_media_test_unlock_bundle(switch_core_session_t *session)
+{
+	if (session && session->media_handle) {
+		switch_mutex_unlock(session->media_handle->bundle_mutex);
+	}
+}
+
+/* Drives the same helper the drain thread and the audio read path use. */
+SWITCH_DECLARE(int) switch_core_media_test_demux_media_type(switch_core_session_t *session, const char *mid, uint32_t ssrc, int pt)
+{
+	switch_media_type_t type = SWITCH_MEDIA_TYPE_AUDIO;
+
+	if (!session || !session->media_handle) return -1;
+
+	return bundle_demux_media_type(session->media_handle, mid, ssrc, (switch_payload_t) pt, &type) ? (int) type : -1;
 }
 
 SWITCH_DECLARE(int) switch_core_media_test_get_drain_state(switch_core_session_t *session)

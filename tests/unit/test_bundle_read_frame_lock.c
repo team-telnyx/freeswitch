@@ -105,6 +105,23 @@ static void *SWITCH_THREAD_FUNC parked_thread_fn(switch_thread_t *thread, void *
 	return NULL;
 }
 
+struct demux_job {
+	switch_core_session_t *session;
+	volatile int started;
+	volatile int done;
+};
+
+static void *SWITCH_THREAD_FUNC demux_thread_fn(switch_thread_t *thread, void *obj)
+{
+	struct demux_job *job = (struct demux_job *) obj;
+
+	job->started = 1;
+	switch_core_media_test_demux_media_type(job->session, "0", 0x1234, 96);
+	job->done = 1;
+
+	return NULL;
+}
+
 struct stop_job {
 	switch_core_session_t *session;
 	volatile int done;
@@ -513,6 +530,65 @@ FST_CORE_BEGIN("./conf")
 							  "[TEST] returned read frame carries SFF_DYNAMIC = %d (expect 0)\n",
 							  switch_test_flag(out, SFF_DYNAMIC) ? 1 : 0);
 			fst_check(!switch_test_flag(out, SFF_DYNAMIC));
+
+			switch_channel_hangup(switch_core_session_get_channel(session), SWITCH_CAUSE_NORMAL_CLEARING);
+			switch_core_session_rwunlock(session);
+		}
+		FST_TEST_END()
+
+		/* The SIP thread re-initialises smh->bundle wholesale on every received SDP
+		 * (switch_bundle_group_init memsets the group, then add_mline repopulates
+		 * it), while the drain thread and the audio read path traverse the same
+		 * group per packet and write SSRC bindings into it. Nothing serialised the
+		 * two. The demux must therefore not proceed while a writer holds the bundle
+		 * lock. Deterministic: the lock is held open, not raced for. */
+		FST_TEST_BEGIN(test_bundle_demux_serialises_against_the_writer)
+		{
+			switch_core_session_t *session = NULL;
+			switch_memory_pool_t *pool = NULL;
+			switch_threadattr_t *thd_attr = NULL;
+			switch_thread_t *reader = NULL;
+			struct demux_job job;
+			switch_status_t st;
+			int waited;
+
+			session = originate_null_session();
+			fst_requires(session);
+			fst_requires(attach_media_handle(session) == SWITCH_STATUS_SUCCESS);
+			pool = switch_core_session_get_pool(session);
+
+			/* Stands in for the SIP thread inside switch_core_media_bundle_populate_from_sdp(). */
+			switch_core_media_test_lock_bundle(session);
+
+			job.session = session;
+			job.done = 0;
+			job.started = 0;
+
+			switch_threadattr_create(&thd_attr, pool);
+			switch_threadattr_detach_set(thd_attr, 0);
+			switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
+			fst_requires(switch_thread_create(&reader, thd_attr, demux_thread_fn, &job, pool) == SWITCH_STATUS_SUCCESS);
+
+			for (waited = 0; waited < 500 && !job.started; waited++) {
+				switch_yield(10000);
+			}
+			/* Proves the reader really reached the demux, so job.done == 0 below
+			 * cannot mean "the thread never ran". */
+			fst_requires(job.started == 1);
+
+			switch_yield(300000);
+
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+							  "[TEST] demux completed while the bundle writer held the lock = %d (expect 0)\n", job.done);
+			fst_check(job.done == 0);
+
+			switch_core_media_test_unlock_bundle(session);
+
+			for (waited = 0; waited < 500 && !job.done; waited++) {
+				switch_yield(10000);
+			}
+			fst_check(job.done == 1);
+			switch_thread_join(&st, reader);
 
 			switch_channel_hangup(switch_core_session_get_channel(session), SWITCH_CAUSE_NORMAL_CLEARING);
 			switch_core_session_rwunlock(session);

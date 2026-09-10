@@ -254,6 +254,9 @@ SWITCH_DECLARE(switch_frame_t *) switch_core_media_test_get_read_fb_frame(switch
 SWITCH_DECLARE(void) switch_core_media_test_arm_drain(switch_core_session_t *session, switch_thread_t *thread);
 SWITCH_DECLARE(switch_thread_t *) switch_core_media_test_get_drain_thread(switch_core_session_t *session);
 SWITCH_DECLARE(int) switch_core_media_test_get_drain_state(switch_core_session_t *session);
+SWITCH_DECLARE(void) switch_core_media_test_lock_bundle(switch_core_session_t *session);
+SWITCH_DECLARE(void) switch_core_media_test_unlock_bundle(switch_core_session_t *session);
+SWITCH_DECLARE(int) switch_core_media_test_demux_media_type(switch_core_session_t *session, const char *mid, uint32_t ssrc, int pt);
 SWITCH_DECLARE(void) switch_core_media_test_drain_thread_stop(switch_core_session_t *session);
 SWITCH_DECLARE(switch_status_t) switch_core_media_test_prepare_bundle_drain(switch_core_session_t *session, switch_rtp_t *rtp_session);
 SWITCH_DECLARE(void) switch_core_media_test_drain_thread_start(switch_core_session_t *session);
