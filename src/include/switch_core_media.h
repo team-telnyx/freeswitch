@@ -241,6 +241,30 @@ typedef struct switch_fork_state_s {
 SWITCH_DECLARE(switch_status_t) switch_media_handle_create(switch_media_handle_t **smhp, switch_core_session_t *session, switch_core_media_params_t *params);
 SWITCH_DECLARE(void) switch_media_handle_destroy(switch_core_session_t *session);
 SWITCH_DECLARE(switch_media_handle_t *) switch_core_session_get_media_handle(switch_core_session_t *session);
+
+#ifdef SWITCH_CORE_MEDIA_TEST_HOOKS
+/* tests/unit only: struct switch_media_handle_s and struct switch_rtp_engine_s are
+ * private to switch_core_media.c, so the BUNDLE read state is otherwise unreachable. */
+SWITCH_DECLARE(switch_status_t) switch_core_media_test_prepare_read_fb(switch_core_session_t *session, switch_media_type_t type);
+SWITCH_DECLARE(switch_status_t) switch_core_media_test_hold_session_write_lock(switch_core_session_t *session);
+SWITCH_DECLARE(void) switch_core_media_test_release_session_write_lock(switch_core_session_t *session);
+SWITCH_DECLARE(switch_frame_t *) switch_core_media_test_pop_read_fb(switch_core_session_t *session, switch_media_type_t type);
+SWITCH_DECLARE(void) switch_core_media_test_flush_queued_read_frames(switch_core_session_t *session, switch_media_type_t type);
+SWITCH_DECLARE(void) switch_core_media_test_set_read_fb_frame(switch_core_session_t *session, switch_media_type_t type, switch_frame_t *frame);
+SWITCH_DECLARE(switch_frame_t *) switch_core_media_test_get_read_fb_frame(switch_core_session_t *session, switch_media_type_t type);
+SWITCH_DECLARE(void) switch_core_media_test_arm_drain(switch_core_session_t *session, switch_thread_t *thread);
+SWITCH_DECLARE(switch_thread_t *) switch_core_media_test_get_drain_thread(switch_core_session_t *session);
+SWITCH_DECLARE(int) switch_core_media_test_get_drain_state(switch_core_session_t *session);
+SWITCH_DECLARE(void) switch_core_media_test_lock_bundle(switch_core_session_t *session);
+SWITCH_DECLARE(void) switch_core_media_test_unlock_bundle(switch_core_session_t *session);
+SWITCH_DECLARE(int) switch_core_media_test_demux_media_type(switch_core_session_t *session, const char *mid, uint32_t ssrc, int pt);
+SWITCH_DECLARE(void) switch_core_media_test_drain_thread_stop(switch_core_session_t *session);
+SWITCH_DECLARE(switch_status_t) switch_core_media_test_prepare_bundle_drain(switch_core_session_t *session, switch_rtp_t *rtp_session);
+SWITCH_DECLARE(void) switch_core_media_test_drain_thread_start(switch_core_session_t *session);
+SWITCH_DECLARE(switch_status_t) switch_core_media_test_prepare_engine_read(switch_core_session_t *session, switch_media_type_t type, switch_rtp_t *rtp_session);
+SWITCH_DECLARE(switch_status_t) switch_core_media_test_push_read_fb(switch_core_session_t *session, switch_media_type_t type, switch_frame_t *frame);
+SWITCH_DECLARE(switch_status_t) switch_core_media_test_try_session_write_lock(switch_core_session_t *session);
+#endif
 SWITCH_DECLARE(switch_status_t) switch_core_session_clear_media_handle(switch_core_session_t *session);
 SWITCH_DECLARE(switch_status_t) switch_core_session_media_handle_ready(switch_core_session_t *session);
 SWITCH_DECLARE(void) switch_media_handle_set_media_flag(switch_media_handle_t *smh, switch_core_media_flag_t flag);

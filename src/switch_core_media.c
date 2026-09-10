@@ -30,6 +30,10 @@
  *
  */
 
+/* Makes the switch_core_media_test_* prototypes visible below so the definitions
+ * are checked against the header rather than silently drifting from it. */
+#define SWITCH_CORE_MEDIA_TEST_HOOKS
+
 #include <switch.h>
 #include <switch_ssl.h>
 #include <switch_stun.h>
@@ -475,6 +479,7 @@ struct switch_media_handle_s {
 
 	switch_mutex_t *mutex;
 	switch_mutex_t *sdp_mutex;
+	switch_mutex_t *bundle_mutex;
 	switch_mutex_t *control_mutex;
 	switch_mutex_t *bundle_drain_mutex;  /* protects drain thread start/stop */
 
@@ -2848,6 +2853,7 @@ SWITCH_DECLARE(void) switch_core_media_set_stats(switch_core_session_t *session)
 
 
 static void switch_core_media_flush_queued_read_frames(switch_rtp_engine_t *engine);
+static void switch_core_media_release_queued_read_frame(switch_rtp_engine_t *engine);
 static void bundle_audio_queue_flush(switch_frame_buffer_t *audio_fb);
 static void bundle_audio_queue_cleanup_locked(switch_core_session_t *session, switch_media_handle_t *smh, switch_rtp_engine_t *v_engine);
 
@@ -2897,7 +2903,11 @@ SWITCH_DECLARE(void) switch_media_handle_destroy(switch_core_session_t *session)
 
 	if (a_engine->write_fb) switch_frame_buffer_destroy(&a_engine->write_fb);
 
+	/* The flush no longer frees the in-flight frame, so release it here. Safe:
+	 * switch_core_media_deactivate_rtp() above joined the drain thread and the
+	 * video helper thread, so no reader is holding it. */
 	switch_core_media_flush_queued_read_frames(v_engine);
+	switch_core_media_release_queued_read_frame(v_engine);
 	if (v_engine->read_fb) switch_frame_buffer_destroy(&v_engine->read_fb);
 
 	/* cleanup audio drain frame buffer.
@@ -2988,6 +2998,7 @@ SWITCH_DECLARE(switch_status_t) switch_media_handle_create(switch_media_handle_t
 
 		switch_mutex_init(&session->media_handle->mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 		switch_mutex_init(&session->media_handle->sdp_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
+		switch_mutex_init(&session->media_handle->bundle_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 		switch_mutex_init(&session->media_handle->control_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 		switch_mutex_init(&session->media_handle->bundle_drain_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
 		switch_thread_cond_create(&session->media_handle->engines[SWITCH_MEDIA_TYPE_VIDEO].bundle_audio_read_cond, switch_core_session_get_pool(session));
@@ -4010,6 +4021,17 @@ static void switch_core_media_release_queued_read_frame(switch_rtp_engine_t *eng
 	}
 }
 
+/* Drains the queue only.  It must NOT free engine->read_fb_frame: the bundled
+ * video read path leaves engine->read_frame aliasing that clone and hands the
+ * caller &engine->read_frame, then releases read_mutex before returning, so a
+ * caller is still using the block after this function could take that mutex.
+ * The reader owns the in-flight frame until its next pop (the release at the top
+ * of the branch), and switch_media_handle_destroy() owns it after teardown.  That
+ * relies on there being a single video reader per session -- read_mutex[type] is a
+ * trylock and is released before the frame is handed out, so it serialises the
+ * call, not the ownership handoff.  True of every in-tree reader today.
+ * Frames still in the queue were never handed out, so freeing them here is safe
+ * without a lock -- the frame buffer is itself thread safe. */
 static void switch_core_media_flush_queued_read_frames(switch_rtp_engine_t *engine)
 {
 	void *pop = NULL;
@@ -4017,8 +4039,6 @@ static void switch_core_media_flush_queued_read_frames(switch_rtp_engine_t *engi
 	if (!engine || !engine->read_fb) {
 		return;
 	}
-
-	switch_core_media_release_queued_read_frame(engine);
 
 	while (switch_frame_buffer_trypop(engine->read_fb, &pop) == SWITCH_STATUS_SUCCESS && pop) {
 		switch_frame_t *frame = (switch_frame_t *) pop;
@@ -4224,6 +4244,33 @@ static void bundle_audio_queue_cleanup_locked(switch_core_session_t *session, sw
  * 2. The alternative (feeding back into RTP internals) would require exposing
  *    JB internals and risks deadlocks on the shared RTP session.
  * 3. Raw packet delivery with queue timing provides adequate ordering. */
+/* Resolves the BUNDLE m-line for a received packet and copies out the only field
+ * either caller needs. Both the traversal and the m-line it returns live in
+ * smh->bundle, which the SIP thread re-initialises wholesale on every received
+ * SDP, so the lookup and the read of media_type have to happen together. */
+static switch_bool_t bundle_demux_media_type(switch_media_handle_t *smh, const char *mid, uint32_t ssrc,
+											 switch_payload_t pt, switch_media_type_t *type_out)
+{
+	switch_bundle_mline_t *mline;
+	switch_bool_t found = SWITCH_FALSE;
+
+	switch_mutex_lock(smh->bundle_mutex);
+
+	/* The state gate belongs in here with the traversal. Read outside the lock it
+	 * only says the group was accepted at some earlier instant -- a rebuild can
+	 * land in between and leave this walking a memset group. Callers keep their own
+	 * unlocked check as a fast path, but this is the one that decides. */
+	if (smh->bundle.state == SWITCH_BUNDLE_STATE_ACCEPTED &&
+		(mline = switch_bundle_group_demux_rtp(&smh->bundle, mid, ssrc, pt, NULL))) {
+		*type_out = mline->media_type;
+		found = SWITCH_TRUE;
+	}
+
+	switch_mutex_unlock(smh->bundle_mutex);
+
+	return found;
+}
+
 static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread, void *obj)
 {
 	switch_core_session_t *session = (switch_core_session_t *) obj;
@@ -4239,6 +4286,26 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 	a_engine = &smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
 	v_engine = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
 
+	/* Hold the session for the life of the thread, the way video_write_thread()
+	 * and video_helper_thread() do. Without it this thread dereferences session,
+	 * its channel and its media handle with nothing keeping the session alive.
+	 *
+	 * This is a trylock that also fails on an already-down channel, and it runs
+	 * after start() published STARTING, so the failure has to unwind that state.
+	 * Left at STARTING it strands the drain: start() refuses on state != INACTIVE,
+	 * and the audio read path's STARTING branch spins on switch_yield(1000) inside
+	 * a loop whose other condition, SCMF_RUNNING, is never cleared. */
+	if (switch_core_session_read_lock(session) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+						  "BUNDLE drain thread could not hold the session; not draining\n");
+		switch_mutex_lock(smh->bundle_drain_mutex);
+		if (v_engine->bundle_drain_state == BUNDLE_DRAIN_STARTING) {
+			v_engine->bundle_drain_state = BUNDLE_DRAIN_INACTIVE;
+		}
+		switch_mutex_unlock(smh->bundle_drain_mutex);
+		return NULL;
+	}
+
 
 	/* Promote STARTING -> RUNNING under the drain mutex. stop() can legally
 	 * set STOPPING while the thread is still starting; do not clobber that
@@ -4247,6 +4314,7 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 	switch_mutex_lock(smh->bundle_drain_mutex);
 	if (v_engine->bundle_drain_state != BUNDLE_DRAIN_STARTING) {
 		switch_mutex_unlock(smh->bundle_drain_mutex);
+		switch_core_session_rwunlock(session);
 		return NULL;
 	}
 	v_engine->bundle_drain_state = BUNDLE_DRAIN_RUNNING;
@@ -4259,7 +4327,7 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 		   && v_engine->bundled_with_audio) {
 
 		switch_status_t st;
-		switch_bundle_mline_t *mline;
+		switch_media_type_t demux_type = SWITCH_MEDIA_TYPE_AUDIO;
 		const char *mid;
 
 		/* Zero out the local frame for each read */
@@ -4319,14 +4387,12 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 
 		/* Demux: determine if audio or video */
 		mid = switch_rtp_get_received_mid(a_engine->rtp_session);
-		mline = switch_bundle_group_demux_rtp(&smh->bundle, mid, drain_frame.ssrc,
-											 drain_frame.payload, NULL);
 
-		if (!mline) {
+		if (!bundle_demux_media_type(smh, mid, drain_frame.ssrc, drain_frame.payload, &demux_type)) {
 			continue;
 		}
 
-		if (mline->media_type == SWITCH_MEDIA_TYPE_VIDEO) {
+		if (demux_type == SWITCH_MEDIA_TYPE_VIDEO) {
 			/* Clone and queue to video read_fb. BUNDLE video read_fb stores
 			 * malloc-backed frame clones, not frame-buffer-owned clones. */
 			switch_frame_t *dupframe = NULL;
@@ -4335,7 +4401,7 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 				switch_frame_buffer_trypush(v_engine->read_fb, dupframe) != SWITCH_STATUS_SUCCESS) {
 				switch_frame_free(&dupframe);
 			}
-		} else if (mline->media_type == SWITCH_MEDIA_TYPE_AUDIO) {
+		} else if (demux_type == SWITCH_MEDIA_TYPE_AUDIO) {
 			/* Clone and queue to audio read_fb for the audio read path.
 			 * Serialize fb access with stop/teardown so the drain thread cannot
 			 * duplicate into a buffer while another thread is disabling BUNDLE. */
@@ -4365,6 +4431,8 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 		v_engine->bundle_drain_state = BUNDLE_DRAIN_INACTIVE;
 	}
 	switch_mutex_unlock(smh->bundle_drain_mutex);
+
+	switch_core_session_rwunlock(session);
 	return NULL;
 }
 
@@ -4438,6 +4506,7 @@ static void bundle_drain_thread_stop(switch_core_session_t *session)
 	switch_media_handle_t *smh = session->media_handle;
 	switch_rtp_engine_t *a_engine, *v_engine;
 	switch_thread_t *thd;
+	int waits = 0;
 
 	if (!smh) return;
 
@@ -4445,15 +4514,55 @@ static void bundle_drain_thread_stop(switch_core_session_t *session)
 	v_engine = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
 
 	switch_mutex_lock(smh->bundle_drain_mutex);
-	thd = v_engine->bundle_drain_thread;
-	if (!thd) {
-		v_engine->bundle_drain_state = BUNDLE_DRAIN_INACTIVE;
-		bundle_audio_queue_cleanup_locked(session, smh, v_engine);
-		switch_mutex_unlock(smh->bundle_drain_mutex);
-		return;
+
+	/* Re-latch every pass rather than deciding once. Waking only tells us the state
+	 * left STOPPING, not that no unjoined thread exists: the owner's caller can
+	 * start a replacement one mutex acquisition after its join returns
+	 * (switch_core_media_activate_rtp does exactly that), and this stop must join
+	 * that one rather than return as though the leg were quiet. */
+	for (;;) {
+		thd = v_engine->bundle_drain_thread;
+
+		if (thd) {
+			break;
+		}
+
+		if (v_engine->bundle_drain_state != BUNDLE_DRAIN_STOPPING) {
+			v_engine->bundle_drain_state = BUNDLE_DRAIN_INACTIVE;
+			bundle_audio_queue_cleanup_locked(session, smh, v_engine);
+			switch_mutex_unlock(smh->bundle_drain_mutex);
+			return;
+		}
+
+		if (!v_engine->bundle_audio_read_cond) {
+			/* Nothing to wait on. Should not happen -- the cond is created with the
+			 * media handle -- but do not spin on the predicate if it ever does. */
+			switch_mutex_unlock(smh->bundle_drain_mutex);
+			return;
+		}
+
+		/* Deliberately unbounded. Callers rely on "stop() returned means the thread
+		 * is gone": deactivate_rtp() then destroys the RTP session the drain thread
+		 * reads from, and switch_media_handle_destroy() the frame buffer it pushes
+		 * into. A bounded wait would hand those callers a live thread, which is the
+		 * defect this wait exists to prevent. The owner's own switch_thread_join()
+		 * below is unbounded too, so this is no weaker than the guarantee a single
+		 * stop already gives, and the owner always resolves STOPPING once its join
+		 * returns. Log periodically so a drain thread that genuinely will not leave
+		 * is visible -- it can run dialplan via execute_on_media_timeout. */
+		if (++waits % 250 == 0) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+							  "BUNDLE drain stop still waiting on a concurrent join after %d ms\n", waits * 20);
+		}
+
+		switch_thread_cond_timedwait(v_engine->bundle_audio_read_cond, smh->bundle_drain_mutex, 20000);
 	}
 
-
+	/* Take ownership of the handle before dropping the mutex. Leaving it visible
+	 * across the join lets a second stop latch the same handle and join it twice,
+	 * then store NULL over whatever bundle_drain_thread_start() has since put
+	 * there. */
+	v_engine->bundle_drain_thread = NULL;
 	v_engine->bundle_drain_state = BUNDLE_DRAIN_STOPPING;
 	switch_mutex_unlock(smh->bundle_drain_mutex);
 
@@ -4478,10 +4587,19 @@ static void bundle_drain_thread_stop(switch_core_session_t *session)
 		switch_thread_join(&st, thd);
 	}
 
+	/* The handle was cleared before the join, so only finish the teardown if no
+	 * replacement thread was started while we were joining. */
 	switch_mutex_lock(smh->bundle_drain_mutex);
-	v_engine->bundle_drain_thread = NULL;
-	bundle_audio_queue_cleanup_locked(session, smh, v_engine);
-	v_engine->bundle_drain_state = BUNDLE_DRAIN_INACTIVE;
+	if (!v_engine->bundle_drain_thread) {
+		bundle_audio_queue_cleanup_locked(session, smh, v_engine);
+		v_engine->bundle_drain_state = BUNDLE_DRAIN_INACTIVE;
+	}
+	/* Release any stop waiting on this join. Broadcast, not signal: more than one
+	 * can be queued, and the other waiters on this cond re-check their own
+	 * predicates in a loop so a spurious wake is harmless. */
+	if (v_engine->bundle_audio_read_cond) {
+		switch_thread_cond_broadcast(v_engine->bundle_audio_read_cond);
+	}
 	switch_mutex_unlock(smh->bundle_drain_mutex);
 
 }
@@ -4489,7 +4607,7 @@ static void bundle_drain_thread_stop(switch_core_session_t *session)
 static switch_bool_t switch_core_media_route_bundled_rtp(switch_media_handle_t *smh, switch_rtp_engine_t *engine, switch_media_type_t type)
 {
 	switch_rtp_engine_t *v_engine;
-	switch_bundle_mline_t *mline;
+	switch_media_type_t demux_type = SWITCH_MEDIA_TYPE_AUDIO;
 	const char *mid;
 
 	if (!smh || !engine || type != SWITCH_MEDIA_TYPE_AUDIO || smh->bundle.state != SWITCH_BUNDLE_STATE_ACCEPTED) {
@@ -4502,17 +4620,16 @@ static switch_bool_t switch_core_media_route_bundled_rtp(switch_media_handle_t *
 	}
 
 	mid = switch_rtp_get_received_mid(engine->rtp_session);
-	mline = switch_bundle_group_demux_rtp(&smh->bundle, mid, engine->read_frame.ssrc, engine->read_frame.payload, NULL);
 
-	if (!mline) {
+	if (!bundle_demux_media_type(smh, mid, engine->read_frame.ssrc, engine->read_frame.payload, &demux_type)) {
 		return SWITCH_TRUE;
 	}
 
-	if (mline->media_type == SWITCH_MEDIA_TYPE_AUDIO) {
+	if (demux_type == SWITCH_MEDIA_TYPE_AUDIO) {
 		return SWITCH_FALSE;
 	}
 
-	if (mline->media_type == SWITCH_MEDIA_TYPE_VIDEO) {
+	if (demux_type == SWITCH_MEDIA_TYPE_VIDEO) {
 		switch_frame_t *dupframe = NULL;
 
 		if (!engine->read_frame.buflen) {
@@ -4673,6 +4790,12 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 
 			engine->read_fb_frame = (switch_frame_t *) pop;
 			engine->read_frame = *engine->read_fb_frame;
+			/* The clone is heap allocated, but what the caller receives is
+			 * &engine->read_frame, embedded in the session-pool media handle.
+			 * Copying the flag wholesale would tell switch_frame_free() to free an
+			 * interior pointer into the pool and release the clone's packet out
+			 * from under engine->read_fb_frame. */
+			switch_clear_flag((&engine->read_frame), SFF_DYNAMIC);
 			engine->read_frame.codec = &engine->read_codec;
 			engine->read_frame.pmap = NULL;
 			if (engine->cur_payload_map) {
@@ -4724,6 +4847,10 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 
 				stable_packet = veng->bundle_audio_read_packet;
 				engine->read_frame = *audio_fb_frame;
+				/* Same reason as the video branch: read_frame is embedded in the
+				 * session-pool media handle, so it must not inherit the clone's
+				 * SFF_DYNAMIC. read_frame.data is repointed at pool memory below. */
+				switch_clear_flag((&engine->read_frame), SFF_DYNAMIC);
 
 				/* Audio drained from the shared BUNDLE socket must re-enter the normal
 				 * audio write path as payload, not as a raw forwarded RTP packet.
@@ -8316,6 +8443,8 @@ static void switch_core_media_bundle_populate_from_sdp(switch_media_handle_t *sm
 	sdp_media_t *m;
 	switch_status_t bundle_group_status = SWITCH_STATUS_FALSE;
 	int mline_index = 0;
+	char mids[(SWITCH_BUNDLE_MAX_MIDS * (SWITCH_BUNDLE_MAX_MID_LEN + 1)) + 1] = "";
+	switch_bool_t accepted = SWITCH_FALSE;
 
 	if (!smh || !smh->session || !sdp) {
 		return;
@@ -8323,6 +8452,12 @@ static void switch_core_media_bundle_populate_from_sdp(switch_media_handle_t *sm
 
 	channel = switch_core_session_get_channel(smh->session);
 	policy = switch_core_media_bundle_policy(smh);
+
+	/* The group is rebuilt from scratch here -- init() memsets it and the loop
+	 * below repopulates it -- while the drain thread and the audio read path
+	 * traverse it per packet. Hold them off for the rebuild. */
+	switch_mutex_lock(smh->bundle_mutex);
+
 	switch_bundle_group_init(&smh->bundle, policy);
 
 	for (attr = sdp->sdp_attributes; attr; attr = attr->a_next) {
@@ -8419,26 +8554,27 @@ static void switch_core_media_bundle_populate_from_sdp(switch_media_handle_t *sm
 		}
 	}
 
-	if (bundle_group_status == SWITCH_STATUS_SUCCESS) {
-		if (switch_bundle_group_validate(&smh->bundle) == SWITCH_STATUS_SUCCESS) {
-			char mids[(SWITCH_BUNDLE_MAX_MIDS * (SWITCH_BUNDLE_MAX_MID_LEN + 1)) + 1] = "";
-			uint32_t i;
+	if (bundle_group_status == SWITCH_STATUS_SUCCESS
+		&& switch_bundle_group_validate(&smh->bundle) == SWITCH_STATUS_SUCCESS) {
+		uint32_t i;
 
-			/* Compatibility/diagnostic output for an accepted group only. Media
-			 * decisions use smh->bundle and must never read this channel variable. */
-			for (i = 0; i < smh->bundle.offered_mid_count; i++) {
-				if (i) {
-					switch_snprintf(mids + strlen(mids), sizeof(mids) - strlen(mids), " ");
-				}
-				switch_snprintf(mids + strlen(mids), sizeof(mids) - strlen(mids), "%s", smh->bundle.offered_mids[i]);
+		/* Compatibility/diagnostic output for an accepted group only. Media
+		 * decisions use smh->bundle and must never read this channel variable. */
+		for (i = 0; i < smh->bundle.offered_mid_count; i++) {
+			if (i) {
+				switch_snprintf(mids + strlen(mids), sizeof(mids) - strlen(mids), " ");
 			}
-			switch_channel_set_variable(channel, "rtp_group_bundle", mids);
-		} else {
-			switch_channel_set_variable(channel, "rtp_group_bundle", NULL);
+			switch_snprintf(mids + strlen(mids), sizeof(mids) - strlen(mids), "%s", smh->bundle.offered_mids[i]);
 		}
-	} else {
-		switch_channel_set_variable(channel, "rtp_group_bundle", NULL);
+		accepted = SWITCH_TRUE;
 	}
+
+	/* Everything that reads the group is done. mids is a local, so the channel
+	 * variable below needs no protection -- and setting it under bundle_mutex would
+	 * hold a per-packet media lock across the channel profile mutex and a malloc. */
+	switch_mutex_unlock(smh->bundle_mutex);
+
+	switch_channel_set_variable(channel, "rtp_group_bundle", accepted ? mids : NULL);
 }
 
 SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *session, const char *r_sdp, uint8_t *proceed, switch_sdp_type_t sdp_type)
@@ -14300,10 +14436,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 					status = SWITCH_STATUS_FALSE;
 					goto end;
 				}
-				switch_core_media_flush_queued_read_frames(v_engine);
-				/* Start the continuous drain thread. Stop first so BUNDLE restart
-				 * joins any exited-but-not-cleared drain thread and flushes stale audio. */
+				/* Stop first so BUNDLE restart joins any exited-but-not-cleared drain
+				 * thread, and flush only once it is gone -- flushing while it still
+				 * runs just lets it refill the queue behind us. */
 				bundle_drain_thread_stop(session);
+				switch_core_media_flush_queued_read_frames(v_engine);
 				switch_mutex_lock(smh->bundle_drain_mutex);
 				bundle_drain_thread_start(session);
 				switch_mutex_unlock(smh->bundle_drain_mutex);
@@ -22579,6 +22716,235 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_get_chosen_ice_candidate(switc
 	*out_port = chosen->con_port;
 
 	return SWITCH_STATUS_SUCCESS;
+}
+
+/* struct switch_media_handle_s and struct switch_rtp_engine_s are private to this
+ * file, so tests cannot reach the BUNDLE read state or the static helpers that
+ * operate on it. These accessors exist for tests/unit, but they are NOT compiled
+ * out of a release build -- they ship in libfreeswitch, the way
+ * switch_rtp_test_rewrite_mid_extension() does. Guarding them properly needs a
+ * configure-time switch; until then, treat them as internal and do not call them
+ * from a module. */
+
+static switch_rtp_engine_t *test_engine(switch_core_session_t *session, switch_media_type_t type)
+{
+	if (!session || !session->media_handle || type >= SWITCH_MEDIA_TYPE_TOTAL) {
+		return NULL;
+	}
+	return &session->media_handle->engines[type];
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_media_test_prepare_read_fb(switch_core_session_t *session, switch_media_type_t type)
+{
+	switch_rtp_engine_t *engine = test_engine(session, type);
+	switch_media_handle_t *smh;
+
+	if (!engine) return SWITCH_STATUS_FALSE;
+	smh = session->media_handle;
+
+	if (!smh->read_mutex[type]) {
+		switch_mutex_init(&smh->read_mutex[type], SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
+	}
+
+	if (!engine->read_fb && switch_frame_buffer_create(&engine->read_fb, 10) != SWITCH_STATUS_SUCCESS) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(void) switch_core_media_test_flush_queued_read_frames(switch_core_session_t *session, switch_media_type_t type)
+{
+	switch_rtp_engine_t *engine = test_engine(session, type);
+
+	if (engine) {
+		switch_core_media_flush_queued_read_frames(engine);
+	}
+}
+
+SWITCH_DECLARE(void) switch_core_media_test_set_read_fb_frame(switch_core_session_t *session, switch_media_type_t type, switch_frame_t *frame)
+{
+	switch_rtp_engine_t *engine = test_engine(session, type);
+
+	if (engine) {
+		engine->read_fb_frame = frame;
+	}
+}
+
+SWITCH_DECLARE(switch_frame_t *) switch_core_media_test_get_read_fb_frame(switch_core_session_t *session, switch_media_type_t type)
+{
+	switch_rtp_engine_t *engine = test_engine(session, type);
+
+	return engine ? engine->read_fb_frame : NULL;
+}
+
+SWITCH_DECLARE(void) switch_core_media_test_arm_drain(switch_core_session_t *session, switch_thread_t *thread)
+{
+	switch_rtp_engine_t *v_engine = test_engine(session, SWITCH_MEDIA_TYPE_VIDEO);
+
+	if (!v_engine) return;
+
+	switch_mutex_lock(session->media_handle->bundle_drain_mutex);
+	v_engine->bundle_drain_thread = thread;
+	v_engine->bundle_drain_state = BUNDLE_DRAIN_RUNNING;
+	switch_mutex_unlock(session->media_handle->bundle_drain_mutex);
+}
+
+SWITCH_DECLARE(switch_thread_t *) switch_core_media_test_get_drain_thread(switch_core_session_t *session)
+{
+	switch_rtp_engine_t *v_engine = test_engine(session, SWITCH_MEDIA_TYPE_VIDEO);
+
+	return v_engine ? v_engine->bundle_drain_thread : NULL;
+}
+
+/* Holds the session write lock, so switch_core_session_read_lock() -- a trylock --
+ * fails for the drain thread while the channel is still UP. Hanging the channel up
+ * instead makes the failure indistinguishable from the thread running normally and
+ * exiting, since the loop condition then fails immediately too. */
+SWITCH_DECLARE(switch_status_t) switch_core_media_test_hold_session_write_lock(switch_core_session_t *session)
+{
+	if (!session || !session->rwlock) return SWITCH_STATUS_FALSE;
+
+	return switch_thread_rwlock_trywrlock(session->rwlock);
+}
+
+SWITCH_DECLARE(void) switch_core_media_test_release_session_write_lock(switch_core_session_t *session)
+{
+	if (session && session->rwlock) {
+		switch_thread_rwlock_unlock(session->rwlock);
+	}
+}
+
+/* Lets a test observe that the flush actually drained the queue, not just that it
+ * left the in-flight frame alone. */
+SWITCH_DECLARE(switch_frame_t *) switch_core_media_test_pop_read_fb(switch_core_session_t *session, switch_media_type_t type)
+{
+	switch_rtp_engine_t *engine = test_engine(session, type);
+	void *pop = NULL;
+
+	if (!engine || !engine->read_fb) return NULL;
+
+	if (switch_frame_buffer_trypop(engine->read_fb, &pop) != SWITCH_STATUS_SUCCESS) {
+		return NULL;
+	}
+
+	return (switch_frame_t *) pop;
+}
+
+SWITCH_DECLARE(void) switch_core_media_test_lock_bundle(switch_core_session_t *session)
+{
+	if (session && session->media_handle) {
+		switch_mutex_lock(session->media_handle->bundle_mutex);
+	}
+}
+
+SWITCH_DECLARE(void) switch_core_media_test_unlock_bundle(switch_core_session_t *session)
+{
+	if (session && session->media_handle) {
+		switch_mutex_unlock(session->media_handle->bundle_mutex);
+	}
+}
+
+/* Drives the same helper the drain thread and the audio read path use. */
+SWITCH_DECLARE(int) switch_core_media_test_demux_media_type(switch_core_session_t *session, const char *mid, uint32_t ssrc, int pt)
+{
+	switch_media_type_t type = SWITCH_MEDIA_TYPE_AUDIO;
+
+	if (!session || !session->media_handle) return -1;
+
+	return bundle_demux_media_type(session->media_handle, mid, ssrc, (switch_payload_t) pt, &type) ? (int) type : -1;
+}
+
+SWITCH_DECLARE(int) switch_core_media_test_get_drain_state(switch_core_session_t *session)
+{
+	switch_rtp_engine_t *engine = test_engine(session, SWITCH_MEDIA_TYPE_VIDEO);
+
+	return engine ? (int) engine->bundle_drain_state : -1;
+}
+
+SWITCH_DECLARE(void) switch_core_media_test_drain_thread_stop(switch_core_session_t *session)
+{
+	if (session) {
+		bundle_drain_thread_stop(session);
+	}
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_media_test_prepare_bundle_drain(switch_core_session_t *session, switch_rtp_t *rtp_session)
+{
+	switch_rtp_engine_t *a_engine, *v_engine;
+	switch_media_handle_t *smh;
+
+	if (!session || !(smh = session->media_handle)) return SWITCH_STATUS_FALSE;
+
+	a_engine = &smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
+	v_engine = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
+
+	a_engine->rtp_session = rtp_session;
+	v_engine->bundled_with_audio = 1;
+	smh->bundle.state = SWITCH_BUNDLE_STATE_ACCEPTED;
+
+	if (!v_engine->read_fb && switch_frame_buffer_create(&v_engine->read_fb, 10) != SWITCH_STATUS_SUCCESS) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(void) switch_core_media_test_drain_thread_start(switch_core_session_t *session)
+{
+	if (session && session->media_handle) {
+		/* bundle_drain_thread_start() documents that the caller holds this, and the
+		 * production call site does; without it the cond wait inside it would run on
+		 * an unheld mutex. */
+		switch_mutex_lock(session->media_handle->bundle_drain_mutex);
+		bundle_drain_thread_start(session);
+		switch_mutex_unlock(session->media_handle->bundle_drain_mutex);
+	}
+}
+
+/* Satisfies the gates switch_core_media_read_frame() applies before it reaches the
+ * bundled-video branch: a ready read codec and a live rtp_session on the engine. */
+SWITCH_DECLARE(switch_status_t) switch_core_media_test_prepare_engine_read(switch_core_session_t *session, switch_media_type_t type,
+																		   switch_rtp_t *rtp_session)
+{
+	switch_rtp_engine_t *engine = test_engine(session, type);
+
+	if (!engine) return SWITCH_STATUS_FALSE;
+
+	engine->rtp_session = rtp_session;
+
+	if (!switch_core_codec_ready(&engine->read_codec) &&
+		switch_core_codec_init(&engine->read_codec, "PCMU", NULL, NULL, 8000, 20, 1,
+							   SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
+							   NULL, switch_core_session_get_pool(session)) != SWITCH_STATUS_SUCCESS) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_media_test_push_read_fb(switch_core_session_t *session, switch_media_type_t type,
+																	switch_frame_t *frame)
+{
+	switch_rtp_engine_t *engine = test_engine(session, type);
+
+	if (!engine || !engine->read_fb) return SWITCH_STATUS_FALSE;
+
+	return switch_frame_buffer_trypush(engine->read_fb, frame);
+}
+
+/* Returns SUCCESS when the session write lock could be taken, meaning nobody holds
+ * a read lock on it. Releases it again on success. */
+SWITCH_DECLARE(switch_status_t) switch_core_media_test_try_session_write_lock(switch_core_session_t *session)
+{
+	if (!session || !session->rwlock) return SWITCH_STATUS_FALSE;
+
+	if (switch_thread_rwlock_trywrlock(session->rwlock) == SWITCH_STATUS_SUCCESS) {
+		switch_thread_rwlock_unlock(session->rwlock);
+		return SWITCH_STATUS_SUCCESS;
+	}
+
+	return SWITCH_STATUS_FALSE;
 }
 
 /* For Emacs:
