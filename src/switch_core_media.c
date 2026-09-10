@@ -4025,8 +4025,11 @@ static void switch_core_media_release_queued_read_frame(switch_rtp_engine_t *eng
  * video read path leaves engine->read_frame aliasing that clone and hands the
  * caller &engine->read_frame, then releases read_mutex before returning, so a
  * caller is still using the block after this function could take that mutex.
- * The reader owns the in-flight frame until its next pop (:release at the top of
- * the branch), and switch_media_handle_destroy() owns it after teardown.
+ * The reader owns the in-flight frame until its next pop (the release at the top
+ * of the branch), and switch_media_handle_destroy() owns it after teardown.  That
+ * relies on there being a single video reader per session -- read_mutex[type] is a
+ * trylock and is released before the frame is handed out, so it serialises the
+ * call, not the ownership handoff.  True of every in-tree reader today.
  * Frames still in the queue were never handed out, so freeing them here is safe
  * without a lock -- the frame buffer is itself thread safe. */
 static void switch_core_media_flush_queued_read_frames(switch_rtp_engine_t *engine)
@@ -4253,7 +4256,12 @@ static switch_bool_t bundle_demux_media_type(switch_media_handle_t *smh, const c
 
 	switch_mutex_lock(smh->bundle_mutex);
 
-	if ((mline = switch_bundle_group_demux_rtp(&smh->bundle, mid, ssrc, pt, NULL))) {
+	/* The state gate belongs in here with the traversal. Read outside the lock it
+	 * only says the group was accepted at some earlier instant -- a rebuild can
+	 * land in between and leave this walking a memset group. Callers keep their own
+	 * unlocked check as a fast path, but this is the one that decides. */
+	if (smh->bundle.state == SWITCH_BUNDLE_STATE_ACCEPTED &&
+		(mline = switch_bundle_group_demux_rtp(&smh->bundle, mid, ssrc, pt, NULL))) {
 		*type_out = mline->media_type;
 		found = SWITCH_TRUE;
 	}
@@ -4288,6 +4296,8 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 	 * and the audio read path's STARTING branch spins on switch_yield(1000) inside
 	 * a loop whose other condition, SCMF_RUNNING, is never cleared. */
 	if (switch_core_session_read_lock(session) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+						  "BUNDLE drain thread could not hold the session; not draining\n");
 		switch_mutex_lock(smh->bundle_drain_mutex);
 		if (v_engine->bundle_drain_state == BUNDLE_DRAIN_STARTING) {
 			v_engine->bundle_drain_state = BUNDLE_DRAIN_INACTIVE;
@@ -4496,6 +4506,7 @@ static void bundle_drain_thread_stop(switch_core_session_t *session)
 	switch_media_handle_t *smh = session->media_handle;
 	switch_rtp_engine_t *a_engine, *v_engine;
 	switch_thread_t *thd;
+	int waits = 0;
 
 	if (!smh) return;
 
@@ -4503,27 +4514,48 @@ static void bundle_drain_thread_stop(switch_core_session_t *session)
 	v_engine = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
 
 	switch_mutex_lock(smh->bundle_drain_mutex);
-	thd = v_engine->bundle_drain_thread;
-	if (!thd) {
-		if (v_engine->bundle_drain_state == BUNDLE_DRAIN_STOPPING) {
-			/* A concurrent stop took the handle and is inside its join. Callers rely
-			 * on "stop() returned means the thread is gone" -- deactivate_rtp()
-			 * destroys the RTP session the thread reads from, and
-			 * switch_media_handle_destroy() the frame buffer it pushes into -- so
-			 * wait for the owner instead of returning. Bounded at 5s like the other
-			 * waits on this cond. */
-			int waits = 0;
 
-			while (v_engine->bundle_drain_state == BUNDLE_DRAIN_STOPPING
-				   && v_engine->bundle_audio_read_cond && waits++ < 250) {
-				switch_thread_cond_timedwait(v_engine->bundle_audio_read_cond, smh->bundle_drain_mutex, 20000);
-			}
-		} else {
+	/* Re-latch every pass rather than deciding once. Waking only tells us the state
+	 * left STOPPING, not that no unjoined thread exists: the owner's caller can
+	 * start a replacement one mutex acquisition after its join returns
+	 * (switch_core_media_activate_rtp does exactly that), and this stop must join
+	 * that one rather than return as though the leg were quiet. */
+	for (;;) {
+		thd = v_engine->bundle_drain_thread;
+
+		if (thd) {
+			break;
+		}
+
+		if (v_engine->bundle_drain_state != BUNDLE_DRAIN_STOPPING) {
 			v_engine->bundle_drain_state = BUNDLE_DRAIN_INACTIVE;
 			bundle_audio_queue_cleanup_locked(session, smh, v_engine);
+			switch_mutex_unlock(smh->bundle_drain_mutex);
+			return;
 		}
-		switch_mutex_unlock(smh->bundle_drain_mutex);
-		return;
+
+		if (!v_engine->bundle_audio_read_cond) {
+			/* Nothing to wait on. Should not happen -- the cond is created with the
+			 * media handle -- but do not spin on the predicate if it ever does. */
+			switch_mutex_unlock(smh->bundle_drain_mutex);
+			return;
+		}
+
+		/* Deliberately unbounded. Callers rely on "stop() returned means the thread
+		 * is gone": deactivate_rtp() then destroys the RTP session the drain thread
+		 * reads from, and switch_media_handle_destroy() the frame buffer it pushes
+		 * into. A bounded wait would hand those callers a live thread, which is the
+		 * defect this wait exists to prevent. The owner's own switch_thread_join()
+		 * below is unbounded too, so this is no weaker than the guarantee a single
+		 * stop already gives, and the owner always resolves STOPPING once its join
+		 * returns. Log periodically so a drain thread that genuinely will not leave
+		 * is visible -- it can run dialplan via execute_on_media_timeout. */
+		if (++waits % 250 == 0) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+							  "BUNDLE drain stop still waiting on a concurrent join after %d ms\n", waits * 20);
+		}
+
+		switch_thread_cond_timedwait(v_engine->bundle_audio_read_cond, smh->bundle_drain_mutex, 20000);
 	}
 
 	/* Take ownership of the handle before dropping the mutex. Leaving it visible
@@ -8411,6 +8443,8 @@ static void switch_core_media_bundle_populate_from_sdp(switch_media_handle_t *sm
 	sdp_media_t *m;
 	switch_status_t bundle_group_status = SWITCH_STATUS_FALSE;
 	int mline_index = 0;
+	char mids[(SWITCH_BUNDLE_MAX_MIDS * (SWITCH_BUNDLE_MAX_MID_LEN + 1)) + 1] = "";
+	switch_bool_t accepted = SWITCH_FALSE;
 
 	if (!smh || !smh->session || !sdp) {
 		return;
@@ -8520,27 +8554,27 @@ static void switch_core_media_bundle_populate_from_sdp(switch_media_handle_t *sm
 		}
 	}
 
-	if (bundle_group_status == SWITCH_STATUS_SUCCESS) {
-		if (switch_bundle_group_validate(&smh->bundle) == SWITCH_STATUS_SUCCESS) {
-			char mids[(SWITCH_BUNDLE_MAX_MIDS * (SWITCH_BUNDLE_MAX_MID_LEN + 1)) + 1] = "";
-			uint32_t i;
+	if (bundle_group_status == SWITCH_STATUS_SUCCESS
+		&& switch_bundle_group_validate(&smh->bundle) == SWITCH_STATUS_SUCCESS) {
+		uint32_t i;
 
-			/* Compatibility/diagnostic output for an accepted group only. Media
-			 * decisions use smh->bundle and must never read this channel variable. */
-			for (i = 0; i < smh->bundle.offered_mid_count; i++) {
-				if (i) {
-					switch_snprintf(mids + strlen(mids), sizeof(mids) - strlen(mids), " ");
-				}
-				switch_snprintf(mids + strlen(mids), sizeof(mids) - strlen(mids), "%s", smh->bundle.offered_mids[i]);
+		/* Compatibility/diagnostic output for an accepted group only. Media
+		 * decisions use smh->bundle and must never read this channel variable. */
+		for (i = 0; i < smh->bundle.offered_mid_count; i++) {
+			if (i) {
+				switch_snprintf(mids + strlen(mids), sizeof(mids) - strlen(mids), " ");
 			}
-			switch_channel_set_variable(channel, "rtp_group_bundle", mids);
-		} else {
-			switch_channel_set_variable(channel, "rtp_group_bundle", NULL);
+			switch_snprintf(mids + strlen(mids), sizeof(mids) - strlen(mids), "%s", smh->bundle.offered_mids[i]);
 		}
-	} else {
-		switch_channel_set_variable(channel, "rtp_group_bundle", NULL);
+		accepted = SWITCH_TRUE;
 	}
+
+	/* Everything that reads the group is done. mids is a local, so the channel
+	 * variable below needs no protection -- and setting it under bundle_mutex would
+	 * hold a per-packet media lock across the channel profile mutex and a malloc. */
 	switch_mutex_unlock(smh->bundle_mutex);
+
+	switch_channel_set_variable(channel, "rtp_group_bundle", accepted ? mids : NULL);
 }
 
 SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *session, const char *r_sdp, uint8_t *proceed, switch_sdp_type_t sdp_type)

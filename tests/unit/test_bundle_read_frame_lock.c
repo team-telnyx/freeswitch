@@ -1,33 +1,17 @@
-/*
- * The BUNDLE video read path hands callers a frame whose data/packet pointers
- * live inside engine->read_fb_frame:
+/* Regression tests for the BUNDLE read and drain defects found alongside
+ * TELCORE-453: TELCORE-454 (the flush freeing a frame a reader still holds),
+ * TELCORE-455 (bundle_drain_thread_stop leaving the handle joinable twice),
+ * TELCORE-456 (the drain thread holding no session read lock), TELCORE-457
+ * (SFF_DYNAMIC copied onto a pool-embedded frame) and TELCORE-459 (the BUNDLE
+ * group rebuilt under the SIP thread while the drain thread traverses it).
  *
- *   switch_core_media.c:4664   switch_core_media_release_queued_read_frame(engine);
- *   switch_core_media.c:4674   engine->read_fb_frame = (switch_frame_t *) pop;
- *   switch_core_media.c:4675   engine->read_frame = *engine->read_fb_frame;
+ * struct switch_media_handle_s and struct switch_rtp_engine_s are private to
+ * switch_core_media.c and the drain helpers are static, so these drive the
+ * switch_core_media_test_* seam declared in switch_core_media.h.
  *
- * That whole branch runs under smh->read_mutex[SWITCH_MEDIA_TYPE_VIDEO], taken at
- * switch_core_media.c:4642, and the frame stays referenced by engine->read_frame
- * after the caller returns.
- *
- * switch_core_media_flush_queued_read_frames() frees that same frame:
- *
- *   switch_core_media.c:4013   switch_core_media_release_queued_read_frame(engine);
- *                              -> switch_frame_free(&engine->read_fb_frame)
- *
- * and takes no lock at all. It is called from the signalling thread at
- * switch_core_media.c:14301 and :14312, both before bundle_drain_thread_stop(),
- * so the drain thread is still producing and the video reader is still consuming.
- *
- * Two threads therefore free the same malloc-backed clone, and the reader keeps
- * using engine->read_frame.data after the signalling thread has freed the block
- * behind it.
- *
- * The invariant: a caller that frees the queued read frame must hold the same
- * read mutex the reader holds while using it. This test holds that mutex and
- * asserts flush blocks. On the current tree flush ignores the mutex and completes
- * immediately, so the first check fails.
- */
+ * Every case asserts a steady state held open rather than racing for a window,
+ * so none of them is probabilistic. Each pins one production line; see the
+ * per-test comments. */
 
 #define SWITCH_CORE_MEDIA_TEST_HOOKS
 #include <switch.h>
