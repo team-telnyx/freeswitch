@@ -4466,13 +4466,22 @@ static void bundle_drain_thread_stop(switch_core_session_t *session)
 	switch_mutex_lock(smh->bundle_drain_mutex);
 	thd = v_engine->bundle_drain_thread;
 	if (!thd) {
-		v_engine->bundle_drain_state = BUNDLE_DRAIN_INACTIVE;
-		bundle_audio_queue_cleanup_locked(session, smh, v_engine);
+		/* A concurrent stop already took the handle and is inside its join; leaving
+		 * the state and the audio queue to it, since marking INACTIVE here would
+		 * publish a teardown that has not happened yet. */
+		if (v_engine->bundle_drain_state != BUNDLE_DRAIN_STOPPING) {
+			v_engine->bundle_drain_state = BUNDLE_DRAIN_INACTIVE;
+			bundle_audio_queue_cleanup_locked(session, smh, v_engine);
+		}
 		switch_mutex_unlock(smh->bundle_drain_mutex);
 		return;
 	}
 
-
+	/* Take ownership of the handle before dropping the mutex. Leaving it visible
+	 * across the join lets a second stop latch the same handle and join it twice,
+	 * then store NULL over whatever bundle_drain_thread_start() has since put
+	 * there. */
+	v_engine->bundle_drain_thread = NULL;
 	v_engine->bundle_drain_state = BUNDLE_DRAIN_STOPPING;
 	switch_mutex_unlock(smh->bundle_drain_mutex);
 
@@ -4497,10 +4506,13 @@ static void bundle_drain_thread_stop(switch_core_session_t *session)
 		switch_thread_join(&st, thd);
 	}
 
+	/* The handle was cleared before the join, so only finish the teardown if no
+	 * replacement thread was started while we were joining. */
 	switch_mutex_lock(smh->bundle_drain_mutex);
-	v_engine->bundle_drain_thread = NULL;
-	bundle_audio_queue_cleanup_locked(session, smh, v_engine);
-	v_engine->bundle_drain_state = BUNDLE_DRAIN_INACTIVE;
+	if (!v_engine->bundle_drain_thread) {
+		bundle_audio_queue_cleanup_locked(session, smh, v_engine);
+		v_engine->bundle_drain_state = BUNDLE_DRAIN_INACTIVE;
+	}
 	switch_mutex_unlock(smh->bundle_drain_mutex);
 
 }
