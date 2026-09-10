@@ -4123,8 +4123,11 @@ static void switch_core_media_release_queued_read_frame(switch_rtp_engine_t *eng
  * video read path leaves engine->read_frame aliasing that clone and hands the
  * caller &engine->read_frame, then releases read_mutex before returning, so a
  * caller is still using the block after this function could take that mutex.
- * The reader owns the in-flight frame until its next pop (:release at the top of
- * the branch), and switch_media_handle_destroy() owns it after teardown.
+ * The reader owns the in-flight frame until its next pop (the release at the top
+ * of the branch), and switch_media_handle_destroy() owns it after teardown.  That
+ * relies on there being a single video reader per session -- read_mutex[type] is a
+ * trylock and is released before the frame is handed out, so it serialises the
+ * call, not the ownership handoff.  True of every in-tree reader today.
  * Frames still in the queue were never handed out, so freeing them here is safe
  * without a lock -- the frame buffer is itself thread safe. */
 static void switch_core_media_flush_queued_read_frames(switch_rtp_engine_t *engine)
@@ -4364,6 +4367,8 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 	 * and the audio read path's STARTING branch spins on switch_yield(1000) inside
 	 * a loop whose other condition, SCMF_RUNNING, is never cleared. */
 	if (switch_core_session_read_lock(session) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+						  "BUNDLE drain thread could not hold the session; not draining\n");
 		switch_mutex_lock(smh->bundle_drain_mutex);
 		if (v_engine->bundle_drain_state == BUNDLE_DRAIN_STARTING) {
 			v_engine->bundle_drain_state = BUNDLE_DRAIN_INACTIVE;
@@ -4578,6 +4583,7 @@ static void bundle_drain_thread_stop(switch_core_session_t *session)
 	switch_media_handle_t *smh = session->media_handle;
 	switch_rtp_engine_t *a_engine, *v_engine;
 	switch_thread_t *thd;
+	int waits = 0;
 
 	if (!smh) return;
 
@@ -4585,27 +4591,48 @@ static void bundle_drain_thread_stop(switch_core_session_t *session)
 	v_engine = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
 
 	switch_mutex_lock(smh->bundle_drain_mutex);
-	thd = v_engine->bundle_drain_thread;
-	if (!thd) {
-		if (v_engine->bundle_drain_state == BUNDLE_DRAIN_STOPPING) {
-			/* A concurrent stop took the handle and is inside its join. Callers rely
-			 * on "stop() returned means the thread is gone" -- deactivate_rtp()
-			 * destroys the RTP session the thread reads from, and
-			 * switch_media_handle_destroy() the frame buffer it pushes into -- so
-			 * wait for the owner instead of returning. Bounded at 5s like the other
-			 * waits on this cond. */
-			int waits = 0;
 
-			while (v_engine->bundle_drain_state == BUNDLE_DRAIN_STOPPING
-				   && v_engine->bundle_audio_read_cond && waits++ < 250) {
-				switch_thread_cond_timedwait(v_engine->bundle_audio_read_cond, smh->bundle_drain_mutex, 20000);
-			}
-		} else {
+	/* Re-latch every pass rather than deciding once. Waking only tells us the state
+	 * left STOPPING, not that no unjoined thread exists: the owner's caller can
+	 * start a replacement one mutex acquisition after its join returns
+	 * (switch_core_media_activate_rtp does exactly that), and this stop must join
+	 * that one rather than return as though the leg were quiet. */
+	for (;;) {
+		thd = v_engine->bundle_drain_thread;
+
+		if (thd) {
+			break;
+		}
+
+		if (v_engine->bundle_drain_state != BUNDLE_DRAIN_STOPPING) {
 			v_engine->bundle_drain_state = BUNDLE_DRAIN_INACTIVE;
 			bundle_audio_queue_cleanup_locked(session, smh, v_engine);
+			switch_mutex_unlock(smh->bundle_drain_mutex);
+			return;
 		}
-		switch_mutex_unlock(smh->bundle_drain_mutex);
-		return;
+
+		if (!v_engine->bundle_audio_read_cond) {
+			/* Nothing to wait on. Should not happen -- the cond is created with the
+			 * media handle -- but do not spin on the predicate if it ever does. */
+			switch_mutex_unlock(smh->bundle_drain_mutex);
+			return;
+		}
+
+		/* Deliberately unbounded. Callers rely on "stop() returned means the thread
+		 * is gone": deactivate_rtp() then destroys the RTP session the drain thread
+		 * reads from, and switch_media_handle_destroy() the frame buffer it pushes
+		 * into. A bounded wait would hand those callers a live thread, which is the
+		 * defect this wait exists to prevent. The owner's own switch_thread_join()
+		 * below is unbounded too, so this is no weaker than the guarantee a single
+		 * stop already gives, and the owner always resolves STOPPING once its join
+		 * returns. Log periodically so a drain thread that genuinely will not leave
+		 * is visible -- it can run dialplan via execute_on_media_timeout. */
+		if (++waits % 250 == 0) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+							  "BUNDLE drain stop still waiting on a concurrent join after %d ms\n", waits * 20);
+		}
+
+		switch_thread_cond_timedwait(v_engine->bundle_audio_read_cond, smh->bundle_drain_mutex, 20000);
 	}
 
 	/* Take ownership of the handle before dropping the mutex. Leaving it visible
