@@ -379,6 +379,85 @@ FST_CORE_BEGIN("./conf")
 		}
 		FST_TEST_END()
 
+		/* Callers of bundle_drain_thread_stop() rely on "returned means the thread
+		 * is joined": switch_core_media_deactivate_rtp() destroys the RTP session
+		 * the drain thread blocks inside, and switch_media_handle_destroy()
+		 * destroys the frame buffer it pushes into. Since 4941a8254f takes the
+		 * handle exclusively, a second concurrent stop finds NULL -- it must WAIT
+		 * for the owner to finish the join, not return early. Concurrent stops are
+		 * reachable: sofia drops tech_pvt->sofia_mutex across
+		 * sofia_media_activate_rtp_unlocked(). */
+		FST_TEST_BEGIN(test_second_drain_thread_stop_waits_for_the_join)
+		{
+			switch_core_session_t *session = NULL;
+			switch_memory_pool_t *pool = NULL;
+			switch_threadattr_t *thd_attr = NULL;
+			switch_thread_t *stopper = NULL, *parked = NULL;
+			struct parked_thread park = { 0, 0 };
+			struct stop_job job;
+			switch_status_t st;
+			int waited, second_returned_early;
+
+			session = originate_null_session();
+			fst_requires(session);
+			fst_requires(attach_media_handle(session) == SWITCH_STATUS_SUCCESS);
+			pool = switch_core_session_get_pool(session);
+
+			switch_threadattr_create(&thd_attr, pool);
+			switch_threadattr_detach_set(thd_attr, 0);
+			switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
+
+			/* A stand-in drain thread that stays alive until released, so the first
+			 * stop is provably parked inside switch_thread_join(). */
+			fst_requires(switch_thread_create(&parked, thd_attr, parked_thread_fn, &park, pool) == SWITCH_STATUS_SUCCESS);
+			for (waited = 0; waited < 500 && !park.running; waited++) {
+				switch_yield(10000);
+			}
+			fst_requires(park.running == 1);
+			switch_core_media_test_arm_drain(session, parked);
+
+			job.session = session;
+			job.done = 0;
+			fst_requires(switch_thread_create(&stopper, thd_attr, stop_thread_fn, &job, pool) == SWITCH_STATUS_SUCCESS);
+
+			/* First stopper is now inside the join and owns the handle. */
+			switch_yield(300000);
+			fst_requires(job.done == 0);
+			fst_requires(switch_core_media_test_get_drain_thread(session) == NULL);
+
+			/* THE CRUX: a second stop must block until the thread is really gone. */
+			{
+				struct stop_job job2;
+				switch_thread_t *stopper2 = NULL;
+
+				job2.session = session;
+				job2.done = 0;
+				fst_requires(switch_thread_create(&stopper2, thd_attr, stop_thread_fn, &job2, pool) == SWITCH_STATUS_SUCCESS);
+				switch_yield(300000);
+				second_returned_early = job2.done;
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+								  "[TEST] second stop returned while the thread was still running = %d (expect 0)\n",
+								  second_returned_early);
+				fst_check(second_returned_early == 0);
+
+				/* Release, then both stops must complete. */
+				park.release = 1;
+				for (waited = 0; waited < 500 && !(job.done && job2.done); waited++) {
+					switch_yield(10000);
+				}
+				fst_check(job.done == 1);
+				fst_check(job2.done == 1);
+				switch_thread_join(&st, stopper2);
+			}
+
+			switch_thread_join(&st, stopper);
+			switch_thread_join(&st, parked);
+
+			switch_channel_hangup(switch_core_session_get_channel(session), SWITCH_CAUSE_NORMAL_CLEARING);
+			switch_core_session_rwunlock(session);
+		}
+		FST_TEST_END()
+
 		/* bundle_frame_dup() marks its clones SFF_DYNAMIC (switch_core_media.c:4072,
 		 * :4098) because they are malloc-backed and released with switch_frame_free().
 		 * The bundled-video read branch then copies the whole frame, flags included,

@@ -4479,10 +4479,20 @@ static void bundle_drain_thread_stop(switch_core_session_t *session)
 	switch_mutex_lock(smh->bundle_drain_mutex);
 	thd = v_engine->bundle_drain_thread;
 	if (!thd) {
-		/* A concurrent stop already took the handle and is inside its join; leaving
-		 * the state and the audio queue to it, since marking INACTIVE here would
-		 * publish a teardown that has not happened yet. */
-		if (v_engine->bundle_drain_state != BUNDLE_DRAIN_STOPPING) {
+		if (v_engine->bundle_drain_state == BUNDLE_DRAIN_STOPPING) {
+			/* A concurrent stop took the handle and is inside its join. Callers rely
+			 * on "stop() returned means the thread is gone" -- deactivate_rtp()
+			 * destroys the RTP session the thread reads from, and
+			 * switch_media_handle_destroy() the frame buffer it pushes into -- so
+			 * wait for the owner instead of returning. Bounded at 5s like the other
+			 * waits on this cond. */
+			int waits = 0;
+
+			while (v_engine->bundle_drain_state == BUNDLE_DRAIN_STOPPING
+				   && v_engine->bundle_audio_read_cond && waits++ < 250) {
+				switch_thread_cond_timedwait(v_engine->bundle_audio_read_cond, smh->bundle_drain_mutex, 20000);
+			}
+		} else {
 			v_engine->bundle_drain_state = BUNDLE_DRAIN_INACTIVE;
 			bundle_audio_queue_cleanup_locked(session, smh, v_engine);
 		}
@@ -4525,6 +4535,12 @@ static void bundle_drain_thread_stop(switch_core_session_t *session)
 	if (!v_engine->bundle_drain_thread) {
 		bundle_audio_queue_cleanup_locked(session, smh, v_engine);
 		v_engine->bundle_drain_state = BUNDLE_DRAIN_INACTIVE;
+	}
+	/* Release any stop waiting on this join. Broadcast, not signal: more than one
+	 * can be queued, and the other waiters on this cond re-check their own
+	 * predicates in a loop so a spurious wake is harmless. */
+	if (v_engine->bundle_audio_read_cond) {
+		switch_thread_cond_broadcast(v_engine->bundle_audio_read_cond);
 	}
 	switch_mutex_unlock(smh->bundle_drain_mutex);
 
