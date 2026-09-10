@@ -587,6 +587,8 @@ SWITCH_DECLARE(void) switch_core_session_run(switch_core_session_t *session)
 
 
 	 */
+	uint32_t routed_generation;
+
 	switch_assert(session != NULL);
 
 	switch_set_flag(session, SSF_THREAD_RUNNING);
@@ -598,6 +600,9 @@ SWITCH_DECLARE(void) switch_core_session_run(switch_core_session_t *session)
 
 	switch_mutex_lock(session->mutex);
 
+	/* Last transfer generation routed by this thread; != only, it wraps. */
+	routed_generation = switch_channel_get_transfer_generation(session->channel);
+
 	while ((state = switch_channel_get_state(session->channel)) != CS_DESTROY) {
 
 		if (switch_channel_test_flag(session->channel, CF_BLOCK_STATE)) {
@@ -608,7 +613,10 @@ SWITCH_DECLARE(void) switch_core_session_run(switch_core_session_t *session)
 		}
 
 		midstate = state;
-		if (state != switch_channel_get_running_state(session->channel) || state >= CS_HANGUP) {
+		/* Third clause: a transfer that landed mid-transition can leave
+		   state == running_state == CS_ROUTING with nothing having routed its profile. */
+		if (state != switch_channel_get_running_state(session->channel) || state >= CS_HANGUP ||
+			(state == CS_ROUTING && switch_channel_get_transfer_generation(session->channel) != routed_generation)) {
 			int index = 0;
 			int proceed = 1;
 			int global_proceed = 1;
@@ -617,6 +625,11 @@ SWITCH_DECLARE(void) switch_core_session_run(switch_core_session_t *session)
 			switch_status_t rstatus = SWITCH_STATUS_SUCCESS;
 
 			switch_channel_set_running_state(session->channel, state);
+			if (state == CS_ROUTING) {
+				/* Before the handler, so a transfer landing during it still reads as
+				   unrouted. Only ROUTING updates this. */
+				routed_generation = switch_channel_get_transfer_generation(session->channel);
+			}
 			switch_channel_clear_flag(session->channel, CF_TRANSFER);
 			switch_channel_clear_flag(session->channel, CF_REDIRECT);
 			switch_ivr_parse_all_messages(session);
@@ -731,6 +744,17 @@ SWITCH_DECLARE(void) switch_core_session_run(switch_core_session_t *session)
 
 				if (switch_channel_test_flag(session->channel, CF_STATE_REPEAT)) {
 					switch_channel_clear_flag(session->channel, CF_STATE_REPEAT);
+				} else if (switch_channel_get_transfer_generation(session->channel) != routed_generation) {
+					/* Unconsumed transfer; sleeping would strand it. Drive the change so
+					   the guard above is guaranteed to fire next iteration - merely
+					   declining to sleep spins when the guard does not match. */
+					if (switch_channel_get_state(session->channel) != CS_ROUTING) {
+						switch_channel_set_state(session->channel, CS_ROUTING);
+					}
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+									  "%s unrouted transfer in state %s, routing again instead of sleeping\n",
+									  switch_channel_get_name(session->channel),
+									  switch_channel_state_name(switch_channel_get_running_state(session->channel)));
 				} else if (switch_channel_get_state(session->channel) == switch_channel_get_running_state(session->channel)) {
 					switch_channel_set_flag(session->channel, CF_THREAD_SLEEPING);
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG1, "%s session thread sleep state: %s!\n",
