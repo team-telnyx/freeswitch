@@ -22581,6 +22581,175 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_get_chosen_ice_candidate(switc
 	return SWITCH_STATUS_SUCCESS;
 }
 
+/* struct switch_media_handle_s and struct switch_rtp_engine_s are private to this
+ * file, so tests cannot reach the BUNDLE read state or the static helpers that
+ * operate on it. These accessors exist only for tests/unit and are compiled out
+ * otherwise. */
+
+static switch_rtp_engine_t *test_engine(switch_core_session_t *session, switch_media_type_t type)
+{
+	if (!session || !session->media_handle || type >= SWITCH_MEDIA_TYPE_TOTAL) {
+		return NULL;
+	}
+	return &session->media_handle->engines[type];
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_media_test_prepare_read_fb(switch_core_session_t *session, switch_media_type_t type)
+{
+	switch_rtp_engine_t *engine = test_engine(session, type);
+	switch_media_handle_t *smh;
+
+	if (!engine) return SWITCH_STATUS_FALSE;
+	smh = session->media_handle;
+
+	if (!smh->read_mutex[type]) {
+		switch_mutex_init(&smh->read_mutex[type], SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
+	}
+
+	if (!engine->read_fb && switch_frame_buffer_create(&engine->read_fb, 10) != SWITCH_STATUS_SUCCESS) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_media_test_lock_read(switch_core_session_t *session, switch_media_type_t type)
+{
+	if (!test_engine(session, type) || !session->media_handle->read_mutex[type]) return SWITCH_STATUS_FALSE;
+	switch_mutex_lock(session->media_handle->read_mutex[type]);
+	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(void) switch_core_media_test_unlock_read(switch_core_session_t *session, switch_media_type_t type)
+{
+	if (!test_engine(session, type) || !session->media_handle->read_mutex[type]) return;
+	switch_mutex_unlock(session->media_handle->read_mutex[type]);
+}
+
+SWITCH_DECLARE(void) switch_core_media_test_flush_queued_read_frames(switch_core_session_t *session, switch_media_type_t type)
+{
+	switch_rtp_engine_t *engine = test_engine(session, type);
+
+	if (engine) {
+		switch_core_media_flush_queued_read_frames(engine);
+	}
+}
+
+SWITCH_DECLARE(void) switch_core_media_test_set_read_fb_frame(switch_core_session_t *session, switch_media_type_t type, switch_frame_t *frame)
+{
+	switch_rtp_engine_t *engine = test_engine(session, type);
+
+	if (engine) {
+		engine->read_fb_frame = frame;
+	}
+}
+
+SWITCH_DECLARE(switch_frame_t *) switch_core_media_test_get_read_fb_frame(switch_core_session_t *session, switch_media_type_t type)
+{
+	switch_rtp_engine_t *engine = test_engine(session, type);
+
+	return engine ? engine->read_fb_frame : NULL;
+}
+
+SWITCH_DECLARE(void) switch_core_media_test_arm_drain(switch_core_session_t *session, switch_thread_t *thread)
+{
+	switch_rtp_engine_t *v_engine = test_engine(session, SWITCH_MEDIA_TYPE_VIDEO);
+
+	if (!v_engine) return;
+
+	switch_mutex_lock(session->media_handle->bundle_drain_mutex);
+	v_engine->bundle_drain_thread = thread;
+	v_engine->bundle_drain_state = BUNDLE_DRAIN_RUNNING;
+	switch_mutex_unlock(session->media_handle->bundle_drain_mutex);
+}
+
+SWITCH_DECLARE(switch_thread_t *) switch_core_media_test_get_drain_thread(switch_core_session_t *session)
+{
+	switch_rtp_engine_t *v_engine = test_engine(session, SWITCH_MEDIA_TYPE_VIDEO);
+
+	return v_engine ? v_engine->bundle_drain_thread : NULL;
+}
+
+SWITCH_DECLARE(void) switch_core_media_test_drain_thread_stop(switch_core_session_t *session)
+{
+	if (session) {
+		bundle_drain_thread_stop(session);
+	}
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_media_test_prepare_bundle_drain(switch_core_session_t *session, switch_rtp_t *rtp_session)
+{
+	switch_rtp_engine_t *a_engine, *v_engine;
+	switch_media_handle_t *smh;
+
+	if (!session || !(smh = session->media_handle)) return SWITCH_STATUS_FALSE;
+
+	a_engine = &smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
+	v_engine = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
+
+	a_engine->rtp_session = rtp_session;
+	v_engine->bundled_with_audio = 1;
+	smh->bundle.state = SWITCH_BUNDLE_STATE_ACCEPTED;
+
+	if (!v_engine->read_fb && switch_frame_buffer_create(&v_engine->read_fb, 10) != SWITCH_STATUS_SUCCESS) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(void) switch_core_media_test_drain_thread_start(switch_core_session_t *session)
+{
+	if (session) {
+		bundle_drain_thread_start(session);
+	}
+}
+
+/* Satisfies the gates switch_core_media_read_frame() applies before it reaches the
+ * bundled-video branch: a ready read codec and a live rtp_session on the engine. */
+SWITCH_DECLARE(switch_status_t) switch_core_media_test_prepare_engine_read(switch_core_session_t *session, switch_media_type_t type,
+																		   switch_rtp_t *rtp_session)
+{
+	switch_rtp_engine_t *engine = test_engine(session, type);
+
+	if (!engine) return SWITCH_STATUS_FALSE;
+
+	engine->rtp_session = rtp_session;
+
+	if (!switch_core_codec_ready(&engine->read_codec) &&
+		switch_core_codec_init(&engine->read_codec, "PCMU", NULL, NULL, 8000, 20, 1,
+							   SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
+							   NULL, switch_core_session_get_pool(session)) != SWITCH_STATUS_SUCCESS) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_media_test_push_read_fb(switch_core_session_t *session, switch_media_type_t type,
+																	switch_frame_t *frame)
+{
+	switch_rtp_engine_t *engine = test_engine(session, type);
+
+	if (!engine || !engine->read_fb) return SWITCH_STATUS_FALSE;
+
+	return switch_frame_buffer_trypush(engine->read_fb, frame);
+}
+
+/* Returns SUCCESS when the session write lock could be taken, meaning nobody holds
+ * a read lock on it. Releases it again on success. */
+SWITCH_DECLARE(switch_status_t) switch_core_media_test_try_session_write_lock(switch_core_session_t *session)
+{
+	if (!session || !session->rwlock) return SWITCH_STATUS_FALSE;
+
+	if (switch_thread_rwlock_trywrlock(session->rwlock) == SWITCH_STATUS_SUCCESS) {
+		switch_thread_rwlock_unlock(session->rwlock);
+		return SWITCH_STATUS_SUCCESS;
+	}
+
+	return SWITCH_STATUS_FALSE;
+}
+
 /* For Emacs:
  * Local Variables:
  * mode:c
