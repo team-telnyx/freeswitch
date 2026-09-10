@@ -18,5 +18,5 @@ test_test_avmd_candidate_LDADD = -lm
 test_avmd_spectral_scan_SOURCES = test/avmd_spectral_scan.c avmd_goertzel.c avmd_spectral.c
 test_avmd_spectral_scan_CFLAGS = $(AM_CFLAGS) -I./
 test_avmd_spectral_scan_LDADD = -lm
-TESTS = test/test_avmd_spectral test/test_avmd_candidate test/test_avmd_pcap_extract_unit.py
-EXTRA_DIST = test/fixtures/README.md test/fixtures/positive-voicemail-beep.ulaw test/fixtures/negative-transfer-ringback.ulaw test/fixtures/real-music-cc0.wav test/avmd_pcap_extract.py test/test_avmd_pcap_extract_unit.py test/avmd_corpus.json test/run_avmd_integration.py
+TESTS = test/test_avmd_spectral test/test_avmd_candidate test/test_avmd_pcap_extract_unit.py test/test_mod_avmd_startup_unit.py
+EXTRA_DIST = test/fixtures/README.md test/fixtures/positive-voicemail-beep.ulaw test/fixtures/negative-transfer-ringback.ulaw test/fixtures/real-music-cc0.wav test/avmd_pcap_extract.py test/test_avmd_pcap_extract_unit.py test/test_mod_avmd_startup_unit.py test/avmd_corpus.json test/run_avmd_integration.py

@@ -446,7 +446,11 @@ static switch_status_t init_avmd_session_data(avmd_session_t *avmd_session, swit
                     AVMD_SPECTRAL_MAX_FRAME_HISTORY_MS);
         }
     }
-    INIT_CIRC_BUFFER(&avmd_session->b, raw_history_samples, (size_t) AVMD_FRAME_LEN(avmd_session->rate), fs_session);
+    /* Keep the legacy buffer sized for the worst-case frame rate.  The
+     * allocation history is intentionally based on allocation_rate, and the
+     * frame term must use the same rate or low-rate sessions shrink the
+     * circular buffer below the size legacy detectors expect. */
+    INIT_CIRC_BUFFER(&avmd_session->b, raw_history_samples, (size_t) AVMD_FRAME_LEN(allocation_rate), fs_session);
     if (avmd_session->b.buf == NULL) {
         status =  SWITCH_STATUS_MEMERR;
         goto end;
@@ -1755,6 +1759,16 @@ SWITCH_STANDARD_APP(avmd_start_app) {
                 "AVMD option 'simplified_estimation' is deprecated and has no effect\n");
     }
 
+    if ((SWITCH_CALL_DIRECTION_OUTBOUND == switch_channel_direction(channel)) &&
+            (avmd_session->settings.outbound_channnel == 1) &&
+            (switch_channel_test_flag(channel, CF_MEDIA_SET) == 0)) {
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                "Channel [%s] has no codec assigned yet. Please try again\n",
+                switch_channel_get_name(channel));
+        status = SWITCH_STATUS_FALSE;
+        goto end;
+    }
+
     status = avmd_initialize_session_data(avmd_session, session, avmd_globals.mutex);
     if (status != SWITCH_STATUS_SUCCESS) {
         switch (status) {
@@ -1806,17 +1820,6 @@ SWITCH_STANDARD_APP(avmd_start_app) {
         switch_mutex_unlock(avmd_session->mutex);
         avmd_session_close(avmd_session);
         goto end;
-    }
-
-    if ((SWITCH_CALL_DIRECTION_OUTBOUND == switch_channel_direction(channel)) && (avmd_session->settings.outbound_channnel == 1)) {
-        if (switch_channel_test_flag(channel, CF_MEDIA_SET) == 0) {
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Channel [%s] has no codec assigned yet. Please try again\n", switch_channel_get_name(channel));
-            status = SWITCH_STATUS_FALSE;
-
-            switch_mutex_unlock(avmd_session->mutex);
-            avmd_session_close(avmd_session);
-            goto end;
-        }
     }
 
     status = switch_core_media_bug_add(session, "avmd", NULL, avmd_callback, avmd_session, 0, flags, &bug); /* Add a media bug that allows me to intercept the audio stream */
