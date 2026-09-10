@@ -4255,6 +4255,13 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 		return NULL;
 	}
 
+	/* Hold the session for the life of the thread, the way video_write_thread()
+	 * and video_helper_thread() do. Without it this thread dereferences session,
+	 * its channel and its media handle with nothing keeping the session alive. */
+	if (switch_core_session_read_lock(session) != SWITCH_STATUS_SUCCESS) {
+		return NULL;
+	}
+
 	a_engine = &smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
 	v_engine = &smh->engines[SWITCH_MEDIA_TYPE_VIDEO];
 
@@ -4266,6 +4273,7 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 	switch_mutex_lock(smh->bundle_drain_mutex);
 	if (v_engine->bundle_drain_state != BUNDLE_DRAIN_STARTING) {
 		switch_mutex_unlock(smh->bundle_drain_mutex);
+		switch_core_session_rwunlock(session);
 		return NULL;
 	}
 	v_engine->bundle_drain_state = BUNDLE_DRAIN_RUNNING;
@@ -4384,6 +4392,8 @@ static void *SWITCH_THREAD_FUNC bundle_drain_thread_func(switch_thread_t *thread
 		v_engine->bundle_drain_state = BUNDLE_DRAIN_INACTIVE;
 	}
 	switch_mutex_unlock(smh->bundle_drain_mutex);
+
+	switch_core_session_rwunlock(session);
 	return NULL;
 }
 
