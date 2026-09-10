@@ -4853,6 +4853,248 @@ SWITCH_DECLARE(switch_core_session_t *) switch_channel_get_session(switch_channe
 	return channel->session;
 }
 
+#define SWITCH_CDR_STAMP_FMT "%Y-%m-%d %T"
+#define SWITCH_CDR_STAMP_LEN 19
+
+/* Upper bound for the diagnostic hold below. Paid once per stamp, so a call
+   that writes all nine pays nine times this with profile_mutex held. */
+#define SWITCH_CDR_STAMP_WATCH_MAX_MS 50
+
+/* Keep a broken-down time field inside the range its fixed-width field can hold. */
+#define CLAMP_STAMP_FIELD(v, lo, hi) ((v) < (lo) ? (lo) : ((v) > (hi) ? (hi) : (v)))
+
+/*!
+  \brief Widen the window in which a stray write to a stamp buffer can be seen.
+
+  A CDR timestamp was once stored with a NUL byte in the middle of an otherwise
+  correct value. The write that shortened it was never identified: it lands
+  inside the buffer, so it corrupts no allocator metadata and crosses no page
+  boundary, which leaves both AddressSanitizer and guard pages blind to it.
+
+  This widens one of the two windows in which the value is exposed: the gap
+  between the formatter filling the stack buffer and the value being copied
+  into the channel variable, a few hundred nanoseconds. It takes a reference
+  copy, holds that gap open for the configured number of milliseconds, then
+  compares. Chance of catching a randomly timed write scales with the width of
+  the gap.
+
+  It does NOT cover the second window. Once copied, the value lives on the heap
+  from here until the CDR is serialized in CS_REPORTING, which spans every
+  module's on_hangup handler and is orders of magnitude longer. A write landing
+  there is invisible to this helper, so silence from it does not bound the rate.
+
+  Disabled unless the "cdr_stamp_watch_ms" core variable is set to a positive
+  value, so production pays nothing. Intended for a lab or canary host.
+
+  \return milliseconds to hold the window open, 0 when disabled
+*/
+static uint32_t chan_stamp_watch_ms(void)
+{
+	char *val = switch_core_get_variable_dup("cdr_stamp_watch_ms");
+	int ms;
+
+	if (zstr(val)) {
+		switch_safe_free(val);
+		return 0;
+	}
+
+	ms = atoi(val);
+	switch_safe_free(val);
+
+	if (ms < 0) {
+		return 0;
+	}
+
+	if (ms > SWITCH_CDR_STAMP_WATCH_MAX_MS) {
+		ms = SWITCH_CDR_STAMP_WATCH_MAX_MS;
+	}
+
+	return (uint32_t)ms;
+}
+
+/*!
+  \brief Report a stamp buffer that changed after the formatter returned.
+
+  Logs the value before and after alongside a hex dump, which is what
+  identifies the write. A single altered byte and an otherwise intact buffer
+  means one stray store; a run of zeroes means a wider store, which is a
+  different fault to look for.
+*/
+static void chan_stamp_report_mutation(switch_channel_t *channel, const char *name,
+									   const char *before, const char *after,
+									   switch_size_t retsize, uint32_t waited_ms)
+{
+	char hex[3 * 24 + 1] = "";
+	switch_size_t i;
+	switch_size_t pos = 0;
+
+	for (i = 0; i < 24; i++) {
+		pos += switch_snprintf(hex + pos, sizeof(hex) - pos, "%02x ", (unsigned char)after[i]);
+	}
+
+	switch_log_printf(SWITCH_CHANNEL_CHANNEL_LOG(channel), SWITCH_LOG_CRIT,
+					  "CDR stamp mutated after formatting [%s] before=[%s] after=[%s] "
+					  "retsize=%" SWITCH_SIZE_T_FMT " strlen_now=%" SWITCH_SIZE_T_FMT
+					  " watched_ms=%u hex=%s\n",
+					  name, before, after, retsize, strlen(after), waited_ms, hex);
+}
+
+/*!
+  \brief Format a CDR timestamp and verify the result before it is stored.
+
+  switch_strftime_nocheck() discards the value returned by strftime(), so a
+  short or mangled buffer is stored into the CDR without any indication that
+  something went wrong. A malformed stamp is not detectable downstream and
+  breaks consumers that parse the field.
+
+  This helper formats the stamp, then verifies that strftime() reported the
+  expected length AND that the buffer really holds that many bytes. If the two
+  disagree, it logs the evidence needed to identify the writer and rebuilds the
+  value from the same broken-down time using an independent formatter.
+
+  \param channel the channel, used for logging context
+  \param name the CDR variable name, used for logging
+  \param when the microsecond timestamp to format
+  \param buf destination buffer
+  \param buflen size of the destination buffer
+  \param watch_ms milliseconds to hold the pre-store window open, 0 to disable
+  \return SWITCH_TRUE when the first format attempt was well formed
+*/
+static switch_bool_t switch_channel_format_stamp(switch_channel_t *channel, const char *name,
+												 switch_time_t when, char *buf, switch_size_t buflen,
+												 uint32_t watch_ms)
+{
+	switch_time_exp_t tm;
+	switch_size_t retsize = 0;
+	switch_size_t len;
+	int year;
+
+	memset(&tm, 0, sizeof(tm));
+	memset(buf, 0, buflen);
+
+	switch_time_exp_lt(&tm, when);
+	switch_strftime_nocheck(buf, &retsize, buflen, SWITCH_CDR_STAMP_FMT, &tm);
+	len = strlen(buf);
+
+	/*
+	 * Diagnostic only, off unless cdr_stamp_watch_ms is set. Holds the gap
+	 * between formatting and storing open so a stray write into this buffer
+	 * can be seen and dumped instead of silently changing the value.
+	 */
+	if (watch_ms) {
+		char before[80] = "";
+
+		switch_copy_string(before, buf, sizeof(before));
+		switch_yield(watch_ms * 1000);
+
+		if (strcmp(before, buf)) {
+			chan_stamp_report_mutation(channel, name, before, buf, retsize, watch_ms);
+			switch_copy_string(buf, before, buflen);
+			len = strlen(buf);
+		}
+	}
+
+	if (retsize == SWITCH_CDR_STAMP_LEN && len == SWITCH_CDR_STAMP_LEN) {
+		return SWITCH_TRUE;
+	}
+
+	switch_log_printf(SWITCH_CHANNEL_CHANNEL_LOG(channel), SWITCH_LOG_CRIT,
+					  "Malformed CDR timestamp [%s] retsize=%" SWITCH_SIZE_T_FMT " strlen=%" SWITCH_SIZE_T_FMT
+					  " src=%" SWITCH_TIME_T_FMT " buf=[%s]\n", name, retsize, len, when, buf);
+
+	/*
+	 * Re-derive the broken-down time from the input rather than reusing tm,
+	 * which shares a stack frame with the buffer that was just rejected. Same
+	 * instant, independent formatter. Clamp each field to the range the
+	 * fixed-width format can represent, so the rebuilt value is always exactly
+	 * SWITCH_CDR_STAMP_LEN characters. Without the clamp a year outside 0..9999
+	 * reproduces the same malformed length that was just rejected.
+	 */
+	switch_time_exp_lt(&tm, when);
+
+	year = tm.tm_year + 1900;
+	if (year < 0) {
+		year = 0;
+	} else if (year > 9999) {
+		year = 9999;
+	}
+
+	switch_snprintf(buf, buflen, "%04d-%02d-%02d %02d:%02d:%02d",
+					year,
+					CLAMP_STAMP_FIELD(tm.tm_mon + 1, 1, 12),
+					CLAMP_STAMP_FIELD(tm.tm_mday, 1, 31),
+					CLAMP_STAMP_FIELD(tm.tm_hour, 0, 23),
+					CLAMP_STAMP_FIELD(tm.tm_min, 0, 59),
+					CLAMP_STAMP_FIELD(tm.tm_sec, 0, 60));
+
+	return SWITCH_FALSE;
+}
+
+/*!
+  \brief Re-check the stored CDR timestamps at the point they are read.
+
+  switch_channel_format_stamp() validates a stamp while it is still in the stack
+  buffer. Once stored, the value lives in a heap block of its own from hangup
+  until the CDR is serialized in CS_REPORTING, a window that spans every
+  module's on_hangup handler. A stray store landing there is invisible to the
+  call-site check and reaches the CDR unaltered.
+
+  This re-reads each stamp where it is used and rebuilds any that is no longer
+  the expected length. The source times live in the session pool rather than in
+  a small heap block of their own, so they are not exposed to the same damage.
+*/
+SWITCH_DECLARE(void) switch_channel_repair_timestamps(switch_channel_t *channel)
+{
+	static const struct {
+		const char *name;
+		size_t offset;
+	} stamps[] = {
+		{ "start_stamp", offsetof(switch_channel_timetable_t, created) },
+		{ "profile_start_stamp", offsetof(switch_channel_timetable_t, profile_created) },
+		{ "answer_stamp", offsetof(switch_channel_timetable_t, answered) },
+		{ "bridge_stamp", offsetof(switch_channel_timetable_t, bridged) },
+		{ "hold_stamp", offsetof(switch_channel_timetable_t, last_hold) },
+		{ "resurrect_stamp", offsetof(switch_channel_timetable_t, resurrected) },
+		{ "progress_stamp", offsetof(switch_channel_timetable_t, progress) },
+		{ "progress_media_stamp", offsetof(switch_channel_timetable_t, progress_media) },
+		{ "end_stamp", offsetof(switch_channel_timetable_t, hungup) }
+	};
+	switch_caller_profile_t *caller_profile;
+	size_t i;
+
+	if (!channel) {
+		return;
+	}
+
+	switch_mutex_lock(channel->profile_mutex);
+
+	if ((caller_profile = channel->caller_profile) && caller_profile->times) {
+		for (i = 0; i < sizeof(stamps) / sizeof(stamps[0]); ++i) {
+			/* Raw stored pointer, no pool copy: profile_mutex is held across
+			 * this whole loop, so the value cannot be freed under us. */
+			const char *stored = switch_channel_get_variable_dup(channel, stamps[i].name, SWITCH_FALSE, -1);
+			char rebuilt[80] = "";
+			switch_time_t when;
+
+			if (!stored || strlen(stored) == SWITCH_CDR_STAMP_LEN) {
+				continue;
+			}
+
+			when = *(switch_time_t *) ((char *) caller_profile->times + stamps[i].offset);
+
+			switch_log_printf(SWITCH_CHANNEL_CHANNEL_LOG(channel), SWITCH_LOG_CRIT,
+							  "CDR stamp damaged after it was stored [%s] was=[%s] strlen=%" SWITCH_SIZE_T_FMT
+							  " src=%" SWITCH_TIME_T_FMT "\n",
+							  stamps[i].name, stored, (switch_size_t) strlen(stored), when);
+
+			switch_channel_format_stamp(channel, stamps[i].name, when, rebuilt, sizeof(rebuilt), 0);
+			switch_channel_set_variable(channel, stamps[i].name, rebuilt);
+		}
+	}
+
+	switch_mutex_unlock(channel->profile_mutex);
+}
+
 SWITCH_DECLARE(switch_status_t) switch_channel_set_timestamps(switch_channel_t *channel)
 {
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
@@ -4860,7 +5102,7 @@ SWITCH_DECLARE(switch_status_t) switch_channel_set_timestamps(switch_channel_t *
 	switch_caller_profile_t *caller_profile;
 	switch_app_log_t *app_log, *ap;
 	char *last_app = NULL, *last_arg = NULL;
-	char start[80] = "", resurrect[80] = "", answer[80] = "", hold[80],
+	char start[80] = "", resurrect[80] = "", answer[80] = "", hold[80] = "",
 		bridge[80] = "", progress[80] = "", progress_media[80] = "", end[80] = "", tmp[80] = "",
 		profile_start[80] =	"";
 	int32_t duration = 0, legbillsec = 0, billsec = 0, mduration = 0, billmsec = 0, legbillmsec = 0, progressmsec = 0, progress_mediamsec = 0, ringback_delaymsec = 0, first_early_rtp_packetmsec = 0;
@@ -4960,51 +5202,41 @@ SWITCH_DECLARE(switch_status_t) switch_channel_set_timestamps(switch_channel_t *
 	}
 
 	if (caller_profile->times) {
-		switch_time_exp_t tm;
-		switch_size_t retsize;
-		const char *fmt = "%Y-%m-%d %T";
+		uint32_t watch_ms = chan_stamp_watch_ms();
 
-		switch_time_exp_lt(&tm, caller_profile->times->created);
-		switch_strftime_nocheck(start, &retsize, sizeof(start), fmt, &tm);
+		switch_channel_format_stamp(channel, "start_stamp", caller_profile->times->created, start, sizeof(start), watch_ms);
 		switch_channel_set_variable(channel, "start_stamp", start);
 
-		switch_time_exp_lt(&tm, caller_profile->times->profile_created);
-		switch_strftime_nocheck(profile_start, &retsize, sizeof(profile_start), fmt, &tm);
+		switch_channel_format_stamp(channel, "profile_start_stamp", caller_profile->times->profile_created, profile_start, sizeof(profile_start), watch_ms);
 		switch_channel_set_variable(channel, "profile_start_stamp", profile_start);
 
 		if (caller_profile->times->answered) {
-			switch_time_exp_lt(&tm, caller_profile->times->answered);
-			switch_strftime_nocheck(answer, &retsize, sizeof(answer), fmt, &tm);
+			switch_channel_format_stamp(channel, "answer_stamp", caller_profile->times->answered, answer, sizeof(answer), watch_ms);
 			switch_channel_set_variable(channel, "answer_stamp", answer);
 		}
 
 		if (caller_profile->times->bridged) {
-			switch_time_exp_lt(&tm, caller_profile->times->bridged);
-			switch_strftime_nocheck(bridge, &retsize, sizeof(bridge), fmt, &tm);
+			switch_channel_format_stamp(channel, "bridge_stamp", caller_profile->times->bridged, bridge, sizeof(bridge), watch_ms);
 			switch_channel_set_variable(channel, "bridge_stamp", bridge);
 		}
 
 		if (caller_profile->times->last_hold) {
-			switch_time_exp_lt(&tm, caller_profile->times->last_hold);
-			switch_strftime_nocheck(hold, &retsize, sizeof(hold), fmt, &tm);
+			switch_channel_format_stamp(channel, "hold_stamp", caller_profile->times->last_hold, hold, sizeof(hold), watch_ms);
 			switch_channel_set_variable(channel, "hold_stamp", hold);
 		}
 
 		if (caller_profile->times->resurrected) {
-			switch_time_exp_lt(&tm, caller_profile->times->resurrected);
-			switch_strftime_nocheck(resurrect, &retsize, sizeof(resurrect), fmt, &tm);
+			switch_channel_format_stamp(channel, "resurrect_stamp", caller_profile->times->resurrected, resurrect, sizeof(resurrect), watch_ms);
 			switch_channel_set_variable(channel, "resurrect_stamp", resurrect);
 		}
 
 		if (caller_profile->times->progress) {
-			switch_time_exp_lt(&tm, caller_profile->times->progress);
-			switch_strftime_nocheck(progress, &retsize, sizeof(progress), fmt, &tm);
+			switch_channel_format_stamp(channel, "progress_stamp", caller_profile->times->progress, progress, sizeof(progress), watch_ms);
 			switch_channel_set_variable(channel, "progress_stamp", progress);
 		}
 
 		if (caller_profile->times->progress_media) {
-			switch_time_exp_lt(&tm, caller_profile->times->progress_media);
-			switch_strftime_nocheck(progress_media, &retsize, sizeof(progress_media), fmt, &tm);
+			switch_channel_format_stamp(channel, "progress_media_stamp", caller_profile->times->progress_media, progress_media, sizeof(progress_media), watch_ms);
 			switch_channel_set_variable(channel, "progress_media_stamp", progress_media);
 		}
 
@@ -5035,8 +5267,7 @@ SWITCH_DECLARE(switch_status_t) switch_channel_set_timestamps(switch_channel_t *
 			}
 		}
 
-		switch_time_exp_lt(&tm, caller_profile->times->hungup);
-		switch_strftime_nocheck(end, &retsize, sizeof(end), fmt, &tm);
+		switch_channel_format_stamp(channel, "end_stamp", caller_profile->times->hungup, end, sizeof(end), watch_ms);
 		switch_channel_set_variable(channel, "end_stamp", end);
 
 		tt_created = (time_t) (caller_profile->times->created / 1000000);
