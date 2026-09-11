@@ -142,19 +142,21 @@ static void check_ip(void)
 	switch_event_t *event;
 	char *hostname = switch_core_get_variable("hostname");
 
-	gethostname(runtime.hostname, sizeof(runtime.hostname));
+	if (!runtime.hostname_overridden) {
+		gethostname(runtime.hostname, sizeof(runtime.hostname));
 
-	if (zstr(hostname)) {
-		switch_core_set_variable("hostname", runtime.hostname);
-	} else if (strcmp(hostname, runtime.hostname)) {
-		if (switch_event_create(&event, SWITCH_EVENT_TRAP) == SWITCH_STATUS_SUCCESS) {
-			switch_event_add_header(event, SWITCH_STACK_BOTTOM, "condition", "hostname-change");
-			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "old-hostname", hostname);
-			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "new-hostname", runtime.hostname);
-			switch_event_fire(&event);
+		if (zstr(hostname)) {
+			switch_core_set_variable("hostname", runtime.hostname);
+		} else if (strcmp(hostname, runtime.hostname)) {
+			if (switch_event_create(&event, SWITCH_EVENT_TRAP) == SWITCH_STATUS_SUCCESS) {
+				switch_event_add_header(event, SWITCH_STACK_BOTTOM, "condition", "hostname-change");
+				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "old-hostname", hostname);
+				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "new-hostname", runtime.hostname);
+				switch_event_fire(&event);
+			}
+
+			switch_core_set_variable("hostname", runtime.hostname);
 		}
-
-		switch_core_set_variable("hostname", runtime.hostname);
 	}
 
 	check4 = switch_find_local_ip(guess_ip4, sizeof(guess_ip4), &mask, AF_INET);
@@ -2387,6 +2389,17 @@ static void switch_load_core_config(const char *file)
 				} else if (!strcasecmp(var, "switchname") && !zstr(val)) {
 					runtime.switchname = switch_core_strdup(runtime.memory_pool, val);
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Set switchname to %s\n", runtime.switchname);
+				} else if (!strcasecmp(var, "hostname") && !zstr(val)) {
+					/* Override the value reported by gethostname(). Containerised
+					   deployments cannot set the kernel UTS hostname (no CAP_SYS_ADMIN,
+					   and Kubernetes spec.hostname must be a DNS-1123 label so it
+					   cannot carry a dot), yet consumers parse FreeSWITCH-Hostname
+					   expecting the <prefix>.<node> form. Latching this also stops the
+					   periodic check_ip() re-read from reverting it. */
+					switch_copy_string(runtime.hostname, val, sizeof(runtime.hostname));
+					runtime.hostname_overridden = 1;
+					switch_core_set_variable("hostname", runtime.hostname);
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Set hostname to %s\n", runtime.hostname);
 				} else if (!strcasecmp(var, "rtp-retain-crypto-keys")) {
 					if (switch_true(val)) {
 						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
