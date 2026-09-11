@@ -137,6 +137,52 @@ static void test_minimum_window_discrimination(uint32_t rate)
 	free(samples);
 }
 
+static void test_secondary_frequency_uses_scanned_grid(uint32_t rate)
+{
+	size_t num;
+	size_t i;
+	double *samples;
+	double frequency;
+	avmd_spectral_result_t result;
+	int status;
+	int matched;
+
+	num = ((size_t)rate * TEST_WINDOW_MS) / 1000u;
+	samples = (double *)calloc(num, sizeof(*samples));
+	check_result(samples != NULL, "scanned-grid allocation");
+	if (samples == NULL) {
+		return;
+	}
+
+	generate_tone(samples, num, rate, 660.0, 6000.0, 0.0);
+	add_tone(samples, num, rate, 675.0, 5000.0, M_PI / 7.0);
+	status = avmd_spectral_analyze(samples,
+			num,
+			rate,
+			667.5,
+			440.0,
+			2000.0,
+			30.0,
+			0.15,
+			&result);
+	check_result(status == 1, "scanned-grid analysis succeeds");
+	check_result(result.secondary_frequency > 0.0,
+			"scanned-grid analysis finds a secondary frequency");
+
+	matched = 0;
+	frequency = 637.5;
+	for (i = 0; i < 512u && frequency <= 697.5 + 0.075; ++i) {
+		if (result.secondary_frequency == frequency) {
+			matched = 1;
+			break;
+		}
+		frequency += 0.15;
+	}
+	check_result(matched,
+			"secondary frequency is the exact grid value that was analyzed");
+	free(samples);
+}
+
 static void test_frequency_boundaries(uint32_t rate)
 {
 	size_t num;
@@ -833,6 +879,7 @@ int main(void)
 		test_single_tone(rates[i], 0.0, 12000.0);
 		test_single_tone(rates[i], M_PI / 5.0, 1200.0);
 		test_minimum_window_discrimination(rates[i]);
+		test_secondary_frequency_uses_scanned_grid(rates[i]);
 		test_frequency_boundaries(rates[i]);
 		test_noisy_single_tone(rates[i]);
 		test_greeting_like_interference(rates[i]);

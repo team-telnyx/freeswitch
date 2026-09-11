@@ -47,6 +47,7 @@ extern int avmd_spectral_window_is_continuous(const double *samples,
 	size_t i;
 	double block_energy;
 	double max_block_energy;
+	double min_block_energy;
 
 	if (samples == NULL || num == 0 || rate == 0) {
 		return 0;
@@ -56,6 +57,7 @@ extern int avmd_spectral_window_is_continuous(const double *samples,
 		block_samples = 1;
 	}
 	max_block_energy = 0.0;
+	min_block_energy = -1.0;
 	block_start = 0;
 	while (block_start < num) {
 		block_end = block_start + block_samples;
@@ -70,27 +72,17 @@ extern int avmd_spectral_window_is_continuous(const double *samples,
 		if (block_energy > max_block_energy) {
 			max_block_energy = block_energy;
 		}
+		if (min_block_energy < 0.0 || block_energy < min_block_energy) {
+			min_block_energy = block_energy;
+		}
 		block_start = block_end;
 	}
 	if (max_block_energy <= 0.0) {
 		return 0;
 	}
-
-	block_start = 0;
-	while (block_start < num) {
-		block_end = block_start + block_samples;
-		if (block_end > num) {
-			block_end = num;
-		}
-		block_energy = 0.0;
-		for (i = block_start; i < block_end; ++i) {
-			block_energy += samples[i] * samples[i];
-		}
-		block_energy /= (double)(block_end - block_start);
-		if (block_energy < AVMD_SPECTRAL_ACTIVITY_MIN_RATIO * max_block_energy) {
-			return 0;
-		}
-		block_start = block_end;
+	if (min_block_energy <
+			AVMD_SPECTRAL_ACTIVITY_MIN_RATIO * max_block_energy) {
+		return 0;
 	}
 	return 1;
 }
@@ -175,6 +167,7 @@ extern int avmd_spectral_analyze(const double *samples,
 	double secondary_power = 0.0;
 	double secondary_frequency = 0.0;
 	double powers[AVMD_SPECTRAL_MAX_SEARCH_BINS];
+	double frequencies[AVMD_SPECTRAL_MAX_SEARCH_BINS];
 	size_t i;
 	size_t bins;
 
@@ -223,6 +216,7 @@ extern int avmd_spectral_analyze(const double *samples,
 		}
 		power = avmd_goertzel(samples, num, rate, frequency, mean);
 		powers[bins] = power;
+		frequencies[bins] = frequency;
 		if (power > result->dominant_power) {
 			result->dominant_power = power;
 			result->dominant_frequency = frequency;
@@ -232,7 +226,7 @@ extern int avmd_spectral_analyze(const double *samples,
 	}
 
 	for (i = 0; i < bins; ++i) {
-		frequency = start_frequency + ((double)i * search_step);
+		frequency = frequencies[i];
 		if (fabs(frequency - result->dominant_frequency) >= AVMD_SPECTRAL_SECONDARY_GUARD_HZ) {
 			power = powers[i];
 			if (power > secondary_power) {

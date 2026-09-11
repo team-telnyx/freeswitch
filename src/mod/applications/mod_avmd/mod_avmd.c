@@ -2930,6 +2930,8 @@ avmd_detector_func(switch_thread_t *thread, void *arg) {
                     sample_result = avmd_process_sample(d->s, &s->b, sample_n, pos, d,
                             &sample_frequency, &sample_frequency_valid);
                     if (track_exact_duration) {
+                        /* Duration-only hardening must scan the full frame after
+                         * detection so the candidate segment is not truncated. */
                         avmd_candidate_segment_observe_frequency(&candidate_segment,
                                 sample_n,
                                 sample_frequency,
