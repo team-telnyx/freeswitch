@@ -89,16 +89,20 @@ typedef struct switch_rtp_crypto_key switch_rtp_crypto_key_t;
 
 typedef struct switch_rtp_write_state switch_rtp_write_state_t;
 
+#define SWITCH_RTP_MID_MAX_LEN 16
+
 typedef enum {
 	IPR_RTP,
 	IPR_RTCP
 } ice_proto_t;
 
 typedef struct ext_mid_s {
-	uint8_t ext_id;      /* negotiated extmap ID for MID (1-14 for 1-byte header) */
-	char local_mid[17];  /* MID string to write (max 16 bytes for 1-byte hdr format) */
-	char remote_mid[17]; /* MID string read from the current packet (max 16 bytes for 1-byte hdr format) */
-	uint8_t enabled;
+	uint8_t send_ext_id; /* negotiated outbound extmap ID (1-14 for 1-byte header) */
+	uint8_t recv_ext_id; /* negotiated inbound extmap ID (1-14 for 1-byte header) */
+	char local_mid[SWITCH_RTP_MID_MAX_LEN + 1];  /* MID string to write (max 16 bytes for 1-byte hdr format) */
+	char remote_mid[SWITCH_RTP_MID_MAX_LEN + 1]; /* MID string read from the current packet (max 16 bytes for 1-byte hdr format) */
+	uint8_t send_enabled;
+	uint8_t recv_enabled;
 } ext_mid_t;
 
 typedef struct icand_s {
@@ -843,11 +847,16 @@ SWITCH_DECLARE(switch_time_t) switch_rtp_session_set_dtls_checks_started(switch_
 SWITCH_DECLARE(switch_sockaddr_t*) switch_rtp_session_get_remote_addr(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(switch_sockaddr_t*) switch_rtp_session_get_rtcp_remote_addr(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(char *) switch_rtp_session_get_type(switch_rtp_t *rtp_session);
-/* Enables MID receive parsing for ext_id and clears any configured local MID, so outbound MID insertion is disabled until switch_rtp_enable_mid() is called. */
+/* Replaces MID state with receive-only parsing for ext_id. */
 SWITCH_DECLARE(switch_status_t) switch_rtp_enable_mid_receive(switch_rtp_t *rtp_session, uint8_t ext_id);
 SWITCH_DECLARE(switch_status_t) switch_rtp_enable_mid(switch_rtp_t *rtp_session, uint8_t ext_id, const char *mid);
-/* Returns the session-owned MID parsed from the current returned RTP packet, or NULL when that packet did not carry MID. The returned pointer is overwritten by the next RTP read and must not be retained across reads or threads. */
+SWITCH_DECLARE(switch_status_t) switch_rtp_configure_mid(switch_rtp_t *rtp_session, uint8_t send_ext_id, const char *mid, uint8_t recv_ext_id);
+/* Clears negotiated MID send/receive state. */
+SWITCH_DECLARE(switch_status_t) switch_rtp_disable_mid(switch_rtp_t *rtp_session);
+/* Returns session-owned storage that is valid only until the next RTP read or MID reconfiguration. */
 SWITCH_DECLARE(const char *) switch_rtp_get_received_mid(switch_rtp_t *rtp_session);
+/* Copies the current received MID while holding the RTP MID-state lock. */
+SWITCH_DECLARE(switch_status_t) switch_rtp_copy_received_mid(switch_rtp_t *rtp_session, char *mid, switch_size_t mid_len);
 
 #ifdef SWITCH_RTP_TEST_HOOKS
 SWITCH_DECLARE(switch_status_t) switch_rtp_test_rewrite_mid_extension(
@@ -857,6 +866,11 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_test_rewrite_mid_extension(
 	const char *mid,
 	switch_bool_t drop_peer_extensions,
 	switch_size_t trusted_payload_offset);
+SWITCH_DECLARE(switch_status_t) switch_rtp_test_strip_header_extensions(
+	switch_rtp_packet_t *packet,
+	switch_size_t *bytes,
+	switch_size_t trusted_payload_offset);
+SWITCH_DECLARE(switch_status_t) switch_rtp_test_set_received_mid(switch_rtp_t *rtp_session, const char *mid);
 #endif
 
 /* Trickle ICE extensions */

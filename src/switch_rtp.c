@@ -366,7 +366,9 @@ struct switch_rtp_write_state {
 	switch_time_t video_frame_last_timestamp;
 };
 
-static switch_status_t rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_t *send_msg, switch_size_t *bytes, uint8_t ext_id, const char *mid, switch_bool_t drop_peer_extensions, switch_size_t trusted_payload_offset);
+static switch_status_t rtp_add_mid_extension(rtp_msg_t *send_msg, switch_size_t *bytes, uint8_t ext_id, const char *mid, switch_bool_t drop_peer_extensions, switch_size_t trusted_payload_offset);
+static switch_status_t rtp_strip_header_extensions(rtp_msg_t *send_msg, switch_size_t *bytes, switch_size_t trusted_payload_offset);
+static switch_status_t rtp_apply_mid_extension(switch_rtp_t *rtp_session, rtp_msg_t *send_msg, switch_size_t *bytes, uint8_t ext_id, const char *mid, switch_bool_t drop_peer_extensions, switch_size_t trusted_payload_offset);
 struct trickle_cb_ctx {
 	switch_ice_candidate_cb_t cb;
 	void *user_data;
@@ -500,6 +502,7 @@ struct switch_rtp {
 	switch_mutex_t *flag_mutex;
 	switch_mutex_t *read_mutex;
 	switch_mutex_t *write_mutex;
+	switch_mutex_t *mid_mutex;
 	switch_mutex_t *bundle_video_frame_lock;  /* serializes video frame burst vs audio */
 	/* Drain-open-frame-first: the video writer signals that a VP8 frame is
 	   mid-emission so the audio writer can briefly defer, keeping fragments
@@ -1347,11 +1350,18 @@ static int global_init = 0;
 static void rtp_log_mid_rewrite_drop(switch_rtp_t *rtp_session, rtp_msg_t *send_msg, switch_size_t bytes, switch_size_t trusted_payload_offset, const char *path)
 {
 	uint32_t total = ++rtp_session->mid_rewrite_drop_total;
+	uint8_t ext_id = 0;
+	char mid[SWITCH_RTP_MID_MAX_LEN + 1] = "";
+
+	switch_mutex_lock(rtp_session->mid_mutex);
+	ext_id = rtp_session->ext_mid.send_ext_id;
+	switch_copy_string(mid, rtp_session->ext_mid.local_mid, sizeof(mid));
+	switch_mutex_unlock(rtp_session->mid_mutex);
 
 	if (total <= 5 || !(total % 500)) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
 			"RTP MID rewrite dropped packet path=%s ext_id=%u mid=%s pt=%u seq=%u ssrc=%u bytes=%" SWITCH_SIZE_T_FMT " trusted_payload_offset=%" SWITCH_SIZE_T_FMT " total=%u\n",
-			switch_str_nil(path), rtp_session->ext_mid.ext_id, switch_str_nil(rtp_session->ext_mid.local_mid),
+			switch_str_nil(path), ext_id, mid,
 			send_msg ? send_msg->header.pt : 0, send_msg ? ntohs(send_msg->header.seq) : 0,
 			send_msg ? ntohl(send_msg->header.ssrc) : 0, bytes, trusted_payload_offset, total);
 	}
@@ -7390,6 +7400,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_create(switch_rtp_t **new_rtp_session
 	switch_mutex_init(&rtp_session->flag_mutex, SWITCH_MUTEX_NESTED, pool);
 	switch_mutex_init(&rtp_session->read_mutex, SWITCH_MUTEX_NESTED, pool);
 	switch_mutex_init(&rtp_session->write_mutex, SWITCH_MUTEX_NESTED, pool);
+	switch_mutex_init(&rtp_session->mid_mutex, SWITCH_MUTEX_NESTED, pool);
 	switch_mutex_init(&rtp_session->bundle_video_frame_lock, SWITCH_MUTEX_NESTED, pool);
 	switch_mutex_init(&rtp_session->ice_mutex, SWITCH_MUTEX_NESTED, pool);
 	/* Pool-scoped: shared with every rtp_session on this pool, not per-session. */
@@ -12728,41 +12739,24 @@ fork_done:
 				rtp_add_extension_header(rtp_session, send_msg, abs(score), data, &bytes);
 			}
 		}
-			if ((mid_ext_id > 0 && mid && *mid) || (rtp_session->ext_mid.enabled && rtp_session->ext_mid.ext_id > 0)) {
-				/* Stamp MID on all outbound packets including BUNDLE audio.
-				   On a BUNDLE shared session, the session-level ext_mid contains the
-				   AUDIO MID value (local_mid is set by the audio m-line in
-				   gen_local_sdp / activate_rtp; the video m-line path guards against
-				   overwriting it on the shared session).  Audio packets need MID for
-				   the browser to demux audio from video on the shared transport
-				   (RFC 9143 BUNDLE).  Without MID, Safari cannot associate audio
-				   packets with the correct m-line, which degrades video quality.
-				   rtp_add_mid_extension() drops peer-scoped inbound header extensions
-				   and rebuilds a clean BEDE header with the outbound MID before SRTP.
-				   Video writes arrive via
-				   force_video with an explicit mid_ext_id/mid carrying the VIDEO MID. */
-				{
-					switch_bool_t drop_peer_extensions = (flags && (*flags & (SFF_RAW_RTP | SFF_RAW_RTP_PARSE_FRAME | SFF_EXTERNAL | SFF_PROXY_PACKET))) ? SWITCH_TRUE : SWITCH_FALSE;
-					switch_status_t mid_status = rtp_add_mid_extension(rtp_session, send_msg, &bytes, mid_ext_id, mid, drop_peer_extensions, trusted_payload_offset);
+			{
+				/* Rewrite outbound MID after dropping peer-scoped extensions; BUNDLE video supplies an explicit MID. */
+				switch_bool_t drop_peer_extensions = (flags && (*flags & (SFF_RAW_RTP | SFF_RAW_RTP_PARSE_FRAME | SFF_EXTERNAL | SFF_PROXY_PACKET))) ? SWITCH_TRUE : SWITCH_FALSE;
+				switch_status_t mid_status = rtp_apply_mid_extension(rtp_session, send_msg, &bytes, mid_ext_id, mid, drop_peer_extensions, trusted_payload_offset);
 
-					if (mid_status != SWITCH_STATUS_SUCCESS) {
-						if (mid_ext_id > 0 && mid && *mid) {
-							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR,
-								"Unable to apply RTP MID extension override id=%u mid=%s\n", mid_ext_id, switch_str_nil(mid));
-							ret = -1;
-							goto end;
-						}
-
-						/* Without a trusted payload boundary, attempting a fallback rewrite can
-						 * move extension bytes into media. Drop only this packet, roll back its
-						 * sequence allocation, and report a write failure. A zero return is
-						 * reserved for transport-not-ready so the media layer does not re-arm
-						 * pre-DTLS keyframe recovery for a malformed packet. */
-						rtp_log_mid_rewrite_drop(rtp_session, send_msg, bytes, trusted_payload_offset, "common");
-						*seq -= delta;
+				if (mid_status != SWITCH_STATUS_SUCCESS) {
+					if (mid_ext_id > 0 && mid && *mid) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR,
+							"Unable to apply RTP MID extension override id=%u mid=%s\n", mid_ext_id, switch_str_nil(mid));
 						ret = -1;
 						goto end;
 					}
+
+					/* Reject malformed packets without a trusted payload boundary to avoid moving extension bytes into media. */
+					rtp_log_mid_rewrite_drop(rtp_session, send_msg, bytes, trusted_payload_offset, "common");
+					*seq -= delta;
+					ret = -1;
+					goto end;
 				}
 			}
 
@@ -13335,8 +13329,8 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 
 			send_msg->header.seq = htons(write_state ? ++write_state->seq : ++rtp_session->seq);
 			send_msg->header.ssrc = htonl(ssrc ? ssrc : rtp_session->ssrc);
-			if ((mid_ext_id > 0 && mid && *mid) || (rtp_session->ext_mid.enabled && rtp_session->ext_mid.ext_id > 0)) {
-				if (rtp_add_mid_extension(rtp_session, send_msg, &bytes, mid_ext_id, mid, SWITCH_TRUE, trusted_payload_offset) != SWITCH_STATUS_SUCCESS) {
+			{
+				if (rtp_apply_mid_extension(rtp_session, send_msg, &bytes, mid_ext_id, mid, SWITCH_TRUE, trusted_payload_offset) != SWITCH_STATUS_SUCCESS) {
 					if (mid_ext_id > 0 && mid && *mid) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR,
 							"Unable to apply RTP MID extension override id=%u mid=%s on proxy packet\n", mid_ext_id, switch_str_nil(mid));
@@ -13828,8 +13822,8 @@ static int rtp_write_manual_state(switch_rtp_t *rtp_session, switch_rtp_write_st
 	memcpy(rtp_session->write_msg.body, data, datalen);
 
 	bytes = rtp_header_len + datalen;
-	if ((mid_ext_id > 0 && mid && *mid) || (rtp_session->ext_mid.enabled && rtp_session->ext_mid.ext_id > 0)) {
-		if (rtp_add_mid_extension(rtp_session, &rtp_session->write_msg, &bytes, mid_ext_id, mid, (flags && (*flags & (SFF_RAW_RTP | SFF_RAW_RTP_PARSE_FRAME | SFF_EXTERNAL | SFF_PROXY_PACKET))) ? SWITCH_TRUE : SWITCH_FALSE, 0) != SWITCH_STATUS_SUCCESS) {
+	{
+		if (rtp_apply_mid_extension(rtp_session, &rtp_session->write_msg, &bytes, mid_ext_id, mid, (flags && (*flags & (SFF_RAW_RTP | SFF_RAW_RTP_PARSE_FRAME | SFF_EXTERNAL | SFF_PROXY_PACKET))) ? SWITCH_TRUE : SWITCH_FALSE, 0) != SWITCH_STATUS_SUCCESS) {
 			if (mid_ext_id > 0 && mid && *mid) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR,
 					"Unable to apply RTP MID extension override id=%u mid=%s on manual packet\n", mid_ext_id, switch_str_nil(mid));
@@ -14223,14 +14217,20 @@ rtp_extension_t *switch_rtp_find_extension(switch_rtp_t *rtp_session, uint8_t id
 
 SWITCH_DECLARE(switch_status_t) switch_rtp_handle_extensions(switch_rtp_t *rtp_session, switch_size_t packet_bytes)
 {
+	uint8_t mid_recv_enabled = 0, mid_recv_ext_id = 0;
+
 	rtp_session->recv_msg.ext = NULL;
 	rtp_session->recv_msg.ebody = NULL;
 	rtp_session->recv_rtp_exts_size = 0;
 	rtp_session->ext_total_len = 0;
 
-	if (rtp_session->ext_mid.enabled) {
+	switch_mutex_lock(rtp_session->mid_mutex);
+	mid_recv_enabled = rtp_session->ext_mid.recv_enabled;
+	mid_recv_ext_id = rtp_session->ext_mid.recv_ext_id;
+	if (mid_recv_enabled) {
 		memset(rtp_session->ext_mid.remote_mid, 0, sizeof(rtp_session->ext_mid.remote_mid));
 	}
+	switch_mutex_unlock(rtp_session->mid_mutex);
 
 	/* Do not advance recv_msg.ebody past the CSRC list here; read_rtp_packet() does that
 	 * once. Advancing it in both places double-counted CSRC, mislocating the extension so
@@ -14312,11 +14312,15 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_handle_extensions(switch_rtp_t *rtp_s
 						return SWITCH_STATUS_FALSE;
 					}
 
-					if (rtp_session->ext_mid.enabled && ext_id == rtp_session->ext_mid.ext_id) {
+					if (mid_recv_enabled && ext_id == mid_recv_ext_id) {
 						const size_t copy_len = (ext_payload_len > sizeof(rtp_session->ext_mid.remote_mid) - 1) ? sizeof(rtp_session->ext_mid.remote_mid) - 1 : ext_payload_len;
 
-						memset(rtp_session->ext_mid.remote_mid, 0, sizeof(rtp_session->ext_mid.remote_mid));
-						memcpy(rtp_session->ext_mid.remote_mid, ext_data_ptr + 1, copy_len);
+						switch_mutex_lock(rtp_session->mid_mutex);
+						if (rtp_session->ext_mid.recv_enabled && rtp_session->ext_mid.recv_ext_id == mid_recv_ext_id) {
+							memset(rtp_session->ext_mid.remote_mid, 0, sizeof(rtp_session->ext_mid.remote_mid));
+							memcpy(rtp_session->ext_mid.remote_mid, ext_data_ptr + 1, copy_len);
+						}
+						switch_mutex_unlock(rtp_session->mid_mutex);
 					}
 
 					rtp_session->ext_total_len = ext_header_len + ext_payload_len;
@@ -14332,45 +14336,132 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_handle_extensions(switch_rtp_t *rtp_s
 SWITCH_DECLARE(switch_status_t) switch_rtp_enable_mid_receive(switch_rtp_t *rtp_session, uint8_t ext_id)
 {
 	if (!rtp_session || !ext_id || ext_id > 14) return SWITCH_STATUS_FALSE;
-
-	rtp_session->ext_mid.ext_id = ext_id;
-	rtp_session->ext_mid.enabled = 1;
-	memset(rtp_session->ext_mid.local_mid, 0, sizeof(rtp_session->ext_mid.local_mid));
-	memset(rtp_session->ext_mid.remote_mid, 0, sizeof(rtp_session->ext_mid.remote_mid));
-
-	return SWITCH_STATUS_SUCCESS;
+	return switch_rtp_configure_mid(rtp_session, 0, NULL, ext_id);
 }
 
 SWITCH_DECLARE(switch_status_t) switch_rtp_enable_mid(switch_rtp_t *rtp_session, uint8_t ext_id, const char *mid)
 {
-	size_t L;
+	if (!rtp_session || !ext_id || ext_id > 14) return SWITCH_STATUS_FALSE;
+	return switch_rtp_configure_mid(rtp_session, ext_id, mid, ext_id);
+}
 
-	if (!rtp_session || !mid) return SWITCH_STATUS_FALSE;
+SWITCH_DECLARE(switch_status_t) switch_rtp_configure_mid(switch_rtp_t *rtp_session, uint8_t send_ext_id, const char *mid, uint8_t recv_ext_id)
+{
+	size_t L = 0;
 
-	L = strlen(mid);
-	if (!L) return SWITCH_STATUS_FALSE;
-	if (L > 16) L = 16;
-
-	if (switch_rtp_enable_mid_receive(rtp_session, ext_id) != SWITCH_STATUS_SUCCESS) {
-		return SWITCH_STATUS_FALSE;
+	if (!rtp_session || send_ext_id > 14 || recv_ext_id > 14 || (send_ext_id && zstr(mid))) return SWITCH_STATUS_FALSE;
+	if (send_ext_id) {
+		L = strlen(mid);
+		if (L > SWITCH_RTP_MID_MAX_LEN) return SWITCH_STATUS_FALSE;
 	}
 
-	memset(rtp_session->ext_mid.local_mid, 0, sizeof(rtp_session->ext_mid.local_mid));
-	memcpy(rtp_session->ext_mid.local_mid, mid, L);
+	switch_mutex_lock(rtp_session->mid_mutex);
+	memset(&rtp_session->ext_mid, 0, sizeof(rtp_session->ext_mid));
+	if (send_ext_id) {
+		rtp_session->ext_mid.send_ext_id = send_ext_id;
+		rtp_session->ext_mid.send_enabled = 1;
+		memcpy(rtp_session->ext_mid.local_mid, mid, L);
+	}
+	if (recv_ext_id) {
+		rtp_session->ext_mid.recv_ext_id = recv_ext_id;
+		rtp_session->ext_mid.recv_enabled = 1;
+	}
+	switch_mutex_unlock(rtp_session->mid_mutex);
 
 	return SWITCH_STATUS_SUCCESS;
 }
 
-SWITCH_DECLARE(const char *) switch_rtp_get_received_mid(switch_rtp_t *rtp_session)
+SWITCH_DECLARE(switch_status_t) switch_rtp_disable_mid(switch_rtp_t *rtp_session)
 {
-	if (!rtp_session || !rtp_session->ext_mid.enabled || zstr(rtp_session->ext_mid.remote_mid)) {
-		return NULL;
-	}
-
-	return rtp_session->ext_mid.remote_mid;
+	return switch_rtp_configure_mid(rtp_session, 0, NULL, 0);
 }
 
-static switch_status_t rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_t *send_msg, switch_size_t *bytes, uint8_t ext_id, const char *mid, switch_bool_t drop_peer_extensions, switch_size_t trusted_payload_offset)
+SWITCH_DECLARE(const char *) switch_rtp_get_received_mid(switch_rtp_t *rtp_session)
+{
+	const char *mid = NULL;
+
+	if (!rtp_session) return NULL;
+
+	switch_mutex_lock(rtp_session->mid_mutex);
+	if (rtp_session->ext_mid.recv_enabled && !zstr(rtp_session->ext_mid.remote_mid)) {
+		mid = rtp_session->ext_mid.remote_mid;
+	}
+	switch_mutex_unlock(rtp_session->mid_mutex);
+	return mid;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_copy_received_mid(switch_rtp_t *rtp_session, char *mid, switch_size_t mid_len)
+{
+	if (!rtp_session || !mid || !mid_len) return SWITCH_STATUS_FALSE;
+	mid[0] = '\0';
+
+	switch_mutex_lock(rtp_session->mid_mutex);
+	if (rtp_session->ext_mid.recv_enabled && !zstr(rtp_session->ext_mid.remote_mid)) {
+		switch_copy_string(mid, rtp_session->ext_mid.remote_mid, mid_len);
+	}
+	switch_mutex_unlock(rtp_session->mid_mutex);
+
+	return zstr(mid) ? SWITCH_STATUS_FALSE : SWITCH_STATUS_SUCCESS;
+}
+
+static switch_status_t rtp_strip_header_extensions(rtp_msg_t *send_msg, switch_size_t *bytes, switch_size_t trusted_payload_offset)
+{
+	switch_rtp_hdr_ext_t *ext_hdr;
+	size_t csrc_bytes, body_header_bytes, old_ext_total, payload_bytes;
+
+	if (!send_msg || !bytes || *bytes < rtp_header_len) return SWITCH_STATUS_FALSE;
+	if (!send_msg->header.x) return SWITCH_STATUS_SUCCESS;
+
+	csrc_bytes = (size_t)send_msg->header.cc * sizeof(uint32_t);
+	body_header_bytes = csrc_bytes;
+	if (*bytes < rtp_header_len + body_header_bytes + 4) return SWITCH_STATUS_FALSE;
+
+	ext_hdr = (switch_rtp_hdr_ext_t *)(send_msg->body + body_header_bytes);
+	old_ext_total = 4 + ((size_t)ntohs(ext_hdr->length) * 4);
+	if (trusted_payload_offset) {
+		if (trusted_payload_offset < rtp_header_len + body_header_bytes + 4 || trusted_payload_offset > *bytes) {
+			return SWITCH_STATUS_FALSE;
+		}
+		old_ext_total = trusted_payload_offset - rtp_header_len - body_header_bytes;
+	} else if (*bytes < rtp_header_len + body_header_bytes + old_ext_total) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	payload_bytes = *bytes - rtp_header_len - body_header_bytes - old_ext_total;
+	memmove(send_msg->body + body_header_bytes,
+		send_msg->body + body_header_bytes + old_ext_total,
+		payload_bytes);
+	send_msg->header.x = 0;
+	*bytes = (switch_size_t)(rtp_header_len + body_header_bytes + payload_bytes);
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static switch_status_t rtp_apply_mid_extension(switch_rtp_t *rtp_session, rtp_msg_t *send_msg, switch_size_t *bytes, uint8_t ext_id, const char *mid, switch_bool_t drop_peer_extensions, switch_size_t trusted_payload_offset)
+{
+	uint8_t effective_ext_id = ext_id;
+	char mid_snapshot[SWITCH_RTP_MID_MAX_LEN + 1] = "";
+	const char *effective_mid = mid;
+
+	if (!(effective_ext_id && !zstr(effective_mid))) {
+		if (!rtp_session) return SWITCH_STATUS_SUCCESS;
+
+		switch_mutex_lock(rtp_session->mid_mutex);
+		if (rtp_session->ext_mid.send_enabled && rtp_session->ext_mid.send_ext_id && !zstr(rtp_session->ext_mid.local_mid)) {
+			effective_ext_id = rtp_session->ext_mid.send_ext_id;
+			switch_copy_string(mid_snapshot, rtp_session->ext_mid.local_mid, sizeof(mid_snapshot));
+		}
+		switch_mutex_unlock(rtp_session->mid_mutex);
+
+		if (!effective_ext_id || zstr(mid_snapshot)) {
+			return drop_peer_extensions ? rtp_strip_header_extensions(send_msg, bytes, trusted_payload_offset) : SWITCH_STATUS_SUCCESS;
+		}
+		effective_mid = mid_snapshot;
+	}
+
+	return rtp_add_mid_extension(send_msg, bytes, effective_ext_id, effective_mid, drop_peer_extensions, trusted_payload_offset);
+}
+
+static switch_status_t rtp_add_mid_extension(rtp_msg_t *send_msg, switch_size_t *bytes, uint8_t ext_id, const char *mid, switch_bool_t drop_peer_extensions, switch_size_t trusted_payload_offset)
 {
 	uint8_t *ext_ptr, *ext_data;
 	uint16_t words;
@@ -14387,62 +14478,32 @@ static switch_status_t rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_
 
 	if (*bytes < rtp_header_len + body_header_bytes) return SWITCH_STATUS_FALSE;
 
-	/* send_msg->ext and ->ebody are rtp_msg_t fields at offsets 16408 and 16416.
-	 * Callers pass frame->packet, sized SWITCH_RTP_MAX_BUF_LEN (16384), so reading
-	 * or writing them runs past the buffer. The extension header is always at
-	 * body + body_header_bytes. */
+	/* Locate the extension through body because caller-owned packet buffers are smaller than rtp_msg_t. */
 	ext_hdr = (switch_rtp_hdr_ext_t *) (send_msg->body + body_header_bytes);
-
-	if (!mid_ext_id) {
-		if (!rtp_session) return SWITCH_STATUS_FALSE;
-		mid_ext_id = rtp_session->ext_mid.ext_id;
-	}
-
-	if (zstr(mid_value)) {
-		if (!rtp_session) return SWITCH_STATUS_FALSE;
-		mid_value = rtp_session->ext_mid.local_mid;
-	}
 
 	if (!mid_ext_id || mid_ext_id > 14 || zstr(mid_value)) return SWITCH_STATUS_FALSE;
 
 	payload_len = strlen(mid_value);
 	if (!payload_len) return SWITCH_STATUS_FALSE;
-	/* One-byte RTP header extensions can carry at most 16 bytes per element.
-	 * Never truncate an explicit negotiated MID override, because BUNDLE MID
-	 * matching is exact. */
-	if (payload_len > 16) {
-		if (ext_id > 0 && mid && *mid) {
-			return SWITCH_STATUS_FALSE;
-		}
-		payload_len = 16;
-	}
+	/* Reject rather than truncate MIDs beyond the one-byte extension limit because BUNDLE matching is exact. */
+	if (payload_len > SWITCH_RTP_MID_MAX_LEN) return SWITCH_STATUS_FALSE;
 	if (send_msg->header.x) {
 		words = ntohs(ext_hdr->length);
 		old_ext_data_bytes = (size_t)words * 4;
 		old_ext_total = 4 + old_ext_data_bytes;
 
-		if (*bytes < rtp_header_len + body_header_bytes + old_ext_total) {
-			if (trusted_payload_offset >= rtp_header_len + body_header_bytes + 4 &&
-				trusted_payload_offset <= *bytes) {
-				/* The declared extension length is malformed, but the source frame
-				 * supplied a trusted payload pointer. Skip the actual extension span
-				 * and rebuild it; never reinterpret extension bytes as media. */
-				old_ext_total = trusted_payload_offset - rtp_header_len - body_header_bytes;
-				old_ext_data_bytes = 0;
-			} else {
+		if (trusted_payload_offset) {
+			if (trusted_payload_offset < rtp_header_len + body_header_bytes + 4 || trusted_payload_offset > *bytes) {
 				return SWITCH_STATUS_FALSE;
 			}
+			old_ext_total = trusted_payload_offset - rtp_header_len - body_header_bytes;
+			if (old_ext_total != 4 + old_ext_data_bytes) old_ext_data_bytes = 0;
+		} else if (*bytes < rtp_header_len + body_header_bytes + old_ext_total) {
+			return SWITCH_STATUS_FALSE;
 		}
 
 		if (old_ext_total && ntohs(ext_hdr->profile) == 0xBEDE && drop_peer_extensions) {
-			/* RTP header-extension ids are scoped to the negotiated leg.  When
-			   forwarding peer media across legs, never preserve the inbound BEDE
-			   extension block while stamping the outbound MID: Chrome may send
-			   sdes:mid as id 4 while Safari negotiated sdes:mid as id 1, and
-			   forwarding both elements makes Safari discard audio.  Keep
-			   old_ext_total so payload_bytes below skips the inbound extension
-			   block, then rebuild a clean block containing only the negotiated
-			   outbound MID. */
+			/* Drop peer-scoped BEDE elements before stamping the outbound leg's negotiated MID. */
 			old_ext_data_bytes = 0;
 		} else if (old_ext_total && ntohs(ext_hdr->profile) == 0xBEDE) {
 			ext_data = (uint8_t *)ext_hdr + 4;
@@ -14478,11 +14539,7 @@ static switch_status_t rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_
 				old_ext_data_bytes--;
 			}
 		} else {
-			/* BUNDLE writes must stamp the negotiated MID for the outbound leg.
-			   If the forwarded packet carries a different RTP extension profile,
-			   strip that extension and replace it with the one-byte BEDE MID rather
-			   than failing the whole media write. The RTP extension header length is
-			   profile-independent, so payload_bytes below still skips it safely. */
+			/* Replace non-BEDE peer extensions so BUNDLE writes can stamp the outbound leg's negotiated MID. */
 			old_ext_data_bytes = 0;
 		}
 	}
@@ -14493,11 +14550,8 @@ static switch_status_t rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_
 	new_ext_total = 4 + ext_data_padded;
 	payload_bytes = *bytes - rtp_header_len - body_header_bytes - old_ext_total;
 
-	/* BUNDLE explicit bound: compute the final post-rewrite total bytes and verify
-	 * we will not overflow send_msg->body[SWITCH_RTP_MAX_BUF_LEN+...]. The packet body
-	 * after rewrite is body_header_bytes + new_ext_total + payload_bytes; reject any
-	 * write that would exceed SWITCH_RTP_MAX_BUF_LEN rather than corrupt the buffer. */
-	if (body_header_bytes + new_ext_total + payload_bytes > SWITCH_RTP_MAX_BUF_LEN) {
+	/* Reject rewrites whose complete RTP packet would exceed the caller-owned buffer. */
+	if (rtp_header_len + body_header_bytes + new_ext_total + payload_bytes > SWITCH_RTP_MAX_BUF_LEN) {
 		return SWITCH_STATUS_FALSE;
 	}
 	/* BUNDLE sanity: ensure the existing packet was large enough that payload_bytes
@@ -14531,7 +14585,23 @@ static switch_status_t rtp_add_mid_extension(switch_rtp_t *rtp_session, rtp_msg_
 SWITCH_DECLARE(switch_status_t) switch_rtp_test_rewrite_mid_extension(switch_rtp_packet_t *packet, switch_size_t *bytes, uint8_t ext_id, const char *mid, switch_bool_t drop_peer_extensions, switch_size_t trusted_payload_offset)
 {
 	if (!packet) return SWITCH_STATUS_FALSE;
-	return rtp_add_mid_extension(NULL, (rtp_msg_t *) packet, bytes, ext_id, mid, drop_peer_extensions, trusted_payload_offset);
+	return rtp_add_mid_extension((rtp_msg_t *) packet, bytes, ext_id, mid, drop_peer_extensions, trusted_payload_offset);
+}
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_test_strip_header_extensions(switch_rtp_packet_t *packet, switch_size_t *bytes, switch_size_t trusted_payload_offset)
+{
+	if (!packet) return SWITCH_STATUS_FALSE;
+	return rtp_strip_header_extensions((rtp_msg_t *)packet, bytes, trusted_payload_offset);
+}
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_test_set_received_mid(switch_rtp_t *rtp_session, const char *mid)
+{
+	if (!rtp_session || zstr(mid) || strlen(mid) > SWITCH_RTP_MID_MAX_LEN) return SWITCH_STATUS_FALSE;
+	switch_mutex_lock(rtp_session->mid_mutex);
+	memset(rtp_session->ext_mid.remote_mid, 0, sizeof(rtp_session->ext_mid.remote_mid));
+	switch_copy_string(rtp_session->ext_mid.remote_mid, mid, sizeof(rtp_session->ext_mid.remote_mid));
+	switch_mutex_unlock(rtp_session->mid_mutex);
+	return SWITCH_STATUS_SUCCESS;
 }
 
 SWITCH_DECLARE(void) switch_rtp_set_ice_candidate_cb(switch_rtp_t *rtp_session, switch_ice_candidate_cb_t cb, void *user_data)

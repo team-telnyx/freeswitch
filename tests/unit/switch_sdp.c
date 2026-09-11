@@ -53,6 +53,28 @@ static unsigned int count_occurrences(const char *haystack, const char *needle)
 	return count;
 }
 
+static switch_bool_t media_section_contains(const char *sdp, const char *media, const char *attribute)
+{
+	const char *start, *end, *match;
+
+	if (!sdp || !media || !attribute) return SWITCH_FALSE;
+	start = strstr(sdp, media);
+	if (!start) return SWITCH_FALSE;
+	end = strstr(start + strlen(media), "\r\nm=");
+	match = strstr(start, attribute);
+	return match && (!end || match < end) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
+static switch_bool_t session_section_contains(const char *sdp, const char *attribute)
+{
+	const char *first_media, *match;
+
+	if (!sdp || !attribute) return SWITCH_FALSE;
+	first_media = strstr(sdp, "m=");
+	match = strstr(sdp, attribute);
+	return match && (!first_media || match < first_media) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
 typedef struct sdp_candidate_s {
     char foundation[32];
     char transport[8];     /* "udp", "tcp" */
@@ -464,6 +486,423 @@ FST_CORE_BEGIN("./conf_sdp")
 			   
 			match = switch_core_media_negotiate_sdp(fst_session, r_sdp, &p, SDP_OFFER);
 			switch_assert(match); 
+		}
+		FST_SESSION_END()
+		FST_SESSION_BEGIN(sdp_non_ice_answer_advertises_negotiated_mid)
+		{
+			switch_status_t status;
+			switch_media_handle_t *media_handle;
+			switch_core_media_params_t *mparams;
+			const char *local_sdp;
+			const char *offer =
+				"v=0\r\n"
+				"o=- 6 1 IN IP4 127.0.0.1\r\n"
+				"s=-\r\n"
+				"c=IN IP4 127.0.0.1\r\n"
+				"t=0 0\r\n"
+				"m=audio 40000 RTP/AVP 0\r\n"
+				"a=rtpmap:0 PCMU/8000\r\n"
+				"a=mid:plain-audio\r\n"
+				"a=extmap:7/recvonly urn:ietf:params:rtp-hdrext:sdes:mid\r\n";
+			uint8_t match, proceed;
+
+			mparams = switch_core_session_alloc(fst_session, sizeof(switch_core_media_params_t));
+			mparams->inbound_codec_string = switch_core_session_strdup(fst_session, "PCMU");
+			mparams->outbound_codec_string = switch_core_session_strdup(fst_session, "PCMU");
+			mparams->rtpip = switch_core_session_strdup(fst_session, (char *)rx_host);
+
+			status = switch_media_handle_create(&media_handle, fst_session, mparams);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			status = switch_core_media_prepare_codecs(fst_session, SWITCH_FALSE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			status = switch_core_media_choose_ports(fst_session, SWITCH_TRUE, SWITCH_FALSE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+
+			proceed = 0;
+			match = switch_core_media_negotiate_sdp(fst_session, offer, &proceed, SDP_OFFER);
+			fst_requires(match == 1);
+			switch_core_media_gen_local_sdp(fst_session, SDP_ANSWER, "127.0.0.1", 41000, NULL, 1);
+			local_sdp = switch_channel_get_variable(fst_channel, "rtp_local_sdp_str");
+			fst_requires(local_sdp != NULL);
+			fst_check(switch_channel_test_flag(fst_channel, CF_ICE) == SWITCH_FALSE);
+			fst_check(strstr(local_sdp, "a=extmap:7/sendonly urn:ietf:params:rtp-hdrext:sdes:mid") != NULL);
+			fst_check(!strcmp(switch_channel_get_variable(fst_channel, "rtp_audio_mid"), "plain-audio"));
+		}
+		FST_SESSION_END()
+		FST_SESSION_BEGIN(sdp_overlength_mid_does_not_negotiate_extension)
+		{
+			switch_status_t status;
+			switch_media_handle_t *media_handle;
+			switch_core_media_params_t *mparams;
+			const char *local_sdp;
+			const char *offer =
+				"v=0\r\n"
+				"o=- 7 1 IN IP4 127.0.0.1\r\n"
+				"s=-\r\n"
+				"c=IN IP4 127.0.0.1\r\n"
+				"t=0 0\r\n"
+				"a=group:BUNDLE 1234567890abcdefg\r\n"
+				"m=audio 40000 RTP/AVP 0\r\n"
+				"a=rtpmap:0 PCMU/8000\r\n"
+				"a=rtcp-mux\r\n"
+				"a=mid:1234567890abcdefg\r\n"
+				"a=extmap:7/recvonly urn:ietf:params:rtp-hdrext:sdes:mid\r\n";
+			uint8_t match, proceed;
+
+			mparams = switch_core_session_alloc(fst_session, sizeof(switch_core_media_params_t));
+			mparams->inbound_codec_string = switch_core_session_strdup(fst_session, "PCMU");
+			mparams->outbound_codec_string = switch_core_session_strdup(fst_session, "PCMU");
+			mparams->rtpip = switch_core_session_strdup(fst_session, (char *)rx_host);
+
+			status = switch_media_handle_create(&media_handle, fst_session, mparams);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			status = switch_core_media_prepare_codecs(fst_session, SWITCH_FALSE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			status = switch_core_media_choose_ports(fst_session, SWITCH_TRUE, SWITCH_FALSE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			switch_channel_set_variable(fst_channel, "rtp-bundle", "auto");
+
+			proceed = 0;
+			match = switch_core_media_negotiate_sdp(fst_session, offer, &proceed, SDP_OFFER);
+			fst_requires(match == 1);
+			switch_core_media_gen_local_sdp(fst_session, SDP_ANSWER, "127.0.0.1", 41000, NULL, 1);
+			local_sdp = switch_channel_get_variable(fst_channel, "rtp_local_sdp_str");
+			fst_requires(local_sdp != NULL);
+			fst_check(strstr(local_sdp, "a=group:BUNDLE") == NULL);
+			fst_check(strstr(local_sdp, "a=mid:1234567890abcdefg") != NULL);
+			fst_check(strstr(local_sdp, "urn:ietf:params:rtp-hdrext:sdes:mid") == NULL);
+			fst_check(switch_channel_get_variable(fst_channel, "rtp_group_bundle") == NULL);
+		}
+		FST_SESSION_END()
+		FST_SESSION_BEGIN(sdp_mid_extmap_direction_and_renegotiation)
+		{
+			switch_status_t status;
+			switch_media_handle_t *media_handle;
+			switch_core_media_params_t *mparams;
+			const char *local_sdp;
+			const char *offer_recvonly =
+				"v=0\r\n"
+				"o=- 1 1 IN IP4 127.0.0.1\r\n"
+				"s=-\r\n"
+				"c=IN IP4 127.0.0.1\r\n"
+				"t=0 0\r\n"
+				"m=audio 40000 RTP/AVP 0\r\n"
+				"a=rtpmap:0 PCMU/8000\r\n"
+				"a=mid:audio\r\n"
+				"a=extmap:7/recvonly urn:ietf:params:rtp-hdrext:sdes:mid\r\n";
+			const char *offer_sendonly =
+				"v=0\r\n"
+				"o=- 1 2 IN IP4 127.0.0.1\r\n"
+				"s=-\r\n"
+				"c=IN IP4 127.0.0.1\r\n"
+				"t=0 0\r\n"
+				"m=audio 40000 RTP/AVP 0\r\n"
+				"a=rtpmap:0 PCMU/8000\r\n"
+				"a=mid:newaudio\r\n"
+				"a=extmap:7/sendonly urn:ietf:params:rtp-hdrext:sdes:mid\r\n";
+			const char *offer_without_mid_ext =
+				"v=0\r\n"
+				"o=- 1 3 IN IP4 127.0.0.1\r\n"
+				"s=-\r\n"
+				"c=IN IP4 127.0.0.1\r\n"
+				"t=0 0\r\n"
+				"m=audio 40000 RTP/AVP 0\r\n"
+				"a=rtpmap:0 PCMU/8000\r\n"
+				"a=mid:audio\r\n";
+			const char *offer_session_level =
+				"v=0\r\n"
+				"o=- 1 4 IN IP4 127.0.0.1\r\n"
+				"s=-\r\n"
+				"c=IN IP4 127.0.0.1\r\n"
+				"t=0 0\r\n"
+				"a=extmap:9/recvonly urn:ietf:params:rtp-hdrext:sdes:mid\r\n"
+				"m=audio 40000 RTP/AVP 0\r\n"
+				"a=rtpmap:0 PCMU/8000\r\n"
+				"a=mid:sessionaudio\r\n";
+			uint8_t match, proceed;
+
+			mparams = switch_core_session_alloc(fst_session, sizeof(switch_core_media_params_t));
+			mparams->inbound_codec_string = switch_core_session_strdup(fst_session, "PCMU");
+			mparams->outbound_codec_string = switch_core_session_strdup(fst_session, "PCMU");
+			mparams->rtpip = switch_core_session_strdup(fst_session, (char *)rx_host);
+
+			status = switch_media_handle_create(&media_handle, fst_session, mparams);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			status = switch_core_media_prepare_codecs(fst_session, SWITCH_FALSE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			status = switch_core_media_choose_ports(fst_session, SWITCH_TRUE, SWITCH_FALSE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			switch_channel_set_flag(fst_channel, CF_ICE);
+
+			proceed = 0;
+			match = switch_core_media_negotiate_sdp(fst_session, offer_recvonly, &proceed, SDP_OFFER);
+			fst_requires(match == 1);
+			switch_core_media_gen_local_sdp(fst_session, SDP_ANSWER, "127.0.0.1", 41000, NULL, 1);
+			local_sdp = switch_channel_get_variable(fst_channel, "rtp_local_sdp_str");
+			fst_requires(local_sdp != NULL);
+			fst_check(strstr(local_sdp, "a=extmap:7/sendonly urn:ietf:params:rtp-hdrext:sdes:mid") != NULL);
+			fst_check(!strcmp(switch_channel_get_variable(fst_channel, "rtp_audio_mid"), "audio"));
+
+			/* A rejected offer must not disturb the committed negotiation. */
+			proceed = 0;
+			match = switch_core_media_negotiate_sdp(fst_session, "not valid sdp", &proceed, SDP_OFFER);
+			fst_check(match == 0);
+			local_sdp = switch_channel_get_variable(fst_channel, "rtp_local_sdp_str");
+			fst_requires(local_sdp != NULL);
+			fst_check(strstr(local_sdp, "a=extmap:7/sendonly urn:ietf:params:rtp-hdrext:sdes:mid") != NULL);
+			fst_check(!strcmp(switch_channel_get_variable(fst_channel, "rtp_audio_mid"), "audio"));
+
+			proceed = 0;
+			match = switch_core_media_negotiate_sdp(fst_session, offer_sendonly, &proceed, SDP_OFFER);
+			fst_requires(match == 1);
+			/* A valid but unanswered offer is pending; active media is unchanged. */
+			local_sdp = switch_channel_get_variable(fst_channel, "rtp_local_sdp_str");
+			fst_requires(local_sdp != NULL);
+			fst_check(strstr(local_sdp, "a=extmap:7/sendonly urn:ietf:params:rtp-hdrext:sdes:mid") != NULL);
+			switch_core_media_gen_local_sdp(fst_session, SDP_ANSWER, "127.0.0.1", 41000, NULL, 1);
+			local_sdp = switch_channel_get_variable(fst_channel, "rtp_local_sdp_str");
+			fst_requires(local_sdp != NULL);
+			fst_check(strstr(local_sdp, "a=extmap:7/recvonly urn:ietf:params:rtp-hdrext:sdes:mid") != NULL);
+			fst_check(!strcmp(switch_channel_get_variable(fst_channel, "rtp_audio_mid"), "newaudio"));
+
+			proceed = 0;
+			match = switch_core_media_negotiate_sdp(fst_session, offer_session_level, &proceed, SDP_OFFER);
+			fst_requires(match == 1);
+			switch_core_media_gen_local_sdp(fst_session, SDP_ANSWER, "127.0.0.1", 41000, NULL, 1);
+			local_sdp = switch_channel_get_variable(fst_channel, "rtp_local_sdp_str");
+			fst_requires(local_sdp != NULL);
+			fst_check(strstr(local_sdp, "a=extmap:9/sendonly urn:ietf:params:rtp-hdrext:sdes:mid") != NULL);
+			fst_check(!strcmp(switch_channel_get_variable(fst_channel, "rtp_audio_mid"), "sessionaudio"));
+
+			proceed = 0;
+			match = switch_core_media_negotiate_sdp(fst_session, offer_without_mid_ext, &proceed, SDP_OFFER);
+			fst_requires(match == 1);
+			switch_core_media_gen_local_sdp(fst_session, SDP_ANSWER, "127.0.0.1", 41000, NULL, 1);
+			local_sdp = switch_channel_get_variable(fst_channel, "rtp_local_sdp_str");
+			fst_requires(local_sdp != NULL);
+			fst_check(strstr(local_sdp, "urn:ietf:params:rtp-hdrext:sdes:mid") == NULL);
+		}
+		FST_SESSION_END()
+		FST_SESSION_BEGIN(sdp_answer_keeps_mid_extmaps_media_scoped)
+		{
+			switch_status_t status;
+			switch_media_handle_t *media_handle;
+			switch_core_media_params_t *mparams;
+			const char *local_sdp;
+			const char *offer =
+				"v=0\r\n"
+				"o=- 4 1 IN IP4 127.0.0.1\r\n"
+				"s=-\r\n"
+				"c=IN IP4 127.0.0.1\r\n"
+				"t=0 0\r\n"
+				"a=group:BUNDLE audio video\r\n"
+				"m=audio 40000 RTP/AVP 0\r\n"
+				"a=rtpmap:0 PCMU/8000\r\n"
+				"a=rtcp-mux\r\n"
+				"a=mid:audio\r\n"
+				"a=extmap:7/recvonly urn:ietf:params:rtp-hdrext:sdes:mid\r\n"
+				"m=video 40002 RTP/AVP 31\r\n"
+				"a=rtpmap:31 PROXY-VID/90000\r\n"
+				"a=rtcp-mux\r\n"
+				"a=mid:video\r\n";
+			uint8_t match, proceed;
+
+			mparams = switch_core_session_alloc(fst_session, sizeof(switch_core_media_params_t));
+			mparams->inbound_codec_string = switch_core_session_strdup(fst_session, "PCMU,PROXY-VID");
+			mparams->outbound_codec_string = switch_core_session_strdup(fst_session, "PCMU,PROXY-VID");
+			mparams->rtpip = switch_core_session_strdup(fst_session, (char *)rx_host);
+
+			status = switch_media_handle_create(&media_handle, fst_session, mparams);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			status = switch_core_media_prepare_codecs(fst_session, SWITCH_FALSE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			status = switch_core_media_choose_ports(fst_session, SWITCH_TRUE, SWITCH_TRUE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			switch_channel_set_flag(fst_channel, CF_ICE);
+			switch_channel_set_flag(fst_channel, CF_VIDEO);
+			switch_channel_set_variable(fst_channel, "rtp-bundle", "auto");
+
+			proceed = 0;
+			match = switch_core_media_negotiate_sdp(fst_session, offer, &proceed, SDP_OFFER);
+			fst_requires(match == 1);
+			switch_core_media_gen_local_sdp(fst_session, SDP_ANSWER, "127.0.0.1", 41000, NULL, 1);
+			local_sdp = switch_channel_get_variable(fst_channel, "rtp_local_sdp_str");
+			fst_requires(local_sdp != NULL);
+			fst_check(session_section_contains(local_sdp, "urn:ietf:params:rtp-hdrext:sdes:mid") == SWITCH_FALSE);
+			fst_check(media_section_contains(local_sdp, "m=audio ",
+				"a=extmap:7/sendonly urn:ietf:params:rtp-hdrext:sdes:mid") == SWITCH_TRUE);
+			fst_check(media_section_contains(local_sdp, "m=video ",
+				"urn:ietf:params:rtp-hdrext:sdes:mid") == SWITCH_FALSE);
+		}
+		FST_SESSION_END()
+		FST_SESSION_BEGIN(sdp_answer_preserves_per_media_mid_ids_and_directions)
+		{
+			switch_status_t status;
+			switch_media_handle_t *media_handle;
+			switch_core_media_params_t *mparams;
+			const char *local_sdp;
+			const char *offer =
+				"v=0\r\n"
+				"o=- 5 1 IN IP4 127.0.0.1\r\n"
+				"s=-\r\n"
+				"c=IN IP4 127.0.0.1\r\n"
+				"t=0 0\r\n"
+				"a=group:BUNDLE audio video\r\n"
+				"m=audio 40000 RTP/AVP 0\r\n"
+				"a=rtpmap:0 PCMU/8000\r\n"
+				"a=rtcp-mux\r\n"
+				"a=mid:audio\r\n"
+				"a=extmap:7/recvonly urn:ietf:params:rtp-hdrext:sdes:mid\r\n"
+				"m=video 40002 RTP/AVP 31\r\n"
+				"a=rtpmap:31 PROXY-VID/90000\r\n"
+				"a=rtcp-mux\r\n"
+				"a=mid:video\r\n"
+				"a=extmap:9/sendonly urn:ietf:params:rtp-hdrext:sdes:mid\r\n";
+			uint8_t match, proceed;
+
+			mparams = switch_core_session_alloc(fst_session, sizeof(switch_core_media_params_t));
+			mparams->inbound_codec_string = switch_core_session_strdup(fst_session, "PCMU,PROXY-VID");
+			mparams->outbound_codec_string = switch_core_session_strdup(fst_session, "PCMU,PROXY-VID");
+			mparams->rtpip = switch_core_session_strdup(fst_session, (char *)rx_host);
+
+			status = switch_media_handle_create(&media_handle, fst_session, mparams);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			status = switch_core_media_prepare_codecs(fst_session, SWITCH_FALSE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			status = switch_core_media_choose_ports(fst_session, SWITCH_TRUE, SWITCH_TRUE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			switch_channel_set_flag(fst_channel, CF_ICE);
+			switch_channel_set_flag(fst_channel, CF_VIDEO);
+			switch_channel_set_variable(fst_channel, "rtp-bundle", "auto");
+
+			proceed = 0;
+			match = switch_core_media_negotiate_sdp(fst_session, offer, &proceed, SDP_OFFER);
+			fst_requires(match == 1);
+			switch_core_media_gen_local_sdp(fst_session, SDP_ANSWER, "127.0.0.1", 41000, NULL, 1);
+			local_sdp = switch_channel_get_variable(fst_channel, "rtp_local_sdp_str");
+			fst_requires(local_sdp != NULL);
+			fst_check(session_section_contains(local_sdp, "urn:ietf:params:rtp-hdrext:sdes:mid") == SWITCH_FALSE);
+			fst_check(media_section_contains(local_sdp, "m=audio ",
+				"a=extmap:7/sendonly urn:ietf:params:rtp-hdrext:sdes:mid") == SWITCH_TRUE);
+			fst_check(media_section_contains(local_sdp, "m=video ",
+				"a=extmap:9/recvonly urn:ietf:params:rtp-hdrext:sdes:mid") == SWITCH_TRUE);
+		}
+		FST_SESSION_END()
+		FST_SESSION_BEGIN(sdp_bundle_state_commits_with_answer)
+		{
+			switch_status_t status;
+			switch_media_handle_t *media_handle;
+			switch_core_media_params_t *mparams;
+			const char *local_sdp;
+			const char *offer_audio =
+				"v=0\r\n"
+				"o=- 2 1 IN IP4 127.0.0.1\r\n"
+				"s=-\r\n"
+				"c=IN IP4 127.0.0.1\r\n"
+				"t=0 0\r\n"
+				"a=group:BUNDLE audio\r\n"
+				"a=extmap:7 urn:ietf:params:rtp-hdrext:sdes:mid\r\n"
+				"m=audio 40000 RTP/AVP 0\r\n"
+				"a=rtpmap:0 PCMU/8000\r\n"
+				"a=rtcp-mux\r\n"
+				"a=mid:audio\r\n";
+			const char *offer_newaudio =
+				"v=0\r\n"
+				"o=- 2 2 IN IP4 127.0.0.1\r\n"
+				"s=-\r\n"
+				"c=IN IP4 127.0.0.1\r\n"
+				"t=0 0\r\n"
+				"a=group:BUNDLE newaudio\r\n"
+				"a=extmap:7 urn:ietf:params:rtp-hdrext:sdes:mid\r\n"
+				"m=audio 40000 RTP/AVP 0\r\n"
+				"a=rtpmap:0 PCMU/8000\r\n"
+				"a=rtcp-mux\r\n"
+				"a=mid:newaudio\r\n";
+			uint8_t match, proceed;
+
+			mparams = switch_core_session_alloc(fst_session, sizeof(switch_core_media_params_t));
+			mparams->inbound_codec_string = switch_core_session_strdup(fst_session, "PCMU");
+			mparams->outbound_codec_string = switch_core_session_strdup(fst_session, "PCMU");
+			mparams->rtpip = switch_core_session_strdup(fst_session, (char *)rx_host);
+
+			status = switch_media_handle_create(&media_handle, fst_session, mparams);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			status = switch_core_media_prepare_codecs(fst_session, SWITCH_FALSE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			status = switch_core_media_choose_ports(fst_session, SWITCH_TRUE, SWITCH_FALSE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			switch_channel_set_flag(fst_channel, CF_ICE);
+			switch_channel_set_variable(fst_channel, "rtp-bundle", "auto");
+
+			proceed = 0;
+			match = switch_core_media_negotiate_sdp(fst_session, offer_audio, &proceed, SDP_OFFER);
+			fst_requires(match == 1);
+			fst_check(switch_channel_get_variable(fst_channel, "rtp_group_bundle") == NULL);
+			switch_core_media_gen_local_sdp(fst_session, SDP_ANSWER, "127.0.0.1", 41000, NULL, 1);
+			fst_check(!strcmp(switch_channel_get_variable(fst_channel, "rtp_group_bundle"), "audio"));
+
+			proceed = 0;
+			match = switch_core_media_negotiate_sdp(fst_session, "not valid sdp", &proceed, SDP_OFFER);
+			fst_check(match == 0);
+			fst_check(!strcmp(switch_channel_get_variable(fst_channel, "rtp_group_bundle"), "audio"));
+
+			proceed = 0;
+			match = switch_core_media_negotiate_sdp(fst_session, offer_newaudio, &proceed, SDP_OFFER);
+			fst_requires(match == 1);
+			fst_check(!strcmp(switch_channel_get_variable(fst_channel, "rtp_group_bundle"), "audio"));
+			switch_core_media_gen_local_sdp(fst_session, SDP_ANSWER, "127.0.0.1", 41000, NULL, 1);
+			local_sdp = switch_channel_get_variable(fst_channel, "rtp_local_sdp_str");
+			fst_requires(local_sdp != NULL);
+			fst_check(strstr(local_sdp, "a=group:BUNDLE newaudio") != NULL);
+			fst_check(!strcmp(switch_channel_get_variable(fst_channel, "rtp_group_bundle"), "newaudio"));
+		}
+		FST_SESSION_END()
+		FST_SESSION_BEGIN(sdp_session_level_mid_extmap_in_answer)
+		{
+			switch_status_t status;
+			switch_media_handle_t *media_handle;
+			switch_core_media_params_t *mparams;
+			const char *local_sdp;
+			const char *answer =
+				"v=0\r\n"
+				"o=- 3 1 IN IP4 127.0.0.1\r\n"
+				"s=-\r\n"
+				"c=IN IP4 127.0.0.1\r\n"
+				"t=0 0\r\n"
+				"a=group:BUNDLE audio\r\n"
+				"a=extmap:9 urn:ietf:params:rtp-hdrext:sdes:mid\r\n"
+				"m=audio 40000 RTP/AVP 0\r\n"
+				"a=rtpmap:0 PCMU/8000\r\n"
+				"a=rtcp-mux\r\n"
+				"a=mid:audio\r\n";
+			uint8_t match, proceed;
+
+			mparams = switch_core_session_alloc(fst_session, sizeof(switch_core_media_params_t));
+			mparams->inbound_codec_string = switch_core_session_strdup(fst_session, "PCMU");
+			mparams->outbound_codec_string = switch_core_session_strdup(fst_session, "PCMU");
+			mparams->rtpip = switch_core_session_strdup(fst_session, (char *)rx_host);
+
+			status = switch_media_handle_create(&media_handle, fst_session, mparams);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			status = switch_core_media_prepare_codecs(fst_session, SWITCH_FALSE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			status = switch_core_media_choose_ports(fst_session, SWITCH_TRUE, SWITCH_FALSE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			switch_channel_set_flag(fst_channel, CF_ICE);
+			switch_channel_set_variable(fst_channel, "rtp-bundle", "auto");
+			switch_channel_set_variable(fst_channel, "rtp_mid_ext_id", "9");
+
+			switch_core_media_gen_local_sdp(fst_session, SDP_OFFER, "127.0.0.1", 41000, NULL, 1);
+			local_sdp = switch_channel_get_variable(fst_channel, "rtp_local_sdp_str");
+			fst_requires(local_sdp != NULL);
+			fst_check(strstr(local_sdp, "a=extmap:9 urn:ietf:params:rtp-hdrext:sdes:mid") != NULL);
+
+			proceed = 0;
+			match = switch_core_media_negotiate_sdp(fst_session, answer, &proceed, SDP_ANSWER);
+			fst_requires(match == 1);
+			/* BUNDLE validation requires the remote MID receive id, proving that
+			 * the session-level answer extmap reached the committed tables. */
+			fst_check(!strcmp(switch_channel_get_variable(fst_channel, "rtp_group_bundle"), "audio"));
 		}
 		FST_SESSION_END()
 		FST_SESSION_BEGIN(sdp_bundle_offer_emits_audio_and_video_mid)
