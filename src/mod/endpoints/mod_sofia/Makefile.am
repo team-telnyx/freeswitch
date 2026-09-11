@@ -48,6 +48,7 @@ test_test_string_stream_mem_leak_LDADD = libsofiamod.la $(SOFIA_SIP_LIBS) $(STIR
 
 TESTS = test/test_sofia_funcs.sh test/test_nuafail test/test_string_stream_mem_leak
 #TESTS += test/test_run_sipp.sh
+TESTS += test/test_t38_session_refresh.sh
 
 if ISMAC
 mod_sofia_la_LDFLAGS += -framework CoreFoundation -framework SystemConfiguration
