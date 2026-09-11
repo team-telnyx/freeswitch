@@ -5607,6 +5607,11 @@ done:
 	return status;
 }
 
+/* Only ever waits out a module callback already in flight, so this is far past
+ * any healthy case; it is kept short because the hangup path runs CLOSE with
+ * session->bug_rwlock held for write. */
+#define SPEECH_THREAD_STOP_TIMEOUT_MS 2000
+
 struct speech_thread_handle {
 	switch_core_session_t *session;
 	switch_asr_handle_t *ah;
@@ -5616,7 +5621,34 @@ struct speech_thread_handle {
 	switch_memory_pool_t *pool;
 	switch_thread_t *thread;
 	int ready;
+	int closing;
 };
+
+/* Wake speech_thread and wait until it can no longer be inside the ASR module.
+ *
+ * Taking the mutex is the whole test. speech_thread holds it for its entire run
+ * and gives it up only inside switch_thread_cond_wait() and once on the way
+ * out, so a successful trylock means the thread is parked in the cond wait and
+ * takes the signal, has not locked yet -- and then its own lock orders it after
+ * the closing store -- or has already left. Any of those means it is not inside
+ * a module callback. Failing to take it is the wedged case, and that is all the
+ * retry is for. No separate predicate is read here: an unsynchronised flag
+ * would be a data race, and a synchronised one would say nothing the lock does
+ * not already say.
+ */
+static int speech_thread_wait_stop(struct speech_thread_handle *sth, switch_time_t expires)
+{
+	while (switch_micro_time_now() < expires) {
+		if (switch_mutex_trylock(sth->mutex) == SWITCH_STATUS_SUCCESS) {
+			switch_thread_cond_signal(sth->cond);
+			switch_mutex_unlock(sth->mutex);
+			return 1;
+		}
+		switch_yield(1000);
+	}
+
+	return 0;
+}
 
 static void *SWITCH_THREAD_FUNC speech_thread(switch_thread_t *thread, void *obj)
 {
@@ -5625,9 +5657,6 @@ static void *SWITCH_THREAD_FUNC speech_thread(switch_thread_t *thread, void *obj
 	switch_asr_flag_t flags = SWITCH_ASR_FLAG_NONE;
 	switch_status_t status;
 	switch_event_t *event;
-
-	switch_thread_cond_create(&sth->cond, sth->pool);
-	switch_mutex_init(&sth->mutex, SWITCH_MUTEX_NESTED, sth->pool);
 
 	if (switch_core_session_read_lock(sth->session) != SWITCH_STATUS_SUCCESS) {
 		sth->ready = 0;
@@ -5638,13 +5667,13 @@ static void *SWITCH_THREAD_FUNC speech_thread(switch_thread_t *thread, void *obj
 
 	sth->ready = 1;
 
-	while (switch_channel_up_nosig(channel) && !switch_test_flag(sth->ah, SWITCH_ASR_FLAG_CLOSED)) {
+	while (switch_channel_up_nosig(channel) && !sth->closing && !switch_test_flag(sth->ah, SWITCH_ASR_FLAG_CLOSED)) {
 		char *xmlstr = NULL;
 		switch_event_t *headers = NULL;
 
 		switch_thread_cond_wait(sth->cond, sth->mutex);
 
-		if (switch_channel_down_nosig(channel) || switch_test_flag(sth->ah, SWITCH_ASR_FLAG_CLOSED)) {
+		if (switch_channel_down_nosig(channel) || sth->closing || switch_test_flag(sth->ah, SWITCH_ASR_FLAG_CLOSED)) {
 			break;
 		}
 
@@ -5796,7 +5825,16 @@ static switch_bool_t speech_callback(switch_media_bug_t *bug, void *user_data, s
 
 			switch_threadattr_create(&thd_attr, sth->pool);
 			switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
-			switch_thread_create(&sth->thread, thd_attr, speech_thread, sth, sth->pool);
+
+			if (switch_thread_create(&sth->thread, thd_attr, speech_thread, sth, sth->pool) != SWITCH_STATUS_SUCCESS) {
+				/* Without the thread nothing ever consumes a result: the read
+				 * callbacks keep feeding the module, but sth->ready stays 0 so
+				 * the condition is never signalled. Fail the bug instead, so
+				 * the caller gets an error rather than a silently deaf ASR. */
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(switch_core_media_bug_get_session(bug)), SWITCH_LOG_ERROR,
+								  "Failed to start speech thread\n");
+				return SWITCH_FALSE;
+			}
 		}
 		break;
 	case SWITCH_ABC_TYPE_CLOSE:
@@ -5804,21 +5842,49 @@ static switch_bool_t speech_callback(switch_media_bug_t *bug, void *user_data, s
 			switch_status_t st;
 			switch_core_session_t *session = switch_core_media_bug_get_session(bug);
 			switch_channel_t *channel = switch_core_session_get_channel(session);
-			
+			int quiesced = 1;
+
 			switch_channel_set_private(channel, SWITCH_SPEECH_KEY, NULL);
 			switch_channel_set_private(channel, SWITCH_SPEECH_KEY "_tmp", NULL);
 			switch_core_event_hook_remove_recv_dtmf(session, speech_on_dtmf);
 			
-			switch_core_asr_close(sth->ah, &flags);
-			if (sth->mutex && sth->cond && sth->ready) {
-				if (switch_mutex_trylock(sth->mutex) == SWITCH_STATUS_SUCCESS) {
-					switch_thread_cond_signal(sth->cond);
-					switch_mutex_unlock(sth->mutex);
+			sth->closing = 1;
+
+			if (sth->thread) {
+				switch_time_t started = switch_micro_time_now();
+
+				quiesced = speech_thread_wait_stop(sth, started + (SPEECH_THREAD_STOP_TIMEOUT_MS * 1000) / 2);
+
+				if (!quiesced) {
+					/* Ask the module to abandon the request. That is what
+					 * releases a thread blocked inside it, and unlike the close
+					 * below it frees nothing, so the handle stays valid for the
+					 * thread still reading it. A module without asr_try_cancel
+					 * simply does nothing here.
+					 */
+					switch_core_asr_try_cancel(sth->ah);
+					quiesced = speech_thread_wait_stop(sth, started + SPEECH_THREAD_STOP_TIMEOUT_MS * 1000);
 				}
 			}
 
-			switch_thread_join(&st, sth->thread);
+			if (!quiesced) {
+				/* try_cancel did not release it either. Close first so the
+				 * module returns, giving up the window this ordering exists to
+				 * shut: liveness wins over the narrower race.
+				 */
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+								  "Speech thread still in the ASR module after %d ms, closing handle first\n",
+								  SPEECH_THREAD_STOP_TIMEOUT_MS);
+				switch_core_asr_close(sth->ah, &flags);
+			}
 
+			if (sth->thread) {
+				switch_thread_join(&st, sth->thread);
+			}
+
+			if (quiesced) {
+				switch_core_asr_close(sth->ah, &flags);
+			}
 		}
 		break;
 	case SWITCH_ABC_TYPE_READ_REPLACE:
@@ -5830,7 +5896,7 @@ static switch_bool_t speech_callback(switch_media_bug_t *bug, void *user_data, s
 					return SWITCH_FALSE;
 				}
 				if (switch_core_asr_check_results(sth->ah, &flags) == SWITCH_STATUS_SUCCESS) {
-					if (sth->mutex && sth->cond && sth->ready) {
+					if (sth->ready) {
 						switch_mutex_lock(sth->mutex);
 						switch_thread_cond_signal(sth->cond);
 						switch_mutex_unlock(sth->mutex);
@@ -5847,7 +5913,7 @@ static switch_bool_t speech_callback(switch_media_bug_t *bug, void *user_data, s
 					return SWITCH_FALSE;
 				}
 				if (switch_core_asr_check_results(sth->ah, &flags) == SWITCH_STATUS_SUCCESS) {
-					if (sth->mutex && sth->cond && sth->ready) {
+					if (sth->ready) {
 						switch_mutex_lock(sth->mutex);
 						switch_thread_cond_signal(sth->cond);
 						switch_mutex_unlock(sth->mutex);
@@ -6086,6 +6152,16 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_detect_speech_init(switch_core_sessio
 	sth->session = session;
 	sth->ah = ah;
 
+	/* Created here rather than in speech_thread() so they exist before the bug
+	 * is added: every caller can then signal without testing for them.
+	 */
+	if (switch_thread_cond_create(&sth->cond, sth->pool) != SWITCH_STATUS_SUCCESS ||
+		switch_mutex_init(&sth->mutex, SWITCH_MUTEX_NESTED, sth->pool) != SWITCH_STATUS_SUCCESS) {
+		switch_channel_set_private(channel, SWITCH_SPEECH_KEY "_tmp", NULL);
+		switch_core_asr_close(ah, &flags);
+		return SWITCH_STATUS_MEMERR;
+	}
+
 	if ((p = switch_channel_get_variable(channel, "fire_asr_events")) && switch_true(p)) {
 		switch_set_flag(ah, SWITCH_ASR_FLAG_FIRE_EVENTS);
 	}
@@ -6114,16 +6190,22 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_detect_speech_init(switch_core_sessio
 
 	if ((status = switch_core_media_bug_add(session, "detect_speech", key,
 											speech_callback, sth, 0, bug_flags, &sth->bug)) != SWITCH_STATUS_SUCCESS) {
+		switch_channel_set_private(channel, SWITCH_SPEECH_KEY "_tmp", NULL);
 		switch_core_asr_close(ah, &flags);
 		return status;
 	}
+
+	/* Published before the hook is added, not after: switch_ivr_stop_detect_speech()
+	 * only tears the media bug down when it finds this key, and takes a try_cancel-only
+	 * path when it finds just the "_tmp" one.  Called below with the key unset, it would
+	 * leave the bug attached and the handle open. */
+	switch_channel_set_private(channel, SWITCH_SPEECH_KEY, sth);
 
 	if ((status = switch_core_event_hook_add_recv_dtmf(session, speech_on_dtmf)) != SWITCH_STATUS_SUCCESS) {
 		switch_ivr_stop_detect_speech(session);
 		return status;
 	}
 
-	switch_channel_set_private(channel, SWITCH_SPEECH_KEY, sth);
 	switch_channel_set_private(channel, SWITCH_SPEECH_KEY "_tmp", NULL);
 
 	return SWITCH_STATUS_SUCCESS;

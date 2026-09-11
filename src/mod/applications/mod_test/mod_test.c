@@ -70,6 +70,9 @@ typedef struct {
 	char *channel_uuid;
 	switch_vad_t *vad;
 	int partial;
+	int get_results_delay_ms;
+	int in_get_results;
+	int closed;
 } test_asr_t;
 
 
@@ -160,6 +163,8 @@ static switch_status_t test_asr_close(switch_asr_handle_t *ah, switch_asr_flag_t
 
 	switch_log_printf(SWITCH_CHANNEL_UUID_LOG(context->channel_uuid), SWITCH_LOG_NOTICE, "ASR closing ...\n");
 
+	context->closed = 1;
+
 	if (context->vad) {
 		switch_vad_destroy(&context->vad);
 	}
@@ -229,9 +234,32 @@ static switch_status_t test_asr_resume(switch_asr_handle_t *ah)
 	return SWITCH_STATUS_SUCCESS;
 }
 
+/* The core must not run asr_close while a speech thread is still inside the
+ * module. Report it rather than assert: the callback is not the test's thread,
+ * and the handle is pool allocated here so the read itself stays in bounds. */
+static void test_asr_report_use_after_close(test_asr_t *context, const char *fn)
+{
+	if (context->closed) {
+		switch_log_printf(SWITCH_CHANNEL_UUID_LOG(context->channel_uuid), SWITCH_LOG_ERROR,
+						  "%s is running after asr_close destroyed the handle state\n", fn);
+		switch_core_set_variable("mod_test_asr_use_after_close", "true");
+	}
+}
+
 static switch_status_t test_asr_check_results(switch_asr_handle_t *ah, switch_asr_flag_t *flags)
 {
 	test_asr_t *context = (test_asr_t *) ah->private_info;
+
+	test_asr_report_use_after_close(context, "asr_check_results");
+
+	/* Reporting a result here makes the media bug callback take the core speech
+	 * thread's mutex, which that thread holds for as long as it is inside
+	 * asr_get_results below. The read loop would then block with bug_rwlock
+	 * held, starving switch_core_media_bug_remove() of its write lock for the
+	 * whole delay -- which is exactly the close a test wants to run in it. */
+	if (context->in_get_results) {
+		return SWITCH_STATUS_BREAK;
+	}
 
 	if (switch_test_flag(context, ASRFLAG_RETURNED_RESULT) || switch_test_flag(ah, SWITCH_ASR_FLAG_CLOSED)) {
 		return SWITCH_STATUS_BREAK;
@@ -264,6 +292,20 @@ static switch_status_t test_asr_get_results(switch_asr_handle_t *ah, char **resu
 {
 	test_asr_t *context = (test_asr_t *) ah->private_info;
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
+
+	/* Only the core speech thread calls this, never the media bug callback, so
+	 * the delay parks that one thread inside the module and nothing else. The
+	 * variable lets a test confirm the thread really is parked in here before it
+	 * closes the handle, rather than assuming it from timing alone. */
+	if (context->get_results_delay_ms > 0) {
+		context->in_get_results = 1;
+		switch_core_set_variable("mod_test_asr_in_get_results", "true");
+		switch_yield(context->get_results_delay_ms * 1000);
+		switch_core_set_variable("mod_test_asr_in_get_results", "false");
+		context->in_get_results = 0;
+	}
+
+	test_asr_report_use_after_close(context, "asr_get_results");
 
 	if (switch_test_flag(context, ASRFLAG_RETURNED_RESULT) || switch_test_flag(ah, SWITCH_ASR_FLAG_CLOSED)) {
 		return SWITCH_STATUS_FALSE;
@@ -371,6 +413,9 @@ static void test_asr_text_param(switch_asr_handle_t *ah, char *param, const char
 		} else if (!strcasecmp("partial", param) && switch_true(val)) {
 			context->partial = 3;
 			switch_log_printf(SWITCH_CHANNEL_UUID_LOG(context->channel_uuid), SWITCH_LOG_DEBUG, "partial = %d\n", context->partial);
+		} else if (!strcasecmp("get-results-delay-ms", param) && switch_is_number(val)) {
+			context->get_results_delay_ms = nval;
+			switch_log_printf(SWITCH_CHANNEL_UUID_LOG(context->channel_uuid), SWITCH_LOG_DEBUG, "get-results-delay-ms = %d\n", context->get_results_delay_ms);
 		}
 	}
 }
