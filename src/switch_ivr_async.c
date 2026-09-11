@@ -1155,6 +1155,13 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_displace_session(switch_core_session_
 }
 
 
+/* One input rate change, and the position in the recording thread's byte stream at which it
+   takes effect.  Queued by the session thread, applied by the recording thread. */
+struct record_rate_boundary {
+	switch_size_t pos;
+	uint32_t rate;
+};
+
 struct record_helper {
 	switch_media_bug_t *bug;
 	switch_memory_pool_t *helper_pool;
@@ -1181,8 +1188,9 @@ struct record_helper {
 	switch_bool_t stop_write_on_error;
 	switch_codec_implementation_t read_impl;
 	switch_bool_t speech_detected;
-	uint32_t pending_native_rate;
-	switch_size_t pending_native_rate_offset;
+	switch_buffer_t *rate_buffer;
+	switch_size_t bytes_out;
+	uint32_t queued_native_rate;
 	switch_buffer_t *thread_buffer;
 	switch_thread_t *thread;
 	switch_mutex_t *buffer_mutex;
@@ -1414,23 +1422,26 @@ static void send_record_error_event(switch_channel_t *channel, const char* file,
 /* Hand a new input rate to whoever owns fh->native_rate.
 
    With a recording thread that owner is the thread, not us, so the rate travels with the
-   point in the buffer where it takes effect: pending_native_rate_offset is the number of
-   bytes of old-rate audio still queued ahead of the change.  The thread applies the new rate
-   only once it has drained that far and never reads across the boundary, so no chunk is ever
-   written at a rate it was not recorded at.  Publishing the rate on its own would be applied
-   to whatever chunk the thread happens to read next -- up to a full bsize of purely old-rate
-   audio, more if the thread is behind -- which is what this offset exists to prevent.
+   point in the byte stream where it takes effect: the change is queued as a boundary at the
+   absolute position of everything enqueued so far.  The thread applies a boundary only once
+   it has drained up to it, and never reads across one, so no chunk is ever written at a rate
+   it was not recorded at.  Publishing the rate on its own would be applied to whatever chunk
+   the thread happens to read next -- up to a full bsize of purely old-rate audio, more if the
+   thread is behind -- which is what the boundary exists to prevent.
 
-   Only one change can be in flight.  A second one arriving before the first has drained
-   replaces it, which writes the audio between the two at the older rate; that needs two
-   renegotiations inside one chunk drain, and the alternative is a queue of rate changes for a
-   window measured in single frames. */
+   Every boundary is kept.  thread_buffer is unbounded by design, so a blocking sink can leave
+   an arbitrary backlog and several rate changes can be in flight at once; a single slot would
+   write the audio between the first two at the rate that preceded both. */
 static void record_set_native_rate(struct record_helper *rh, uint32_t rate)
 {
 	if (rh->thread_buffer) {
+		struct record_rate_boundary boundary;
+
 		switch_mutex_lock(rh->buffer_mutex);
-		rh->pending_native_rate = rate;
-		rh->pending_native_rate_offset = switch_buffer_inuse(rh->thread_buffer);
+		boundary.pos = rh->bytes_out + switch_buffer_inuse(rh->thread_buffer);
+		boundary.rate = rate;
+		switch_buffer_write(rh->rate_buffer, &boundary, sizeof(boundary));
+		rh->queued_native_rate = rate;
 		switch_mutex_unlock(rh->buffer_mutex);
 	} else {
 		rh->fh->native_rate = rate;
@@ -1450,7 +1461,7 @@ static void record_follow_frame_rate(struct record_helper *rh, switch_core_sessi
 
 	if (rh->thread_buffer) {
 		switch_mutex_lock(rh->buffer_mutex);
-		old_rate = rh->pending_native_rate ? rh->pending_native_rate : rh->fh->native_rate;
+		old_rate = switch_buffer_inuse(rh->rate_buffer) ? rh->queued_native_rate : rh->fh->native_rate;
 		switch_mutex_unlock(rh->buffer_mutex);
 	} else {
 		old_rate = rh->fh->native_rate;
@@ -1473,6 +1484,7 @@ static void *SWITCH_THREAD_FUNC recording_thread(switch_thread_t *thread, void *
 	switch_channel_t *channel = switch_core_session_get_channel(session);
 	struct record_helper *rh;
 	switch_size_t bsize = SWITCH_RECOMMENDED_BUFFER_SIZE, samples = 0, inuse = 0, readlen = 0, bytes = 0;
+	struct record_rate_boundary boundary;
 	unsigned char *data;
 	int channels = 1;
 	switch_codec_implementation_t read_impl = { 0 };
@@ -1482,6 +1494,7 @@ static void *SWITCH_THREAD_FUNC recording_thread(switch_thread_t *thread, void *
 	}
 
 	rh = switch_core_media_bug_get_user_data(bug);
+	switch_buffer_create_dynamic(&rh->rate_buffer, sizeof(struct record_rate_boundary) * 8, sizeof(struct record_rate_boundary) * 8, 0);
 	switch_buffer_create_dynamic(&rh->thread_buffer, SWITCH_MAX_L16, SWITCH_MAX_L16, 0);
 	rh->thread_ready = 1;
 
@@ -1538,23 +1551,23 @@ static void *SWITCH_THREAD_FUNC recording_thread(switch_thread_t *thread, void *
 
 		readlen = bsize;
 
-		if (rh->pending_native_rate) {
-			if (!rh->pending_native_rate_offset) {
-				/* the audio recorded at the old rate has drained, so the change takes effect here */
-				rh->fh->native_rate = rh->pending_native_rate;
-				rh->pending_native_rate = 0;
-			} else if (rh->pending_native_rate_offset < readlen) {
-				/* stop short of the change so this chunk is all one rate */
-				readlen = rh->pending_native_rate_offset;
+		while (switch_buffer_peek(rh->rate_buffer, &boundary, sizeof(boundary)) == sizeof(boundary)) {
+			if (boundary.pos > rh->bytes_out) {
+				if (boundary.pos - rh->bytes_out < readlen) {
+					/* stop short of the change so this chunk is all one rate */
+					readlen = boundary.pos - rh->bytes_out;
+				}
+				break;
 			}
+
+			/* the audio recorded at the old rate has drained, so the change takes effect here */
+			rh->fh->native_rate = boundary.rate;
+			switch_buffer_toss(rh->rate_buffer, sizeof(boundary));
 		}
 
 		bytes = switch_buffer_read(rh->thread_buffer, data, readlen);
 		samples = bytes / 2 / channels;
-
-		if (rh->pending_native_rate_offset) {
-			rh->pending_native_rate_offset -= (bytes < rh->pending_native_rate_offset) ? bytes : rh->pending_native_rate_offset;
-		}
+		rh->bytes_out += bytes;
 
 		switch_mutex_unlock(rh->buffer_mutex);
 
@@ -1858,6 +1871,7 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 
 				if (rh->thread_buffer) {
 					switch_buffer_destroy(&rh->thread_buffer);
+					switch_buffer_destroy(&rh->rate_buffer);
 				}
 
 				frame.data = data;

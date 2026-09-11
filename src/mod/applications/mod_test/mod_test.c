@@ -453,10 +453,133 @@ static void test_speech_float_param_tts(switch_speech_handle_t *sh, char *param,
 {
 }
 
+/* A write-only file sink that can be told to block inside file_write, so a test can hold the
+   recording thread still while the session thread keeps queueing audio.  Writes raw L16 at
+   whatever rate the handle was opened with, so the sample count on disk is the file's own. */
+
+#define TEST_FILE_STALL_MAX_MS 10000
+
+static volatile int test_file_stall = 0;
+
+struct test_file_context {
+	switch_file_t *fd;
+};
+
+static switch_status_t test_file_open(switch_file_handle_t *handle, const char *path)
+{
+	struct test_file_context *context;
+
+	if (!switch_test_flag(handle, SWITCH_FILE_FLAG_WRITE)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "%s is a write-only sink\n", path);
+		return SWITCH_STATUS_GENERR;
+	}
+
+	if (!(context = switch_core_alloc(handle->memory_pool, sizeof(*context)))) {
+		return SWITCH_STATUS_MEMERR;
+	}
+
+	if (switch_file_open(&context->fd, path, SWITCH_FOPEN_WRITE | SWITCH_FOPEN_CREATE | SWITCH_FOPEN_TRUNCATE,
+						 SWITCH_FPROT_UREAD | SWITCH_FPROT_UWRITE, handle->memory_pool) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Error opening %s\n", path);
+		return SWITCH_STATUS_GENERR;
+	}
+
+	/* no pre-buffering: every write has to reach the sink, or a test cannot hold one */
+	handle->pre_buffer_datalen = 0;
+
+	handle->samples = 0;
+	handle->format = 0;
+	handle->sections = 0;
+	handle->seekable = 0;
+	handle->speed = 0;
+	handle->pos = 0;
+	handle->private_info = context;
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static switch_status_t test_file_close(switch_file_handle_t *handle)
+{
+	struct test_file_context *context = handle->private_info;
+
+	if (context->fd) {
+		switch_file_close(context->fd);
+		context->fd = NULL;
+	}
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static switch_status_t test_file_write(switch_file_handle_t *handle, void *data, size_t *len)
+{
+	struct test_file_context *context = handle->private_info;
+	size_t bytes = *len * 2 * handle->channels;
+	int waited_ms = 0;
+
+	/* bounded so a test that never releases the stall fails instead of hanging the suite */
+	while (test_file_stall && waited_ms < TEST_FILE_STALL_MAX_MS) {
+		switch_yield(20000);
+		waited_ms += 20;
+	}
+
+	if (waited_ms) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Test file sink held a write for %d ms\n", waited_ms);
+	}
+
+	if (switch_file_write(context->fd, data, &bytes) != SWITCH_STATUS_SUCCESS) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	handle->pos += bytes;
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static switch_status_t test_file_read(switch_file_handle_t *handle, void *data, size_t *len)
+{
+	return SWITCH_STATUS_FALSE;
+}
+
+static switch_status_t test_file_seek(switch_file_handle_t *handle, unsigned int *cur_sample, int64_t samples, int whence)
+{
+	return SWITCH_STATUS_FALSE;
+}
+
+static switch_status_t test_file_set_string(switch_file_handle_t *handle, switch_audio_col_t col, const char *string)
+{
+	return SWITCH_STATUS_FALSE;
+}
+
+static switch_status_t test_file_get_string(switch_file_handle_t *handle, switch_audio_col_t col, const char **string)
+{
+	return SWITCH_STATUS_FALSE;
+}
+
+#define TEST_FILE_STALL_SYNTAX "on|off"
+SWITCH_STANDARD_API(test_file_stall_function)
+{
+	if (!zstr(cmd) && !strcasecmp(cmd, "on")) {
+		test_file_stall = 1;
+	} else if (!zstr(cmd) && !strcasecmp(cmd, "off")) {
+		test_file_stall = 0;
+	} else {
+		stream->write_function(stream, "-USAGE: %s\n", TEST_FILE_STALL_SYNTAX);
+		return SWITCH_STATUS_SUCCESS;
+	}
+
+	stream->write_function(stream, "+OK\n");
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static char *test_file_supported_formats[] = { "teststall", NULL };
+
 SWITCH_MODULE_LOAD_FUNCTION(mod_test_load)
 {
 	switch_asr_interface_t *asr_interface;
 	switch_speech_interface_t *speech_interface = NULL;
+	switch_file_interface_t *file_interface;
+	switch_api_interface_t *api_interface;
 
 	*module_interface = switch_loadable_module_create_module_interface(pool, modname);
 
@@ -484,6 +607,19 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_test_load)
 	speech_interface->speech_text_param_tts = test_speech_text_param_tts;
 	speech_interface->speech_numeric_param_tts = test_speech_numeric_param_tts;
 	speech_interface->speech_float_param_tts = test_speech_float_param_tts;
+
+	file_interface = switch_loadable_module_create_interface(*module_interface, SWITCH_FILE_INTERFACE);
+	file_interface->interface_name = modname;
+	file_interface->extens = test_file_supported_formats;
+	file_interface->file_open = test_file_open;
+	file_interface->file_close = test_file_close;
+	file_interface->file_read = test_file_read;
+	file_interface->file_write = test_file_write;
+	file_interface->file_seek = test_file_seek;
+	file_interface->file_set_string = test_file_set_string;
+	file_interface->file_get_string = test_file_get_string;
+
+	SWITCH_ADD_API(api_interface, "test_file_stall", "Block writes to the test file sink", test_file_stall_function, TEST_FILE_STALL_SYNTAX);
 
 	return SWITCH_STATUS_SUCCESS;
 }
