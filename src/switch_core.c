@@ -142,7 +142,9 @@ static void check_ip(void)
 	switch_event_t *event;
 	char *hostname = switch_core_get_variable("hostname");
 
-	gethostname(runtime.hostname, sizeof(runtime.hostname));
+	if (!runtime.hostname_overridden) {
+		gethostname(runtime.hostname, sizeof(runtime.hostname));
+	}
 
 	if (zstr(hostname)) {
 		switch_core_set_variable("hostname", runtime.hostname);
@@ -2387,6 +2389,12 @@ static void switch_load_core_config(const char *file)
 				} else if (!strcasecmp(var, "switchname") && !zstr(val)) {
 					runtime.switchname = switch_core_strdup(runtime.memory_pool, val);
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Set switchname to %s\n", runtime.switchname);
+				} else if (!strcasecmp(var, "hostname") && !zstr(val)) {
+					/* config override; latched so check_ip() does not re-read gethostname() */
+					switch_copy_string(runtime.hostname, val, sizeof(runtime.hostname));
+					runtime.hostname_overridden = 1;
+					switch_core_set_variable("hostname", runtime.hostname);
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Set hostname to %s\n", runtime.hostname);
 				} else if (!strcasecmp(var, "rtp-retain-crypto-keys")) {
 					if (switch_true(val)) {
 						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,

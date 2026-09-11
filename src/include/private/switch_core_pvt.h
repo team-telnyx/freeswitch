@@ -283,6 +283,7 @@ struct switch_runtime {
 	double min_idle_time;
 	switch_dbtype_t odbc_dbtype;
 	char hostname[256];
+	uint8_t hostname_overridden;
 	char *switchname;
 	int multiple_registrations;
 	uint32_t max_db_handles;
