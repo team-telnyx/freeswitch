@@ -13608,6 +13608,16 @@ static void add_fb(char *buf, uint32_t buflen, int pt, int fir, int nack, int pl
 
 }
 
+/* Held by any of the three hold mechanisms: switch_core_media_toggle_hold()
+ * sets CF_PROTO_HOLD, switch_ivr_hold() sets CF_HOLD, and mod_sofia's
+ * INDICATE_HOLD handler sets only CF_LEG_HOLDING. */
+static int partner_is_held(switch_channel_t *channel)
+{
+	return switch_channel_test_flag(channel, CF_PROTO_HOLD) ||
+		switch_channel_test_flag(channel, CF_HOLD) ||
+		switch_channel_test_flag(channel, CF_LEG_HOLDING);
+}
+
 //?
 #define SDPBUFLEN 65536
 SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *session, switch_sdp_type_t sdp_type, const char *ip, switch_port_t port, const char *sr, int force)
@@ -14003,13 +14013,21 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 			if (other_smh) {
 				other_engine = &other_smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
 				/* Only update partner's smode if partner's endpoint is not on hold
-				 * When we transition to sendrecv/recvonly (can receive), only update if partner can send */
+				 * When we transition to sendrecv/recvonly (can receive), only update if partner can send.
+				 * Do not propagate INACTIVE to a non-held partner so it can receive hold audio. */
 				if (new_smode == SWITCH_MEDIA_FLOW_SENDRECV || new_smode == SWITCH_MEDIA_FLOW_RECVONLY) {
 					if (other_engine->rmode != SWITCH_MEDIA_FLOW_INACTIVE) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG, 
 						"Updating partner media mode to %d\n", opp_smode);
 						other_engine->smode = opp_smode;
 					}
+				} else if (new_smode == SWITCH_MEDIA_FLOW_INACTIVE &&
+						   !switch_channel_var_true(session->channel, "rtp_inactive_hold_propagate_legacy") &&
+						   other_engine->rmode != SWITCH_MEDIA_FLOW_INACTIVE &&
+						   !partner_is_held(switch_core_session_get_channel(other_session))) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
+									  "Skipping partner media mode update for inactive hold; partner keeps smode %d\n",
+									  other_engine->smode);
 				} else {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG, 
 						"Updating partner media mode to %d\n", opp_smode);
