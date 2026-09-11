@@ -9,6 +9,7 @@
 *.txt text eol=lf
 *.exe -diff binary executable windows dfsg-nonfree debian-ignore
 *.wav -diff binary sound
+*.ulaw -diff binary sound
 *.gif -diff binary image
 *.jpg -diff binary image
 *.jpeg -diff binary image
