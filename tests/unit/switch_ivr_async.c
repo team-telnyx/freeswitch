@@ -195,6 +195,133 @@ FST_CORE_BEGIN("./conf_async")
 			unlink(record_filename);
 		}
 		FST_SESSION_END()
+
+		/* a codec negotiated in the 183 can differ from the one in the 200 OK, changing the
+		   read rate underneath a running recording: the file keeps its own rate and the new
+		   input has to be resampled into it, or it plays back at the wrong speed */
+		FST_SESSION_BEGIN_RATE(session_record_read_rate_change, 16000)
+		{
+			const char *record_filename = switch_core_session_sprintf(fst_session, "%s%s%s-rate-change.wav", SWITCH_GLOBAL_dirs.temp_dir, SWITCH_PATH_SEPARATOR, switch_core_session_get_uuid(fst_session));
+			switch_file_handle_t fhr = { 0 };
+			switch_codec_implementation_t read_impl = { 0 };
+			switch_status_t status;
+			const char *duration_ms_str;
+			int duration_ms;
+			uint32_t file_samples, expected_samples = 4 * 16000; /* four seconds at the rate the file was opened with */
+
+			switch_channel_set_variable(fst_channel, "RECORD_READ_ONLY", "true");
+
+			status = switch_ivr_record_session_event(fst_session, record_filename, 0, NULL, NULL);
+			fst_xcheck(status == SWITCH_STATUS_SUCCESS, "Expect switch_ivr_record_session_event() to return SWITCH_STATUS_SUCCESS");
+
+			switch_ivr_sleep(fst_session, 2000, SWITCH_TRUE, NULL);
+
+			/* the far end answers with a narrowband codec: the read rate halves mid-recording */
+			switch_channel_set_variable(fst_channel, "null_switch_rate", "8000");
+
+			switch_ivr_sleep(fst_session, 2000, SWITCH_TRUE, NULL);
+
+			switch_core_session_get_read_impl(fst_session, &read_impl);
+			fst_xcheck(read_impl.actual_samples_per_second == 8000, "Expect the session read rate to have changed to 8000");
+
+			status = switch_ivr_stop_record_session(fst_session, record_filename);
+			fst_xcheck(status == SWITCH_STATUS_SUCCESS, "Expect switch_ivr_stop_record_session() to return SWITCH_STATUS_SUCCESS");
+
+			fst_requires(switch_file_exists(record_filename, fst_pool) == SWITCH_STATUS_SUCCESS);
+
+			/* record_ms describes the file, so it counts in the rate the file was opened with */
+			duration_ms_str = switch_channel_get_variable(fst_channel, "record_ms");
+			fst_requires(duration_ms_str != NULL);
+			duration_ms = atoi(duration_ms_str);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(fst_session), SWITCH_LOG_NOTICE, "Recording duration is %s ms\n", duration_ms_str);
+			fst_xcheck(duration_ms > 3600 && duration_ms < 4400, "Expect record_ms to report about four seconds after the read rate changes");
+
+			status = switch_core_file_open(&fhr, record_filename, 1, 16000, SWITCH_FILE_FLAG_READ | SWITCH_FILE_DATA_SHORT, NULL);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			file_samples = fhr.samples;
+			fst_requires(switch_core_file_close(&fhr) == SWITCH_STATUS_SUCCESS);
+
+			unlink(record_filename);
+
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(fst_session), SWITCH_LOG_NOTICE, "Recording holds %u samples, expected about %u\n", file_samples, expected_samples);
+			fst_xcheck(file_samples > expected_samples * 0.9 && file_samples < expected_samples * 1.1,
+					   "Expect the recording to hold four seconds of audio after the read rate changes");
+		}
+		FST_SESSION_END()
+
+		/* thread_buffer is unbounded and exists to absorb a slow sink, so more than one rate
+		   change can be queued at once.  Hold the recording thread inside file_write while the
+		   read rate goes 16000 -> 48000 -> 8000: every boundary has to survive, or the audio
+		   between the first two is written at the rate that preceded both. */
+		FST_SESSION_BEGIN_RATE(session_record_read_rate_change_backlog, 16000)
+		{
+			const char *record_filename = switch_core_session_sprintf(fst_session, "%s%s%s-rate-backlog.teststall", SWITCH_GLOBAL_dirs.temp_dir, SWITCH_PATH_SEPARATOR, switch_core_session_get_uuid(fst_session));
+			switch_stream_handle_t stream = { 0 };
+			switch_codec_implementation_t read_impl = { 0 };
+			switch_status_t status;
+			const char *samples_str, *duration_ms_str;
+			int file_samples, duration_ms;
+			/* one second at 16000, one at 48000 and two at 8000, all resampled into an 8000 Hz file */
+			int expected_samples = 4 * 8000;
+
+			switch_channel_set_variable(fst_channel, "RECORD_READ_ONLY", "true");
+			switch_channel_set_variable(fst_channel, "record_sample_rate", "8000");
+
+			SWITCH_STANDARD_STREAM(stream);
+			status = switch_api_execute("test_file_stall", "on", NULL, &stream);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			fst_requires(stream.data && !strncmp((char *)stream.data, "+OK", 3));
+			switch_safe_free(stream.data);
+
+			status = switch_ivr_record_session_event(fst_session, record_filename, 0, NULL, NULL);
+			fst_xcheck(status == SWITCH_STATUS_SUCCESS, "Expect switch_ivr_record_session_event() to return SWITCH_STATUS_SUCCESS");
+
+			/* the recording thread is now parked in file_write and everything below piles up behind it */
+			switch_ivr_sleep(fst_session, 1000, SWITCH_TRUE, NULL);
+
+			switch_channel_set_variable(fst_channel, "null_switch_rate", "48000");
+			switch_ivr_sleep(fst_session, 1000, SWITCH_TRUE, NULL);
+
+			switch_core_session_get_read_impl(fst_session, &read_impl);
+			fst_xcheck(read_impl.actual_samples_per_second == 48000, "Expect the session read rate to have changed to 48000");
+
+			switch_channel_set_variable(fst_channel, "null_switch_rate", "8000");
+			switch_ivr_sleep(fst_session, 1000, SWITCH_TRUE, NULL);
+
+			switch_core_session_get_read_impl(fst_session, &read_impl);
+			fst_xcheck(read_impl.actual_samples_per_second == 8000, "Expect the session read rate to have changed to 8000");
+
+			SWITCH_STANDARD_STREAM(stream);
+			status = switch_api_execute("test_file_stall", "off", NULL, &stream);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			fst_requires(stream.data && !strncmp((char *)stream.data, "+OK", 3));
+			switch_safe_free(stream.data);
+
+			/* let the backlog drain across all three boundaries before the recording stops */
+			switch_ivr_sleep(fst_session, 1000, SWITCH_TRUE, NULL);
+
+			status = switch_ivr_stop_record_session(fst_session, record_filename);
+			fst_xcheck(status == SWITCH_STATUS_SUCCESS, "Expect switch_ivr_stop_record_session() to return SWITCH_STATUS_SUCCESS");
+
+			fst_requires(switch_file_exists(record_filename, fst_pool) == SWITCH_STATUS_SUCCESS);
+			unlink(record_filename);
+
+			samples_str = switch_channel_get_variable(fst_channel, "record_samples");
+			fst_requires(samples_str != NULL);
+			file_samples = atoi(samples_str);
+
+			duration_ms_str = switch_channel_get_variable(fst_channel, "record_ms");
+			fst_requires(duration_ms_str != NULL);
+			duration_ms = atoi(duration_ms_str);
+
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(fst_session), SWITCH_LOG_NOTICE, "Recording holds %d samples (%d ms), expected about %d\n",
+							  file_samples, duration_ms, expected_samples);
+
+			fst_xcheck(file_samples > expected_samples * 0.9 && file_samples < expected_samples * 1.1,
+					   "Expect the recording to hold four seconds of audio after two queued read rate changes");
+			fst_xcheck(duration_ms > 3600 && duration_ms < 4400, "Expect record_ms to report about four seconds");
+		}
+		FST_SESSION_END()
 	}
 	FST_SUITE_END()
 }

@@ -484,6 +484,25 @@ SWITCH_DECLARE(switch_status_t) switch_core_perform_file_open(const char *file, 
 	return status;
 }
 
+/* the input rate can change while the file is open, so drop a resampler built for
+   rates that no longer apply and let the next read or write make the right one */
+static void check_resampler(switch_file_handle_t *fh)
+{
+	if (!fh->resampler) {
+		return;
+	}
+
+	if (fh->native_rate != fh->samplerate &&
+		fh->resampler->from_rate == (int) fh->native_rate && fh->resampler->to_rate == (int) fh->samplerate) {
+		return;
+	}
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Dropping resampler %d->%d, rate is now %d->%d\n",
+					  fh->resampler->from_rate, fh->resampler->to_rate, fh->native_rate, fh->samplerate);
+
+	switch_resample_destroy(&fh->resampler);
+}
+
 SWITCH_DECLARE(switch_status_t) switch_core_file_read(switch_file_handle_t *fh, void *data, switch_size_t *len)
 {
 	switch_status_t status = SWITCH_STATUS_FALSE;
@@ -572,6 +591,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_file_read(switch_file_handle_t *fh, 
 		}
 	}
 
+	check_resampler(fh);
+
 	if (!switch_test_flag(fh, SWITCH_FILE_NATIVE) && fh->native_rate != fh->samplerate) {
 		if (!fh->resampler) {
 			if (switch_resample_create(&fh->resampler,
@@ -624,6 +645,7 @@ SWITCH_DECLARE(switch_bool_t) switch_core_file_has_video(switch_file_handle_t *f
 SWITCH_DECLARE(switch_status_t) switch_core_file_write(switch_file_handle_t *fh, void *data, switch_size_t *len)
 {
 	switch_size_t orig_len = *len;
+	switch_size_t write_len;
 
 	switch_assert(fh != NULL);
 	switch_assert(fh->file_interface != NULL);
@@ -658,6 +680,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_file_write(switch_file_handle_t *fh,
 		switch_mux_channels((int16_t *) data, *len, fh->real_channels, fh->channels);
 	}
 
+
+	check_resampler(fh);
 
 	if (!switch_test_flag(fh, SWITCH_FILE_NATIVE) && fh->native_rate != fh->samplerate) {
 		if (!fh->resampler) {
@@ -694,6 +718,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_file_write(switch_file_handle_t *fh,
 		return SWITCH_STATUS_SUCCESS;
 	}
 
+	/* count what goes into the file, not what was handed to us: after a rate change
+	   the input has no single rate to read samples_out back with */
+	write_len = *len;
 
 	if (fh->pre_buffer) {
 		switch_size_t rlen, blen;
@@ -720,12 +747,12 @@ SWITCH_DECLARE(switch_status_t) switch_core_file_write(switch_file_handle_t *fh,
 				}
 			}
 		}
-		fh->samples_out += orig_len;
+		fh->samples_out += write_len;
 		return status;
 	} else {
 		switch_status_t status;
 		if ((status = fh->file_interface->file_write(fh, data, len)) == SWITCH_STATUS_SUCCESS) {
-			fh->samples_out += orig_len;
+			fh->samples_out += write_len;
 		}
 		return status;
 	}
