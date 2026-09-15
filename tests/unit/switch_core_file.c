@@ -224,6 +224,56 @@ FST_CORE_BEGIN("./conf")
 		}
 		FST_TEST_END()
 
+
+		/* the recorder updates fh->native_rate when the codec of the recorded leg changes
+		   rate, so writes have to follow it instead of reusing the first resampler */
+		FST_TEST_BEGIN(test_switch_core_file_write_native_rate_change)
+		{
+			switch_status_t status = SWITCH_STATUS_FALSE;
+			switch_file_handle_t fhw = { 0 };
+			switch_file_handle_t fhr = { 0 };
+			static char filename[] = "/tmp/fs_write_native_rate_change_unit_test.wav";
+			int16_t *buf;
+			switch_size_t len;
+			uint32_t file_samples, expected_samples = 2 * 11025; /* one second at 16000 plus one second at 8000 */
+			int i;
+
+			switch_zmalloc(buf, 320 * sizeof(int16_t));
+
+			status = switch_core_file_open(&fhw, filename, 1, 11025, SWITCH_FILE_FLAG_WRITE | SWITCH_FILE_DATA_SHORT, NULL);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+
+			/* one second of 16000 Hz input, in 20ms frames */
+			fhw.native_rate = 16000;
+			for (i = 0; i < 50; i++) {
+				len = 320;
+				fst_requires(switch_core_file_write(&fhw, buf, &len) == SWITCH_STATUS_SUCCESS);
+			}
+
+			/* the far end switches to an 8000 Hz codec: one more second, now in 8000 Hz frames */
+			fhw.native_rate = 8000;
+			for (i = 0; i < 50; i++) {
+				len = 160;
+				fst_requires(switch_core_file_write(&fhw, buf, &len) == SWITCH_STATUS_SUCCESS);
+			}
+
+			status = switch_core_file_close(&fhw);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+
+			status = switch_core_file_open(&fhr, filename, 1, 11025, SWITCH_FILE_FLAG_READ | SWITCH_FILE_DATA_SHORT, NULL);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			file_samples = fhr.samples;
+			fst_requires(switch_core_file_close(&fhr) == SWITCH_STATUS_SUCCESS);
+
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "File holds %u samples, expected about %u\n", file_samples, expected_samples);
+			fst_xcheck(file_samples > expected_samples * 0.98 && file_samples < expected_samples * 1.02,
+					   "Expect the file to hold two seconds of audio after the input rate changes");
+
+			switch_safe_free(buf);
+			unlink(filename);
+		}
+		FST_TEST_END()
+
 	}
 	FST_SUITE_END()
 }
