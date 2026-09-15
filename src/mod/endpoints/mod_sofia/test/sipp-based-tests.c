@@ -33,6 +33,12 @@
 #include <switch.h>
 #include <test/switch_test.h>
 #include <stdlib.h>
+#include <errno.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
+
+extern char **environ;
 
 int test_success = 0;
 int test_sofia_debug = 1;
@@ -167,6 +173,72 @@ static void kill_sipp(void)
 	switch_sleep(1000 * 1000);
 }
 
+/* Keep this peer in the foreground so its exit status belongs to this test. */
+static int start_t38_sipp(const char *ip, pid_t *pid)
+{
+	char *target = switch_mprintf("%s:5080", ip);
+	char *argv[] = {
+		"sipp", target, "-nr", "-p", "5062", "-m", "1", "-s", "1212121212",
+		"-recv_timeout", "10000", "-timeout", "15s", "-timeout_error", "-nostdin",
+		"-sf", "sipp-scenarios/uac_t38_identical_refresh.xml", "-trace_err", NULL
+	};
+	int result = posix_spawnp(pid, "sipp", NULL, NULL, argv, environ);
+
+	switch_safe_free(target);
+	return result;
+}
+
+/* Return 1 only after reaping the owned child; 0 is timeout, -1 is wait failure. */
+static int wait_t38_sipp(pid_t *pid, int *status, int timeout_ms)
+{
+	int remaining = timeout_ms / 100;
+	pid_t result;
+
+	do {
+		result = waitpid(*pid, status, WNOHANG);
+		if (result == *pid) {
+			*pid = -1;
+			return 1;
+		}
+		if (result < 0 && errno != EINTR) {
+			if (errno == ECHILD) {
+				*pid = -1;
+			}
+			return -1;
+		}
+		if (remaining) {
+			switch_sleep(100 * 1000);
+		}
+	} while (remaining--);
+
+	return 0;
+}
+
+static int stop_t38_sipp(pid_t *pid)
+{
+	int status;
+
+	if (*pid <= 0) {
+		return 1;
+	}
+	/* Never signal a process by name: other tests may have their own SIPp. */
+	if (wait_t38_sipp(pid, &status, 0) == 1) {
+		return 1;
+	}
+	if (*pid <= 0) {
+		return 0;
+	}
+	kill(*pid, SIGTERM);
+	if (wait_t38_sipp(pid, &status, 2000) == 1) {
+		return 1;
+	}
+	if (*pid <= 0) {
+		return 0;
+	}
+	kill(*pid, SIGKILL);
+	return wait_t38_sipp(pid, &status, 2000) == 1;
+}
+
 static void show_event(switch_event_t *event) {
 	char *str;
 	/*print the event*/
@@ -233,16 +305,23 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 
 			switch_core_set_variable("spawn_instead_of_system", "true");
 
-			fst_requires_module("mod_sndfile");
-			fst_requires_module("mod_voicemail");
-			fst_requires_module("mod_sofia");
-			fst_requires_module("mod_loopback");
-			fst_requires_module("mod_console");
-			fst_requires_module("mod_dptools");
-			fst_requires_module("mod_dialplan_xml");
-			fst_requires_module("mod_commands");
-			fst_requires_module("mod_say_en");
-			fst_requires_module("mod_tone_stream");
+			if (getenv("FST_T38_ONLY")) {
+				fst_requires_module("mod_sofia");
+				fst_requires_module("mod_dialplan_xml");
+				fst_requires_module("mod_dptools");
+				fst_requires_module("mod_commands");
+			} else {
+				fst_requires_module("mod_sndfile");
+				fst_requires_module("mod_voicemail");
+				fst_requires_module("mod_sofia");
+				fst_requires_module("mod_loopback");
+				fst_requires_module("mod_console");
+				fst_requires_module("mod_dptools");
+				fst_requires_module("mod_dialplan_xml");
+				fst_requires_module("mod_commands");
+				fst_requires_module("mod_say_en");
+				fst_requires_module("mod_tone_stream");
+			}
 
 		}
 		FST_SETUP_END()
@@ -304,6 +383,95 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 				fst_check(sdp_count == 1);
 				/* sipp should timeout, attempt kill, just in case.*/
 				kill_sipp();
+			}
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(t38_identical_session_refresh_keeps_image)
+		{
+			const char *local_ip_v4 = switch_core_get_variable("local_ip_v4");
+			switch_core_session_t *session = NULL;
+			switch_channel_t *channel = NULL;
+			switch_t38_options_t *t38_options = NULL;
+			switch_core_session_message_t msg = { 0 };
+			switch_status_t status;
+			char uuid[100] = "";
+			pid_t sipp_pid = -1;
+			int sipp_status = 0;
+			int result;
+			int loop_count = 200;
+			switch_bool_t t38_active = SWITCH_FALSE;
+
+			result = start_t38_sipp(local_ip_v4, &sipp_pid);
+			fst_xcheck(result == 0, "Unable to start SIPp T.38 peer");
+			if (result != 0) {
+				/* posix_spawnp does not define the PID on failure. */
+				sipp_pid = -1;
+				goto t38_cleanup;
+			}
+
+			test_wait_for_uuid(uuid);
+			fst_xcheck(!zstr(uuid), "SIPp call did not create a FreeSWITCH channel");
+			if (zstr(uuid)) {
+				goto t38_cleanup;
+			}
+			session = switch_core_session_locate(uuid);
+			fst_xcheck(session != NULL, "Unable to locate SIPp call session");
+			if (!session) {
+				goto t38_cleanup;
+			}
+
+			channel = switch_core_session_get_channel(session);
+			status = switch_channel_wait_for_flag(channel, CF_ANSWERED, SWITCH_TRUE, 5000, NULL);
+			fst_xcheck(status == SWITCH_STATUS_SUCCESS, "Initial audio call was not answered");
+			if (status != SWITCH_STATUS_SUCCESS) {
+				goto t38_cleanup;
+			}
+
+			switch_channel_set_variable(channel, "fax_enable_t38", "true");
+			/* Model the fax application's capability, not successful negotiation. */
+			switch_channel_set_app_flag_key("T38", channel, CF_APP_T38_POSSIBLE);
+			t38_options = switch_core_session_alloc(session, sizeof(*t38_options));
+			t38_options->T38FaxVersion = 0;
+			t38_options->T38MaxBitRate = 14400;
+			t38_options->T38FaxFillBitRemoval = 1;
+			t38_options->T38FaxRateManagement = switch_core_session_strdup(session, "transferredTCF");
+			t38_options->T38FaxMaxBuffer = 2000;
+			t38_options->T38FaxMaxDatagram = 400;
+			t38_options->T38FaxUdpEC = switch_core_session_strdup(session, "t38UDPRedundancy");
+			switch_channel_set_private(channel, "t38_options", t38_options);
+			switch_channel_set_app_flag_key("T38", channel, CF_APP_T38_REQ);
+
+			msg.from = __FILE__;
+			msg.message_id = SWITCH_MESSAGE_INDICATE_REQUEST_IMAGE_MEDIA;
+			status = switch_core_session_receive_message(session, &msg);
+			fst_xcheck(status == SWITCH_STATUS_SUCCESS, "Failed to request T.38 image media");
+			if (status != SWITCH_STATUS_SUCCESS) {
+				goto t38_cleanup;
+			}
+
+			while (loop_count-- && !switch_channel_down_nosig(channel)) {
+				if (switch_channel_test_flag(channel, CF_IMAGE_SDP) &&
+					switch_channel_test_app_flag_key("T38", channel, CF_APP_T38)) {
+					t38_active = SWITCH_TRUE;
+					break;
+				}
+				switch_sleep(10 * 1000);
+			}
+			fst_xcheck(t38_active, "T.38 negotiation never became active");
+
+			result = wait_t38_sipp(&sipp_pid, &sipp_status, 15000);
+			fst_xcheck(result == 1, "SIPp did not finish within the T.38 test deadline");
+			fst_xcheck(result == 1 && WIFEXITED(sipp_status) && WEXITSTATUS(sipp_status) == 0,
+					"SIPp T.38 scenario failed; inspect uac_t38_identical_refresh_*_errors.log");
+
+		 t38_cleanup:
+			fst_xcheck(stop_t38_sipp(&sipp_pid), "Unable to reap the owned SIPp process");
+			if (session) {
+				if (!switch_channel_down_nosig(channel)) {
+					switch_channel_hangup(channel, SWITCH_CAUSE_NORMAL_CLEARING);
+				}
+				switch_core_session_rwunlock(session);
 			}
 		}
 		FST_TEST_END()

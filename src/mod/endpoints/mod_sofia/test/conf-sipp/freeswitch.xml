@@ -5,7 +5,7 @@
     <configuration name="modules.conf" description="Modules">
       <modules>
         <load module="mod_console"/>
-        <load module="mod_sofia"/>
+        <!-- FST_MODULE_BEGIN loads mod_sofia from the build under test. -->
         <load module="mod_loopback"/>
         <load module="mod_dptools"/>
         <load module="mod_dialplan_xml"/>
