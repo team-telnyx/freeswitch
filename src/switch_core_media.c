@@ -49,6 +49,7 @@ static void switch_core_media_set_r_sdp_codec_string(switch_core_session_t *sess
 static void gen_ice(switch_core_session_t *session, switch_media_type_t type, const char *ip, switch_port_t port);
 static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t type, sdp_session_t *sdp, sdp_media_t *m, switch_sdp_type_t sdp_type);
 static switch_bool_t scm_should_use_m_port(switch_core_session_t *session, switch_rtp_engine_t *engine);
+static switch_bool_t switch_core_media_engine_owns_rtp(const switch_rtp_engine_t *engine);
 
 //#define GOOGLE_ICE
 #define RTCP_MUX
@@ -6552,6 +6553,7 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 	switch_bool_t check_ice_active_has_addr = SWITCH_FALSE;
 	const icand_t *selected_rtp_ice_candidate = NULL;
 	switch_rtp_pvt_ice_tuple_t check_ice_rtp_tuple = { 0 };
+	switch_bool_t video_topology_lock_held = SWITCH_FALSE;
 
 	check_ice_rtp_tuple.current_addr = engine->rtp_session ? switch_rtp_session_get_remote_addr(engine->rtp_session) : NULL;
 	if (engine->rtp_session && switch_rtp_pvt_get_ice_state(engine->rtp_session, IPR_RTP,
@@ -7162,7 +7164,13 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 		engine->new_ice = 0;
 	}
 
-	if (engine->new_ice) {
+	if (engine->new_ice && type == SWITCH_MEDIA_TYPE_VIDEO && engine->dtls_init_rwlock &&
+		switch_thread_rwlock_rdlock(engine->dtls_init_rwlock) == SWITCH_STATUS_SUCCESS) {
+		video_topology_lock_held = SWITCH_TRUE;
+	}
+
+	if (engine->new_ice && (type != SWITCH_MEDIA_TYPE_VIDEO || video_topology_lock_held) &&
+		switch_core_media_engine_owns_rtp(engine)) {
 		if (switch_rtp_ready(engine->rtp_session) && engine->ice_in.cands[engine->ice_in.chosen[0]][0].ready) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_INFO, "RE-Activating %s ICE\n", type2str(type));
 
@@ -7301,6 +7309,10 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 
 		}
 
+	}
+
+	if (video_topology_lock_held) {
+		switch_thread_rwlock_unlock(engine->dtls_init_rwlock);
 	}
 
 	return ice_seen ? SWITCH_STATUS_SUCCESS : SWITCH_STATUS_BREAK;

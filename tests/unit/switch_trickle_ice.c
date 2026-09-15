@@ -575,6 +575,142 @@ FCT_BGN()
 		}
 		FCT_TEST_END();
 
+		FCT_TEST_BGN(bundled_video_reinvite_preserves_audio_owned_ice_credentials)
+		{
+			switch_core_session_t *session = NULL;
+			switch_channel_t *channel = NULL;
+			switch_media_handle_t *smh = NULL;
+			switch_rtp_t *audio_rtp = NULL;
+			switch_rtp_t *video_rtp = NULL;
+			void *sdp_session = NULL;
+			sdp_parser_t *parser = NULL;
+			switch_status_t status;
+			uint8_t match;
+			uint8_t proceed = 0;
+			char advertised_audio_ufrag[256] = "";
+			char advertised_audio_pwd[256] = "";
+			char advertised_video_ufrag[256] = "";
+			char advertised_video_pwd[256] = "";
+			char active_ice_user[513] = "";
+			char active_local_pwd[256] = "";
+			char active_remote_pwd[256] = "";
+			const char *active_local_ufrag;
+			const char *local_sdp;
+			switch_bool_t has_addr = SWITCH_FALSE;
+			const char *initial_sdp =
+				"v=0\n"
+				"o=- 1683118194 1683118195 IN IP4 0.0.0.0\n"
+				"s=-\n"
+				"t=0 0\n"
+				"a=group:BUNDLE audio video\n"
+				"a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid\n"
+				"m=audio 18215 UDP/TLS/RTP/SAVPF 0\n"
+				"c=IN IP4 127.0.0.1\n"
+				"a=ice-ufrag:bundleRemoteUfrag1\n"
+				"a=ice-pwd:bundleRemotePassword1234561\n"
+				"a=ice-options:trickle\n"
+				"a=candidate:1 1 udp 2130706431 127.0.0.1 18215 typ host\n"
+				"a=rtcp-mux\n"
+				"a=setup:active\n"
+				"a=rtpmap:0 PCMU/8000\n"
+				"a=sendrecv\n"
+				"a=fingerprint:sha-256 17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4\n"
+				"a=mid:audio\n"
+				"m=video 18215 UDP/TLS/RTP/SAVPF 31\n"
+				"c=IN IP4 127.0.0.1\n"
+				"a=ice-ufrag:bundleRemoteUfrag1\n"
+				"a=ice-pwd:bundleRemotePassword1234561\n"
+				"a=ice-options:trickle\n"
+				"a=candidate:1 1 udp 2130706431 127.0.0.1 18215 typ host\n"
+				"a=rtcp-mux\n"
+				"a=setup:active\n"
+				"a=rtpmap:31 PROXY-VID/90000\n"
+				"a=sendrecv\n"
+				"a=fingerprint:sha-256 17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4\n"
+				"a=mid:video\n";
+			const char *restart_sdp =
+				"v=0\n"
+				"o=- 1683118194 1683118196 IN IP4 0.0.0.0\n"
+				"s=-\n"
+				"t=0 0\n"
+				"a=group:BUNDLE audio video\n"
+				"a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid\n"
+				"m=audio 18215 UDP/TLS/RTP/SAVPF 0\n"
+				"c=IN IP4 127.0.0.1\n"
+				"a=ice-ufrag:bundleRemoteUfrag2\n"
+				"a=ice-pwd:bundleRemotePassword1234562\n"
+				"a=ice-options:trickle\n"
+				"a=candidate:1 1 udp 2130706431 127.0.0.1 18215 typ host\n"
+				"a=rtcp-mux\n"
+				"a=setup:active\n"
+				"a=rtpmap:0 PCMU/8000\n"
+				"a=sendrecv\n"
+				"a=fingerprint:sha-256 17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4\n"
+				"a=mid:audio\n"
+				"m=video 18215 UDP/TLS/RTP/SAVPF 31\n"
+				"c=IN IP4 127.0.0.1\n"
+				"a=ice-ufrag:bundleRemoteUfrag2\n"
+				"a=ice-pwd:bundleRemotePassword1234562\n"
+				"a=ice-options:trickle\n"
+				"a=candidate:1 1 udp 2130706431 127.0.0.1 18215 typ host\n"
+				"a=rtcp-mux\n"
+				"a=setup:active\n"
+				"a=rtpmap:31 PROXY-VID/90000\n"
+				"a=sendrecv\n"
+				"a=fingerprint:sha-256 17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4\n"
+				"a=mid:video\n";
+
+			status = make_session_and_rtp_with_sdp_ex(&session, &audio_rtp, &sdp_session, &parser,
+				initial_sdp, "PCMU,PROXY-VID", SWITCH_TRUE, SWITCH_FALSE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS && session && !audio_rtp && sdp_session && parser);
+			channel = switch_core_session_get_channel(session);
+			smh = switch_core_session_get_media_handle(session);
+			fst_requires(channel != NULL && smh != NULL);
+			switch_channel_set_flag(channel, CF_VIDEO);
+			switch_channel_set_flag(channel, CF_VIDEO_POSSIBLE);
+			status = switch_core_media_choose_port(session, SWITCH_MEDIA_TYPE_VIDEO, 0);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+
+			switch_core_media_gen_local_sdp(session, SDP_ANSWER, NULL, 0, NULL, 0);
+			local_sdp = switch_channel_get_variable(channel, "rtp_local_sdp_str");
+			fst_requires(copy_sdp_media_attribute(local_sdp, "audio", "ice-ufrag", advertised_audio_ufrag,
+				sizeof(advertised_audio_ufrag)) == SWITCH_STATUS_SUCCESS);
+			fst_requires(copy_sdp_media_attribute(local_sdp, "audio", "ice-pwd", advertised_audio_pwd,
+				sizeof(advertised_audio_pwd)) == SWITCH_STATUS_SUCCESS);
+			fst_requires(copy_sdp_media_attribute(local_sdp, "video", "ice-ufrag", advertised_video_ufrag,
+				sizeof(advertised_video_ufrag)) == SWITCH_STATUS_SUCCESS);
+			fst_requires(copy_sdp_media_attribute(local_sdp, "video", "ice-pwd", advertised_video_pwd,
+				sizeof(advertised_video_pwd)) == SWITCH_STATUS_SUCCESS);
+			fst_check_string_equals(advertised_video_ufrag, advertised_audio_ufrag);
+			fst_check_string_equals(advertised_video_pwd, advertised_audio_pwd);
+
+			status = switch_core_media_activate_rtp(session);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			audio_rtp = switch_core_media_get_rtp_session(session, SWITCH_MEDIA_TYPE_AUDIO);
+			video_rtp = switch_core_media_get_rtp_session(session, SWITCH_MEDIA_TYPE_VIDEO);
+			fst_requires(audio_rtp != NULL && video_rtp == audio_rtp);
+			fst_check(switch_core_media_video_is_bundled(session) == SWITCH_TRUE);
+
+			switch_channel_set_flag(channel, CF_REINVITE);
+			match = switch_core_media_negotiate_sdp(session, restart_sdp, &proceed, SDP_OFFER);
+			fst_requires(match != 0);
+
+			status = switch_rtp_pvt_get_ice_state(audio_rtp, IPR_RTP,
+				active_ice_user, sizeof(active_ice_user), active_local_pwd, sizeof(active_local_pwd),
+				active_remote_pwd, sizeof(active_remote_pwd), &has_addr);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			active_local_ufrag = strchr(active_ice_user, ':');
+			fst_requires(active_local_ufrag != NULL && active_local_ufrag[1] != '\0');
+			active_local_ufrag++;
+			fst_check(!strncmp(active_ice_user, "bundleRemoteUfrag2:", strlen("bundleRemoteUfrag2:")));
+			fst_check_string_equals(active_local_ufrag, advertised_audio_ufrag);
+			fst_check_string_equals(active_local_pwd, advertised_audio_pwd);
+			fst_check_string_equals(active_remote_pwd, "bundleRemotePassword1234562");
+
+			cleanup_session_media_and_sdp(session, sdp_session, parser);
+		}
+		FCT_TEST_END();
+
 		FCT_TEST_BGN(rtcp_mux_prflx_late_srflx_preserves_inflight_dtls)
 		{
 			switch_core_session_t *session = NULL;
