@@ -2888,7 +2888,11 @@ typedef enum {
 	SCFC_FLUSH_AUDIO,
 	SCFC_PAUSE_READ,
 	SCFC_PAUSE_WRITE,
-	SCFC_RESUME_WRITE
+	SCFC_RESUME_WRITE,
+	/* Abort any I/O in flight on this handle and fail subsequent I/O rather than
+	 * blocking, so a caller waiting on the writer can stop waiting.  Formats that do
+	 * not implement it simply ignore it. */
+	SCFC_ABORT_IO
 } switch_file_command_t;
 
 

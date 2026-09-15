@@ -163,5 +163,11 @@ enum AVColorRange {
 <configuration name="avformat.conf" description="AVFormat Config">
   <settings>
       <param name="colorspace" value="1"/>
+
+      <!-- Deliberately short, so the network tests below finish quickly and so a
+           regression that stops applying the budget shows up as a long test rather
+           than a passing one. -->
+      <param name="network-rw-timeout" value="1000"/>
+      <param name="network-connect-timeout" value="1000"/>
   </settings>
 </configuration>
