@@ -2,6 +2,9 @@
 #define SWITCH_RTP_TEST_HOOKS
 #include <switch.h>
 #include <test/switch_test.h>
+#include <signal.h>
+#include <stdlib.h>
+#include <unistd.h>
 
 #ifndef MSG_CONFIRM
 #define MSG_CONFIRM 0
@@ -17,11 +20,22 @@ static switch_rtp_flag_t flags[SWITCH_RTP_FLAG_INVALID] = {0};
 const char *err = NULL;
 static const switch_payload_t TEST_PT = 8;
 #define TEST_MID_EXT_ID 10
+#define SOURCE_MID_EXT_ID 4
+#define TEST_MID_TOGGLE_TIMEOUT_SEC 15
 switch_rtp_packet_t rtp_packet;
 switch_frame_flag_t *frame_flags;
 switch_io_flag_t io_flags;
 switch_payload_t read_pt;
 int send_rtcp_test_success = 0;
+
+static void mid_toggle_timeout_handler(int signal_number)
+{
+	static const char message[] = "switch_rtp: MID toggle stress test timed out\n";
+
+	(void)signal_number;
+	(void)write(STDERR_FILENO, message, sizeof(message) - 1);
+	_exit(EXIT_FAILURE);
+}
 
 static int make_udp_sink(switch_port_t *port)
 {
@@ -48,6 +62,21 @@ static int make_udp_sink(switch_port_t *port)
 	return fd;
 }
 
+static switch_bool_t send_udp_packet(int fd, switch_port_t port, const uint8_t *packet, size_t packet_len)
+{
+	struct sockaddr_in addr;
+	ssize_t sent;
+
+	if (fd < 0 || !port || !packet || !packet_len) return SWITCH_FALSE;
+
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	addr.sin_port = htons(port);
+	sent = sendto(fd, packet, packet_len, 0, (const struct sockaddr *)&addr, sizeof(addr));
+	return sent == (ssize_t)packet_len ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
 static switch_bool_t recv_rtp_seq(int fd, uint16_t *seq, int timeout_ms)
 {
 	fd_set read_fds;
@@ -69,6 +98,92 @@ static switch_bool_t recv_rtp_seq(int fd, uint16_t *seq, int timeout_ms)
 	if (bytes < SWITCH_RTP_HEADER_LEN) return SWITCH_FALSE;
 
 	*seq = (uint16_t)(((uint16_t)packet[2] << 8) | packet[3]);
+	return SWITCH_TRUE;
+}
+
+static switch_bool_t recv_rtp_packet(int fd, uint8_t *packet, size_t packet_size, size_t *packet_len, int timeout_ms)
+{
+	fd_set read_fds;
+	struct timeval timeout;
+	ssize_t bytes;
+	int ready;
+
+	if (fd < 0 || !packet || !packet_size || !packet_len || timeout_ms < 0) return SWITCH_FALSE;
+	FD_ZERO(&read_fds);
+	FD_SET(fd, &read_fds);
+	timeout.tv_sec = timeout_ms / 1000;
+	timeout.tv_usec = (timeout_ms % 1000) * 1000;
+	ready = select(fd + 1, &read_fds, NULL, NULL, &timeout);
+	if (ready != 1) return SWITCH_FALSE;
+
+	bytes = recvfrom(fd, packet, packet_size, 0, NULL, NULL);
+	if (bytes < SWITCH_RTP_HEADER_LEN) return SWITCH_FALSE;
+	*packet_len = (size_t)bytes;
+	return SWITCH_TRUE;
+}
+
+typedef struct received_mid_packet_s {
+	switch_bool_t has_extension;
+	switch_bool_t has_complete_mid;
+	char mid[SWITCH_RTP_MID_MAX_LEN + 1];
+	size_t mid_len;
+	uint8_t payload;
+} received_mid_packet_t;
+
+static switch_bool_t recv_rtp_mid_packet(int fd, received_mid_packet_t *state, int timeout_ms)
+{
+	fd_set read_fds;
+	struct timeval timeout;
+	uint8_t packet[SWITCH_RTP_MAX_PACKET_LEN];
+	size_t offset, ext_data_bytes, ext_offset;
+	ssize_t bytes;
+	int ready;
+
+	if (fd < 0 || !state || timeout_ms < 0) return SWITCH_FALSE;
+	memset(state, 0, sizeof(*state));
+
+	FD_ZERO(&read_fds);
+	FD_SET(fd, &read_fds);
+	timeout.tv_sec = timeout_ms / 1000;
+	timeout.tv_usec = (timeout_ms % 1000) * 1000;
+	ready = select(fd + 1, &read_fds, NULL, NULL, &timeout);
+	if (ready != 1) return SWITCH_FALSE;
+
+	bytes = recvfrom(fd, packet, sizeof(packet), 0, NULL, NULL);
+	if (bytes < SWITCH_RTP_HEADER_LEN) return SWITCH_FALSE;
+
+	offset = SWITCH_RTP_HEADER_LEN + ((size_t)(packet[0] & 0x0f) * sizeof(uint32_t));
+	if (offset > (size_t)bytes) return SWITCH_FALSE;
+	state->has_extension = packet[0] & 0x10 ? SWITCH_TRUE : SWITCH_FALSE;
+	if (state->has_extension) {
+		if (offset + 4 > (size_t)bytes || packet[offset] != 0xbe || packet[offset + 1] != 0xde) return SWITCH_FALSE;
+		ext_data_bytes = (size_t)(((uint16_t)packet[offset + 2] << 8) | packet[offset + 3]) * 4;
+		offset += 4;
+		if (offset + ext_data_bytes > (size_t)bytes) return SWITCH_FALSE;
+		for (ext_offset = 0; ext_offset < ext_data_bytes;) {
+			uint8_t element = packet[offset + ext_offset];
+			uint8_t ext_id;
+			size_t ext_len;
+
+			if (!element) {
+				ext_offset++;
+				continue;
+			}
+			ext_id = (uint8_t)(element >> 4);
+			if (ext_id == 15) break;
+			ext_len = (size_t)(element & 0x0f) + 1;
+			if (ext_offset + 1 + ext_len > ext_data_bytes) return SWITCH_FALSE;
+			if (ext_id == TEST_MID_EXT_ID && ext_len <= SWITCH_RTP_MID_MAX_LEN) {
+				memcpy(state->mid, packet + offset + ext_offset + 1, ext_len);
+				state->mid_len = ext_len;
+				state->has_complete_mid = SWITCH_TRUE;
+			}
+			ext_offset += 1 + ext_len;
+		}
+		offset += ext_data_bytes;
+	}
+	if (offset >= (size_t)bytes) return SWITCH_FALSE;
+	state->payload = packet[offset];
 	return SWITCH_TRUE;
 }
 
@@ -95,6 +210,97 @@ static void prepare_mid_write_packet(switch_rtp_packet_t *packet, switch_bool_t 
 	} else {
 		packet->body[0] = (char)0xaa;
 	}
+}
+
+static void prepare_peer_mid_write_packet(switch_rtp_packet_t *packet, uint32_t timestamp, uint8_t mid_ext_id)
+{
+	switch_rtp_hdr_ext_t *ext;
+
+	memset(packet, 0, sizeof(*packet));
+	packet->header.version = 2;
+	packet->header.pt = TEST_PT;
+	packet->header.ts = htonl(timestamp);
+	packet->header.ssrc = htonl(0x11223344);
+	packet->header.x = 1;
+	ext = (switch_rtp_hdr_ext_t *)packet->body;
+	ext->profile = htons(0xBEDE);
+	ext->length = htons(1);
+	packet->body[4] = (char)(mid_ext_id << 4);
+	packet->body[5] = '1';
+	packet->body[8] = (char)0xaa;
+}
+
+static void prepare_peer_audio_level_and_mid_write_packet(switch_rtp_packet_t *packet, uint32_t timestamp, uint8_t mid_ext_id)
+{
+	switch_rtp_hdr_ext_t *ext;
+
+	memset(packet, 0, sizeof(*packet));
+	packet->header.version = 2;
+	packet->header.pt = TEST_PT;
+	packet->header.ts = htonl(timestamp);
+	packet->header.ssrc = htonl(0x11223344);
+	packet->header.x = 1;
+	ext = (switch_rtp_hdr_ext_t *)packet->body;
+	ext->profile = htons(0xBEDE);
+	ext->length = htons(2);
+	packet->body[4] = 0x10;
+	packet->body[5] = 0x55;
+	packet->body[6] = (char)(mid_ext_id << 4);
+	packet->body[7] = '1';
+	packet->body[12] = (char)0xaa;
+}
+
+static void prepare_peer_audio_level_write_packet(switch_rtp_packet_t *packet, uint32_t timestamp)
+{
+	switch_rtp_hdr_ext_t *ext;
+
+	memset(packet, 0, sizeof(*packet));
+	packet->header.version = 2;
+	packet->header.pt = TEST_PT;
+	packet->header.ts = htonl(timestamp);
+	packet->header.ssrc = htonl(0x11223344);
+	packet->header.x = 1;
+	ext = (switch_rtp_hdr_ext_t *)packet->body;
+	ext->profile = htons(0xBEDE);
+	ext->length = htons(1);
+	packet->body[4] = 0;
+	packet->body[5] = 0x10;
+	packet->body[6] = 0x55;
+	packet->body[8] = (char)0xaa;
+}
+
+typedef struct mid_toggle_context_s {
+	switch_rtp_t *rtp_session;
+	int iterations;
+	volatile int failed;
+} mid_toggle_context_t;
+
+static void *SWITCH_THREAD_FUNC toggle_mid_state(switch_thread_t *thread, void *obj)
+{
+	mid_toggle_context_t *context = (mid_toggle_context_t *)obj;
+	int i;
+
+	(void)thread;
+	for (i = 0; i < context->iterations; i++) {
+		if (switch_rtp_configure_mid(context->rtp_session, 0, NULL, TEST_MID_EXT_ID) != SWITCH_STATUS_SUCCESS ||
+			switch_rtp_test_set_received_mid(context->rtp_session, "video") != SWITCH_STATUS_SUCCESS) {
+			context->failed = 1;
+			break;
+		}
+		switch_yield(10);
+		if (switch_rtp_configure_mid(context->rtp_session, TEST_MID_EXT_ID, "audio", TEST_MID_EXT_ID) != SWITCH_STATUS_SUCCESS) {
+			context->failed = 1;
+			break;
+		}
+		switch_yield(10);
+		if (switch_rtp_disable_mid(context->rtp_session) != SWITCH_STATUS_SUCCESS) {
+			context->failed = 1;
+			break;
+		}
+		switch_yield(10);
+	}
+
+	return NULL;
 }
 
 static void show_event(switch_event_t *event) {
@@ -160,11 +366,9 @@ FST_TEARDOWN_END()
 	{
 		switch_memory_pool_t *test_pool = NULL;
 		switch_rtp_t *mid_rtp = NULL;
-		switch_socket_t *send_sock = NULL;
-		switch_sockaddr_t *send_bind_addr = NULL, *rtp_addr = NULL, *local_sa = NULL;
 		switch_rtp_flag_t mid_flags[SWITCH_RTP_FLAG_INVALID] = {0};
 		const char *mid_err = NULL;
-		const char *mid = NULL;
+		char mid[SWITCH_RTP_MID_MAX_LEN + 1] = "";
 		switch_frame_t frame = { 0 };
 		switch_frame_flag_t read_flags = SFF_NONE;
 		uint8_t read_buf[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
@@ -172,8 +376,16 @@ FST_TEARDOWN_END()
 		switch_payload_t malformed_pt = 0;
 		switch_port_t local_port = 0;
 		switch_port_t remote_port = 0;
-		switch_size_t packet_len;
 		switch_status_t status;
+		int read_attempts = 0;
+		int send_fd = -1;
+		switch_jb_t *mid_jb = NULL;
+		switch_rtp_packet_t old_packet = { 0 }, new_packet = { 0 }, dequeued_packet = { 0 };
+		switch_size_t old_packet_len = 0, new_packet_len = 0, dequeued_packet_len = 0;
+		switch_size_t old_payload_offset = 0;
+		uint8_t forwarded_packet[SWITCH_RTP_MAX_PACKET_LEN] = { 0 };
+		size_t forwarded_len = 0;
+		int wrote;
 		uint8_t packet_with_mid[] = {
 			0x90, TEST_PT, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x11, 0x22, 0x33, 0x44,
 			0xbe, 0xde, 0x00, 0x01, (TEST_MID_EXT_ID << 4) | 0x00, '1', 0x00, 0x00,
@@ -215,54 +427,57 @@ FST_TEARDOWN_END()
 			0x80, TEST_PT, 0x00, 0x08, 0x00, 0x00, 0x00, 0x08, 0x11, 0x22, 0x33, 0x44,
 			0xee
 		};
+		uint8_t packet_mid_mapping_race[] = {
+			0x90, TEST_PT, 0x00, 0x09, 0x00, 0x00, 0x00, 0x09, 0x11, 0x22, 0x33, 0x44,
+			0xbe, 0xde, 0x00, 0x01, (TEST_MID_EXT_ID << 4) | 0x00, '1', 0x00, 0x00,
+			0xef
+		};
+		uint8_t packet_after_mapping_change[] = {
+			0x90, TEST_PT, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x0a, 0x11, 0x22, 0x33, 0x44,
+			0xbe, 0xde, 0x00, 0x01, (SOURCE_MID_EXT_ID << 4) | 0x00, '2', 0x00, 0x00,
+			0xf0
+		};
 
 		fst_requires(switch_core_new_memory_pool(&test_pool) == SWITCH_STATUS_SUCCESS);
 		local_port = switch_rtp_request_port(rx_host);
 		fst_requires(local_port > 0);
 
-		/* The unit-test conf exposes a single RTP port, so derive the sender port from an OS-assigned ephemeral bind rather than the shared allocator. */
-		fst_requires(switch_sockaddr_info_get(&send_bind_addr, rx_host, SWITCH_UNSPEC, 0, 0, test_pool) == SWITCH_STATUS_SUCCESS);
-		fst_requires(switch_socket_create(&send_sock, switch_sockaddr_get_family(send_bind_addr), SOCK_DGRAM, 0, test_pool) == SWITCH_STATUS_SUCCESS);
-		fst_requires(switch_socket_bind(send_sock, send_bind_addr) == SWITCH_STATUS_SUCCESS);
-		fst_requires(switch_socket_addr_get(&local_sa, SWITCH_FALSE, send_sock) == SWITCH_STATUS_SUCCESS);
-		remote_port = switch_sockaddr_get_port(local_sa);
-		fst_requires(remote_port > 0);
+		send_fd = make_udp_sink(&remote_port);
+		fst_requires(send_fd >= 0);
 
 		mid_rtp = switch_rtp_new(rx_host, local_port, tx_host, remote_port, TEST_PT, 8000, 20 * 1000, mid_flags, "soft", &mid_err, test_pool);
 		fst_requires(mid_rtp != NULL);
 		fst_requires(switch_rtp_ready(mid_rtp));
 		fst_check(switch_rtp_enable_mid_receive(mid_rtp, TEST_MID_EXT_ID) == SWITCH_STATUS_SUCCESS);
-		fst_check(switch_rtp_get_received_mid(mid_rtp) == NULL);
+		fst_check(switch_rtp_copy_received_mid(mid_rtp, mid, sizeof(mid)) == SWITCH_STATUS_FALSE);
 		switch_rtp_clear_flag(mid_rtp, SWITCH_RTP_FLAG_PAUSE);
 
-		fst_requires(switch_sockaddr_info_get(&rtp_addr, rx_host, SWITCH_UNSPEC, local_port, 0, test_pool) == SWITCH_STATUS_SUCCESS);
-
-		packet_len = sizeof(packet_with_mid);
-		fst_requires(switch_socket_sendto(send_sock, rtp_addr, 0, (const char *) packet_with_mid, &packet_len) == SWITCH_STATUS_SUCCESS);
-		status = switch_rtp_zerocopy_read_frame(mid_rtp, &frame, SWITCH_IO_FLAG_NONE);
-		fst_requires(status == SWITCH_STATUS_SUCCESS);
-		mid = switch_rtp_get_received_mid(mid_rtp);
-		fst_requires(mid != NULL);
+		fst_requires(send_udp_packet(send_fd, local_port, packet_with_mid, sizeof(packet_with_mid)));
+		do {
+			memset(&frame, 0, sizeof(frame));
+			status = switch_rtp_zerocopy_read_frame(mid_rtp, &frame, SWITCH_IO_FLAG_NONE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			read_attempts++;
+			if (switch_test_flag(&frame, SFF_CNG) && read_attempts < 3) {
+				fst_requires(send_udp_packet(send_fd, local_port, packet_with_mid, sizeof(packet_with_mid)));
+			}
+		} while (switch_test_flag(&frame, SFF_CNG) && read_attempts < 3);
+		fst_requires(!switch_test_flag(&frame, SFF_CNG));
+		fst_check(frame.rtp_extensions.mid == TEST_MID_EXT_ID);
+		fst_requires(switch_rtp_copy_received_mid(mid_rtp, mid, sizeof(mid)) == SWITCH_STATUS_SUCCESS);
 		fst_check(!strcmp(mid, "1"));
 
-		packet_len = sizeof(packet_padding_before_mid);
-		fst_requires(switch_socket_sendto(send_sock, rtp_addr, 0, (const char *) packet_padding_before_mid, &packet_len) == SWITCH_STATUS_SUCCESS);
+		fst_requires(send_udp_packet(send_fd, local_port, packet_padding_before_mid, sizeof(packet_padding_before_mid)));
 		status = switch_rtp_zerocopy_read_frame(mid_rtp, &frame, SWITCH_IO_FLAG_NONE);
 		fst_requires(status == SWITCH_STATUS_SUCCESS);
-		mid = switch_rtp_get_received_mid(mid_rtp);
-		fst_requires(mid != NULL);
+		fst_requires(switch_rtp_copy_received_mid(mid_rtp, mid, sizeof(mid)) == SWITCH_STATUS_SUCCESS);
 		fst_check(!strcmp(mid, "1"));
 
-		packet_len = sizeof(packet_malformed_mid_ext);
-		fst_requires(switch_socket_sendto(send_sock, rtp_addr, 0, (const char *) packet_malformed_mid_ext, &packet_len) == SWITCH_STATUS_SUCCESS);
-		packet_len = sizeof(packet_truncated_csrc_ext);
-		fst_requires(switch_socket_sendto(send_sock, rtp_addr, 0, (const char *) packet_truncated_csrc_ext, &packet_len) == SWITCH_STATUS_SUCCESS);
-		packet_len = sizeof(packet_short_ext_header);
-		fst_requires(switch_socket_sendto(send_sock, rtp_addr, 0, (const char *) packet_short_ext_header, &packet_len) == SWITCH_STATUS_SUCCESS);
-		packet_len = sizeof(packet_oversized_ext_block);
-		fst_requires(switch_socket_sendto(send_sock, rtp_addr, 0, (const char *) packet_oversized_ext_block, &packet_len) == SWITCH_STATUS_SUCCESS);
-		packet_len = sizeof(packet_malformed_padding);
-		fst_requires(switch_socket_sendto(send_sock, rtp_addr, 0, (const char *) packet_malformed_padding, &packet_len) == SWITCH_STATUS_SUCCESS);
+		fst_requires(send_udp_packet(send_fd, local_port, packet_malformed_mid_ext, sizeof(packet_malformed_mid_ext)));
+		fst_requires(send_udp_packet(send_fd, local_port, packet_truncated_csrc_ext, sizeof(packet_truncated_csrc_ext)));
+		fst_requires(send_udp_packet(send_fd, local_port, packet_short_ext_header, sizeof(packet_short_ext_header)));
+		fst_requires(send_udp_packet(send_fd, local_port, packet_oversized_ext_block, sizeof(packet_oversized_ext_block)));
+		fst_requires(send_udp_packet(send_fd, local_port, packet_malformed_padding, sizeof(packet_malformed_padding)));
 
 		/* Non-zero id=0 nibble is malformed padding, but the media packet is still
 		 * usable. The extension parser should stop parsing, clear remote MID, and
@@ -270,37 +485,321 @@ FST_TEARDOWN_END()
 		memset(&frame, 0, sizeof(frame));
 		status = switch_rtp_zerocopy_read_frame(mid_rtp, &frame, SWITCH_IO_FLAG_NONE);
 		fst_requires(status == SWITCH_STATUS_SUCCESS);
-		fst_check(switch_rtp_get_received_mid(mid_rtp) == NULL);
+		fst_check(switch_rtp_copy_received_mid(mid_rtp, mid, sizeof(mid)) == SWITCH_STATUS_FALSE);
 		fst_check(frame.datalen == 1);
 		fst_check(((uint8_t *) frame.data)[0] == 0xaa);
 
-		packet_len = sizeof(packet_reserved_ext_id);
-		fst_requires(switch_socket_sendto(send_sock, rtp_addr, 0, (const char *) packet_reserved_ext_id, &packet_len) == SWITCH_STATUS_SUCCESS);
+		fst_requires(send_udp_packet(send_fd, local_port, packet_reserved_ext_id, sizeof(packet_reserved_ext_id)));
 
 		/* id=15 is reserved in the one-byte form. Treat it as end-of-parse, not
 		 * as a packet-level failure. */
 		memset(&frame, 0, sizeof(frame));
 		status = switch_rtp_zerocopy_read_frame(mid_rtp, &frame, SWITCH_IO_FLAG_NONE);
 		fst_requires(status == SWITCH_STATUS_SUCCESS);
-		fst_check(switch_rtp_get_received_mid(mid_rtp) == NULL);
+		fst_check(switch_rtp_copy_received_mid(mid_rtp, mid, sizeof(mid)) == SWITCH_STATUS_FALSE);
 		fst_check(frame.datalen == 1);
 		fst_check(((uint8_t *) frame.data)[0] == 0xbb);
 
-		packet_len = sizeof(packet_without_mid);
-		fst_requires(switch_socket_sendto(send_sock, rtp_addr, 0, (const char *) packet_without_mid, &packet_len) == SWITCH_STATUS_SUCCESS);
+		fst_requires(send_udp_packet(send_fd, local_port, packet_without_mid, sizeof(packet_without_mid)));
 
 		read_len = sizeof(read_buf);
 		status = switch_rtp_read(mid_rtp, read_buf, &read_len, &malformed_pt, &read_flags, SWITCH_IO_FLAG_NONE);
 		fst_requires(status == SWITCH_STATUS_SUCCESS);
-		fst_check(switch_rtp_get_received_mid(mid_rtp) == NULL);
+		fst_check(switch_rtp_copy_received_mid(mid_rtp, mid, sizeof(mid)) == SWITCH_STATUS_FALSE);
 		fst_check(read_len == 1);
 		fst_check(read_buf[0] == 0xee);
 
-		if (send_sock) {
-			switch_socket_close(send_sock);
-		}
+		/* Queue packets from two negotiation generations and prove the older packet
+		 * retains its source-leg MID id through jitter-buffer reordering. */
+		fst_check(switch_rtp_configure_mid(mid_rtp, 0, NULL, TEST_MID_EXT_ID) == SWITCH_STATUS_SUCCESS);
+		fst_requires(send_udp_packet(send_fd, local_port, packet_mid_mapping_race, sizeof(packet_mid_mapping_race)));
+		memset(&frame, 0, sizeof(frame));
+		status = switch_rtp_zerocopy_read_frame(mid_rtp, &frame, SWITCH_IO_FLAG_NONE);
+		fst_requires(status == SWITCH_STATUS_SUCCESS);
+		fst_check(frame.rtp_extensions.mid == TEST_MID_EXT_ID);
+		fst_requires(frame.packet != NULL);
+		old_packet = *(switch_rtp_packet_t *)frame.packet;
+		old_packet_len = frame.packetlen;
+		old_payload_offset = (switch_size_t)((uint8_t *)frame.data - (uint8_t *)frame.packet);
+		fst_check(old_packet.mid_ext_id == TEST_MID_EXT_ID);
+
+		fst_check(switch_rtp_configure_mid(mid_rtp, 0, NULL, SOURCE_MID_EXT_ID) == SWITCH_STATUS_SUCCESS);
+		fst_requires(send_udp_packet(send_fd, local_port, packet_after_mapping_change, sizeof(packet_after_mapping_change)));
+		memset(&frame, 0, sizeof(frame));
+		status = switch_rtp_zerocopy_read_frame(mid_rtp, &frame, SWITCH_IO_FLAG_NONE);
+		fst_requires(status == SWITCH_STATUS_SUCCESS);
+		fst_requires(frame.packet != NULL);
+		new_packet = *(switch_rtp_packet_t *)frame.packet;
+		new_packet_len = frame.packetlen;
+		fst_check(new_packet.mid_ext_id == SOURCE_MID_EXT_ID);
+
+		fst_requires(switch_jb_create(&mid_jb, SJB_AUDIO, 1, 2, test_pool) == SWITCH_STATUS_SUCCESS);
+		fst_requires(switch_jb_put_packet(mid_jb, &old_packet, old_packet_len) == SWITCH_STATUS_SUCCESS);
+		fst_requires(switch_jb_put_packet(mid_jb, &new_packet, new_packet_len) == SWITCH_STATUS_SUCCESS);
+		fst_requires(switch_jb_get_packet_by_seq(mid_jb, old_packet.header.seq,
+			&dequeued_packet, &dequeued_packet_len) == SWITCH_STATUS_SUCCESS);
+		fst_check(dequeued_packet.mid_ext_id == TEST_MID_EXT_ID);
+
+		dequeued_packet.ext = NULL;
+		dequeued_packet.ebody = NULL;
+		memset(&frame, 0, sizeof(frame));
+		frame.packet = &dequeued_packet;
+		frame.packetlen = dequeued_packet_len;
+		frame.data = (uint8_t *)&dequeued_packet + old_payload_offset;
+		frame.datalen = 1;
+		frame.payload = TEST_PT;
+		frame.timestamp = 9;
+		frame.flags = SFF_RAW_RTP | SFF_EXTERNAL;
+		frame.rtp_extensions.mid = dequeued_packet.mid_ext_id;
+		wrote = switch_rtp_write_frame(mid_rtp, &frame);
+		fst_requires(wrote > 0);
+		fst_requires(recv_rtp_packet(send_fd, forwarded_packet, sizeof(forwarded_packet), &forwarded_len, 1000));
+		fst_check(forwarded_len == SWITCH_RTP_HEADER_LEN + 1);
+		fst_check((forwarded_packet[0] & 0x10) == 0);
+		fst_check(forwarded_packet[SWITCH_RTP_HEADER_LEN] == 0xef);
+
+		fst_requires(switch_jb_get_packet_by_seq(mid_jb, new_packet.header.seq,
+			&dequeued_packet, &dequeued_packet_len) == SWITCH_STATUS_SUCCESS);
+		fst_check(dequeued_packet.mid_ext_id == SOURCE_MID_EXT_ID);
+		switch_jb_destroy(&mid_jb);
+
+		close(send_fd);
 		switch_rtp_destroy(&mid_rtp);
 		switch_core_destroy_memory_pool(&test_pool);
+	}
+	FST_TEST_END()
+
+	FST_TEST_BEGIN(test_disable_mid_stops_outbound_header_extension)
+	{
+		switch_memory_pool_t *test_pool = NULL;
+		switch_core_session_t *test_session = NULL;
+		switch_rtp_t *mid_rtp = NULL;
+		switch_rtp_flag_t mid_flags[SWITCH_RTP_FLAG_INVALID] = { 0 };
+		const char *mid_err = NULL;
+		switch_call_cause_t cause = SWITCH_CAUSE_NONE;
+		switch_port_t local_port = 0;
+		switch_port_t sink_port = 0;
+		switch_rtp_packet_t packet;
+		switch_frame_t frame = { 0 };
+		received_mid_packet_t received = { 0 };
+		mid_toggle_context_t toggle_context = { 0 };
+		switch_threadattr_t *thread_attr = NULL;
+		switch_thread_t *toggle_thread = NULL;
+		switch_status_t thread_status;
+		int sink_fd = -1;
+		int i;
+		int wrote;
+		int saw_stress_mid = 0;
+		int saw_stress_without_mid = 0;
+		int saw_received_mid = 0;
+		char received_mid[SWITCH_RTP_MID_MAX_LEN + 1] = "";
+		uint8_t forwarded_packet[SWITCH_RTP_MAX_PACKET_LEN];
+		size_t forwarded_len = 0;
+		const char *max_ascii_mid = "1234567890abcdef";
+		const char *too_long_ascii_mid = "1234567890abcdefg";
+		const char *max_utf8_mid = "\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9";
+		const char *too_long_utf8_mid = "\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9";
+
+		fst_requires(switch_ivr_originate(NULL, &test_session, &cause, "null/+15553334444", 2,
+			NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) == SWITCH_STATUS_SUCCESS);
+		fst_requires(test_session != NULL);
+		test_pool = switch_core_session_get_pool(test_session);
+		fst_requires(test_pool != NULL);
+		sink_fd = make_udp_sink(&sink_port);
+		fst_requires(sink_fd >= 0);
+		local_port = switch_rtp_request_port(rx_host);
+		fst_requires(local_port > 0);
+		mid_flags[SWITCH_RTP_FLAG_RAW_WRITE] = 1;
+		mid_rtp = switch_rtp_new(rx_host, local_port, tx_host, sink_port, TEST_PT, 8000, 20 * 1000,
+			mid_flags, "soft", &mid_err, test_pool);
+		fst_requires(mid_rtp != NULL);
+		fst_requires(switch_rtp_ready(mid_rtp));
+		switch_rtp_clear_flag(mid_rtp, SWITCH_RTP_FLAG_PAUSE);
+
+		prepare_peer_mid_write_packet(&packet, 9000, SOURCE_MID_EXT_ID);
+		frame.packet = &packet;
+		frame.packetlen = SWITCH_RTP_HEADER_LEN + 9;
+		frame.data = packet.body + 8;
+		frame.datalen = 1;
+		frame.payload = TEST_PT;
+		frame.timestamp = 9000;
+		frame.flags = SFF_RAW_RTP | SFF_EXTERNAL;
+		frame.rtp_extensions.mid = SOURCE_MID_EXT_ID;
+
+		/* The packet carries the source leg's MID id even though the destination leg did not negotiate MID. */
+		wrote = switch_rtp_write_frame(mid_rtp, &frame);
+		fst_requires(wrote > 0);
+		fst_requires(recv_rtp_mid_packet(sink_fd, &received, 1000));
+		fst_check(received.has_extension == SWITCH_FALSE);
+		fst_check(received.payload == 0xaa);
+
+		/* The destination receive id must not be used against source-leg extensions. */
+		fst_requires(switch_rtp_enable_mid_receive(mid_rtp, 1) == SWITCH_STATUS_SUCCESS);
+		prepare_peer_audio_level_and_mid_write_packet(&packet, 9040, SOURCE_MID_EXT_ID);
+		frame.packetlen = SWITCH_RTP_HEADER_LEN + 13;
+		frame.data = packet.body + 12;
+		frame.timestamp = 9040;
+		frame.flags = SFF_RAW_RTP | SFF_EXTERNAL;
+		wrote = switch_rtp_write_frame(mid_rtp, &frame);
+		fst_requires(wrote > 0);
+		fst_requires(recv_rtp_packet(sink_fd, forwarded_packet, sizeof(forwarded_packet), &forwarded_len, 1000));
+		fst_check(forwarded_len == SWITCH_RTP_HEADER_LEN + 9);
+		fst_check((forwarded_packet[0] & 0x10) != 0);
+		fst_check(forwarded_packet[SWITCH_RTP_HEADER_LEN + 4] == 0x10);
+		fst_check(forwarded_packet[SWITCH_RTP_HEADER_LEN + 5] == 0x55);
+		fst_check(forwarded_packet[SWITCH_RTP_HEADER_LEN + 8] == 0xaa);
+
+		/* A BEDE block without the receive-side MID id is byte-preserved. */
+		prepare_peer_audio_level_write_packet(&packet, 9060);
+		frame.packetlen = SWITCH_RTP_HEADER_LEN + 9;
+		frame.data = packet.body + 8;
+		frame.timestamp = 9060;
+		frame.flags = SFF_RAW_RTP | SFF_EXTERNAL;
+		wrote = switch_rtp_write_frame(mid_rtp, &frame);
+		fst_requires(wrote > 0);
+		fst_requires(recv_rtp_packet(sink_fd, forwarded_packet, sizeof(forwarded_packet), &forwarded_len, 1000));
+		fst_check(forwarded_len == SWITCH_RTP_HEADER_LEN + 9);
+		fst_check(!memcmp(forwarded_packet + SWITCH_RTP_HEADER_LEN, packet.body, 9));
+
+		/* Without an outbound MID, malformed extensions pass through rather than dropping media. */
+		prepare_mid_write_packet(&packet, SWITCH_TRUE, 9080);
+		frame.packetlen = SWITCH_RTP_HEADER_LEN + 9;
+		frame.data = packet.body + 8;
+		frame.timestamp = 9080;
+		frame.flags = SFF_RAW_RTP | SFF_EXTERNAL;
+		wrote = switch_rtp_write_frame(mid_rtp, &frame);
+		fst_requires(wrote > 0);
+		fst_requires(recv_rtp_packet(sink_fd, forwarded_packet, sizeof(forwarded_packet), &forwarded_len, 1000));
+		fst_check(forwarded_len == SWITCH_RTP_HEADER_LEN + 9);
+		fst_check((forwarded_packet[0] & 0x10) != 0);
+		fst_check(!memcmp(forwarded_packet + SWITCH_RTP_HEADER_LEN, packet.body, 9));
+
+		prepare_mid_write_packet(&packet, SWITCH_TRUE, 9120);
+		frame.packetlen = SWITCH_RTP_HEADER_LEN + 9;
+		frame.data = packet.body + 8;
+		frame.timestamp = 9120;
+		frame.flags = SFF_PROXY_PACKET | SFF_EXTERNAL;
+		wrote = switch_rtp_write_frame(mid_rtp, &frame);
+		fst_requires(wrote > 0);
+		fst_requires(recv_rtp_packet(sink_fd, forwarded_packet, sizeof(forwarded_packet), &forwarded_len, 1000));
+		fst_check(forwarded_len == SWITCH_RTP_HEADER_LEN + 9);
+		fst_check((forwarded_packet[0] & 0x10) != 0);
+		fst_check(!memcmp(forwarded_packet + SWITCH_RTP_HEADER_LEN, packet.body, 9));
+
+		prepare_mid_write_packet(&packet, SWITCH_FALSE, 9160);
+		frame.packetlen = SWITCH_RTP_HEADER_LEN + 1;
+		frame.data = packet.body;
+		frame.timestamp = 9160;
+		frame.flags = SFF_RAW_RTP | SFF_EXTERNAL;
+		fst_requires(switch_rtp_enable_mid(mid_rtp, TEST_MID_EXT_ID, "audio") == SWITCH_STATUS_SUCCESS);
+		wrote = switch_rtp_write_frame(mid_rtp, &frame);
+		fst_requires(wrote > 0);
+		fst_requires(recv_rtp_mid_packet(sink_fd, &received, 1000));
+		fst_check(received.has_extension == SWITCH_TRUE);
+		fst_check(received.has_complete_mid == SWITCH_TRUE);
+		fst_check(!strcmp(received.mid, "audio"));
+		fst_check(received.payload == 0xaa);
+
+		/* Audio-level insertion moves the trusted payload boundary before MID rewriting. */
+		prepare_mid_write_packet(&packet, SWITCH_FALSE, 9200);
+		forwarded_len = SWITCH_RTP_HEADER_LEN + 1;
+		fst_check(switch_rtp_test_add_audio_level_and_rewrite_mid(mid_rtp, &packet, &forwarded_len,
+			TEST_MID_EXT_ID, "audio", SWITCH_RTP_HEADER_LEN) == SWITCH_STATUS_SUCCESS);
+		fst_check(forwarded_len == SWITCH_RTP_HEADER_LEN + 13);
+		fst_check(packet.header.x == 1);
+		fst_check((uint8_t)packet.body[0] == 0xbe);
+		fst_check((uint8_t)packet.body[1] == 0xde);
+		fst_check((uint8_t)packet.body[4] == (uint8_t)((TEST_MID_EXT_ID << 4) | 4));
+		fst_check(!memcmp(packet.body + 5, "audio", 5));
+		fst_check((uint8_t)packet.body[12] == 0xaa);
+
+		fst_requires(switch_rtp_configure_mid(mid_rtp, TEST_MID_EXT_ID, max_ascii_mid, TEST_MID_EXT_ID) == SWITCH_STATUS_SUCCESS);
+		prepare_mid_write_packet(&packet, SWITCH_FALSE, 9240);
+		frame.packetlen = SWITCH_RTP_HEADER_LEN + 1;
+		frame.data = packet.body;
+		frame.timestamp = 9240;
+		wrote = switch_rtp_write_frame(mid_rtp, &frame);
+		fst_requires(wrote > 0);
+		fst_requires(recv_rtp_mid_packet(sink_fd, &received, 1000));
+		fst_check(received.has_complete_mid == SWITCH_TRUE);
+		fst_check(received.mid_len == SWITCH_RTP_MID_MAX_LEN);
+		fst_check(!strcmp(received.mid, max_ascii_mid));
+
+		fst_requires(switch_rtp_disable_mid(mid_rtp) == SWITCH_STATUS_SUCCESS);
+		fst_check(switch_rtp_configure_mid(mid_rtp, TEST_MID_EXT_ID, too_long_ascii_mid, TEST_MID_EXT_ID) == SWITCH_STATUS_FALSE);
+		prepare_mid_write_packet(&packet, SWITCH_FALSE, 9280);
+		frame.packetlen = SWITCH_RTP_HEADER_LEN + 1;
+		frame.data = packet.body;
+		frame.timestamp = 9280;
+		wrote = switch_rtp_write_frame(mid_rtp, &frame);
+		fst_requires(wrote > 0);
+		fst_requires(recv_rtp_mid_packet(sink_fd, &received, 1000));
+		fst_check(received.has_extension == SWITCH_FALSE);
+
+		fst_requires(switch_rtp_configure_mid(mid_rtp, TEST_MID_EXT_ID, max_utf8_mid, TEST_MID_EXT_ID) == SWITCH_STATUS_SUCCESS);
+		prepare_mid_write_packet(&packet, SWITCH_FALSE, 9300);
+		frame.packetlen = SWITCH_RTP_HEADER_LEN + 1;
+		frame.data = packet.body;
+		frame.timestamp = 9300;
+		wrote = switch_rtp_write_frame(mid_rtp, &frame);
+		fst_requires(wrote > 0);
+		fst_requires(recv_rtp_mid_packet(sink_fd, &received, 1000));
+		fst_check(received.has_complete_mid == SWITCH_TRUE);
+		fst_check(received.mid_len == SWITCH_RTP_MID_MAX_LEN);
+		fst_check(!memcmp(received.mid, max_utf8_mid, SWITCH_RTP_MID_MAX_LEN));
+
+		fst_requires(switch_rtp_disable_mid(mid_rtp) == SWITCH_STATUS_SUCCESS);
+		fst_check(switch_rtp_configure_mid(mid_rtp, TEST_MID_EXT_ID, too_long_utf8_mid, TEST_MID_EXT_ID) == SWITCH_STATUS_FALSE);
+
+		fst_requires(switch_rtp_disable_mid(mid_rtp) == SWITCH_STATUS_SUCCESS);
+		prepare_mid_write_packet(&packet, SWITCH_FALSE, 9320);
+		frame.packetlen = SWITCH_RTP_HEADER_LEN + 1;
+		frame.data = packet.body;
+		frame.timestamp = 9320;
+		wrote = switch_rtp_write_frame(mid_rtp, &frame);
+		fst_requires(wrote > 0);
+		fst_requires(recv_rtp_mid_packet(sink_fd, &received, 1000));
+		fst_check(received.has_extension == SWITCH_FALSE);
+		fst_check(received.payload == 0xaa);
+
+		/* A writer must observe either complete MID state or disabled state. */
+		toggle_context.rtp_session = mid_rtp;
+		toggle_context.iterations = 10000;
+		fst_requires(switch_threadattr_create(&thread_attr, test_pool) == SWITCH_STATUS_SUCCESS);
+		fst_requires(switch_thread_create(&toggle_thread, thread_attr, toggle_mid_state, &toggle_context, test_pool) == SWITCH_STATUS_SUCCESS);
+		for (i = 0; i < 1000; i++) {
+			prepare_mid_write_packet(&packet, SWITCH_FALSE, (uint32_t)(9480 + (i * 160)));
+			frame.packetlen = SWITCH_RTP_HEADER_LEN + 1;
+			frame.data = packet.body;
+			frame.timestamp = (uint32_t)(9480 + (i * 160));
+			wrote = switch_rtp_write_frame(mid_rtp, &frame);
+			fst_requires(wrote > 0);
+			fst_requires(recv_rtp_mid_packet(sink_fd, &received, 1000));
+			fst_check(received.payload == 0xaa);
+			if (received.has_extension) {
+				fst_check(received.has_complete_mid == SWITCH_TRUE);
+				saw_stress_mid = 1;
+			} else {
+				saw_stress_without_mid = 1;
+			}
+			if (switch_rtp_copy_received_mid(mid_rtp, received_mid, sizeof(received_mid)) == SWITCH_STATUS_SUCCESS) {
+				fst_check(!strcmp(received_mid, "video"));
+				saw_received_mid = 1;
+			}
+		}
+		fst_requires(signal(SIGALRM, mid_toggle_timeout_handler) != SIG_ERR);
+		alarm(TEST_MID_TOGGLE_TIMEOUT_SEC);
+		switch_thread_join(&thread_status, toggle_thread);
+		alarm(0);
+		fst_check(toggle_context.failed == 0);
+		fst_check(saw_stress_mid == 1);
+		fst_check(saw_stress_without_mid == 1);
+		fst_check(saw_received_mid == 1);
+
+		close(sink_fd);
+		switch_rtp_destroy(&mid_rtp);
+		switch_channel_hangup(switch_core_session_get_channel(test_session), SWITCH_CAUSE_NORMAL_CLEARING);
+		switch_core_session_rwunlock(test_session);
 	}
 	FST_TEST_END()
 
@@ -322,6 +821,7 @@ FST_TEARDOWN_END()
 			0xbe, 0xde, 0x00, 0x01, 0x10, 0x30, 0x00, 0x00, 0xdd
 		};
 		const uint8_t malformed_length_mid[] = { 0xbe, 0xde, 0x00, 0x10, 0x40, 0x30, 0x00, 0x00, 0xaa, 0xbb };
+		const uint8_t short_length_mid[] = { 0xbe, 0xde, 0x00, 0x00, 0x40, 0x30, 0x00, 0x00, 0xaa, 0xbb };
 		const uint8_t expected_repaired_mid[] = { 0xbe, 0xde, 0x00, 0x01, 0x10, 0x30, 0x00, 0x00, 0xaa, 0xbb };
 
 		body = (uint8_t *) packet.body;
@@ -335,6 +835,16 @@ FST_TEARDOWN_END()
 		fst_check(switch_rtp_test_rewrite_mid_extension(&packet, &bytes, 1, "0", SWITCH_TRUE, 0) == SWITCH_STATUS_SUCCESS);
 		fst_check(bytes == SWITCH_RTP_HEADER_LEN + sizeof(expected_clean_mid));
 		fst_check(!memcmp(body, expected_clean_mid, sizeof(expected_clean_mid)));
+
+		memset(&packet, 0, sizeof(packet));
+		packet.header.x = 1;
+		memcpy(packet.body, exact_peer_mid_leak, sizeof(exact_peer_mid_leak));
+		bytes = SWITCH_RTP_HEADER_LEN + sizeof(exact_peer_mid_leak);
+		fst_check(switch_rtp_test_strip_header_extensions(&packet, &bytes, 0) == SWITCH_STATUS_SUCCESS);
+		fst_check(packet.header.x == 0);
+		fst_check(bytes == SWITCH_RTP_HEADER_LEN + 2);
+		fst_check((uint8_t)packet.body[0] == 0xaa);
+		fst_check((uint8_t)packet.body[1] == 0xbb);
 
 		memset(&packet, 0, sizeof(packet));
 		packet.header.x = 1;
@@ -375,15 +885,47 @@ FST_TEARDOWN_END()
 			SWITCH_RTP_HEADER_LEN + 8) == SWITCH_STATUS_SUCCESS);
 		fst_check(bytes == SWITCH_RTP_HEADER_LEN + sizeof(expected_repaired_mid));
 		fst_check(!memcmp(body, expected_repaired_mid, sizeof(expected_repaired_mid)));
+
+		memset(&packet, 0, sizeof(packet));
+		packet.header.x = 1;
+		memcpy(packet.body, short_length_mid, sizeof(short_length_mid));
+		bytes = SWITCH_RTP_HEADER_LEN + sizeof(short_length_mid);
+		fst_check(switch_rtp_test_rewrite_mid_extension(&packet, &bytes, 1, "0", SWITCH_TRUE,
+			SWITCH_RTP_HEADER_LEN + 8) == SWITCH_STATUS_SUCCESS);
+		fst_check(bytes == SWITCH_RTP_HEADER_LEN + sizeof(expected_repaired_mid));
+		fst_check(!memcmp(body, expected_repaired_mid, sizeof(expected_repaired_mid)));
+
+		memset(&packet, 0, sizeof(packet));
+		packet.header.x = 1;
+		memcpy(packet.body, malformed_length_mid, sizeof(malformed_length_mid));
+		bytes = SWITCH_RTP_HEADER_LEN + sizeof(malformed_length_mid);
+		fst_check(switch_rtp_test_strip_header_extensions(&packet, &bytes, 0) == SWITCH_STATUS_FALSE);
+		fst_check(packet.header.x == 1);
+
+		memset(&packet, 0, sizeof(packet));
+		packet.header.x = 1;
+		memcpy(packet.body, malformed_length_mid, sizeof(malformed_length_mid));
+		bytes = SWITCH_RTP_HEADER_LEN + sizeof(malformed_length_mid);
+		fst_check(switch_rtp_test_strip_header_extensions(&packet, &bytes, SWITCH_RTP_HEADER_LEN + 8) == SWITCH_STATUS_SUCCESS);
+		fst_check(packet.header.x == 0);
+		fst_check(bytes == SWITCH_RTP_HEADER_LEN + 2);
+		fst_check((uint8_t)packet.body[0] == 0xaa);
+		fst_check((uint8_t)packet.body[1] == 0xbb);
+
+		memset(&packet, 0, sizeof(packet));
+		packet.header.x = 1;
+		memcpy(packet.body, short_length_mid, sizeof(short_length_mid));
+		bytes = SWITCH_RTP_HEADER_LEN + sizeof(short_length_mid);
+		fst_check(switch_rtp_test_strip_header_extensions(&packet, &bytes, SWITCH_RTP_HEADER_LEN + 8) == SWITCH_STATUS_SUCCESS);
+		fst_check(packet.header.x == 0);
+		fst_check(bytes == SWITCH_RTP_HEADER_LEN + 2);
+		fst_check((uint8_t)packet.body[0] == 0xaa);
+		fst_check((uint8_t)packet.body[1] == 0xbb);
 	}
 	FST_TEST_END()
 	FST_TEST_BEGIN(test_mid_rewrite_respects_caller_packet_buffer_size)
 	{
-		/* Callers size frame->packet at SWITCH_RTP_MAX_BUF_LEN (16384), not
-		 * sizeof(switch_rtp_packet_t) (16424). ->ext and ->ebody at struct offsets
-		 * 16408 and 16416 then fall at +24 and +32 past the buffer, which for the
-		 * session-pool callers in switch_core_media.c is the next allocation.
-		 * switch_app_log::next is at offset 24. */
+		/* Exercise the real caller-owned packet capacity and guard its adjacent allocation. */
 		struct pool_neighbour {
 			uint8_t          packet_buf[SWITCH_RTP_MAX_BUF_LEN];
 			switch_app_log_t node1;
@@ -420,6 +962,7 @@ FST_TEARDOWN_END()
 			&bytes, 1, "0", SWITCH_FALSE, 0) == SWITCH_STATUS_SUCCESS);
 
 		/* The rewrite must stay inside the buffer it was given. */
+		fst_check(bytes == SWITCH_RTP_HEADER_LEN + 1208);
 		fst_check(sim->node1.next == &sim->node2);
 		fst_check(sim->node1.app == app_name);
 		fst_check(sim->node2.app == app_name);
@@ -431,6 +974,38 @@ FST_TEARDOWN_END()
 			}
 		}
 		fst_check(guard_ok);
+
+		/* A one-byte MID adds an eight-byte padded extension block. */
+		memset(sim->packet_buf, 0, sizeof(sim->packet_buf));
+		hdr = (switch_rtp_hdr_t *) sim->packet_buf;
+		hdr->version = 2;
+		hdr->pt = 96;
+		memset(sim->packet_buf + SWITCH_RTP_HEADER_LEN, 0x42,
+			SWITCH_RTP_MAX_BUF_LEN - SWITCH_RTP_HEADER_LEN - 8);
+		bytes = SWITCH_RTP_MAX_BUF_LEN - 8;
+		fst_check(switch_rtp_test_rewrite_mid_extension((switch_rtp_packet_t *) sim->packet_buf,
+			&bytes, 1, "0", SWITCH_FALSE, 0) == SWITCH_STATUS_SUCCESS);
+		fst_check(bytes == SWITCH_RTP_MAX_BUF_LEN);
+		fst_check(sim->packet_buf[SWITCH_RTP_MAX_BUF_LEN - 1] == 0x42);
+		fst_check(sim->node1.next == &sim->node2);
+		fst_check(sim->node1.app == app_name);
+		fst_check(sim->node2.app == app_name);
+		fst_check(sim->node2.arg == app_arg);
+
+		memset(sim->packet_buf, 0, sizeof(sim->packet_buf));
+		hdr = (switch_rtp_hdr_t *) sim->packet_buf;
+		hdr->version = 2;
+		hdr->pt = 96;
+		memset(sim->packet_buf + SWITCH_RTP_HEADER_LEN, 0x43,
+			SWITCH_RTP_MAX_BUF_LEN - SWITCH_RTP_HEADER_LEN - 7);
+		bytes = SWITCH_RTP_MAX_BUF_LEN - 7;
+		fst_check(switch_rtp_test_rewrite_mid_extension((switch_rtp_packet_t *) sim->packet_buf,
+			&bytes, 1, "0", SWITCH_FALSE, 0) == SWITCH_STATUS_FALSE);
+		fst_check(bytes == SWITCH_RTP_MAX_BUF_LEN - 7);
+		fst_check(sim->node1.next == &sim->node2);
+		fst_check(sim->node1.app == app_name);
+		fst_check(sim->node2.app == app_name);
+		fst_check(sim->node2.arg == app_arg);
 
 		free(sim);
 	}

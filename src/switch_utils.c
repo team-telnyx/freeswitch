@@ -185,6 +185,7 @@ static switch_frame_t *find_free_frame(switch_frame_buffer_t *fb, switch_frame_t
 	np->frame->flags = orig->flags;
 	np->frame->codec = orig->codec;
 	np->frame->pmap = orig->pmap;
+	np->frame->rtp_extensions = orig->rtp_extensions;
 	np->frame->img = NULL;
 	np->frame->extra_data = np;
 	np->inuse = 1;

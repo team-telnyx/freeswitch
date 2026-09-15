@@ -115,6 +115,31 @@ FST_TEST_BEGIN(frame_buffer_dup_without_data_rebuilds_base_header)
 }
 FST_TEST_END()
 
+FST_TEST_BEGIN(frame_buffer_dup_preserves_rtp_extension_metadata)
+{
+	switch_frame_buffer_t *fb = NULL;
+	switch_frame_t orig = { 0 };
+	switch_frame_t *clone = NULL;
+	switch_rtp_packet_t packet = { 0 };
+	uint8_t *payload = (uint8_t *)&packet + SWITCH_RTP_HEADER_LEN;
+
+	orig.packet = &packet;
+	orig.data = payload;
+	orig.datalen = 1;
+	orig.packetlen = SWITCH_RTP_HEADER_LEN + 1;
+	orig.buflen = SWITCH_RTP_MAX_BUF_LEN - SWITCH_RTP_HEADER_LEN;
+	orig.rtp_extensions.mid = 4;
+
+	fst_requires(switch_frame_buffer_create(&fb, 1) == SWITCH_STATUS_SUCCESS);
+	fst_requires(switch_frame_buffer_dup(fb, &orig, &clone) == SWITCH_STATUS_SUCCESS);
+	fst_requires(clone != NULL);
+	fst_check(clone->rtp_extensions.mid == orig.rtp_extensions.mid);
+
+	switch_frame_buffer_free(fb, &clone);
+	switch_frame_buffer_destroy(&fb);
+}
+FST_TEST_END()
+
 FST_TEST_BEGIN(frame_buffer_dup_reports_capacity_after_rtp_header)
 {
 	switch_frame_buffer_t *fb = NULL;
