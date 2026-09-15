@@ -79,9 +79,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 
 	switch_assert(session != NULL);
 
-	switch_thread_rwlock_rdlock(session->bug_rwlock);
-	tap_only = session->bug_tap_only;
-	switch_thread_rwlock_unlock(session->bug_rwlock);
+	tap_only = switch_test_flag(session, SSF_MEDIA_BUG_TAP_ONLY);
 
 	switch_os_yield();
 
@@ -419,33 +417,21 @@ cnt_with_cng:
 
 
 		goto done;
-	} else if (!need_codec) {
-		switch_thread_rwlock_rdlock(session->bug_rwlock);
-		if (session->bugs) {
-			do_bugs = 1;
-			need_codec = 1;
-		}
-		switch_thread_rwlock_unlock(session->bug_rwlock);
+	} else if (session->bugs && !need_codec) {
+		do_bugs = 1;
+		need_codec = 1;
 	}
 
 	if (switch_test_flag(*frame, SFF_CNG)) {
-		int have_bugs;
-
-		switch_thread_rwlock_rdlock(session->bug_rwlock);
-		have_bugs = (session->bugs != NULL);
-		switch_thread_rwlock_unlock(session->bug_rwlock);
-
-		if (!have_bugs && !session->plc) {
+		if (!session->bugs && !session->plc) {
 			/* Check if other session has bugs */
 			unsigned int other_session_bugs = 0;
 			switch_core_session_t *other_session = NULL;
 			if (switch_channel_test_flag(switch_core_session_get_channel(session), CF_BRIDGED) &&
 				switch_core_session_get_partner(session, &other_session) == SWITCH_STATUS_SUCCESS) {
-				switch_thread_rwlock_rdlock(other_session->bug_rwlock);
-				if (other_session->bugs && !other_session->bug_tap_only) {
+				if (other_session->bugs && !switch_test_flag(other_session, SSF_MEDIA_BUG_TAP_ONLY)) {
 					other_session_bugs = 1;
 				}
-				switch_thread_rwlock_unlock(other_session->bug_rwlock);
 				switch_core_session_rwunlock(other_session);
 			}
 
