@@ -60,6 +60,7 @@ typedef struct {
 	char body[SWITCH_RTP_MAX_BUF_LEN+4+sizeof(char *)];
 	switch_rtp_hdr_ext_t *ext;
 	char *ebody;
+	uint8_t mid_ext_id;
 } switch_rtp_packet_t;
 
 typedef enum {

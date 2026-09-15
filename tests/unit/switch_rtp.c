@@ -379,6 +379,13 @@ FST_TEARDOWN_END()
 		switch_status_t status;
 		int read_attempts = 0;
 		int send_fd = -1;
+		switch_jb_t *mid_jb = NULL;
+		switch_rtp_packet_t old_packet = { 0 }, new_packet = { 0 }, dequeued_packet = { 0 };
+		switch_size_t old_packet_len = 0, new_packet_len = 0, dequeued_packet_len = 0;
+		switch_size_t old_payload_offset = 0;
+		uint8_t forwarded_packet[SWITCH_RTP_MAX_PACKET_LEN] = { 0 };
+		size_t forwarded_len = 0;
+		int wrote;
 		uint8_t packet_with_mid[] = {
 			0x90, TEST_PT, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x11, 0x22, 0x33, 0x44,
 			0xbe, 0xde, 0x00, 0x01, (TEST_MID_EXT_ID << 4) | 0x00, '1', 0x00, 0x00,
@@ -419,6 +426,16 @@ FST_TEARDOWN_END()
 		uint8_t packet_without_mid[] = {
 			0x80, TEST_PT, 0x00, 0x08, 0x00, 0x00, 0x00, 0x08, 0x11, 0x22, 0x33, 0x44,
 			0xee
+		};
+		uint8_t packet_mid_mapping_race[] = {
+			0x90, TEST_PT, 0x00, 0x09, 0x00, 0x00, 0x00, 0x09, 0x11, 0x22, 0x33, 0x44,
+			0xbe, 0xde, 0x00, 0x01, (TEST_MID_EXT_ID << 4) | 0x00, '1', 0x00, 0x00,
+			0xef
+		};
+		uint8_t packet_after_mapping_change[] = {
+			0x90, TEST_PT, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x0a, 0x11, 0x22, 0x33, 0x44,
+			0xbe, 0xde, 0x00, 0x01, (SOURCE_MID_EXT_ID << 4) | 0x00, '2', 0x00, 0x00,
+			0xf0
 		};
 
 		fst_requires(switch_core_new_memory_pool(&test_pool) == SWITCH_STATUS_SUCCESS);
@@ -491,6 +508,60 @@ FST_TEARDOWN_END()
 		fst_check(switch_rtp_copy_received_mid(mid_rtp, mid, sizeof(mid)) == SWITCH_STATUS_FALSE);
 		fst_check(read_len == 1);
 		fst_check(read_buf[0] == 0xee);
+
+		/* Queue packets from two negotiation generations and prove the older packet
+		 * retains its source-leg MID id through jitter-buffer reordering. */
+		fst_check(switch_rtp_configure_mid(mid_rtp, 0, NULL, TEST_MID_EXT_ID) == SWITCH_STATUS_SUCCESS);
+		fst_requires(send_udp_packet(send_fd, local_port, packet_mid_mapping_race, sizeof(packet_mid_mapping_race)));
+		memset(&frame, 0, sizeof(frame));
+		status = switch_rtp_zerocopy_read_frame(mid_rtp, &frame, SWITCH_IO_FLAG_NONE);
+		fst_requires(status == SWITCH_STATUS_SUCCESS);
+		fst_check(frame.rtp_extensions.mid == TEST_MID_EXT_ID);
+		fst_requires(frame.packet != NULL);
+		old_packet = *(switch_rtp_packet_t *)frame.packet;
+		old_packet_len = frame.packetlen;
+		old_payload_offset = (switch_size_t)((uint8_t *)frame.data - (uint8_t *)frame.packet);
+		fst_check(old_packet.mid_ext_id == TEST_MID_EXT_ID);
+
+		fst_check(switch_rtp_configure_mid(mid_rtp, 0, NULL, SOURCE_MID_EXT_ID) == SWITCH_STATUS_SUCCESS);
+		fst_requires(send_udp_packet(send_fd, local_port, packet_after_mapping_change, sizeof(packet_after_mapping_change)));
+		memset(&frame, 0, sizeof(frame));
+		status = switch_rtp_zerocopy_read_frame(mid_rtp, &frame, SWITCH_IO_FLAG_NONE);
+		fst_requires(status == SWITCH_STATUS_SUCCESS);
+		fst_requires(frame.packet != NULL);
+		new_packet = *(switch_rtp_packet_t *)frame.packet;
+		new_packet_len = frame.packetlen;
+		fst_check(new_packet.mid_ext_id == SOURCE_MID_EXT_ID);
+
+		fst_requires(switch_jb_create(&mid_jb, SJB_AUDIO, 1, 2, test_pool) == SWITCH_STATUS_SUCCESS);
+		fst_requires(switch_jb_put_packet(mid_jb, &old_packet, old_packet_len) == SWITCH_STATUS_SUCCESS);
+		fst_requires(switch_jb_put_packet(mid_jb, &new_packet, new_packet_len) == SWITCH_STATUS_SUCCESS);
+		fst_requires(switch_jb_get_packet_by_seq(mid_jb, old_packet.header.seq,
+			&dequeued_packet, &dequeued_packet_len) == SWITCH_STATUS_SUCCESS);
+		fst_check(dequeued_packet.mid_ext_id == TEST_MID_EXT_ID);
+
+		dequeued_packet.ext = NULL;
+		dequeued_packet.ebody = NULL;
+		memset(&frame, 0, sizeof(frame));
+		frame.packet = &dequeued_packet;
+		frame.packetlen = dequeued_packet_len;
+		frame.data = (uint8_t *)&dequeued_packet + old_payload_offset;
+		frame.datalen = 1;
+		frame.payload = TEST_PT;
+		frame.timestamp = 9;
+		frame.flags = SFF_RAW_RTP | SFF_EXTERNAL;
+		frame.rtp_extensions.mid = dequeued_packet.mid_ext_id;
+		wrote = switch_rtp_write_frame(mid_rtp, &frame);
+		fst_requires(wrote > 0);
+		fst_requires(recv_rtp_packet(send_fd, forwarded_packet, sizeof(forwarded_packet), &forwarded_len, 1000));
+		fst_check(forwarded_len == SWITCH_RTP_HEADER_LEN + 1);
+		fst_check((forwarded_packet[0] & 0x10) == 0);
+		fst_check(forwarded_packet[SWITCH_RTP_HEADER_LEN] == 0xef);
+
+		fst_requires(switch_jb_get_packet_by_seq(mid_jb, new_packet.header.seq,
+			&dequeued_packet, &dequeued_packet_len) == SWITCH_STATUS_SUCCESS);
+		fst_check(dequeued_packet.mid_ext_id == SOURCE_MID_EXT_ID);
+		switch_jb_destroy(&mid_jb);
 
 		close(send_fd);
 		switch_rtp_destroy(&mid_rtp);

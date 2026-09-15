@@ -144,7 +144,15 @@ typedef struct {
 	char body[SWITCH_RTP_MAX_BUF_LEN+4+sizeof(char *)];
 	switch_rtp_hdr_ext_t *ext;
 	char *ebody;
+	uint8_t mid_ext_id;
 } rtp_msg_t;
+
+/* Jitter-buffer APIs copy/cast between these packet layouts. Keep the public
+ * and private definitions identical so MID provenance survives reordering. */
+typedef char rtp_packet_layout_size_must_match[
+	sizeof(rtp_msg_t) == sizeof(switch_rtp_packet_t) ? 1 : -1];
+typedef char rtp_packet_layout_mid_offset_must_match[
+	offsetof(rtp_msg_t, mid_ext_id) == offsetof(switch_rtp_packet_t, mid_ext_id) ? 1 : -1];
 
 #define RTP_BODY(_s) (char *) (_s->recv_msg.ebody ? _s->recv_msg.ebody : _s->recv_msg.body)
 #define RTP_SET_ERR(e, s) do { if ((e)) *(e) = (s); } while (0)
@@ -11937,7 +11945,6 @@ SWITCH_DECLARE(switch_status_t) switch_rtcp_zerocopy_read_frame(switch_rtp_t *rt
 SWITCH_DECLARE(switch_status_t) switch_rtp_zerocopy_read_frame(switch_rtp_t *rtp_session, switch_frame_t *frame, switch_io_flag_t io_flags)
 {
 	int bytes = 0;
-	uint8_t source_mid_ext_id = 0;
 
 	frame->rtp_extensions.mid = 0;
 
@@ -11956,7 +11963,6 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_zerocopy_read_frame(switch_rtp_t *rtp
 		frame->ssrc = 0;
 		frame->m = 0;
 	} else {
-
 		frame->packet = &rtp_session->recv_msg;
 		/* read_rtp_packet strips only the RTP header extension from `bytes` (which still
 		 * includes header + CSRC + payload). Add just the extension back, derived from the
@@ -11971,10 +11977,8 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_zerocopy_read_frame(switch_rtp_t *rtp
 			frame->packetlen = bytes + ext_len;
 		}
 		frame->source = __FILE__;
-		switch_mutex_lock(rtp_session->mid_mutex);
-		if (rtp_session->ext_mid.recv_enabled) source_mid_ext_id = rtp_session->ext_mid.recv_ext_id;
-		switch_mutex_unlock(rtp_session->mid_mutex);
-		frame->rtp_extensions.mid = source_mid_ext_id;
+		/* Preserve the source mapping captured with this packet across renegotiation and JB reordering. */
+		frame->rtp_extensions.mid = rtp_session->recv_msg.mid_ext_id;
 
 		switch_set_flag(frame, SFF_RAW_RTP);
 		switch_set_flag(frame, SFF_EXTERNAL);
@@ -14243,6 +14247,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_handle_extensions(switch_rtp_t *rtp_s
 	switch_mutex_lock(rtp_session->mid_mutex);
 	mid_recv_enabled = rtp_session->ext_mid.recv_enabled;
 	mid_recv_ext_id = rtp_session->ext_mid.recv_ext_id;
+	rtp_session->recv_msg.mid_ext_id = mid_recv_enabled ? mid_recv_ext_id : 0;
 	if (mid_recv_enabled) {
 		memset(rtp_session->ext_mid.remote_mid, 0, sizeof(rtp_session->ext_mid.remote_mid));
 	}

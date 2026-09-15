@@ -8930,7 +8930,7 @@ static switch_media_type_t switch_core_media_bundle_tag_media(const switch_bundl
 {
 	uint32_t i;
 
-	if (!bundle || bundle->state != SWITCH_BUNDLE_STATE_ACCEPTED || zstr(bundle->bundle_tag_mid)) {
+	if (!bundle || zstr(bundle->bundle_tag_mid)) {
 		return SWITCH_MEDIA_TYPE_TOTAL;
 	}
 	for (i = 0; i < bundle->mline_count; i++) {
@@ -9043,7 +9043,8 @@ static void switch_core_media_filter_answer_bundle(switch_bundle_group_t *bundle
 	char accepted_mids[SWITCH_BUNDLE_MAX_MIDS][SWITCH_BUNDLE_MAX_MID_LEN + 1] = {{ 0 }};
 	uint32_t accepted_count = 0, i, j;
 
-	if (!bundle || bundle->state != SWITCH_BUNDLE_STATE_ACCEPTED) return;
+	if (!bundle || (bundle->state != SWITCH_BUNDLE_STATE_ACCEPTED &&
+		bundle->state != SWITCH_BUNDLE_STATE_REJECTED)) return;
 	if (!accept_audio || switch_core_media_bundle_tag_media(bundle) != SWITCH_MEDIA_TYPE_AUDIO) {
 		switch_bundle_group_init(bundle, bundle->policy);
 		return;
@@ -9084,7 +9085,34 @@ static void switch_core_media_filter_answer_bundle(switch_bundle_group_t *bundle
 			}
 		}
 	}
-	if (!accepted_count) bundle->state = SWITCH_BUNDLE_STATE_NONE;
+	if (!accepted_count) {
+		bundle->state = SWITCH_BUNDLE_STATE_NONE;
+	} else {
+		switch_bundle_group_validate(bundle);
+	}
+}
+
+static switch_bool_t switch_core_media_bundle_mid_ext_ids_compatible(const switch_bundle_group_t *bundle,
+	const switch_mid_negotiation_t states[SWITCH_MEDIA_TYPE_TOTAL])
+{
+	uint8_t bundle_mid_ext_id = 0;
+	uint8_t i;
+
+	if (!bundle || bundle->state != SWITCH_BUNDLE_STATE_ACCEPTED || !states) return SWITCH_TRUE;
+
+	for (i = 0; i < SWITCH_MEDIA_TYPE_TOTAL; i++) {
+		if (!switch_core_media_bundle_has_media(bundle, (switch_media_type_t)i)) continue;
+		if (states[i].send_ext_id) {
+			if (bundle_mid_ext_id && bundle_mid_ext_id != states[i].send_ext_id) return SWITCH_FALSE;
+			bundle_mid_ext_id = states[i].send_ext_id;
+		}
+		if (states[i].recv_ext_id) {
+			if (bundle_mid_ext_id && bundle_mid_ext_id != states[i].recv_ext_id) return SWITCH_FALSE;
+			bundle_mid_ext_id = states[i].recv_ext_id;
+		}
+	}
+
+	return SWITCH_TRUE;
 }
 
 static void switch_core_media_ignore_answer_mid(switch_mid_negotiation_t states[SWITCH_MEDIA_TYPE_TOTAL],
@@ -9247,6 +9275,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 	int amr_offerings_rejected_n = 0;
 	switch_mid_negotiation_t mid_states[SWITCH_MEDIA_TYPE_TOTAL] = { { 0 } };
 	switch_bundle_group_t candidate_bundle = { 0 };
+	switch_bundle_group_t effective_candidate_bundle = { 0 };
 
 	switch_assert(session);
 
@@ -9284,6 +9313,11 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 	switch_core_media_bundle_populate_from_sdp(smh, sdp, r_sdp, SWITCH_FALSE, &candidate_bundle);
 	if (sdp_type == SDP_ANSWER) {
 		switch_core_media_validate_answer_mid(session, sdp, r_sdp, mid_states, &candidate_bundle);
+	}
+	effective_candidate_bundle = candidate_bundle;
+	if (!switch_core_media_bundle_mid_ext_ids_compatible(&candidate_bundle, mid_states)) {
+		/* Keep the per-media mappings, but do not commit a group whose MID URI changes id. */
+		switch_bundle_group_init(&candidate_bundle, candidate_bundle.policy);
 	}
 
 	switch_channel_clear_flag(channel, CF_AUDIO_PAUSE_READ);
@@ -11181,6 +11215,15 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 	}
 
  t38_done:
+	/* Compare MID IDs only across media that this endpoint actually accepted. */
+	switch_core_media_filter_answer_bundle(&effective_candidate_bundle,
+		match ? SWITCH_TRUE : SWITCH_FALSE,
+		vmatch ? SWITCH_TRUE : SWITCH_FALSE,
+		SWITCH_FALSE);
+	if (!switch_core_media_bundle_mid_ext_ids_compatible(&effective_candidate_bundle, mid_states)) {
+		switch_bundle_group_init(&effective_candidate_bundle, effective_candidate_bundle.policy);
+	}
+	candidate_bundle = effective_candidate_bundle;
 	if (parser) {
 		sdp_parser_free(parser);
 	}
@@ -15359,6 +15402,39 @@ static void switch_core_media_append_mid_extmaps(char *buf, size_t buflen, uint8
 	}
 }
 
+static void switch_core_media_prepare_generated_offer_bundle(switch_bundle_group_t *bundle,
+	const switch_bundle_group_t *current_bundle, const char *audio_mid, const char *video_mid,
+	switch_port_t audio_port, switch_port_t video_port, switch_bool_t offer_audio, switch_bool_t offer_video)
+{
+	char offered_mids[(SWITCH_BUNDLE_MAX_MID_LEN * 2) + 2] = "";
+	switch_bundle_mline_t *mline;
+	switch_bundle_policy_t policy = current_bundle ? current_bundle->policy : SWITCH_BUNDLE_POLICY_OFF;
+
+	switch_bundle_group_init(bundle, policy);
+	if (!offer_audio) return;
+
+	switch_snprintf(offered_mids, sizeof(offered_mids), "%s%s%s",
+		!zstr(audio_mid) ? audio_mid : "audio", offer_video ? " " : "",
+		offer_video ? (!zstr(video_mid) ? video_mid : "video") : "");
+	if (switch_bundle_group_set_offered_mids(bundle, offered_mids) != SWITCH_STATUS_SUCCESS) return;
+
+	mline = switch_bundle_group_add_mline(bundle, 0, SWITCH_MEDIA_TYPE_AUDIO,
+		!zstr(audio_mid) ? audio_mid : "audio", audio_port, SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE);
+	if (!mline) {
+		switch_bundle_group_init(bundle, policy);
+		return;
+	}
+	if (offer_video) {
+		mline = switch_bundle_group_add_mline(bundle, 1, SWITCH_MEDIA_TYPE_VIDEO,
+			!zstr(video_mid) ? video_mid : "video", video_port, SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE);
+		if (!mline) {
+			switch_bundle_group_init(bundle, policy);
+			return;
+		}
+	}
+	bundle->state = SWITCH_BUNDLE_STATE_ACCEPTED;
+}
+
 static void switch_core_media_answer_mid_extmaps(switch_rtp_engine_t *engine, const switch_mid_negotiation_t *pending,
 											  switch_bool_t use_pending, uint8_t *send_ext_id, uint8_t *recv_ext_id)
 {
@@ -15948,12 +16024,15 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 	const char *use_trickle = switch_core_media_trickle_enabled(session) ? "true" : NULL;
 	switch_mid_negotiation_t pending_mid_states[SWITCH_MEDIA_TYPE_TOTAL] = { { 0 } };
 	switch_bundle_group_t pending_bundle = { 0 };
+	switch_bundle_group_t generated_offer_bundle = { 0 };
 	const switch_bundle_group_t *sdp_bundle;
 	switch_bool_t pending_mid_answer = SWITCH_FALSE;
 	uint8_t sdp_mid_send_ext_ids[SWITCH_MEDIA_TYPE_TOTAL] = { 0 };
 	uint8_t sdp_mid_recv_ext_ids[SWITCH_MEDIA_TYPE_TOTAL] = { 0 };
 	uint8_t offer_session_mid_send_ext_id = 0, offer_session_mid_recv_ext_id = 0;
 	switch_bool_t offer_mid_extmaps_media_scoped = SWITCH_FALSE;
+	switch_bool_t offer_audio_media = SWITCH_FALSE;
+	switch_bool_t offer_bundle_audio = SWITCH_FALSE;
 	switch_bool_t offer_bundle_video = SWITCH_FALSE;
 	switch_bool_t offer_text_media = SWITCH_FALSE;
 
@@ -16393,6 +16472,11 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 	bundle_no_video_mid = switch_channel_var_true(session->channel, "rtp_no_video_mid");
 	offer_bundle_video = bundle_has_vid && !bundle_no_video_mid ? SWITCH_TRUE : SWITCH_FALSE;
 	if (sdp_type == SDP_OFFER) {
+		offer_audio_media = a_engine->rmode != SWITCH_MEDIA_FLOW_DISABLED ? SWITCH_TRUE : SWITCH_FALSE;
+		offer_bundle_audio = switch_core_media_bundle_should_offer(smh, sdp_bundle) &&
+			offer_audio_media && !bundle_no_attr_mid && !bundle_no_audio_mid ? SWITCH_TRUE : SWITCH_FALSE;
+	}
+	if (sdp_type == SDP_OFFER) {
 		offer_text_media =
 			(switch_channel_test_flag(session->channel, CF_WANT_RTT) || switch_channel_test_flag(session->channel, CF_RTT) ||
 			 switch_channel_var_true(session->channel, "rtp_enable_text")) && switch_channel_test_cap(session->channel, CC_RTP_RTT) ?
@@ -16408,13 +16492,13 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 		const char *mid_ext_id_str = switch_channel_get_variable(session->channel, "rtp_mid_ext_id");
 		switch_bool_t offered_mid_media[SWITCH_MEDIA_TYPE_TOTAL] = { SWITCH_FALSE };
 		switch_bool_t have_session_mid_extmap = SWITCH_FALSE;
-		uint8_t bundle_mid_send_ext_id = 0, bundle_mid_recv_ext_id = 0;
+		uint8_t bundle_mid_ext_id = 0, bundle_mid_send_ext_id = 0, bundle_mid_recv_ext_id = 0;
 		switch_bool_t bundle_mid_ids_compatible = SWITCH_TRUE;
 
 		if (mid_ext_id_str) configured_mid_ext_id = switch_atoui(mid_ext_id_str);
 		if (configured_mid_ext_id < 1 || configured_mid_ext_id > 14) configured_mid_ext_id = 1;
 
-		offered_mid_media[SWITCH_MEDIA_TYPE_AUDIO] = a_engine->rmode != SWITCH_MEDIA_FLOW_DISABLED;
+		offered_mid_media[SWITCH_MEDIA_TYPE_AUDIO] = offer_audio_media;
 		offered_mid_media[SWITCH_MEDIA_TYPE_VIDEO] = bundle_has_vid != 0;
 		offered_mid_media[SWITCH_MEDIA_TYPE_TEXT] = offer_text_media;
 
@@ -16435,43 +16519,59 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 		}
 		switch_mutex_unlock(smh->sdp_mutex);
 
-		/* Keep BUNDLE MID IDs compatible without remapping established RTP sessions. */
-		if (offer_bundle_video && switch_core_media_bundle_should_offer(smh, sdp_bundle)) {
+		/* A BUNDLE group uses one MID extension id in every direction. An audio
+		 * conflict invalidates the audio-owned group; a video-only conflict keeps
+		 * video on its independent transport. */
+		if (offer_bundle_audio) {
 			if (sdp_mid_send_ext_ids[SWITCH_MEDIA_TYPE_AUDIO]) {
-				bundle_mid_send_ext_id = sdp_mid_send_ext_ids[SWITCH_MEDIA_TYPE_AUDIO];
+				bundle_mid_ext_id = bundle_mid_send_ext_id = sdp_mid_send_ext_ids[SWITCH_MEDIA_TYPE_AUDIO];
 			}
 			if (sdp_mid_recv_ext_ids[SWITCH_MEDIA_TYPE_AUDIO]) {
-				bundle_mid_recv_ext_id = sdp_mid_recv_ext_ids[SWITCH_MEDIA_TYPE_AUDIO];
-			}
-			if (sdp_mid_send_ext_ids[SWITCH_MEDIA_TYPE_VIDEO]) {
-				if (bundle_mid_send_ext_id && bundle_mid_send_ext_id != sdp_mid_send_ext_ids[SWITCH_MEDIA_TYPE_VIDEO]) {
+				if (bundle_mid_ext_id && bundle_mid_ext_id != sdp_mid_recv_ext_ids[SWITCH_MEDIA_TYPE_AUDIO]) {
 					bundle_mid_ids_compatible = SWITCH_FALSE;
 				} else {
-					bundle_mid_send_ext_id = sdp_mid_send_ext_ids[SWITCH_MEDIA_TYPE_VIDEO];
-				}
-			}
-			if (sdp_mid_recv_ext_ids[SWITCH_MEDIA_TYPE_VIDEO]) {
-				if (bundle_mid_recv_ext_id && bundle_mid_recv_ext_id != sdp_mid_recv_ext_ids[SWITCH_MEDIA_TYPE_VIDEO]) {
-					bundle_mid_ids_compatible = SWITCH_FALSE;
-				} else {
-					bundle_mid_recv_ext_id = sdp_mid_recv_ext_ids[SWITCH_MEDIA_TYPE_VIDEO];
+					bundle_mid_ext_id = bundle_mid_recv_ext_id = sdp_mid_recv_ext_ids[SWITCH_MEDIA_TYPE_AUDIO];
 				}
 			}
 
-			if (bundle_mid_ids_compatible) {
-				if (!bundle_mid_send_ext_id && !bundle_mid_recv_ext_id) {
-					bundle_mid_send_ext_id = bundle_mid_recv_ext_id = (uint8_t)configured_mid_ext_id;
+			if (!bundle_mid_ids_compatible) {
+				offer_bundle_audio = SWITCH_FALSE;
+				offer_bundle_video = SWITCH_FALSE;
+			} else if (offer_bundle_video) {
+				if (sdp_mid_send_ext_ids[SWITCH_MEDIA_TYPE_VIDEO]) {
+					if (bundle_mid_ext_id && bundle_mid_ext_id != sdp_mid_send_ext_ids[SWITCH_MEDIA_TYPE_VIDEO]) {
+						bundle_mid_ids_compatible = SWITCH_FALSE;
+					} else {
+						bundle_mid_ext_id = sdp_mid_send_ext_ids[SWITCH_MEDIA_TYPE_VIDEO];
+						bundle_mid_send_ext_id = sdp_mid_send_ext_ids[SWITCH_MEDIA_TYPE_VIDEO];
+					}
 				}
+				if (sdp_mid_recv_ext_ids[SWITCH_MEDIA_TYPE_VIDEO]) {
+					if (bundle_mid_ext_id && bundle_mid_ext_id != sdp_mid_recv_ext_ids[SWITCH_MEDIA_TYPE_VIDEO]) {
+						bundle_mid_ids_compatible = SWITCH_FALSE;
+					} else {
+						bundle_mid_ext_id = sdp_mid_recv_ext_ids[SWITCH_MEDIA_TYPE_VIDEO];
+						bundle_mid_recv_ext_id = sdp_mid_recv_ext_ids[SWITCH_MEDIA_TYPE_VIDEO];
+					}
+				}
+				if (!bundle_mid_ids_compatible) offer_bundle_video = SWITCH_FALSE;
+			}
+
+			if (offer_bundle_audio) {
+				if (!bundle_mid_ext_id) {
+					bundle_mid_ext_id = bundle_mid_send_ext_id = bundle_mid_recv_ext_id = (uint8_t)configured_mid_ext_id;
+				}
+				if (!bundle_mid_send_ext_id) bundle_mid_send_ext_id = bundle_mid_ext_id;
+				if (!bundle_mid_recv_ext_id) bundle_mid_recv_ext_id = bundle_mid_ext_id;
 				if (!sdp_mid_send_ext_ids[SWITCH_MEDIA_TYPE_AUDIO] && !sdp_mid_recv_ext_ids[SWITCH_MEDIA_TYPE_AUDIO]) {
 					sdp_mid_send_ext_ids[SWITCH_MEDIA_TYPE_AUDIO] = bundle_mid_send_ext_id;
 					sdp_mid_recv_ext_ids[SWITCH_MEDIA_TYPE_AUDIO] = bundle_mid_recv_ext_id;
 				}
-				if (!sdp_mid_send_ext_ids[SWITCH_MEDIA_TYPE_VIDEO] && !sdp_mid_recv_ext_ids[SWITCH_MEDIA_TYPE_VIDEO]) {
+				if (offer_bundle_video && !sdp_mid_send_ext_ids[SWITCH_MEDIA_TYPE_VIDEO] &&
+					!sdp_mid_recv_ext_ids[SWITCH_MEDIA_TYPE_VIDEO]) {
 					sdp_mid_send_ext_ids[SWITCH_MEDIA_TYPE_VIDEO] = bundle_mid_send_ext_id;
 					sdp_mid_recv_ext_ids[SWITCH_MEDIA_TYPE_VIDEO] = bundle_mid_recv_ext_id;
 				}
-			} else {
-				offer_bundle_video = SWITCH_FALSE;
 			}
 		}
 
@@ -16495,6 +16595,11 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 			memset(sdp_mid_recv_ext_ids, 0, sizeof(sdp_mid_recv_ext_ids));
 		}
 	}
+	if (sdp_type == SDP_OFFER) {
+		switch_core_media_prepare_generated_offer_bundle(&generated_offer_bundle, sdp_bundle,
+			audio_mid, video_mid, port, v_engine->adv_sdp_port, offer_bundle_audio, offer_bundle_video);
+		sdp_bundle = &generated_offer_bundle;
+	}
 	if (sdp_type == SDP_ANSWER && pending_mid_answer) {
 		switch_core_media_filter_answer_bundle(&pending_bundle,
 			!bundle_no_attr_mid && !bundle_no_audio_mid && !zstr(audio_mid) && port && !a_engine->reject_avp,
@@ -16511,8 +16616,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 				" %s", sdp_bundle->offered_mids[bundle_mid_index]);
 		}
 		switch_snprintf(groupbuf + strlen(groupbuf), sizeof(groupbuf) - strlen(groupbuf), "\r\n");
-	} else if (sdp_type != SDP_ANSWER && switch_core_media_bundle_should_offer(smh, sdp_bundle) &&
-		!bundle_no_attr_mid && !bundle_no_audio_mid) {
+	} else if (sdp_type == SDP_OFFER && offer_bundle_audio) {
 		bundle_audio_mid = !zstr(audio_mid) ? audio_mid : "audio";
 		if (offer_bundle_video) bundle_video_mid = !zstr(video_mid) ? video_mid : "video";
 		if (bundle_video_mid) switch_snprintf(groupbuf, sizeof(groupbuf), "a=group:BUNDLE %s %s\r\n", bundle_audio_mid, bundle_video_mid);
@@ -16934,25 +17038,21 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 		if ((v_port = v_engine->adv_sdp_port)) {
 			int loops;
 			int got_vid = 0;
+			switch_bool_t generated_video_is_bundled = switch_core_media_bundle_has_media(sdp_bundle, SWITCH_MEDIA_TYPE_VIDEO);
 
 			for (loops = 0; loops < 2; loops++) {
 
 				if (switch_channel_test_flag(smh->session->channel, CF_ICE)) {
+					/* Restore independent credentials before describing a separate video transport. */
+					if (sdp_type == SDP_OFFER && !generated_video_is_bundled) {
+						if (v_engine->ice_out.ufrag == a_engine->ice_out.ufrag) v_engine->ice_out.ufrag = NULL;
+						if (v_engine->ice_out.pwd == a_engine->ice_out.pwd) v_engine->ice_out.pwd = NULL;
+					}
 					gen_ice(session, SWITCH_MEDIA_TYPE_VIDEO, ip, (switch_port_t)v_port);
 				}
 
-				if (switch_core_media_bundle_has_media(sdp_bundle, SWITCH_MEDIA_TYPE_VIDEO) && v_engine && v_engine->rtcp_mux < 1) {
+				if (generated_video_is_bundled && v_engine && v_engine->rtcp_mux < 1) {
 					v_engine->rtcp_mux = 1;
-				}
-
-				if (switch_core_media_bundle_has_media(sdp_bundle, SWITCH_MEDIA_TYPE_VIDEO) && v_engine) {
-					if (zstr(v_engine->ice_out.ufrag) && !zstr(a_engine->ice_out.ufrag)) {
-						switch_set_string(v_engine->ice_out.ufrag, a_engine->ice_out.ufrag);
-					}
-					
-					if (zstr(v_engine->ice_out.pwd) && !zstr(a_engine->ice_out.pwd)) {
-						switch_set_string(v_engine->ice_out.pwd, a_engine->ice_out.pwd);
-					}
 				}
 
 				switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "m=video %d %s",
@@ -17292,11 +17392,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 					switch_stun_random_string(tmp3, 10, "0123456789");
 
 					
-				if (switch_core_media_bundle_has_media(sdp_bundle, SWITCH_MEDIA_TYPE_VIDEO)) {
-					v_engine->ice_out.ufrag = a_engine->ice_out.ufrag;
-					v_engine->ice_out.pwd = a_engine->ice_out.pwd;
-				}
-				ice_out = &v_engine->ice_out;
+				ice_out = generated_video_is_bundled ? &a_engine->ice_out : &v_engine->ice_out;
 
 
 					switch_snprintf(buf + strlen(buf), SDPBUFLEN - strlen(buf), "a=ssrc:%u cname:%s\r\n", v_engine->ssrc, smh->cname);
