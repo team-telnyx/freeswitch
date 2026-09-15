@@ -241,7 +241,7 @@ static switch_frame_t *find_free_frame(switch_frame_buffer_t *fb, switch_frame_t
 		np->frame->packetlen = data_offset + datalen;
 		np->frame->data = packet + data_offset;
 		np->frame->datalen = datalen;
-		np->frame->buflen = SWITCH_RTP_MAX_BUF_LEN;
+		np->frame->buflen = SWITCH_RTP_MAX_BUF_LEN - data_offset;
 	} else {
 		np->frame->packet = NULL;
 		np->frame->packetlen = 0;

@@ -138,6 +138,12 @@ struct switch_core_session {
 	switch_queue_t *private_event_queue_pri;
 	switch_thread_rwlock_t *bug_rwlock;
 	switch_media_bug_t *bugs;
+	/* "All media bugs are native taps" hint, maintained and read under
+	 * bug_rwlock. Lives here instead of an SSF_* bit because session->flags is
+	 * mutated with non-atomic RMW under various unrelated locks - updating a
+	 * bit under bug_rwlock could concurrently clobber flags written under the
+	 * session rwlock (e.g. SSF_DESTROYED). */
+	int bug_tap_only;
 	switch_app_log_t *app_log;
 	uint32_t stack_count;
 
@@ -283,6 +289,7 @@ struct switch_runtime {
 	double min_idle_time;
 	switch_dbtype_t odbc_dbtype;
 	char hostname[256];
+	uint8_t hostname_overridden;
 	char *switchname;
 	int multiple_registrations;
 	uint32_t max_db_handles;
