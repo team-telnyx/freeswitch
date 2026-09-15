@@ -1,0 +1,34 @@
+<?xml version="1.0"?>
+<document type="freeswitch/xml">
+  <X-PRE-PROCESS cmd="set" data="rtp_timer_name=soft"/>
+  <section name="configuration" description="Various Configuration">
+    <configuration name="modules.conf" description="Modules">
+      <!-- Only what the TELCORE-412 handoff test needs: the null/loopback endpoint,
+           uuid_transfer, and the inline dialplan plus the park application. -->
+      <modules>
+        <load module="mod_console"/>
+        <load module="mod_loopback"/>
+        <load module="mod_commands"/>
+        <load module="mod_dptools"/>
+      </modules>
+    </configuration>
+
+    <configuration name="switch.conf" description="Core Configuration">
+      <settings>
+        <param name="colorize-console" value="false"/>
+        <param name="dialplan-timestamps" value="false"/>
+        <param name="loglevel" value="debug"/>
+      </settings>
+    </configuration>
+
+    <configuration name="console.conf" description="Console Logger">
+      <mappings>
+        <map name="all" value="console,debug,info,notice,warning,err,crit,alert"/>
+      </mappings>
+      <settings>
+        <param name="colorize" value="false"/>
+        <param name="loglevel" value="debug"/>
+      </settings>
+    </configuration>
+  </section>
+</document>
