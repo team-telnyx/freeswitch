@@ -17,11 +17,14 @@
 #include <switch.h>
 #include <test/switch_test.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <time.h>
+#include <unistd.h>
 
 #define MAX_TEST_THREADS 2
 #define TEST_DURATION_SEC 10
+#define TEST_PROCESS_TIMEOUT_SEC (TEST_DURATION_SEC + 5)
 #define PACKET_INJECTION_RATE_MS 1  /* Inject as fast as possible */
 
 static volatile int should_stop_threads = 0;
@@ -31,6 +34,23 @@ static volatile int thread2_iterations = 0;
 static switch_core_session_t *test_session = NULL;
 static switch_jb_t *test_jb = NULL;
 static switch_channel_t *test_channel = NULL;
+
+static void test_timeout_handler(int signal_number)
+{
+	static const char message[] = "switch_jb_deadlock: test process timed out\n";
+
+	(void)signal_number;
+	(void)write(STDERR_FILENO, message, sizeof(message) - 1);
+	_exit(EXIT_FAILURE);
+}
+
+static void fail_on_deadlock(void)
+{
+	static const char message[] = "switch_jb_deadlock: watchdog detected a deadlock\n";
+
+	(void)write(STDERR_FILENO, message, sizeof(message) - 1);
+	_exit(EXIT_FAILURE);
+}
 
 /* Thread 1: Simulates media bug destroy path from GDB backtrace
  * Calls switch_channel_event_set_data() which:
@@ -124,7 +144,7 @@ static void *packet_injection_thread(void *arg)
 	return NULL;
 }
 
-/* Watchdog thread to detect deadlock */
+/* Watchdog thread to detect and fail fast on deadlock. */
 static void *watchdog_thread(void *arg)
 {
 	int check_count = 0;
@@ -161,7 +181,7 @@ static void *watchdog_thread(void *arg)
 					                  current_thread1, current_thread2);
 					deadlock_detected = 1;
 					should_stop_threads = 1;
-					break;
+					fail_on_deadlock();
 				}
 			} else {
 				/* Both threads completed their work normally */
@@ -225,6 +245,9 @@ FST_CORE_BEGIN("./conf")
 			const char *err = NULL;
 			switch_media_handle_t *media_handle = NULL;
 			switch_core_media_params_t *mparams = NULL;
+
+			fst_requires(signal(SIGALRM, test_timeout_handler) != SIG_ERR);
+			alarm(TEST_PROCESS_TIMEOUT_SEC);
 
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
 			                  "=== JITTER BUFFER CHANNEL MUTEX DEADLOCK TEST ===\n");
@@ -340,12 +363,12 @@ FST_CORE_BEGIN("./conf")
 				                  "No deadlock detected - either the fix is applied or race didn't trigger\n");
 			}
 
-			/* The test "passes" by detecting the deadlock (proving the bug exists)
-			 * or by completing without deadlock (if the fix is applied)
-			 * We'll mark it as successful either way since we're demonstrating the issue */
-			fst_check(1);
+			/* Reaching this point means the workers completed without the watchdog
+			 * or process deadline terminating the test. */
+			fst_check(!deadlock_detected);
 
 test_end:
+			alarm(0);
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
 			                  "=== TEST END ===\n");
 		}

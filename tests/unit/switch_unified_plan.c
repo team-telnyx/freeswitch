@@ -177,7 +177,7 @@ FCT_BGN()
 
 			fct_req(make_session_and_rtp(&session, &rtp) == SWITCH_STATUS_SUCCESS && session != NULL);
 			/* Set channel vars for BUNDLE + MIDs */
-			switch_channel_set_variable(switch_core_session_get_channel(session), "rtp_use_bundle", "true");
+			switch_channel_set_variable(switch_core_session_get_channel(session), "rtp-bundle", "auto");
 			switch_channel_set_variable(switch_core_session_get_channel(session), "rtp_audio_mid", "0");
 			switch_channel_set_variable(switch_core_session_get_channel(session), "rtp_video_mid", "1");
 
@@ -190,7 +190,9 @@ FCT_BGN()
 
 
 			/* Now disable bundle and ensure the line disappears */
-			switch_channel_set_variable(switch_core_session_get_channel(session), "rtp_use_bundle", "false");
+			/* Explicit policy is authoritative even if the compatibility request is true. */
+			switch_channel_set_variable(switch_core_session_get_channel(session), "rtp_use_bundle", "true");
+			switch_channel_set_variable(switch_core_session_get_channel(session), "rtp-bundle", "off");
 			switch_core_media_gen_local_sdp(session, SDP_OFFER, "127.0.0.1", 40000, NULL, 1);
 			s = (char *)switch_channel_get_variable(switch_core_session_get_channel(session), "rtp_local_sdp_str");
 			fct_req(s != NULL);
@@ -210,6 +212,7 @@ FCT_BGN()
             fct_req(rtp != NULL);
 
             fct_chk(switch_rtp_enable_mid(rtp, TEST_MID_EXT_ID, "0") == SWITCH_STATUS_SUCCESS);
+            fct_chk(switch_rtp_get_received_mid(rtp) == NULL);
 
             {
                 switch_status_t st;
@@ -224,6 +227,17 @@ FCT_BGN()
                     /* one element "0": 1 (id/len) + 1 (payload) => padded to 4 => >=1 word */
                     fct_chk(info.length_words >= 1);
                 }
+
+				fct_chk(switch_rtp_enable_mid_receive(rtp, TEST_MID_EXT_ID) == SWITCH_STATUS_SUCCESS);
+				bytes = sizeof(p);
+				memset(p, 0xEE, sizeof(p));
+				st = switch_rtp_write_raw(rtp, p, &bytes, SWITCH_TRUE);
+				fct_chk(st == SWITCH_STATUS_SUCCESS);
+				{
+					switch_rtp_ext_info_t info = {0};
+					fct_chk(switch_rtp_get_extension_info(rtp, &info) == SWITCH_STATUS_SUCCESS);
+					fct_chk(info.has_ext == SWITCH_FALSE);
+				}
 			}
             cleanup_rtp(&rtp);
             cleanup_session_and_media(session);
