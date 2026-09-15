@@ -76,6 +76,10 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 	switch_frame_t *fork_frame = NULL;
 	unsigned int flag = 0;
 	int i;
+	/* The mutex actually locked below. switch_core_codec_destroy() memsets the codec,
+	 * mutex pointer included, without holding codec_read_mutex, so re-reading
+	 * session->read_codec->mutex to unlock can yield NULL. */
+	switch_mutex_t *read_codec_mutex = NULL;
 
 	switch_assert(session != NULL);
 
@@ -134,7 +138,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 		return SWITCH_STATUS_FALSE;
 	}
 
-	switch_mutex_lock(session->read_codec->mutex);
+	read_codec_mutex = session->read_codec->mutex;
+	switch_mutex_lock(read_codec_mutex);
 
   top:
 
@@ -185,7 +190,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 	}
 
 	if (session->endpoint_interface->io_routines->read_frame) {
-		switch_mutex_unlock(session->read_codec->mutex);
+		switch_mutex_unlock(read_codec_mutex);
+		read_codec_mutex = NULL;
 		switch_mutex_unlock(session->codec_read_mutex);
 		if ((status = session->endpoint_interface->io_routines->read_frame(session, frame, flags, stream_id)) == SWITCH_STATUS_SUCCESS) {
 			for (ptr = session->event_hooks.read_frame; ptr; ptr = ptr->next) {
@@ -217,7 +223,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 					switch_yield(session->read_impl.microseconds_per_packet);
 					return SWITCH_STATUS_SUCCESS;
 				}
-				switch_mutex_lock(session->read_codec->mutex);
+				read_codec_mutex = session->read_codec->mutex;
+				switch_mutex_lock(read_codec_mutex);
 				(*frame)->codec = session->read_codec;
 				status = SWITCH_STATUS_SUCCESS;
 				is_inuse = 1;
@@ -248,7 +255,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 			return SWITCH_STATUS_FALSE;
 		}
 
-		switch_mutex_lock(session->read_codec->mutex);
+		read_codec_mutex = session->read_codec->mutex;
+		switch_mutex_lock(read_codec_mutex);
 		if (!switch_core_codec_ready(session->read_codec)) {
 			*frame = NULL;
 			status = SWITCH_STATUS_FALSE;
@@ -1084,7 +1092,10 @@ cnt_with_cng:
 		}
 	}
 
-	switch_mutex_unlock(session->read_codec->mutex);
+	/* Not session->read_codec->mutex: the codec may have been zeroed since. */
+	if (read_codec_mutex) {
+		switch_mutex_unlock(read_codec_mutex);
+	}
 	switch_mutex_unlock(session->codec_read_mutex);
 
 

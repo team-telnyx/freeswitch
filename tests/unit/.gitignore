@@ -44,6 +44,7 @@ switch_estimators
 switch_jitter_buffer
 test_sofia
 test_dtmf_sent_event
+test_read_frame_codec_teardown
 switch_mod_lumenvox
 conf_lumenvox/[0-9]*/**
 .deps/
