@@ -1479,12 +1479,6 @@ SWITCH_STANDARD_APP(set_name_function)
 	}
 }
 
-static void warn_deprecated_bundle_media_arg(switch_core_session_t *session)
-{
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-		"The bundle_media answer flag is deprecated and no longer activates BUNDLE; set rtp-bundle=auto|force before SDP negotiation\n");
-}
-
 SWITCH_STANDARD_APP(answer_function)
 {
 	switch_channel_t *channel = switch_core_session_get_channel(session);
@@ -1505,7 +1499,7 @@ SWITCH_STANDARD_APP(answer_function)
 			switch_channel_set_flag_recursive(channel, CF_VIDEO_DEBUG_READ);
 		}
 		if (switch_stristr("bundle_media", arg)) {
-			warn_deprecated_bundle_media_arg(session);
+			switch_channel_set_flag_recursive(channel, CF_BUNDLE_MEDIA);
 		}
 	}
 
@@ -1578,7 +1572,7 @@ SWITCH_STANDARD_APP(pre_answer_function)
 			switch_channel_set_flag(channel, CF_CONFERENCE);
 		}
 		if (switch_stristr("bundle_media", arg)) {
-			warn_deprecated_bundle_media_arg(session);
+			switch_channel_set_flag(channel, CF_BUNDLE_MEDIA);
 		}
 	}
 
