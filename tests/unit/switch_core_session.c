@@ -31,6 +31,32 @@
 #include <switch.h>
 #include <test/switch_test.h>
 
+/*
+ * TELCORE-501: hangup-path producer for blind-transfer confirmation.
+ *
+ * When confirm_blind_transfer=true and the transferred (flag-holding) leg is
+ * torn down before the transfer completes, switch_core_session_hangup_state()
+ * must deliver SWITCH_MESSAGE_INDICATE_BLIND_TRANSFER_RESPONSE(numeric_arg=0)
+ * to the parked transferor so it does not sit in CS_PARK until park_timeout.
+ *
+ * These tests exercise the pure-core path: a null-endpoint peer stands in for
+ * the parked transferor, an event hook on the peer counts the message, and the
+ * flag-holding fst_session is hung up to drive the teardown producer. No SIP
+ * stack is involved.
+ */
+
+/* counters captured by the peer's receive_message event hook */
+static switch_atomic_t blind_transfer_response_count;
+static int blind_transfer_response_numeric_arg = -1;
+
+static switch_status_t blind_transfer_response_hook(switch_core_session_t *session, switch_core_session_message_t *msg)
+{
+	if (msg->message_id == SWITCH_MESSAGE_INDICATE_BLIND_TRANSFER_RESPONSE) {
+		switch_atomic_inc(&blind_transfer_response_count);
+		blind_transfer_response_numeric_arg = msg->numeric_arg;
+	}
+	return SWITCH_STATUS_SUCCESS;
+}
 
 FST_CORE_BEGIN("./conf")
 {
@@ -241,6 +267,130 @@ FST_CORE_BEGIN("./conf")
 			fst_check_string_equals(switch_str_nil(switch_channel_get_variable(fst_channel, "parse_event_test2")), "2");
 
 			switch_event_destroy(&event);
+		}
+		FST_SESSION_END()
+
+		/*
+		 * blind_transfer_response_on_hangup: the flag-holding leg is torn down
+		 * before the transfer completes. switch_core_session_hangup_state()
+		 * must call switch_ivr_blind_transfer_ack(SWITCH_FALSE), which locates
+		 * the parked peer via blind_transfer_uuid and delivers
+		 * SWITCH_MESSAGE_INDICATE_BLIND_TRANSFER_RESPONSE with numeric_arg=0,
+		 * then clears CF_CONFIRM_BLIND_TRANSFER. The peer's receive_message
+		 * event hook must observe exactly that, once.
+		 */
+		FST_SESSION_BEGIN(blind_transfer_response_on_hangup)
+		{
+			switch_core_session_t *peer_session = NULL;
+			switch_channel_t *peer_channel = NULL;
+			switch_call_cause_t cause = SWITCH_CAUSE_NONE;
+			switch_status_t status;
+			const char *peer_uuid;
+			int i;
+
+			/* Peer stands in for the parked transferor (the REFER sender). */
+			status = switch_ivr_originate(NULL, &peer_session, &cause, "null/+15553334444",
+										  0, NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL);
+			fst_xcheck(status == SWITCH_STATUS_SUCCESS, "originate null peer session");
+			fst_requires(peer_session);
+			peer_channel = switch_core_session_get_channel(peer_session);
+			fst_requires(peer_channel);
+			peer_uuid = switch_core_session_get_uuid(peer_session);
+
+			/* Observe BLIND_TRANSFER_RESPONSE delivered to the peer. */
+			switch_atomic_set(&blind_transfer_response_count, 0);
+			blind_transfer_response_numeric_arg = -1;
+			fst_check(switch_core_event_hook_add_receive_message(peer_session, blind_transfer_response_hook) == SWITCH_STATUS_SUCCESS);
+
+			/* fst_session is the transferred (flag-holding) leg. */
+			switch_channel_set_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER);
+			switch_channel_set_variable(fst_channel, "blind_transfer_uuid", peer_uuid);
+
+			/* Tear down the flag-holding leg; the hangup state on its session
+			   thread drives the new teardown-path producer. */
+			switch_channel_hangup(fst_channel, SWITCH_CAUSE_NORMAL_CLEARING);
+
+			/* Poll up to ~5s for the session thread to run CS_HANGUP. */
+			for (i = 0; i < 500 && switch_atomic_read(&blind_transfer_response_count) == 0; i++) {
+				switch_yield(10000);
+			}
+
+			fst_xcheck(switch_atomic_read(&blind_transfer_response_count) == 1,
+					   "exactly one failure BLIND_TRANSFER_RESPONSE delivered to peer on hangup");
+			fst_xcheck(blind_transfer_response_numeric_arg == 0,
+					   "failure response carries numeric_arg=0");
+			fst_xcheck(!switch_channel_test_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER),
+					   "CF_CONFIRM_BLIND_TRANSFER cleared after teardown producer ran");
+
+			/* Cleanup: release the peer so ASan/harness stay clean. */
+			switch_core_event_hook_remove_receive_message(peer_session, blind_transfer_response_hook);
+			switch_channel_hangup(peer_channel, SWITCH_CAUSE_NORMAL_CLEARING);
+			switch_core_session_rwunlock(peer_session);
+		}
+		FST_SESSION_END()
+
+		/*
+		 * blind_transfer_ack_suppresses_hangup_producer: a prior
+		 * switch_ivr_blind_transfer_ack(SWITCH_TRUE) (e.g. from the
+		 * blind_transfer_ack dialplan app or the success producer at
+		 * switch_core_session.c:970-985) test-and-clears the flag, so a later
+		 * hangup must NOT re-deliver the message. Locks in test-and-clear
+		 * suppression against a double-fire from the teardown producer.
+		 */
+		FST_SESSION_BEGIN(blind_transfer_ack_suppresses_hangup_producer)
+		{
+			switch_core_session_t *peer_session = NULL;
+			switch_channel_t *peer_channel = NULL;
+			switch_call_cause_t cause = SWITCH_CAUSE_NONE;
+			switch_status_t status;
+			const char *peer_uuid;
+			int i;
+
+			status = switch_ivr_originate(NULL, &peer_session, &cause, "null/+15553334444",
+										  0, NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL);
+			fst_xcheck(status == SWITCH_STATUS_SUCCESS, "originate null peer session");
+			fst_requires(peer_session);
+			peer_channel = switch_core_session_get_channel(peer_session);
+			fst_requires(peer_channel);
+			peer_uuid = switch_core_session_get_uuid(peer_session);
+
+			switch_atomic_set(&blind_transfer_response_count, 0);
+			blind_transfer_response_numeric_arg = -1;
+			fst_check(switch_core_event_hook_add_receive_message(peer_session, blind_transfer_response_hook) == SWITCH_STATUS_SUCCESS);
+
+			switch_channel_set_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER);
+			switch_channel_set_variable(fst_channel, "blind_transfer_uuid", peer_uuid);
+
+			/* Acknowledge success first: clears the flag and delivers numeric_arg=1. */
+			fst_check(switch_ivr_blind_transfer_ack(fst_session, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS);
+
+			for (i = 0; i < 500 && switch_atomic_read(&blind_transfer_response_count) == 0; i++) {
+				switch_yield(10000);
+			}
+
+			fst_xcheck(switch_atomic_read(&blind_transfer_response_count) == 1,
+					   "exactly one success BLIND_TRANSFER_RESPONSE delivered to peer");
+			fst_xcheck(blind_transfer_response_numeric_arg == 1,
+					   "success response carries numeric_arg=1");
+			fst_xcheck(!switch_channel_test_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER),
+					   "CF_CONFIRM_BLIND_TRANSFER cleared by the explicit ack");
+
+			/* Snapshot the count, then hang up; the teardown producer must NOT
+			   fire again because the flag is already cleared. */
+			{
+				uint32_t before = switch_atomic_read(&blind_transfer_response_count);
+				switch_channel_hangup(fst_channel, SWITCH_CAUSE_NORMAL_CLEARING);
+				for (i = 0; i < 500 && switch_channel_get_state(fst_channel) != CS_DESTROY; i++) {
+					switch_yield(10000);
+				}
+				switch_yield(100000);
+				fst_xcheck(switch_atomic_read(&blind_transfer_response_count) == before,
+						   "teardown producer did not re-fire after explicit ack");
+			}
+
+			switch_core_event_hook_remove_receive_message(peer_session, blind_transfer_response_hook);
+			switch_channel_hangup(peer_channel, SWITCH_CAUSE_NORMAL_CLEARING);
+			switch_core_session_rwunlock(peer_session);
 		}
 		FST_SESSION_END()
 	}
