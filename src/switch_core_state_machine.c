@@ -881,6 +881,27 @@ SWITCH_DECLARE(void) switch_core_session_hangup_state(switch_core_session_t *ses
 	switch_channel_set_timestamps(session->channel);
 	switch_channel_set_callstate(session->channel, CCS_HANGUP);
 
+	/* TELCORE-501: if this leg was awaiting confirmation of a blind transfer
+	   (confirm_blind_transfer=true) and is being torn down before the transfer
+	   completed, notify the parked transferor of the failure so it does not
+	   sit in CS_PARK until park_timeout. switch_ivr_blind_transfer_ack()
+	   test-and-clears CF_CONFIRM_BLIND_TRANSFER, locates the parked peer via
+	   blind_transfer_uuid and delivers SWITCH_MESSAGE_INDICATE_BLIND_TRANSFER_RESPONSE
+	   with numeric_arg=0; it returns SWITCH_STATUS_SUCCESS only when the peer
+	   was located and notified, so a FALSE result means the flag was already
+	   cleared by another producer or the transferor is already gone. */
+	if (switch_channel_test_flag(session->channel, CF_CONFIRM_BLIND_TRANSFER)) {
+		if (switch_ivr_blind_transfer_ack(session, SWITCH_FALSE) == SWITCH_STATUS_SUCCESS) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+							  "%s hung up with blind transfer confirmation pending, notified transferor of failure\n",
+							  switch_channel_get_name(session->channel));
+		} else {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+							  "%s hung up with blind transfer confirmation pending, transferor already gone\n",
+							  switch_channel_get_name(session->channel));
+		}
+	}
+
 	/* Export JB stats before hangup handlers run, while JB still exists */
 	switch_core_media_export_jb_stats(session);
 

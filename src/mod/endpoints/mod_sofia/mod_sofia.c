@@ -1830,8 +1830,18 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 			uuid = switch_channel_get_variable(channel, "blind_transfer_uuid");
 
 			if (event && uuid) {
+				/* TELCORE-501: default failure sipfrag. This is what the NOTIFY
+				   carries on the teardown path when the transferred leg is gone
+				   before this consumer runs: switch_core_session_locate(uuid)
+				   below fails (CS_HANGUP is rejected), so the custom-failure
+				   override never executes. A 487 Request Terminated would better
+				   reflect the ORIGINATOR_CANCEL that drove the teardown, but the
+				   dying transferee can no longer be located to read its
+				   sip_invite_failure_status/phrase, so a fixed phrase is used.
+				   Acceptable as-is; refining to 487 here is a possible follow-up. */
 				char payload_str[255] = "SIP/2.0 403 Forbidden\r\n";
 				const char *session_id_header = sofia_glue_session_id_header(session, tech_pvt->profile);
+				switch_bool_t peer_alive = SWITCH_FALSE;
 				if (msg->numeric_arg) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 							"%s Completing blind transfer with success\n", switch_channel_get_name(channel));
@@ -1840,8 +1850,19 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 					switch_core_session_t *other_session = switch_core_session_locate(uuid);
 					if (other_session) {
 						switch_channel_t *other_channel = switch_core_session_get_channel(other_session);
+						/* TELCORE-501: switch_core_session_locate() rejects channels in
+						   CS_HANGUP or later, so a successful locate means the transferred
+						   leg is still up and may be intercepted back. Keep a belt-and-braces
+						   down_nosig() check in case the leg is torn down between the locate
+						   and the read of the failure-status variables below. */
 						const char *invite_failure_status = switch_channel_get_variable(other_channel, "sip_invite_failure_status");
-						const char *invite_failure_str = switch_channel_get_variable(other_channel, "sip_invite_failure_status");
+						/* TELCORE-501: the reason-phrase channel variable is
+						   sip_invite_failure_phrase (set at mod_sofia.c:725 and
+						   sofia.c:1781,7330-7335), not sip_invite_failure_status.
+						   Reading the status twice rendered a custom-failure NOTIFY
+						   as "SIP/2.0 487 487" instead of "SIP/2.0 487 CANCEL". */
+						const char *invite_failure_str = switch_channel_get_variable(other_channel, "sip_invite_failure_phrase");
+						peer_alive = !switch_channel_down_nosig(other_channel) ? SWITCH_TRUE : SWITCH_FALSE;
 						if (!zstr(invite_failure_status) && !zstr(invite_failure_str)) {
 							snprintf(payload_str, sizeof(payload_str), "SIP/2.0 %s %s\r\n", invite_failure_status, invite_failure_str);
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
@@ -1862,8 +1883,21 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 
 
 				if (!msg->numeric_arg) {
-					xdest = switch_core_session_sprintf(session, "intercept:%s", uuid);
-					switch_ivr_session_transfer(session, xdest, "inline", NULL);
+					/* TELCORE-501: only re-bridge onto the transferred leg when it is
+					   still up. When the transferred leg was torn down before the
+					   transfer completed (the new teardown-path producer at
+					   switch_core_session_hangup_state()), the NOTIFY above has already
+					   carried the failure sipfrag; intercept would target a dead
+					   channel, so hang this (parked) leg up with BLIND_TRANSFER instead. */
+					if (peer_alive) {
+						xdest = switch_core_session_sprintf(session, "intercept:%s", uuid);
+						switch_ivr_session_transfer(session, xdest, "inline", NULL);
+					} else {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+								"%s blind transfer failed and transferee %s is down, hanging up\n",
+								switch_channel_get_name(channel), uuid);
+						switch_channel_hangup(channel, SWITCH_CAUSE_BLIND_TRANSFER);
+					}
 				}
 			}
 
