@@ -14,7 +14,6 @@ Author: Terry Caton
 
 TODO:
 * better documentation
-* unicode character decoding
 
 */
 
@@ -279,6 +278,59 @@ inline void Reader::MatchExpectedString(const std::string& sExpected, InputStrea
 }
 
 
+// Telnyx fork of upstream CAJUN. Upstream left \u unimplemented -- the case
+// label fell through to the throwing default -- so a document carrying one was
+// refused whatever it decoded to, which is a legal document every conforming
+// parser reads.
+
+inline int Utf16HexDigit(char c)
+{
+   if (c >= '0' && c <= '9') { return c - '0'; }
+   if (c >= 'a' && c <= 'f') { return c - 'a' + 10; }
+   if (c >= 'A' && c <= 'F') { return c - 'A' + 10; }
+   return -1;
+}
+
+inline void AppendUtf8(std::string& out, unsigned long cp)
+{
+   if (cp < 0x80UL) {
+      out.push_back(static_cast<char>(cp));
+   }
+   else if (cp < 0x800UL) {
+      out.push_back(static_cast<char>(0xc0UL | (cp >> 6)));
+      out.push_back(static_cast<char>(0x80UL | (cp & 0x3fUL)));
+   }
+   else if (cp < 0x10000UL) {
+      out.push_back(static_cast<char>(0xe0UL | (cp >> 12)));
+      out.push_back(static_cast<char>(0x80UL | ((cp >> 6) & 0x3fUL)));
+      out.push_back(static_cast<char>(0x80UL | (cp & 0x3fUL)));
+   }
+   else {
+      out.push_back(static_cast<char>(0xf0UL | (cp >> 18)));
+      out.push_back(static_cast<char>(0x80UL | ((cp >> 12) & 0x3fUL)));
+      out.push_back(static_cast<char>(0x80UL | ((cp >> 6) & 0x3fUL)));
+      out.push_back(static_cast<char>(0x80UL | (cp & 0x3fUL)));
+   }
+}
+
+inline unsigned long Reader::MatchHex4(InputStream& inputStream)
+{
+   unsigned long value = 0;
+   for (int i = 0; i < 4; ++i) {
+      if (inputStream.EOS()) {
+         throw ScanException("Truncated \\u escape sequence in string",
+                             inputStream.GetLocation());
+      }
+      const int digit = Utf16HexDigit(inputStream.Get());
+      if (digit < 0) {
+         throw ScanException("Non-hex digit in \\u escape sequence in string",
+                             inputStream.GetLocation());
+      }
+      value = (value << 4) | static_cast<unsigned long>(digit);
+   }
+   return value;
+}
+
 inline void Reader::MatchString(std::string& string, InputStream& inputStream)
 {
    MatchExpectedString("\"", inputStream);
@@ -302,7 +354,31 @@ inline void Reader::MatchString(std::string& string, InputStream& inputStream)
             case 'n':      string.push_back('\n');    break;
             case 'r':      string.push_back('\r');    break;
             case 't':      string.push_back('\t');    break;
-            case 'u':      // TODO: what do we do with this?
+            case 'u': {
+               unsigned long cp = MatchHex4(inputStream);
+               // A high surrogate is half a character. JSON spells anything
+               // above the BMP as a pair, so the low half has to follow or
+               // what we append is not the character that was written.
+               if (cp >= 0xd800UL && cp <= 0xdbffUL) {
+                  if (inputStream.EOS() || inputStream.Get() != '\\' ||
+                      inputStream.EOS() || inputStream.Get() != 'u') {
+                     throw ScanException("Unpaired UTF-16 high surrogate in string",
+                                         inputStream.GetLocation());
+                  }
+                  const unsigned long low = MatchHex4(inputStream);
+                  if (low < 0xdc00UL || low > 0xdfffUL) {
+                     throw ScanException("Invalid UTF-16 low surrogate in string",
+                                         inputStream.GetLocation());
+                  }
+                  cp = 0x10000UL + ((cp - 0xd800UL) << 10) + (low - 0xdc00UL);
+               }
+               else if (cp >= 0xdc00UL && cp <= 0xdfffUL) {
+                  throw ScanException("Unpaired UTF-16 low surrogate in string",
+                                      inputStream.GetLocation());
+               }
+               AppendUtf8(string, cp);
+               break;
+            }
             default: {
                std::string sMessage = "Unrecognized escape sequence found in string: \\";
                sMessage.push_back(c);
