@@ -578,6 +578,7 @@ decode_error:
 #endif
 }
 
+#ifndef AMR_PASSTHROUGH
 static switch_status_t switch_amr_control(switch_codec_t *codec,
 										   switch_codec_control_command_t cmd,
 										   switch_codec_control_type_t ctype,
@@ -587,10 +588,6 @@ static switch_status_t switch_amr_control(switch_codec_t *codec,
 										   switch_codec_control_type_t *rtype,
 										   void **ret_data)
 {
-#ifdef AMR_PASSTHROUGH
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "This codec is only usable in passthrough mode!\n");
-	return SWITCH_STATUS_FALSE;
-#else
 	struct amr_context *context = codec->private_info;
 
 	switch(cmd) {
@@ -659,8 +656,8 @@ static switch_status_t switch_amr_control(switch_codec_t *codec,
 	}
 
 	return SWITCH_STATUS_SUCCESS;
-#endif
 }
+#endif
 
 static char *generate_fmtp(switch_memory_pool_t *pool , int octet_align)
 {
@@ -696,6 +693,50 @@ static char *generate_fmtp(switch_memory_pool_t *pool , int octet_align)
 
 	return switch_core_strdup(pool, buf);
 }
+
+#ifndef AMR_PASSTHROUGH
+static int extract_octet_align(const char *fmtp)
+{
+	int oa = 0;
+	int argc;
+	char *argv[10];
+	char *fmtp_dup;
+
+	if (zstr(fmtp)) return oa;
+
+	fmtp_dup = strdup(fmtp);
+	if (!fmtp_dup) return oa;
+
+	argc = switch_separate_string(fmtp_dup, ';', argv, (int)(sizeof(argv) / sizeof(argv[0])));
+	for (int i = 0; i < argc; ++i) {
+		char *data = argv[i];
+		char *arg;
+		while (*data == ' ') data++;
+		arg = strchr(data, '=');
+		if (arg) {
+			*arg++ = '\0';
+			while (*arg == ' ') arg++;
+			if (!strcasecmp(data, "octet-align")) {
+				oa = switch_true(arg);
+				break;
+			}
+		}
+	}
+
+	switch_safe_free(fmtp_dup);
+	return oa;
+}
+
+static switch_status_t matches_fmtp(const char *fmtp, const char *codec_fmtp)
+{
+	int oa1 = extract_octet_align(fmtp);
+	int oa2 = extract_octet_align(codec_fmtp);
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AMR fmtp: %s, codec_fmtp: %s\n", switch_str_nil(fmtp), switch_str_nil(codec_fmtp));
+
+	return (oa1 == oa2) ? SWITCH_STATUS_SUCCESS : SWITCH_STATUS_FALSE;
+}
+#endif
 
 static switch_status_t amr_parse_fmtp_cb(const char *fmtp, switch_codec_fmtp_t *codec_fmtp)
 {
@@ -926,8 +967,12 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_amr_load)
 										 switch_amr_encode,	/* function to encode raw data into encoded data */
 										 switch_amr_decode,	/* function to decode encoded data into raw data */
 										 switch_amr_destroy);	/* deinitalize a codec handle using this implementation */
+#ifndef AMR_PASSTHROUGH
+	codec_interface->implementations->codec_control = switch_amr_control;
+	codec_interface->implementations->matches_fmtp = matches_fmtp;
+#endif
 
-	SWITCH_ADD_CODEC(codec_interface, "AMR / Bandwidth Efficient");
+//	SWITCH_ADD_CODEC(codec_interface, "AMR / Bandwidth Efficient");
 	codec_interface->parse_fmtp = amr_parse_fmtp_cb;
 
 	default_fmtp_be = generate_fmtp(pool, 0);
@@ -948,8 +993,11 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_amr_load)
 										 switch_amr_encode,	/* function to encode raw data into encoded data */
 										 switch_amr_decode,	/* function to decode encoded data into raw data */
 										 switch_amr_destroy);	/* deinitalize a codec handle using this implementation */
-
+#ifndef AMR_PASSTHROUGH
 	codec_interface->implementations->codec_control = switch_amr_control;
+	codec_interface->implementations->matches_fmtp = matches_fmtp;
+#endif
+
 	mod_amr_configuration_snprintf(config_buffer, sizeof(config_buffer));
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "AMR config: %s", config_buffer);
 

@@ -11,8 +11,18 @@
         <load module="mod_dptools"/>
         <load module="mod_sndfile"/>
         <load module="mod_test"/>
+        <load module="mod_amr"/>
         <load module="mod_amrwb"/>
      </modules>
+    </configuration>
+
+    <configuration name="amr.conf" description="AMR-NB">
+      <settings>
+        <param name="volte" value="1"/>
+        <param name="mode-set" value="7"/>
+        <param name="invite-prefer-oa" value="0"/>
+        <param name="invite-prefer-be" value="0"/>
+      </settings>
     </configuration>
 
     <configuration name="amrwb.conf" description="AMR-WB">

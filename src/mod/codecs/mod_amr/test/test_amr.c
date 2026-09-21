@@ -93,6 +93,52 @@ FST_CORE_BEGIN(".")
 		}
 
 		FST_TEST_END()
+
+		/*
+		 * mod_amr registers the octet-aligned (IANA 96) and bandwidth-efficient
+		 * (IANA 97) implementations of "AMR" in a single codec interface, with a
+		 * matches_fmtp callback that compares octet-align. Codec init must select
+		 * the implementation whose octet-align agrees with the fmtp passed in.
+		 */
+		FST_TEST_BEGIN(amr_codec_init_selects_impl_by_fmtp)
+		{
+			switch_codec_t codec = { 0 };
+			switch_status_t status;
+			switch_codec_settings_t codec_settings = {{ 0 }};
+
+			/* octet-align=1 selects the octet-aligned implementation (IANA 96). */
+			status = switch_core_codec_init(&codec,
+			"AMR",
+			"mod_amr",
+			"octet-align=1",
+			8000,
+			20,
+			1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
+			&codec_settings, fst_pool);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			fst_check(codec.implementation != NULL);
+			fst_check(codec.implementation->ianacode == 96);
+
+			switch_core_codec_destroy(&codec);
+			memset(&codec, 0, sizeof(codec));
+
+			/* No octet-align defaults to 0 (bandwidth efficient, IANA 97). */
+			status = switch_core_codec_init(&codec,
+			"AMR",
+			"mod_amr",
+			"mode-set=7",
+			8000,
+			20,
+			1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
+			&codec_settings, fst_pool);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			fst_check(codec.implementation != NULL);
+			fst_check(codec.implementation->ianacode == 97);
+
+			switch_core_codec_destroy(&codec);
+		}
+
+		FST_TEST_END()
 	}
 	FST_SUITE_END()
 }
