@@ -824,6 +824,39 @@ SWITCH_DECLARE(switch_status_t) switch_core_codec_decode(switch_codec_t *codec,
 										   decoded_data, decoded_data_len, decoded_rate, flag);
 	if (codec->mutex) switch_mutex_unlock(codec->mutex);
 
+	/* Post-condition for the concealment path. With no encoded bytes to work
+	 * from, a decoder can produce at most one packet of concealment, so anything
+	 * larger means it returned without writing through decoded_data_len - our
+	 * callers pass in the size of their buffer (raw_write_frame.datalen =
+	 * raw_write_frame.buflen), and that preset value then travels on as "this
+	 * much valid audio". switch_core_session_write_frame() resamples it for the
+	 * far leg, which on an 8000 -> 16000 transcode doubles it past the write
+	 * buffer, fails the write, and ends the bridge - a codec bug should never be
+	 * able to do that. Drop the frame instead; both read and write paths already
+	 * treat SWITCH_STATUS_BREAK as "no audio this tick". Seen with mod_bcg729's
+	 * G.729 PLC branch on G722 <-> G729 bridges. */
+	if (encoded_data_len == 0 && (status == SWITCH_STATUS_SUCCESS || status == SWITCH_STATUS_RESAMPLE) &&
+		codec->implementation->decoded_bytes_per_packet &&
+		*decoded_data_len > codec->implementation->decoded_bytes_per_packet) {
+		/* A codec that gets this wrong gets it wrong on every silent packet, so
+		 * rate-limit rather than emit a line per 20 ms for the life of the call.
+		 * The unsynchronised static is deliberate: the worst a race can do is
+		 * let a second thread log the same complaint once more. */
+		static switch_time_t last_complained = 0;
+		switch_time_t now = switch_micro_time_now();
+
+		if (now - last_complained > 10000000) {
+			last_complained = now;
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT,
+							  "Codec %s decoded a zero-length frame into %u bytes, more than one %u byte packet - dropping\n",
+							  codec->implementation->iananame, *decoded_data_len,
+							  codec->implementation->decoded_bytes_per_packet);
+		}
+
+		*decoded_data_len = 0;
+		return SWITCH_STATUS_BREAK;
+	}
+
 	return status;
 }
 
