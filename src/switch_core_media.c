@@ -7372,6 +7372,52 @@ static int same_codec_impl(const switch_codec_implementation_t *imp, const switc
 		imp->samples_per_second == ref->samples_per_second;
 }
 
+/*
+ * AMR picks octet-aligned or bandwidth-efficient framing from the fmtp once, when
+ * the codec is initialised, so two AMR payload maps are only interchangeable when
+ * they agree on it. Parsed the way mod_amr parses it.
+ */
+static int amr_octet_align(const char *fmtp)
+{
+	char *fmtp_dup, *argv[16];
+	int argc, x, octet_align = 0;
+
+	if (zstr(fmtp) || !(fmtp_dup = strdup(fmtp))) {
+		return 0;
+	}
+
+	argc = switch_separate_string(fmtp_dup, ';', argv, (sizeof(argv) / sizeof(argv[0])));
+
+	for (x = 0; x < argc; x++) {
+		char *data = argv[x];
+		char *arg;
+
+		while (*data == ' ') {
+			data++;
+		}
+
+		if ((arg = strchr(data, '='))) {
+			*arg++ = '\0';
+			if (!strcasecmp(data, "octet-align") && atoi(arg)) {
+				octet_align = 1;
+			}
+		}
+	}
+
+	free(fmtp_dup);
+
+	return octet_align;
+}
+
+static int same_codec_framing(const switch_codec_implementation_t *imp, const char *cur_fmtp, const char *new_fmtp)
+{
+	if (!imp || zstr(imp->iananame) || strcasecmp(imp->iananame, "AMR")) {
+		return 1;
+	}
+
+	return amr_octet_align(cur_fmtp) == amr_octet_align(new_fmtp);
+}
+
 static void greedy_sort(switch_media_handle_t *smh, struct matches *matches, int m_idx, const switch_codec_implementation_t **codec_array, int total_codecs)
 {
 	int j = 0, f = 0, g;
@@ -10505,7 +10551,9 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 						int same_codec_name = codec_ready && selected_imp->iananame && a_engine->read_impl.iananame &&
 							!strcasecmp(selected_imp->iananame, a_engine->read_impl.iananame);
 
-						if (codec_ready && same_codec_impl(selected_imp, &a_engine->read_impl)) {
+						if (codec_ready && same_codec_impl(selected_imp, &a_engine->read_impl) &&
+							same_codec_framing(selected_imp, a_engine->read_codec.fmtp_in,
+											   a_engine->cur_payload_map ? a_engine->cur_payload_map->rm_fmtp : NULL)) {
 							a_engine->reset_codec = 0;
 							switch_clear_flag(&a_engine->read_codec, SWITCH_CODEC_FLAG_RESET_PENDING);
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Not resetting codec. We stick to %s\n", a_engine->read_impl.iananame);
