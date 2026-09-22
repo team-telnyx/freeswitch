@@ -393,7 +393,7 @@ FST_CORE_BEGIN(".")
 
 		FST_TEST_END()
 
-		FST_SESSION_BEGIN(amr_strict_reoffer_forced_framing_keeps_codec)
+FST_SESSION_BEGIN(amr_strict_reoffer_forced_framing_keeps_codec)
 		{
 			amr_reoffer_result_t result;
 
@@ -409,7 +409,50 @@ FST_CORE_BEGIN(".")
 			fst_xcheck(result.answer_octet_align == 1, "the answer still advertises octet aligned framing");
 		}
 		FST_SESSION_END()
-	}
+
+FST_TEST_BEGIN(amr_decode_octet_aligned_mode_7)
+		{
+			switch_codec_t read_codec = { 0 };
+			switch_status_t status;
+			switch_codec_settings_t codec_settings = {{ 0 }};
+			uint32_t flags = 0;
+			uint32_t rate;
+			/*CMR 7, TOC FT=7 Q=1, 31 bytes of speech*/
+			uint8_t mode_7[34] = { 0x70, 0x3c };
+			/*CMR 7, TOC NO_DATA Q=1*/
+			static uint8_t no_data[] = { 0x70, 0x7c };
+			uint32_t decoded_len;
+			unsigned char decbuf[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
+
+			status = switch_core_codec_init(&read_codec,
+			"AMR",
+			"mod_amr",
+			"octet-align=1",
+			8000,
+			20,
+			1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
+			&codec_settings, fst_pool);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+
+			memset(mode_7 + 2, 0x55, sizeof(mode_7) - 2);
+
+			decoded_len = sizeof(decbuf);
+			status = switch_core_codec_decode(&read_codec, NULL, mode_7, 33, 8000, &decbuf, &decoded_len, &rate, &flags);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			fst_check(decoded_len == 320);
+
+			decoded_len = sizeof(decbuf);
+			status = switch_core_codec_decode(&read_codec, NULL, mode_7, 34, 8000, &decbuf, &decoded_len, &rate, &flags);
+			fst_check(status != SWITCH_STATUS_SUCCESS);
+
+			decoded_len = sizeof(decbuf);
+			status = switch_core_codec_decode(&read_codec, NULL, no_data, sizeof(no_data), 8000, &decbuf, &decoded_len, &rate, &flags);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+
+			switch_core_codec_destroy(&read_codec);
+		}
+
+		FST_TEST_END()	}
 	FST_SUITE_END()
 }
 FST_CORE_END()
