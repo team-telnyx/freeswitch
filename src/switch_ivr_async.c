@@ -1277,6 +1277,30 @@ static switch_size_t record_buffer_inuse(struct record_helper *rh)
 	return inuse;
 }
 
+/* Absolute position in the recording thread's byte stream: what has left the
+ * queue plus what is still in it.  Queued rate boundaries are recorded against
+ * this, so it must not move when the ceiling discards -- a discard leaves the
+ * queue without being read, and is counted as drained for exactly that reason. */
+static switch_size_t record_stream_pos(struct record_helper *rh)
+{
+	switch_size_t pos = 0;
+	switch_buffer_t *tb;
+
+	switch_mutex_lock(rh->flag_mutex);
+	tb = rh->thread_buffer;
+	switch_mutex_unlock(rh->flag_mutex);
+
+	if (tb && rh->buffer_mutex) {
+		/* Both halves under one lock: read apart they can come from different
+		 * moments and the sum means nothing. */
+		switch_mutex_lock(rh->buffer_mutex);
+		pos = rh->bytes_out + switch_buffer_inuse(tb);
+		switch_mutex_unlock(rh->buffer_mutex);
+	}
+
+	return pos;
+}
+
 /**
  * Set the recording completion cause. The cause can only be set once, to minimize the logic in the record_callback.
  * [The completion_cause strings are essentially those of an MRCP Recorder resource.]
@@ -2328,8 +2352,9 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 						if (dropped && (!rh->last_drop_log || (switch_micro_time_now() - rh->last_drop_log) > 5000000)) {
 							rh->last_drop_log = switch_micro_time_now();
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-											  "Recording buffer for %s is full; discarding oldest audio (%" SWITCH_SIZE_T_FMT " bytes dropped so far)\n",
-											  rh->log_file, rh->buffer_dropped_bytes);
+											  "Recording buffer for %s is full; discarding oldest audio (%" SWITCH_SIZE_T_FMT
+											  " bytes dropped so far, stream position %" SWITCH_SIZE_T_FMT ")\n",
+											  rh->log_file, rh->buffer_dropped_bytes, record_stream_pos(rh));
 						}
 
 						if (switch_mutex_trylock(rh->cond_mutex) == SWITCH_STATUS_SUCCESS) {

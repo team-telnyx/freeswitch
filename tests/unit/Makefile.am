@@ -15,6 +15,8 @@ noinst_PROGRAMS += test_read_frame_codec_teardown
 # still be routed. See switch_channel_inc_transfer_generation().
 noinst_PROGRAMS += test_transfer_handoff_window
 
+# Regression: a ceiling discard must keep the stream position.
+noinst_PROGRAMS += test_record_rate_boundary
 # switch_mod_lumenvox is intentionally NOT built/run in CI yet: LumenVox servers
 # are not reachable from CI, so the ASR tests cannot run there. Re-enable by
 # appending switch_mod_lumenvox to the line above. See TELCORE-249.
