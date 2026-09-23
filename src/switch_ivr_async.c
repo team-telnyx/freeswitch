@@ -2297,6 +2297,16 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 								dropped = excess > inuse ? inuse : excess;
 								switch_buffer_toss(tb, excess);
 								rh->buffer_dropped_bytes += dropped;
+
+								/* Queued rate changes are absolute positions in this stream
+								 * (bytes_out + inuse), and the recording thread only advances
+								 * bytes_out for what it reads.  Discarded bytes leave the queue
+								 * without being read, so without this the two drift apart by
+								 * every byte ever dropped and a rate change is applied that far
+								 * into the wrong audio.  Counting the discard as drained keeps
+								 * bytes_out + inuse invariant, and lets the thread apply and
+								 * retire any boundary the discard swallowed. */
+								rh->bytes_out += dropped;
 							}
 						}
 
