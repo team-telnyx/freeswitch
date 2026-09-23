@@ -1256,10 +1256,21 @@ static switch_status_t record_helper_destroy(struct record_helper **rh, switch_c
 static switch_size_t record_buffer_inuse(struct record_helper *rh)
 {
 	switch_size_t inuse = 0;
+	switch_buffer_t *tb;
 
-	if (rh->thread_buffer && rh->buffer_mutex) {
+	/* thread_buffer is published under flag_mutex together with the buffer it
+	 * points at, so take the same snapshot every other reader takes.  Reading it
+	 * bare can see it before the buffer behind it is fully created, and can see
+	 * stale NULL while a recording thread is starting -- which here would read as
+	 * an empty queue and cut the close budget short on a thread that is draining
+	 * normally. */
+	switch_mutex_lock(rh->flag_mutex);
+	tb = rh->thread_buffer;
+	switch_mutex_unlock(rh->flag_mutex);
+
+	if (tb && rh->buffer_mutex) {
 		switch_mutex_lock(rh->buffer_mutex);
-		inuse = switch_buffer_inuse(rh->thread_buffer);
+		inuse = switch_buffer_inuse(tb);
 		switch_mutex_unlock(rh->buffer_mutex);
 	}
 
