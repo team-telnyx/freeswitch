@@ -21,6 +21,11 @@
  * switch_ivr.c and switch_core_state_machine.c hunks and the frozen window test wedges
  * every trial.
  *
+ * xferext_transfer_wakes_a_thread_asleep_in_routing covers the sibling handoff,
+ * switch_channel_transfer_to_extension(), called directly while the session thread is
+ * asleep in CS_ROUTING - the case where set_state() is a same-state no-op and so wakes
+ * nobody.
+ *
  * Not covered: a transfer landing after the dialplan hunt has read the profile. The
  * generation survives, but a blocking extension defers it until the app returns.
  *
@@ -471,6 +476,193 @@ static trial_result_t run_freeze_trial(int settle_ms, int *froze, switch_bool_t 
 	return result;
 }
 
+/*
+ * switch_channel_transfer_to_extension() - the sibling handoff, reachable from ESL
+ * xferext - does the same bump and the same switch_channel_set_state(CS_ROUTING), but
+ * unlike switch_ivr_session_transfer() it is not followed by anything that wakes the
+ * session thread. set_state() is a silent no-op when the channel is already CS_ROUTING,
+ * so a cross-thread call landing on a channel asleep in routing strands the bump.
+ *
+ * To hold a session thread asleep in CS_ROUTING deterministically, veto the routing
+ * handler: a core pre-exec on_routing returning anything but SWITCH_STATUS_SUCCESS makes
+ * STATE_MACRO skip switch_core_standard_on_routing(), so nothing moves the state on. The
+ * loop then finds state == running_state == CS_ROUTING and goes into
+ * switch_thread_cond_wait(). CF_THREAD_SLEEPING is set across that wait, so the test can
+ * confirm the thread really is parked there before taking the shot - without that the
+ * result would prove nothing.
+ *
+ * The handler disarms itself, so the routing pass that the wake provokes runs the
+ * standard handler, which picks the queued extension up.
+ */
+static switch_mutex_t *stall_mutex = NULL;
+static char stall_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1] = { 0 };
+static int stall_armed = 0;
+static int stall_applied = 0;
+
+static switch_status_t stall_on_routing(switch_core_session_t *session)
+{
+	const char *uuid = switch_core_session_get_uuid(session);
+	switch_status_t status = SWITCH_STATUS_SUCCESS;
+
+	switch_mutex_lock(stall_mutex);
+	if (stall_armed && uuid && !strcmp(uuid, stall_uuid)) {
+		stall_armed = 0;
+		stall_applied = 1;
+		status = SWITCH_STATUS_FALSE;
+	}
+	switch_mutex_unlock(stall_mutex);
+
+	return status;
+}
+
+static switch_state_handler_table_t stall_handlers = {
+	/*.on_init */ NULL,
+	/*.on_routing */ stall_on_routing,
+	/*.on_execute */ NULL,
+	/*.on_hangup */ NULL,
+	/*.on_exchange_media */ NULL,
+	/*.on_soft_execute */ NULL,
+	/*.on_consume_media */ NULL,
+	/*.on_hibernate */ NULL,
+	/*.on_reset */ NULL,
+	/*.on_park */ NULL,
+	/*.on_reporting */ NULL,
+	/*.on_destroy */ NULL,
+	/*.flags */ SSH_FLAG_PRE_EXEC | SSH_FLAG_STICKY
+};
+
+static void stall_arm(const char *uuid)
+{
+	switch_mutex_lock(stall_mutex);
+	switch_set_string(stall_uuid, uuid ? uuid : "");
+	stall_armed = uuid ? 1 : 0;
+	stall_applied = 0;
+	switch_mutex_unlock(stall_mutex);
+}
+
+static int stall_is_applied(void)
+{
+	int applied;
+
+	switch_mutex_lock(stall_mutex);
+	applied = stall_applied;
+	switch_mutex_unlock(stall_mutex);
+
+	return applied;
+}
+
+/* One trial. *stalled is set only if the thread was confirmed asleep in CS_ROUTING. */
+static trial_result_t run_xferext_trial(int settle_ms, int *stalled)
+{
+	switch_core_session_t *session = NULL;
+	switch_call_cause_t cause = SWITCH_CAUSE_NORMAL_CLEARING;
+	switch_channel_t *channel = NULL;
+	switch_caller_extension_t *extension = NULL;
+	const char *uuid = NULL;
+	const char *marker = NULL;
+	trial_result_t result = TRIAL_UNKNOWN;
+	switch_time_t deadline;
+
+	if (switch_ivr_originate(NULL, &session, &cause, "null/+15553334444", 5,
+							 NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) != SWITCH_STATUS_SUCCESS || !session) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "[transfer-handoff] xferext trial: originate failed: %s\n",
+						  switch_channel_cause2str(cause));
+		return TRIAL_UNKNOWN;
+	}
+
+	channel = switch_core_session_get_channel(session);
+	uuid = switch_core_session_get_uuid(session);
+
+	park_watch_reset(uuid);
+	uuid_transfer(uuid, XFER_A_DEST);
+
+	if (switch_channel_wait_for_flag(channel, CF_PARK, SWITCH_TRUE, 5000, NULL) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "[transfer-handoff] xferext trial: channel never parked\n");
+		goto done;
+	}
+
+	switch_channel_set_variable(channel, MARKER_VAR, NULL);
+	park_watch_reset(uuid);
+
+	/* Park the session thread asleep in CS_ROUTING. */
+	stall_arm(uuid);
+	uuid_transfer(uuid, XFER_A_DEST);
+
+	deadline = switch_micro_time_now() + 3000000;
+	while (switch_micro_time_now() < deadline) {
+		if (stall_is_applied() &&
+			switch_channel_get_state(channel) == CS_ROUTING &&
+			switch_channel_get_running_state(channel) == CS_ROUTING &&
+			switch_channel_test_flag(channel, CF_THREAD_SLEEPING)) {
+			break;
+		}
+		switch_cond_next();
+	}
+
+	if (!(stall_is_applied() &&
+		  switch_channel_get_state(channel) == CS_ROUTING &&
+		  switch_channel_get_running_state(channel) == CS_ROUTING &&
+		  switch_channel_test_flag(channel, CF_THREAD_SLEEPING))) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+						  "[transfer-handoff] xferext trial: stall not achieved (applied=%d state=%s running=%s sleeping=%d)\n",
+						  stall_is_applied(), switch_channel_state_name(switch_channel_get_state(channel)),
+						  switch_channel_state_name(switch_channel_get_running_state(channel)),
+						  switch_channel_test_flag(channel, CF_THREAD_SLEEPING) ? 1 : 0);
+		goto done;
+	}
+
+	if (stalled) {
+		*stalled = 1;
+	}
+
+	/* The shot: the exported sibling path, called directly, same state, asleep. */
+	if (!(extension = switch_caller_extension_new(session, "xferext", "xferext"))) {
+		goto done;
+	}
+	switch_caller_extension_add_application(session, extension, "set", MARKER_VAR "=" MARKER_VALUE);
+	switch_caller_extension_add_application(session, extension, "park", NULL);
+
+	switch_channel_transfer_to_extension(channel, extension);
+
+	deadline = switch_micro_time_now() + (settle_ms * 1000);
+	while (switch_micro_time_now() < deadline) {
+		marker = switch_channel_get_variable(channel, MARKER_VAR);
+		if (marker && !strcmp(marker, MARKER_VALUE)) {
+			break;
+		}
+		switch_sleep(20000);
+	}
+
+	marker = switch_channel_get_variable(channel, MARKER_VAR);
+
+	if (marker && !strcmp(marker, MARKER_VALUE)) {
+		result = TRIAL_REACHED;
+	} else if (switch_channel_get_state(channel) == CS_ROUTING &&
+			   switch_channel_get_running_state(channel) == CS_ROUTING) {
+		result = TRIAL_WEDGED;
+	}
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE,
+					  "[transfer-handoff] xferext trial -> %s state=%s running_state=%s sleeping=%d marker=%s\n",
+					  trial_result_name(result),
+					  switch_channel_state_name(switch_channel_get_state(channel)),
+					  switch_channel_state_name(switch_channel_get_running_state(channel)),
+					  switch_channel_test_flag(channel, CF_THREAD_SLEEPING) ? 1 : 0,
+					  marker ? marker : "(unset)");
+
+  done:
+	stall_arm(NULL);
+	park_watch_reset(NULL);
+
+	if (switch_channel_up(channel)) {
+		switch_channel_hangup(channel, SWITCH_CAUSE_NORMAL_CLEARING);
+	}
+	switch_core_session_rwunlock(session);
+	switch_sleep(200000);
+
+	return result;
+}
+
 static int env_int(const char *name, int dflt)
 {
 	const char *val = getenv(name);
@@ -498,6 +690,7 @@ FST_CORE_BEGIN("./conf_transfer_handoff")
 			/* Per test, never cached: fst_pool is created and destroyed per test. */
 			switch_mutex_init(&park_mutex, SWITCH_MUTEX_NESTED, fst_pool);
 			switch_mutex_init(&freeze_mutex, SWITCH_MUTEX_NESTED, fst_pool);
+			switch_mutex_init(&stall_mutex, SWITCH_MUTEX_NESTED, fst_pool);
 		}
 		FST_SETUP_END()
 
@@ -632,6 +825,48 @@ FST_CORE_BEGIN("./conf_transfer_handoff")
 			fst_check(reached == trials);
 			fst_check(wedged == 0);
 			fst_check(ok_but_dropped == 0);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(xferext_transfer_wakes_a_thread_asleep_in_routing)
+		{
+			int settle_ms = env_int("TRANSFER_HANDOFF_SETTLE_MS", 1200);
+			int trials = env_int("TRANSFER_HANDOFF_TRIALS", 2);
+			int t, stalled_total = 0, reached = 0, wedged = 0, unknown = 0;
+
+			fst_requires(switch_event_bind("transfer_handoff", SWITCH_EVENT_CHANNEL_PARK, SWITCH_EVENT_SUBCLASS_ANY,
+										   park_event_handler, NULL) == SWITCH_STATUS_SUCCESS);
+			switch_core_add_state_handler(&stall_handlers);
+
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+							  "========== TELCORE-412 xferext into a sleeping routing thread x %d ==========\n", trials);
+
+			for (t = 0; t < trials; t++) {
+				int stalled = 0;
+				trial_result_t r = run_xferext_trial(settle_ms, &stalled);
+
+				stalled_total += stalled;
+
+				switch (r) {
+				case TRIAL_REACHED: reached++; break;
+				case TRIAL_WEDGED:  wedged++;  break;
+				default:            unknown++; break;
+				}
+			}
+
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+							  "========== TELCORE-412 xferext: stalled %d/%d | reached %d | wedged %d | unknown %d ==========\n",
+							  stalled_total, trials, reached, wedged, unknown);
+
+			switch_core_remove_state_handler(&stall_handlers);
+			switch_event_unbind_callback(park_event_handler);
+
+			/* The probe itself must work, or the result below means nothing. */
+			fst_requires(stalled_total == trials);
+
+			fst_check(reached == trials);
+			fst_check(wedged == 0);
+			fst_check(unknown == 0);
 		}
 		FST_TEST_END()
 	}

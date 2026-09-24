@@ -3497,6 +3497,17 @@ SWITCH_DECLARE(void) switch_channel_transfer_to_extension(switch_channel_t *chan
 	/* Same handoff as switch_ivr_session_transfer(); see the counter. */
 	switch_channel_inc_transfer_generation(channel);
 	switch_channel_set_state(channel, CS_ROUTING);
+
+	/* set_state() is a silent no-op when the channel is already CS_ROUTING, and it is the
+	   only thing here that would have woken the session thread - so a cross-thread call
+	   landing on a channel already in routing leaves the bump above stranded against a
+	   sleeping thread. Bare wake, matching switch_ivr_session_transfer(): the full
+	   signal_state_change() would also run the endpoint state_change io routine and every
+	   registered hook, which are not all state-guarded, for a transition that may not
+	   have happened. */
+	if (channel->session) {
+		switch_core_session_wake_session_thread(channel->session);
+	}
 }
 
 SWITCH_DECLARE(void) switch_channel_set_caller_extension(switch_channel_t *channel, switch_caller_extension_t *caller_extension)
