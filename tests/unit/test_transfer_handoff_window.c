@@ -21,13 +21,19 @@
  * switch_ivr.c and switch_core_state_machine.c hunks and the frozen window test wedges
  * every trial.
  *
+ * transfer_after_the_hunt_discards_the_stale_extension covers the other half of the
+ * window - a transfer landing after the dialplan hunt has already read the caller
+ * profile - by holding the session thread in the post-dialplan hook, which sits between
+ * the hunt and switch_channel_set_caller_extension().
+ *
  * xferext_transfer_wakes_a_thread_asleep_in_routing covers the sibling handoff,
  * switch_channel_transfer_to_extension(), called directly while the session thread is
  * asleep in CS_ROUTING - the case where set_state() is a same-state no-op and so wakes
  * nobody.
  *
- * Not covered: a transfer landing after the dialplan hunt has read the profile. The
- * generation survives, but a blocking extension defers it until the app returns.
+ * Not covered: the sleep branch's own backstop, which fires only when
+ * wake_session_thread() gives up after ten failed trylocks. That is a sub-microsecond
+ * window with no test-only hook to reach it.
  *
  * Env: TRANSFER_HANDOFF_TRIALS, TRANSFER_HANDOFF_DELAYS (csv ms), TRANSFER_HANDOFF_SETTLE_MS.
  */
@@ -477,6 +483,207 @@ static trial_result_t run_freeze_trial(int settle_ms, int *froze, switch_bool_t 
 }
 
 /*
+ * The other half of the window: a transfer that lands after the dialplan hunt has read
+ * the caller profile.
+ *
+ * switch_core_standard_on_routing() reads the caller profile, hunts an extension from it,
+ * then installs that extension and sets CS_EXECUTE. A transfer arriving between the read
+ * and the install replaces the profile, but the handler still commits the extension it
+ * hunted from the old one. From that point state != running_state, so neither the
+ * top-of-loop guard nor the sleep branch consults the generation again: the stale
+ * extension runs, and because the production payload is a blocking park, the new transfer
+ * is deferred for the life of the call.
+ *
+ * Reaching that point deterministically needs a hook inside the handler, between the hunt
+ * and switch_channel_set_caller_extension(). The post-dialplan function is exactly there
+ * - it runs only when sofia_profile_name is set, which the test sets itself. The callback
+ * parks the session thread until the test has delivered the second transfer, so the race
+ * is not raced at all.
+ */
+static switch_mutex_t *hunt_mutex = NULL;
+static char hunt_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1] = { 0 };
+static int hunt_armed = 0;
+static int hunt_reached = 0;
+static int hunt_release = 0;
+
+static void hunt_post_dialplan(switch_core_session_t *session, switch_caller_extension_t *extension, const char *profile_name)
+{
+	const char *uuid = switch_core_session_get_uuid(session);
+	switch_time_t deadline;
+	int mine = 0;
+
+	switch_mutex_lock(hunt_mutex);
+	if (hunt_armed && uuid && !strcmp(uuid, hunt_uuid)) {
+		hunt_armed = 0;
+		hunt_reached = 1;
+		mine = 1;
+	}
+	switch_mutex_unlock(hunt_mutex);
+
+	if (!mine) {
+		return;
+	}
+
+	/* Bounded: a test that never releases must not strand the session thread forever. */
+	deadline = switch_micro_time_now() + 5000000;
+	while (switch_micro_time_now() < deadline) {
+		int go;
+
+		switch_mutex_lock(hunt_mutex);
+		go = hunt_release;
+		switch_mutex_unlock(hunt_mutex);
+
+		if (go) {
+			break;
+		}
+		switch_cond_next();
+	}
+}
+
+static void hunt_arm(const char *uuid)
+{
+	switch_mutex_lock(hunt_mutex);
+	switch_set_string(hunt_uuid, uuid ? uuid : "");
+	hunt_armed = uuid ? 1 : 0;
+	hunt_reached = 0;
+	hunt_release = 0;
+	switch_mutex_unlock(hunt_mutex);
+}
+
+static void hunt_let_go(void)
+{
+	switch_mutex_lock(hunt_mutex);
+	hunt_armed = 0;
+	hunt_release = 1;
+	switch_mutex_unlock(hunt_mutex);
+}
+
+static int hunt_is_reached(void)
+{
+	int reached;
+
+	switch_mutex_lock(hunt_mutex);
+	reached = hunt_reached;
+	switch_mutex_unlock(hunt_mutex);
+
+	return reached;
+}
+
+/* One trial. *hunted is set only if the session thread was confirmed inside the hook. */
+static trial_result_t run_post_hunt_trial(int settle_ms, int *hunted, int *first_ran)
+{
+	switch_core_session_t *session = NULL;
+	switch_call_cause_t cause = SWITCH_CAUSE_NORMAL_CLEARING;
+	switch_channel_t *channel = NULL;
+	const char *uuid = NULL;
+	const char *marker = NULL;
+	trial_result_t result = TRIAL_UNKNOWN;
+	switch_time_t deadline;
+
+	if (switch_ivr_originate(NULL, &session, &cause, "null/+15553334444", 5,
+							 NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) != SWITCH_STATUS_SUCCESS || !session) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "[transfer-handoff] post-hunt trial: originate failed: %s\n",
+						  switch_channel_cause2str(cause));
+		return TRIAL_UNKNOWN;
+	}
+
+	channel = switch_core_session_get_channel(session);
+	uuid = switch_core_session_get_uuid(session);
+
+	park_watch_reset(uuid);
+	uuid_transfer(uuid, XFER_A_DEST);
+
+	if (switch_channel_wait_for_flag(channel, CF_PARK, SWITCH_TRUE, 5000, NULL) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "[transfer-handoff] post-hunt trial: channel never parked\n");
+		goto done;
+	}
+
+	/* The precondition transfer used XFER_A_DEST too, so clear its marker. */
+	switch_channel_set_variable(channel, MARKER_VAR, NULL);
+	switch_channel_set_variable(channel, MARKER_A_VAR, NULL);
+	park_watch_reset(uuid);
+
+	/* The hook only runs when this is set; the value is not otherwise used here. */
+	switch_channel_set_variable(channel, "sofia_profile_name", "transfer_handoff");
+	switch_channel_set_post_dialplan_function(channel, hunt_post_dialplan);
+
+	hunt_arm(uuid);
+	uuid_transfer(uuid, XFER_A_DEST);
+
+	deadline = switch_micro_time_now() + 3000000;
+	while (switch_micro_time_now() < deadline) {
+		if (hunt_is_reached()) {
+			break;
+		}
+		switch_cond_next();
+	}
+
+	if (!hunt_is_reached()) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+						  "[transfer-handoff] post-hunt trial: hook never reached (state=%s running=%s)\n",
+						  switch_channel_state_name(switch_channel_get_state(channel)),
+						  switch_channel_state_name(switch_channel_get_running_state(channel)));
+		hunt_let_go();
+		goto done;
+	}
+
+	if (hunted) {
+		*hunted = 1;
+	}
+
+	/* The A extension is hunted and built; the profile it came from is about to be
+	   replaced underneath it. */
+	uuid_transfer(uuid, XFER_B_DEST);
+
+	hunt_let_go();
+
+	deadline = switch_micro_time_now() + (settle_ms * 1000);
+	while (switch_micro_time_now() < deadline) {
+		marker = switch_channel_get_variable(channel, MARKER_VAR);
+		if (marker && !strcmp(marker, MARKER_VALUE)) {
+			break;
+		}
+		switch_sleep(20000);
+	}
+
+	marker = switch_channel_get_variable(channel, MARKER_VAR);
+
+	if (marker && !strcmp(marker, MARKER_VALUE)) {
+		result = TRIAL_REACHED;
+	} else if (switch_channel_get_state(channel) == CS_ROUTING &&
+			   switch_channel_get_running_state(channel) == CS_ROUTING) {
+		result = TRIAL_WEDGED;
+	} else if (park_watch_count() > 0) {
+		result = TRIAL_REPARKED;
+	}
+
+	if (first_ran && switch_channel_get_variable(channel, MARKER_A_VAR)) {
+		*first_ran = 1;
+	}
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE,
+					  "[transfer-handoff] post-hunt trial -> %s state=%s running_state=%s park_events=%d marker=%s stale_extension_ran=%s\n",
+					  trial_result_name(result),
+					  switch_channel_state_name(switch_channel_get_state(channel)),
+					  switch_channel_state_name(switch_channel_get_running_state(channel)),
+					  park_watch_count(), marker ? marker : "(unset)",
+					  switch_channel_get_variable(channel, MARKER_A_VAR) ? "yes" : "no");
+
+  done:
+	hunt_arm(NULL);
+	hunt_let_go();
+	park_watch_reset(NULL);
+
+	if (switch_channel_up(channel)) {
+		switch_channel_hangup(channel, SWITCH_CAUSE_NORMAL_CLEARING);
+	}
+	switch_core_session_rwunlock(session);
+	switch_sleep(200000);
+
+	return result;
+}
+
+/*
  * switch_channel_transfer_to_extension() - the sibling handoff, reachable from ESL
  * xferext - does the same bump and the same switch_channel_set_state(CS_ROUTING), but
  * unlike switch_ivr_session_transfer() it is not followed by anything that wakes the
@@ -691,6 +898,7 @@ FST_CORE_BEGIN("./conf_transfer_handoff")
 			switch_mutex_init(&park_mutex, SWITCH_MUTEX_NESTED, fst_pool);
 			switch_mutex_init(&freeze_mutex, SWITCH_MUTEX_NESTED, fst_pool);
 			switch_mutex_init(&stall_mutex, SWITCH_MUTEX_NESTED, fst_pool);
+			switch_mutex_init(&hunt_mutex, SWITCH_MUTEX_NESTED, fst_pool);
 		}
 		FST_SETUP_END()
 
@@ -863,6 +1071,54 @@ FST_CORE_BEGIN("./conf_transfer_handoff")
 
 			/* The probe itself must work, or the result below means nothing. */
 			fst_requires(stalled_total == trials);
+
+			fst_check(reached == trials);
+			fst_check(wedged == 0);
+			fst_check(unknown == 0);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(transfer_after_the_hunt_discards_the_stale_extension)
+		{
+			int settle_ms = env_int("TRANSFER_HANDOFF_SETTLE_MS", 1200);
+			int trials = env_int("TRANSFER_HANDOFF_TRIALS", 2);
+			int t, hunted_total = 0, first_ran_total = 0;
+			int reached = 0, wedged = 0, reparked = 0, unknown = 0;
+
+			fst_requires(switch_event_bind("transfer_handoff", SWITCH_EVENT_CHANNEL_PARK, SWITCH_EVENT_SUBCLASS_ANY,
+										   park_event_handler, NULL) == SWITCH_STATUS_SUCCESS);
+
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+							  "========== TELCORE-412 transfer landing after the hunt x %d ==========\n", trials);
+
+			for (t = 0; t < trials; t++) {
+				int hunted = 0, first_ran = 0;
+				trial_result_t r = run_post_hunt_trial(settle_ms, &hunted, &first_ran);
+
+				hunted_total += hunted;
+				first_ran_total += first_ran;
+
+				switch (r) {
+				case TRIAL_REACHED:  reached++;  break;
+				case TRIAL_WEDGED:   wedged++;   break;
+				case TRIAL_REPARKED: reparked++; break;
+				default:             unknown++;  break;
+				}
+			}
+
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+							  "========== TELCORE-412 post-hunt: hooked %d/%d | reached %d | wedged %d | reparked %d "
+							  "| unknown %d | stale extension ran: %d ==========\n",
+							  hunted_total, trials, reached, wedged, reparked, unknown, first_ran_total);
+
+			switch_event_unbind_callback(park_event_handler);
+
+			/* The probe itself must work, or the result below means nothing. */
+			fst_requires(hunted_total == trials);
+
+			/* The point of the test: the extension hunted from the replaced profile - the
+			   blocking park - must never run. */
+			fst_check(first_ran_total == 0);
 
 			fst_check(reached == trials);
 			fst_check(wedged == 0);

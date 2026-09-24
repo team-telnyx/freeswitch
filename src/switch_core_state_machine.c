@@ -689,6 +689,26 @@ SWITCH_DECLARE(void) switch_core_session_run(switch_core_session_t *session)
 				break;
 			case CS_ROUTING:	/* Look for a dialplan and find something to do */
 				STATE_MACRO(routing, "ROUTING");
+
+				/*
+				 * A transfer that landed after the hunt read the caller profile. The
+				 * handler has installed the extension it hunted from the profile the
+				 * transfer replaced and pointed the channel at its next state, so from
+				 * here on state != running_state and neither the top-of-loop guard nor
+				 * the sleep branch below looks at the generation again - the stale
+				 * extension runs, and if it blocks (a park) the transfer is deferred for
+				 * the life of the call. The routing decision is void; route again.
+				 * The top-of-loop guard re-snapshots, so this settles in one extra pass.
+				 * Not past CS_HANGUP: a hangup decided during routing stands.
+				 */
+				if (switch_channel_get_transfer_generation(session->channel) != routed_generation &&
+					switch_channel_get_state(session->channel) < CS_HANGUP) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+									  "%s transfer landed during routing, discarding the %s decision and routing again\n",
+									  switch_channel_get_name(session->channel),
+									  switch_channel_state_name(switch_channel_get_state(session->channel)));
+					switch_channel_set_state(session->channel, CS_ROUTING);
+				}
 				break;
 			case CS_RESET:		/* Reset */
 				STATE_MACRO(reset, "RESET");
