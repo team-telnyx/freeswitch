@@ -3557,6 +3557,10 @@ SWITCH_DECLARE(const char *) switch_redact_file_target(const char *target, char 
 		}
 	}
 
+	if (zstr(target)) {
+		return "(unknown)";
+	}
+
 	if (!(scheme_end = strstr(target, SWITCH_URL_SEPARATOR))) {
 		/* A local path holds no secret, and the log is more useful naming it. */
 		switch_snprintf(buf, buflen, "%s", target);

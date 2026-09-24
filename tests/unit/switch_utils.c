@@ -140,6 +140,8 @@ FST_TEST_BEGIN(redact_file_target)
     fst_check_string_equals(out, "(unknown)");
     out = switch_redact_file_target("", buf, sizeof(buf));
     fst_check_string_equals(out, "(unknown)");
+    out = switch_redact_file_target("{auth_password=hunter2} ", buf, sizeof(buf));
+    fst_check_string_equals(out, "(unknown)");
 
     /* An unterminated parameter group would leave the secret in the remainder. */
     out = switch_redact_file_target("{auth_password=hunter2 rtmp://host.example.com/app", buf, sizeof(buf));
