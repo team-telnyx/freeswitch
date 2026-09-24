@@ -6,6 +6,8 @@ noinst_PROGRAMS += switch_core_video switch_core_db switch_vad switch_packetizer
 
 noinst_PROGRAMS += switch_hold switch_sip switch_mod_telnyx switch_mod_gstt switch_3pcc test_inuse_race switch_jb_deadlock switch_cjson switch_sockaddr test_rtp_set_flag_null_crash test_write_frame_foreign_codec test_g729_zero_length_plc test_video_bridge_engine_race switch_apr_cleanup test_dtmf_sent_event test_record_transfer_helper_uaf
 
+# Regression: a zero write-error grace must never give up.
+noinst_PROGRAMS += test_record_write_error_grace
 # Regression: switch_core_session_read_frame() must not unlock the codec mutex by
 # re-dereferencing session->read_codec, which a concurrent switch_core_codec_destroy()
 # may have zeroed.

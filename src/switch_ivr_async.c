@@ -1175,8 +1175,8 @@ struct record_rate_boundary {
 /* Default for how long a run of consecutive write failures is tolerated before the
  * recording is abandoned.  Long enough to ride out a hiccup, short enough that a dead
  * destination does not spin at frame rate for the rest of the call.  Overridable per
- * recording or globally; 0 gives up on the first failure, and a large value effectively
- * never gives up (which is the pre-existing behaviour, spin included). */
+ * recording or globally; 0 never gives up, which is the pre-existing behaviour, spin
+ * included.  RECORD_STOP_WRITE_ON_ERROR still gives up on the first failure. */
 #define RECORD_WRITE_ERROR_GRACE_MS 1000
 
 struct record_helper {
@@ -1745,7 +1745,8 @@ static void *SWITCH_THREAD_FUNC recording_thread(switch_thread_t *thread, void *
 			 * only fail slowly this loop just blocked; now that a dead destination
 			 * fails instantly, carrying on would spin at frame rate for the rest of
 			 * the call.  The grace period still rides out a brief hiccup. */
-			if (rh->stop_write_on_error || (now - rh->first_write_error) >= (switch_time_t) rh->write_error_grace_ms * 1000) {
+			if (rh->stop_write_on_error ||
+				(rh->write_error_grace_ms > 0 && (now - rh->first_write_error) >= (switch_time_t) rh->write_error_grace_ms * 1000)) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
 								  "Giving up on %s after %u write errors over %dms (grace %dms); stopping this recording\n",
 								  rh->log_file, rh->write_errors, (int) ((now - rh->first_write_error) / 1000),
@@ -4478,7 +4479,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_session_event(switch_core_sess
 	/* How long a run of consecutive write failures is tolerated before this recording is
 	 * abandoned.  Unlike the other settings this one has a working default rather than
 	 * being off, because the alternative is retrying a dead destination on every frame;
-	 * it is configurable so a deployment that would rather wait longer can. */
+	 * it is configurable so a deployment that would rather wait longer can, and 0 turns
+	 * it off. */
 	rh->write_error_grace_ms = RECORD_WRITE_ERROR_GRACE_MS;
 
 	if (!(p = get_recording_var(channel, vars, "RECORD_WRITE_ERROR_GRACE_MS"))) {
