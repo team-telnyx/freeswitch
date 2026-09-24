@@ -1701,6 +1701,12 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 	unsigned char null_data[SWITCH_RECOMMENDED_BUFFER_SIZE] = {0};
 	int transferred_away;
 
+	/* CLOSE clears the core's handle, and switch_core_media_bug_close() calls
+	 * back without checking user_data, so we can arrive with none. */
+	if (!rh) {
+		return SWITCH_FALSE;
+	}
+
 	/* Check if the recording was transferred (see recording_follow_transfer) */
 	switch_mutex_lock(rh->flag_mutex);
 	transferred_away = (rh->recording_session != session);
@@ -2030,6 +2036,14 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 							switch_channel_set_private(channel, rh->file, NULL);
 						}
 
+						/* Clear before releasing: the core hands user_data back at
+						 * SWITCH_ABC_TYPE_DESTROY_USER_DATA, and video_bug_thread()
+						 * reads it until close() clears bug->ready after this returns.
+						 * This narrows that race to the few instructions between the
+						 * read and the lock - it does not close it, since remove() and
+						 * prune() release bug_rwlock before closing. Joining the video
+						 * thread before CLOSE would. */
+						switch_core_media_bug_set_user_data(bug, NULL);
 						record_helper_destroy(&rh, session);
 
 						return SWITCH_FALSE;
@@ -2092,6 +2106,8 @@ static switch_bool_t record_callback(switch_media_bug_t *bug, void *user_data, s
 				switch_channel_set_private(channel, rh->file, NULL);
 			}
 
+			/* Clear before releasing (see the write-failure path above). */
+			switch_core_media_bug_set_user_data(bug, NULL);
 			record_helper_destroy(&rh, session);
 		}
 
