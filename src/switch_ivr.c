@@ -675,6 +675,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 											  "%s Stopping broadcast: bridge peer %s is gone\n",
 											  switch_channel_get_name(channel), peer_uuid);
+							switch_channel_set_variable(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, "true");
 							switch_channel_set_flag(channel, CF_STOP_BROADCAST);
 							switch_channel_set_flag(channel, CF_BREAK);
 						}
