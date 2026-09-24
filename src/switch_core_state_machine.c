@@ -588,6 +588,8 @@ SWITCH_DECLARE(void) switch_core_session_run(switch_core_session_t *session)
 
 	 */
 	uint32_t routed_generation;
+	switch_caller_profile_t *routed_profile = NULL;
+	switch_channel_state_t routed_endstate = CS_NONE;
 
 	switch_assert(session != NULL);
 
@@ -602,6 +604,7 @@ SWITCH_DECLARE(void) switch_core_session_run(switch_core_session_t *session)
 
 	/* Last transfer generation routed by this thread; != only, it wraps. */
 	routed_generation = switch_channel_get_transfer_generation(session->channel);
+	routed_profile = switch_channel_get_caller_profile(session->channel);
 
 	while ((state = switch_channel_get_state(session->channel)) != CS_DESTROY) {
 
@@ -627,8 +630,9 @@ SWITCH_DECLARE(void) switch_core_session_run(switch_core_session_t *session)
 			switch_channel_set_running_state(session->channel, state);
 			if (state == CS_ROUTING) {
 				/* Before the handler, so a transfer landing during it still reads as
-				   unrouted. Only ROUTING updates this. */
+				   unrouted. Only ROUTING updates these. */
 				routed_generation = switch_channel_get_transfer_generation(session->channel);
+				routed_profile = switch_channel_get_caller_profile(session->channel);
 			}
 			switch_channel_clear_flag(session->channel, CF_TRANSFER);
 			switch_channel_clear_flag(session->channel, CF_REDIRECT);
@@ -691,22 +695,47 @@ SWITCH_DECLARE(void) switch_core_session_run(switch_core_session_t *session)
 				STATE_MACRO(routing, "ROUTING");
 
 				/*
-				 * A transfer that landed after the hunt read the caller profile. The
-				 * handler has installed the extension it hunted from the profile the
-				 * transfer replaced and pointed the channel at its next state, so from
-				 * here on state != running_state and neither the top-of-loop guard nor
-				 * the sleep branch below looks at the generation again - the stale
-				 * extension runs, and if it blocks (a park) the transfer is deferred for
-				 * the life of the call. The routing decision is void; route again.
-				 * The top-of-loop guard re-snapshots, so this settles in one extra pass.
-				 * Not past CS_HANGUP: a hangup decided during routing stands.
+				 * A transfer that landed after the handler read the profile it routed
+				 * from. The handler has installed an extension hunted from a profile the
+				 * transfer has since replaced and pointed the channel at its next state,
+				 * so from here on state != running_state and neither the top-of-loop
+				 * guard nor the sleep branch below looks again - the stale extension
+				 * runs, and with the production payload (a park) it blocks, deferring
+				 * the transfer for the life of the call. Route again.
+				 *
+				 * Deliberately NOT the transfer generation, which is what the guards
+				 * above use. The generation says a transfer arrived, not that it is
+				 * still outstanding, and the two transfer payloads are consumed
+				 * differently: switch_ivr_session_transfer() installs a caller profile,
+				 * which the next hunt simply re-reads, but
+				 * switch_channel_transfer_to_extension() queues an extension that
+				 * switch_channel_get_queued_extension() destructively pops. Re-routing
+				 * on the generation therefore throws away a pass that had already
+				 * consumed the queued extension, and pass two - with nothing queued and
+				 * the caller profile untouched - re-hunts the pre-transfer destination
+				 * or hangs up with NO_ROUTE_DESTINATION. Test the payloads instead:
+				 * an unconsumed queued extension, or a caller profile swapped since we
+				 * entered ROUTING.
+				 *
+				 * Still conservative on the profile arm: a transfer landing before the
+				 * handler read the profile also swaps it, and re-routing then is
+				 * redundant because the hunt already used the new profile. That costs
+				 * one extra hunt and a duplicate CHANNEL_STATE event; distinguishing it
+				 * would mean having the handler publish which profile it hunted from.
+				 *
+				 * Not past CS_HANGUP: a hangup decided during routing stands. Not
+				 * CS_RESET either: a media reset a handler asked for is not a routing
+				 * decision to discard.
 				 */
-				if (switch_channel_get_transfer_generation(session->channel) != routed_generation &&
-					switch_channel_get_state(session->channel) < CS_HANGUP) {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+				routed_endstate = switch_channel_get_state(session->channel);
+
+				if (routed_endstate < CS_HANGUP && routed_endstate != CS_RESET &&
+					(switch_channel_has_queued_extension(session->channel) ||
+					 switch_channel_get_caller_profile(session->channel) != routed_profile)) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
 									  "%s transfer landed during routing, discarding the %s decision and routing again\n",
 									  switch_channel_get_name(session->channel),
-									  switch_channel_state_name(switch_channel_get_state(session->channel)));
+									  switch_channel_state_name(routed_endstate));
 					switch_channel_set_state(session->channel, CS_ROUTING);
 				}
 				break;

@@ -2467,10 +2467,12 @@ static inline void careful_set(switch_channel_t *channel, switch_channel_state_t
  * so an unrelated state can consume it. A counter is not consumable; ROUTING snapshots
  * it and compares. It wraps, hence != and never > or <.
  *
- * Atomic so the increment cannot be lost. The read is an unordered plain load; the
- * session thread observes a bump because the transfer wakes it, and that supplies the
- * edge. state_mutex must not be used here: perform_set_running_state() holds it across
- * an event fire.
+ * Atomic so the increment cannot be lost. The read is an unordered plain load and
+ * orders nothing by itself. Where the session thread is asleep the wake supplies the
+ * edge; where it is running, nothing does, and a bump is simply observed on some later
+ * iteration - the guards are level-triggered, so a late read costs a pass, not a
+ * transfer. state_mutex must not be used here: perform_set_running_state() holds it
+ * across an event fire.
  */
 SWITCH_DECLARE(void) switch_channel_inc_transfer_generation(switch_channel_t *channel)
 {
@@ -3487,6 +3489,19 @@ SWITCH_DECLARE(switch_caller_extension_t *) switch_channel_get_queued_extension(
 	return caller_extension;
 }
 
+SWITCH_DECLARE(switch_bool_t) switch_channel_has_queued_extension(switch_channel_t *channel)
+{
+	switch_bool_t queued;
+
+	switch_assert(channel != NULL);
+
+	switch_mutex_lock(channel->profile_mutex);
+	queued = channel->queued_extension ? SWITCH_TRUE : SWITCH_FALSE;
+	switch_mutex_unlock(channel->profile_mutex);
+
+	return queued;
+}
+
 SWITCH_DECLARE(void) switch_channel_transfer_to_extension(switch_channel_t *channel, switch_caller_extension_t *caller_extension)
 {
 	switch_mutex_lock(channel->profile_mutex);
@@ -3500,14 +3515,17 @@ SWITCH_DECLARE(void) switch_channel_transfer_to_extension(switch_channel_t *chan
 
 	/* set_state() is a silent no-op when the channel is already CS_ROUTING, and it is the
 	   only thing here that would have woken the session thread - so a cross-thread call
-	   landing on a channel already in routing leaves the bump above stranded against a
-	   sleeping thread. Bare wake, matching switch_ivr_session_transfer(): the full
-	   signal_state_change() would also run the endpoint state_change io routine and every
-	   registered hook, which are not all state-guarded, for a transition that may not
-	   have happened. */
-	if (channel->session) {
-		switch_core_session_wake_session_thread(channel->session);
-	}
+	   landing on a channel already in routing leaves the queued extension stranded
+	   against a sleeping thread. Bare wake, matching switch_ivr_session_transfer(): the
+	   full signal_state_change() would also run the endpoint state_change io routine,
+	   every registered hook, and switch_core_session_kill_channel(SWITCH_SIG_BREAK) -
+	   which breaks a pending read - for a transition that may not have happened.
+
+	   Called on the session thread too (switch_ivr_parse_event()'s xferext arm runs
+	   there); session->mutex is SWITCH_MUTEX_NESTED, so the trylock inside succeeds
+	   recursively, signals a condvar with no waiter, and unlocks. A no-op, by design:
+	   on that thread the loop's own guards carry the handoff. */
+	switch_core_session_wake_session_thread(channel->session);
 }
 
 SWITCH_DECLARE(void) switch_channel_set_caller_extension(switch_channel_t *channel, switch_caller_extension_t *caller_extension)
