@@ -6135,49 +6135,28 @@ static int same_codec_impl(const switch_codec_implementation_t *imp, const switc
 }
 
 /*
- * AMR picks octet-aligned or bandwidth-efficient framing from the fmtp once, when
- * the codec is initialised, so two AMR payload maps are only interchangeable when
- * they agree on it. Parsed the way mod_amr parses it.
+ * Some codecs latch fmtp-driven state such as AMR payload framing when they are
+ * initialised, so ask the running codec whether an fmtp would change it. A codec
+ * that does not answer is treated as unaffected.
  */
-static int amr_octet_align(const char *fmtp)
+static int same_codec_framing(switch_core_session_t *session, switch_codec_t *codec, const char *fmtp)
 {
-	char *fmtp_dup, *argv[10];
-	int argc, x, octet_align = 0;
+	switch_codec_control_type_t reply_type = SCCT_NONE;
+	void *reply = NULL;
+	int same = 1;
 
-	if (zstr(fmtp) || !(fmtp_dup = strdup(fmtp))) {
-		return 0;
+	switch_core_session_lock_codec_read(session);
+
+	if (switch_core_codec_ready(codec) && codec->implementation->codec_control &&
+		switch_core_codec_control(codec, SCC_CODEC_SPECIFIC, SCCT_STRING, (void *) "fmtp_changes_framing",
+								  SCCT_STRING, (void *) fmtp, &reply_type, &reply) == SWITCH_STATUS_SUCCESS &&
+		reply_type == SCCT_STRING && reply) {
+		same = !switch_true((const char *) reply);
 	}
 
-	argc = switch_separate_string(fmtp_dup, ';', argv, (sizeof(argv) / sizeof(argv[0])));
+	switch_core_session_unlock_codec_read(session);
 
-	for (x = 0; x < argc; x++) {
-		char *data = argv[x];
-		char *arg;
-
-		while (*data == ' ') {
-			data++;
-		}
-
-		if ((arg = strchr(data, '='))) {
-			*arg++ = '\0';
-			if (!strcasecmp(data, "octet-align") && atoi(arg)) {
-				octet_align = 1;
-			}
-		}
-	}
-
-	free(fmtp_dup);
-
-	return octet_align;
-}
-
-static int same_codec_framing(const switch_codec_implementation_t *imp, const char *cur_fmtp, const char *new_fmtp)
-{
-	if (!imp || zstr(imp->iananame) || strcasecmp(imp->iananame, "AMR")) {
-		return 1;
-	}
-
-	return amr_octet_align(cur_fmtp) == amr_octet_align(new_fmtp);
+	return same;
 }
 
 static void greedy_sort(switch_media_handle_t *smh, struct matches *matches, int m_idx, const switch_codec_implementation_t **codec_array, int total_codecs)
@@ -8213,14 +8192,14 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 					 */
 					if (a_engine->read_impl.iananame && switch_core_codec_ready(&a_engine->read_codec) && strcasecmp(pmap->iananame, a_engine->read_impl.iananame) == 0 &&
 						(!strict_codec_match || (!partner_driven && found_prev < 2 && same_codec_impl(matches[j].imp, &a_engine->read_impl) &&
-												 (!found_prev || same_codec_framing(matches[j].imp, a_engine->read_codec.fmtp_in, matches[j].map->rm_fmtp))))) {
+												 (!found_prev || same_codec_framing(session, &a_engine->read_codec, matches[j].map->rm_fmtp))))) {
 						if (strict_codec_match) {
 							/*
 							 * Latch, so a later match on the same name cannot overwrite the exact one.
 							 * A match whose framing differs from the running codec is only held until
 							 * one that agrees with it turns up.
 							 */
-							found_prev = same_codec_framing(matches[j].imp, a_engine->read_codec.fmtp_in, matches[j].map->rm_fmtp) ? 2 : 1;
+							found_prev = same_codec_framing(session, &a_engine->read_codec, matches[j].map->rm_fmtp) ? 2 : 1;
 						}
 						if (a_engine->cur_payload_map) {
 							a_engine->cur_payload_map->current = 0;
@@ -8341,7 +8320,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 						int codec_ready = switch_core_codec_ready(&a_engine->read_codec);
 						int same_codec_name = codec_ready && selected_imp->iananame && a_engine->read_impl.iananame &&
 							!strcasecmp(selected_imp->iananame, a_engine->read_impl.iananame);
-						int same_framing = same_codec_framing(selected_imp, a_engine->read_codec.fmtp_in, a_engine->cur_payload_map->rm_fmtp);
+						int same_framing = !same_codec_name || same_codec_framing(session, &a_engine->read_codec, a_engine->cur_payload_map->rm_fmtp);
 
 						if (codec_ready && same_codec_impl(selected_imp, &a_engine->read_impl) && same_framing) {
 							a_engine->reset_codec = 0;

@@ -194,6 +194,32 @@ static amr_reoffer_result_t amr_reoffer(switch_core_session_t *session, const ch
 	return result;
 }
 
+static switch_xml_t amr_force_oa_config(const char *section, const char *tag_name, const char *key_name, const char *key_value,
+										 switch_event_t *params, void *user_data)
+{
+	if (zstr(section) || strcmp(section, "configuration") || zstr(key_value) || strcmp(key_value, "amr.conf")) {
+		return NULL;
+	}
+
+	return switch_xml_parse_str_dup(
+		"<document type=\"freeswitch/xml\">"
+		"<section name=\"configuration\">"
+		"<configuration name=\"amr.conf\"><settings><param name=\"force-oa\" value=\"1\"/></settings></configuration>"
+		"</section>"
+		"</document>");
+}
+
+static switch_status_t amr_reload_module(void)
+{
+	const char *err = NULL;
+
+	if (switch_loadable_module_unload_module(SWITCH_GLOBAL_dirs.mod_dir, "mod_amr", SWITCH_FALSE, &err) != SWITCH_STATUS_SUCCESS) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	return switch_loadable_module_load_module(SWITCH_GLOBAL_dirs.mod_dir, "mod_amr", SWITCH_TRUE, &err);
+}
+
 FST_CORE_BEGIN(".")
 {
 	FST_SUITE_BEGIN(test_amr)
@@ -308,6 +334,23 @@ FST_CORE_BEGIN(".")
 		}
 
 		FST_TEST_END()
+
+		FST_SESSION_BEGIN(amr_strict_reoffer_forced_framing_keeps_codec)
+		{
+			amr_reoffer_result_t result;
+
+			switch_xml_bind_search_function(amr_force_oa_config, switch_xml_parse_section_string("configuration"), NULL);
+			fst_requires(amr_reload_module() == SWITCH_STATUS_SUCCESS);
+
+			result = amr_reoffer(fst_session, "true", AMR_FMTP_OA, amr_offer(fst_session, 2, AMR_FMTP_BE), AMR_FMTP_OA);
+			switch_xml_unbind_search_function_ptr(amr_force_oa_config);
+
+			fst_requires(result.negotiated);
+			fst_xcheck(!result.codec_reset, "with force-oa an octet-align change does not reset the codec");
+			fst_xcheck(result.decoded, "octet aligned frames still decode");
+			fst_xcheck(result.answer_octet_align == 1, "the answer still advertises octet aligned framing");
+		}
+		FST_SESSION_END()
 	}
 	FST_SUITE_END()
 }
