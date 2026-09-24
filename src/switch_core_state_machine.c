@@ -723,13 +723,24 @@ SWITCH_DECLARE(void) switch_core_session_run(switch_core_session_t *session)
 				 * one extra hunt and a duplicate CHANNEL_STATE event; distinguishing it
 				 * would mean having the handler publish which profile it hunted from.
 				 *
-				 * Not past CS_HANGUP: a hangup decided during routing stands. Not
-				 * CS_RESET either: a media reset a handler asked for is not a routing
-				 * decision to discard.
+				 * Only CS_EXECUTE, and only with the generation moved. Both narrow this
+				 * to a state the ROUTING handler itself chose after a transfer, so a
+				 * command that arrived later keeps the state it asked for:
+				 * switch_ivr_uuid_bridge() steps both caller profiles
+				 * (switch_ivr_bridge.c) and then sets CS_HIBERNATE, and mod_fifo steps
+				 * them too. Without the CS_EXECUTE test a bridge landing in this window
+				 * would be rewritten to CS_ROUTING - HIBERNATE -> ROUTING is legal - and
+				 * the originator would re-hunt its dialplan while the originatee slept
+				 * waiting for a bridge that never starts. Without the generation test a
+				 * profile swap alone would count as a transfer. A handler that picks
+				 * anything else (CS_PARK, CS_CONSUME_MEDIA, a hangup, a CS_RESET) is
+				 * left alone; the sleep branch below still catches a genuinely
+				 * outstanding transfer from those.
 				 */
 				routed_endstate = switch_channel_get_state(session->channel);
 
-				if (routed_endstate < CS_HANGUP && routed_endstate != CS_RESET &&
+				if (routed_endstate == CS_EXECUTE &&
+					switch_channel_get_transfer_generation(session->channel) != routed_generation &&
 					(switch_channel_has_queued_extension(session->channel) ||
 					 switch_channel_get_caller_profile(session->channel) != routed_profile)) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
@@ -793,18 +804,31 @@ SWITCH_DECLARE(void) switch_core_session_run(switch_core_session_t *session)
 
 				if (switch_channel_test_flag(session->channel, CF_STATE_REPEAT)) {
 					switch_channel_clear_flag(session->channel, CF_STATE_REPEAT);
-				} else if (switch_channel_get_transfer_generation(session->channel) != routed_generation) {
-					/* Unconsumed transfer; sleeping would strand it. Drive the change so
-					   the guard above is guaranteed to fire next iteration - merely
-					   declining to sleep spins when the guard does not match. */
-					if (switch_channel_get_state(session->channel) != CS_ROUTING) {
-						switch_channel_set_state(session->channel, CS_ROUTING);
-					}
+				} else if (switch_channel_get_transfer_generation(session->channel) != routed_generation &&
+						   switch_channel_get_state(session->channel) == CS_ROUTING) {
+					/* Unconsumed transfer, and the channel is still in the state the
+					   transfer asked for. Don't sleep: loop, and the top-of-loop guard's
+					   third clause re-enters ROUTING. */
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 									  "%s unrouted transfer in state %s, routing again instead of sleeping\n",
 									  switch_channel_get_name(session->channel),
 									  switch_channel_state_name(switch_channel_get_running_state(session->channel)));
 				} else if (switch_channel_get_state(session->channel) == switch_channel_get_running_state(session->channel)) {
+					if (switch_channel_get_transfer_generation(session->channel) != routed_generation) {
+						/* Stale bump in a state the transfer did not ask for. Every
+						   transfer's set_state(CS_ROUTING) is accepted below CS_HANGUP,
+						   and a ROUTING pass would have consumed the bump - so being
+						   here means a later command (switch_ivr_uuid_bridge() drives
+						   HIBERNATE then RESET) moved the channel off CS_ROUTING and
+						   superseded the transfer. Dragging it back would pull it out of
+						   whatever the later command set up. Consume the bump instead;
+						   the later command wins. */
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+										  "%s transfer superseded before it routed, dropping it in state %s\n",
+										  switch_channel_get_name(session->channel),
+										  switch_channel_state_name(switch_channel_get_running_state(session->channel)));
+						routed_generation = switch_channel_get_transfer_generation(session->channel);
+					}
 					switch_channel_set_flag(session->channel, CF_THREAD_SLEEPING);
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG1, "%s session thread sleep state: %s!\n",
 									  switch_channel_get_name(session->channel),

@@ -1139,6 +1139,295 @@ static trial_result_t run_queued_extension_trial(int settle_ms, int *gated, int 
 	return result;
 }
 
+/*
+ * Two commands that are not transfers, and must not be treated as one.
+ *
+ * (a) switch_ivr_uuid_bridge() steps BOTH caller profiles
+ *     (switch_channel_step_caller_profile(), which clones and installs a new profile
+ *     object) and then sets CS_HIBERNATE. A post-ROUTING check that re-routes on "the
+ *     caller profile changed" therefore reads a bridge as a transfer, and because
+ *     HIBERNATE -> ROUTING is a legal transition it rewrites the bridge's state: the
+ *     originator re-hunts its dialplan while the originatee waits for a bridge that
+ *     never starts. mod_fifo steps the profiles the same way.
+ *
+ * (b) A transfer that is superseded before its ROUTING pass ever happens. Only a ROUTING
+ *     entry re-snapshots routed_generation, so the bump outlives the command: if a later
+ *     bridge moves the channel to HIBERNATE and then RESET, the sleep branch still sees
+ *     a stale generation and drags the channel back to CS_ROUTING - resurrecting an
+ *     earlier transfer on top of a later command.
+ *
+ * Neither trial drives a real uuid_bridge: a bridge needs two sessions and lands in a
+ * window too narrow to schedule. They reproduce what the bridge does to THIS channel -
+ * step the profile, set the state - at the point the checks read it, which is what the
+ * checks are being asked to get right.
+ */
+static switch_mutex_t *veto_mutex = NULL;
+static char veto_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1] = { 0 };
+static int veto_armed = 0;
+static int veto_reached = 0;
+static int veto_release = 0;
+
+/* Vetoes, so switch_core_standard_on_routing() never runs and never overwrites the state
+   the test sets while this is held. */
+static switch_status_t veto_on_routing(switch_core_session_t *session)
+{
+	const char *uuid = switch_core_session_get_uuid(session);
+	switch_time_t deadline;
+	int mine = 0;
+
+	switch_mutex_lock(veto_mutex);
+	if (veto_armed && uuid && !strcmp(uuid, veto_uuid)) {
+		veto_armed = 0;
+		veto_reached = 1;
+		mine = 1;
+	}
+	switch_mutex_unlock(veto_mutex);
+
+	if (!mine) {
+		return SWITCH_STATUS_SUCCESS;
+	}
+
+	deadline = switch_micro_time_now() + 5000000;
+	while (switch_micro_time_now() < deadline) {
+		int go;
+
+		switch_mutex_lock(veto_mutex);
+		go = veto_release;
+		switch_mutex_unlock(veto_mutex);
+
+		if (go) {
+			break;
+		}
+		switch_yield(1000);
+	}
+
+	return SWITCH_STATUS_FALSE;
+}
+
+static switch_state_handler_table_t veto_handlers = {
+	/*.on_init */ NULL,
+	/*.on_routing */ veto_on_routing,
+	/*.on_execute */ NULL,
+	/*.on_hangup */ NULL,
+	/*.on_exchange_media */ NULL,
+	/*.on_soft_execute */ NULL,
+	/*.on_consume_media */ NULL,
+	/*.on_hibernate */ NULL,
+	/*.on_reset */ NULL,
+	/*.on_park */ NULL,
+	/*.on_reporting */ NULL,
+	/*.on_destroy */ NULL,
+	/*.flags */ SSH_FLAG_PRE_EXEC | SSH_FLAG_STICKY
+};
+
+static void veto_arm(const char *uuid)
+{
+	switch_mutex_lock(veto_mutex);
+	switch_set_string(veto_uuid, uuid ? uuid : "");
+	veto_armed = uuid ? 1 : 0;
+	veto_reached = 0;
+	veto_release = 0;
+	switch_mutex_unlock(veto_mutex);
+}
+
+static void veto_let_go(void)
+{
+	switch_mutex_lock(veto_mutex);
+	veto_armed = 0;
+	veto_release = 1;
+	switch_mutex_unlock(veto_mutex);
+}
+
+static int veto_is_reached(void)
+{
+	int reached;
+
+	switch_mutex_lock(veto_mutex);
+	reached = veto_reached;
+	switch_mutex_unlock(veto_mutex);
+
+	return reached;
+}
+
+/*
+ * (a) Hold the routing pass, do to the channel what uuid_bridge does - step the caller
+ * profile, then set CS_HIBERNATE - and require that the state survives the pass.
+ */
+static int run_profile_swap_trial(int settle_ms, int *held)
+{
+	switch_core_session_t *session = NULL;
+	switch_call_cause_t cause = SWITCH_CAUSE_NORMAL_CLEARING;
+	switch_channel_t *channel = NULL;
+	const char *uuid = NULL;
+	switch_channel_state_t state = CS_NONE;
+	switch_time_t deadline;
+	int ok = 0;
+
+	if (switch_ivr_originate(NULL, &session, &cause, "null/+15553334444", 5,
+							 NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) != SWITCH_STATUS_SUCCESS || !session) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "[transfer-handoff] profile-swap trial: originate failed\n");
+		return 0;
+	}
+
+	channel = switch_core_session_get_channel(session);
+	uuid = switch_core_session_get_uuid(session);
+
+	uuid_transfer(uuid, XFER_A_DEST);
+
+	if (switch_channel_wait_for_flag(channel, CF_PARK, SWITCH_TRUE, 5000, NULL) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "[transfer-handoff] profile-swap trial: never parked\n");
+		goto done;
+	}
+
+	switch_channel_set_variable(channel, MARKER_A_VAR, NULL);
+
+	veto_arm(uuid);
+	uuid_transfer(uuid, XFER_A_DEST);
+
+	deadline = switch_micro_time_now() + 3000000;
+	while (switch_micro_time_now() < deadline) {
+		if (veto_is_reached()) {
+			break;
+		}
+		switch_yield(1000);
+	}
+
+	if (!veto_is_reached()) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "[transfer-handoff] profile-swap trial: routing never held\n");
+		veto_let_go();
+		goto done;
+	}
+
+	/* What switch_ivr_uuid_bridge() does to this channel. Neither bumps the transfer
+	   generation, because neither is a transfer. */
+	switch_channel_step_caller_profile(channel);
+	switch_channel_set_state(channel, CS_HIBERNATE);
+
+	if (held) {
+		*held = 1;
+	}
+
+	veto_let_go();
+
+	switch_sleep(settle_ms * 1000);
+
+	state = switch_channel_get_state(channel);
+	/* CS_HIBERNATE must stand. A re-route rewrites it to CS_ROUTING. */
+	ok = (state == CS_HIBERNATE && !switch_channel_get_variable(channel, MARKER_A_VAR));
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE,
+					  "[transfer-handoff] profile-swap trial -> %s state=%s running_state=%s dialplan_reran=%s\n",
+					  ok ? "HIBERNATE STOOD" : "OVERRIDDEN",
+					  switch_channel_state_name(state),
+					  switch_channel_state_name(switch_channel_get_running_state(channel)),
+					  switch_channel_get_variable(channel, MARKER_A_VAR) ? "yes" : "no");
+
+  done:
+	veto_arm(NULL);
+	veto_let_go();
+
+	if (switch_channel_up(channel)) {
+		switch_channel_hangup(channel, SWITCH_CAUSE_NORMAL_CLEARING);
+	}
+	switch_core_session_rwunlock(session);
+	switch_sleep(200000);
+
+	return ok;
+}
+
+/*
+ * (b) Transfer, then move the channel elsewhere before its routing pass runs, the way a
+ * later uuid_bridge would. The transfer must not resurrect out of the sleep branch.
+ */
+static int run_superseded_trial(int settle_ms, int *held)
+{
+	switch_core_session_t *session = NULL;
+	switch_call_cause_t cause = SWITCH_CAUSE_NORMAL_CLEARING;
+	switch_channel_t *channel = NULL;
+	const char *uuid = NULL;
+	const char *marker = NULL;
+	switch_channel_state_t state = CS_NONE;
+	switch_time_t deadline;
+	int ok = 0;
+
+	if (switch_ivr_originate(NULL, &session, &cause, "null/+15553334444", 5,
+							 NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) != SWITCH_STATUS_SUCCESS || !session) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "[transfer-handoff] superseded trial: originate failed\n");
+		return 0;
+	}
+
+	channel = switch_core_session_get_channel(session);
+	uuid = switch_core_session_get_uuid(session);
+
+	uuid_transfer(uuid, XFER_A_DEST);
+
+	if (switch_channel_wait_for_flag(channel, CF_PARK, SWITCH_TRUE, 5000, NULL) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "[transfer-handoff] superseded trial: never parked\n");
+		goto done;
+	}
+
+	switch_channel_set_variable(channel, MARKER_VAR, NULL);
+
+	/* Stop the thread at the top of the loop, so the transfer below bumps the generation
+	   and sets CS_ROUTING but no ROUTING pass ever consumes it. */
+	switch_channel_set_flag(channel, CF_BLOCK_STATE);
+
+	uuid_transfer(uuid, XFER_B_DEST);
+
+	deadline = switch_micro_time_now() + 3000000;
+	while (switch_micro_time_now() < deadline) {
+		if (switch_channel_get_state(channel) == CS_ROUTING &&
+			switch_channel_get_running_state(channel) == CS_EXECUTE) {
+			break;
+		}
+		switch_yield(1000);
+	}
+
+	if (!(switch_channel_get_state(channel) == CS_ROUTING &&
+		  switch_channel_get_running_state(channel) == CS_EXECUTE)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+						  "[transfer-handoff] superseded trial: block not achieved (state=%s running=%s)\n",
+						  switch_channel_state_name(switch_channel_get_state(channel)),
+						  switch_channel_state_name(switch_channel_get_running_state(channel)));
+		switch_channel_clear_flag(channel, CF_BLOCK_STATE);
+		goto done;
+	}
+
+	/* The later command supersedes the transfer. */
+	switch_channel_set_state(channel, CS_HIBERNATE);
+
+	if (held) {
+		*held = 1;
+	}
+
+	switch_channel_clear_flag(channel, CF_BLOCK_STATE);
+
+	switch_sleep(settle_ms * 1000);
+
+	state = switch_channel_get_state(channel);
+	marker = switch_channel_get_variable(channel, MARKER_VAR);
+	/* The later state must stand and the transfer's extension must not have run. */
+	ok = (state == CS_HIBERNATE && !(marker && !strcmp(marker, MARKER_VALUE)));
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE,
+					  "[transfer-handoff] superseded trial -> %s state=%s running_state=%s transfer_resurrected=%s\n",
+					  ok ? "LATER COMMAND WON" : "TRANSFER RESURRECTED",
+					  switch_channel_state_name(state),
+					  switch_channel_state_name(switch_channel_get_running_state(channel)),
+					  (marker && !strcmp(marker, MARKER_VALUE)) ? "yes" : "no");
+
+  done:
+	switch_channel_clear_flag(channel, CF_BLOCK_STATE);
+
+	if (switch_channel_up(channel)) {
+		switch_channel_hangup(channel, SWITCH_CAUSE_NORMAL_CLEARING);
+	}
+	switch_core_session_rwunlock(session);
+	switch_sleep(200000);
+
+	return ok;
+}
+
 static int env_int(const char *name, int dflt)
 {
 	const char *val = getenv(name);
@@ -1180,6 +1469,7 @@ FST_CORE_BEGIN("./conf_transfer_handoff")
 				switch_mutex_init(&stall_mutex, SWITCH_MUTEX_NESTED, test_pool);
 				switch_mutex_init(&hunt_mutex, SWITCH_MUTEX_NESTED, test_pool);
 				switch_mutex_init(&gate_mutex, SWITCH_MUTEX_NESTED, test_pool);
+				switch_mutex_init(&veto_mutex, SWITCH_MUTEX_NESTED, test_pool);
 			}
 		}
 		FST_SETUP_END()
@@ -1461,6 +1751,67 @@ FST_CORE_BEGIN("./conf_transfer_handoff")
 			fst_check(first_ran_total == 0);
 			fst_check(wedged == 0);
 			fst_check(unknown == 0);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(a_later_command_is_not_overridden_by_the_reroute)
+		{
+			int settle_ms = env_int("TRANSFER_HANDOFF_SETTLE_MS", 1200);
+			int trials = env_int("TRANSFER_HANDOFF_TRIALS", 2);
+			int t, held_total = 0, stood = 0;
+
+			fst_requires(switch_core_add_state_handler(&veto_handlers) >= 0);
+
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+							  "========== TELCORE-412 bridge-style profile swap during routing x %d ==========\n", trials);
+
+			for (t = 0; t < trials; t++) {
+				int held = 0;
+
+				stood += run_profile_swap_trial(settle_ms, &held);
+				held_total += held;
+			}
+
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+							  "========== TELCORE-412 profile swap: held %d/%d | state stood %d ==========\n",
+							  held_total, trials, stood);
+
+			switch_core_remove_state_handler(&veto_handlers);
+
+			/* The probe itself must work, or the result below means nothing. */
+			fst_requires(held_total == trials);
+
+			/* A caller-profile swap is not a transfer. The state the other command chose
+			   must survive the routing pass. */
+			fst_check(stood == trials);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(a_superseded_transfer_does_not_resurrect)
+		{
+			int settle_ms = env_int("TRANSFER_HANDOFF_SETTLE_MS", 1200);
+			int trials = env_int("TRANSFER_HANDOFF_TRIALS", 2);
+			int t, held_total = 0, won = 0;
+
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+							  "========== TELCORE-412 transfer superseded before it routed x %d ==========\n", trials);
+
+			for (t = 0; t < trials; t++) {
+				int held = 0;
+
+				won += run_superseded_trial(settle_ms, &held);
+				held_total += held;
+			}
+
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+							  "========== TELCORE-412 superseded: held %d/%d | later command won %d ==========\n",
+							  held_total, trials, won);
+
+			/* The probe itself must work, or the result below means nothing. */
+			fst_requires(held_total == trials);
+
+			/* The stale generation must not drag the channel back to CS_ROUTING. */
+			fst_check(won == trials);
 		}
 		FST_TEST_END()
 	}
