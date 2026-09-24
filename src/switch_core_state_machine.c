@@ -885,6 +885,7 @@ SWITCH_DECLARE(void) switch_core_session_hangup_state(switch_core_session_t *ses
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 								  "%s Stopping broadcast on bridge partner %s due to hangup\n",
 								  switch_channel_get_name(session->channel), switch_channel_get_name(partner_channel));
+				switch_channel_set_variable(partner_channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, "true");
 				switch_channel_stop_broadcast(partner_channel);
 			}
 
