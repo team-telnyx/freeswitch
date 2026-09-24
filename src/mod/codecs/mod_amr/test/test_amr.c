@@ -42,6 +42,7 @@ typedef struct {
 	int negotiated;
 	int decoded;
 	int codec_reset;
+	int answer_octet_align;
 } amr_reoffer_result_t;
 
 static const char *amr_offer(switch_core_session_t *session, int version, const char *fmtp)
@@ -56,6 +57,44 @@ static const char *amr_offer(switch_core_session_t *session, int version, const 
 		"a=rtpmap:96 AMR/8000\r\n"
 		"a=fmtp:96 %s\r\n"
 		"a=sendrecv\r\n", version, fmtp);
+}
+
+static const char *amr_offer_two_maps(switch_core_session_t *session, int version, const char *fmtp_96, const char *fmtp_97)
+{
+	return switch_core_session_sprintf(session,
+		"v=0\r\n"
+		"o=- 1 %d IN IP4 198.51.100.1\r\n"
+		"s=-\r\n"
+		"t=0 0\r\n"
+		"m=audio 56210 RTP/AVP 96 97\r\n"
+		"c=IN IP4 198.51.100.1\r\n"
+		"a=rtpmap:96 AMR/8000\r\n"
+		"a=fmtp:96 %s\r\n"
+		"a=rtpmap:97 AMR/8000\r\n"
+		"a=fmtp:97 %s\r\n"
+		"a=sendrecv\r\n", version, fmtp_96, fmtp_97);
+}
+
+static int amr_answer_octet_align(switch_core_session_t *session)
+{
+	const char *sdp, *fmtp, *eol, *oa;
+
+	switch_core_media_gen_local_sdp(session, SDP_ANSWER, "127.0.0.1", 12345, NULL, 1);
+
+	if (!(sdp = switch_channel_get_variable(switch_core_session_get_channel(session), "rtp_local_sdp_str")) ||
+		!(fmtp = strstr(sdp, "a=fmtp:"))) {
+		return -1;
+	}
+
+	if (!(eol = strstr(fmtp, "\r\n"))) {
+		eol = fmtp + strlen(fmtp);
+	}
+
+	if (!(oa = strstr(fmtp, "octet-align=")) || oa > eol) {
+		return 0;
+	}
+
+	return atoi(oa + strlen("octet-align="));
 }
 
 static switch_status_t amr_encode_frame(switch_memory_pool_t *pool, const char *fmtp, uint8_t *pkt, uint32_t *pkt_len)
@@ -107,7 +146,7 @@ static int amr_decodes_as(switch_codec_t *codec, switch_memory_pool_t *pool, con
 }
 
 static amr_reoffer_result_t amr_reoffer(switch_core_session_t *session, const char *strict,
-										const char *first_fmtp, const char *second_fmtp)
+										const char *first_fmtp, const char *second_offer, const char *frame_fmtp)
 {
 	amr_reoffer_result_t result = { 0 };
 	switch_channel_t *channel = switch_core_session_get_channel(session);
@@ -138,7 +177,7 @@ static amr_reoffer_result_t amr_reoffer(switch_core_session_t *session, const ch
 
 	initial_context = read_codec->private_info;
 
-	if (switch_core_media_negotiate_sdp(session, amr_offer(session, 2, second_fmtp), &p, SDP_OFFER) != 1 ||
+	if (switch_core_media_negotiate_sdp(session, second_offer, &p, SDP_OFFER) != 1 ||
 		!(read_codec = switch_core_session_get_read_codec(session)) || !switch_core_codec_ready(read_codec)) {
 		return result;
 	}
@@ -146,9 +185,11 @@ static amr_reoffer_result_t amr_reoffer(switch_core_session_t *session, const ch
 	result.negotiated = 1;
 	result.codec_reset = read_codec->private_info != initial_context;
 
-	if (amr_encode_frame(pool, second_fmtp, pkt, &pkt_len) == SWITCH_STATUS_SUCCESS && pkt_len > 20) {
-		result.decoded = amr_decodes_as(read_codec, pool, second_fmtp, pkt, pkt_len);
+	if (amr_encode_frame(pool, frame_fmtp, pkt, &pkt_len) == SWITCH_STATUS_SUCCESS && pkt_len > 20) {
+		result.decoded = amr_decodes_as(read_codec, pool, frame_fmtp, pkt, pkt_len);
 	}
+
+	result.answer_octet_align = amr_answer_octet_align(session);
 
 	return result;
 }
@@ -171,40 +212,56 @@ FST_CORE_BEGIN(".")
 
 		FST_SESSION_BEGIN(amr_strict_reoffer_octet_aligned_to_bandwidth_efficient)
 		{
-			amr_reoffer_result_t result = amr_reoffer(fst_session, "true", AMR_FMTP_OA, AMR_FMTP_BE);
+			amr_reoffer_result_t result = amr_reoffer(fst_session, "true", AMR_FMTP_OA, amr_offer(fst_session, 2, AMR_FMTP_BE), AMR_FMTP_BE);
 
 			fst_requires(result.negotiated);
 			fst_xcheck(result.codec_reset, "a framing change resets the codec");
 			fst_xcheck(result.decoded, "bandwidth efficient frames decode after the re-offer");
+			fst_xcheck(result.answer_octet_align == 0, "the answer advertises bandwidth efficient framing");
 		}
 		FST_SESSION_END()
 
 		FST_SESSION_BEGIN(amr_strict_reoffer_bandwidth_efficient_to_octet_aligned)
 		{
-			amr_reoffer_result_t result = amr_reoffer(fst_session, "true", AMR_FMTP_BE, AMR_FMTP_OA);
+			amr_reoffer_result_t result = amr_reoffer(fst_session, "true", AMR_FMTP_BE, amr_offer(fst_session, 2, AMR_FMTP_OA), AMR_FMTP_OA);
 
 			fst_requires(result.negotiated);
 			fst_xcheck(result.codec_reset, "a framing change resets the codec");
 			fst_xcheck(result.decoded, "octet aligned frames decode after the re-offer");
+			fst_xcheck(result.answer_octet_align == 1, "the answer advertises octet aligned framing");
 		}
 		FST_SESSION_END()
 
 		FST_SESSION_BEGIN(amr_strict_reoffer_mode_set_change_keeps_codec)
 		{
-			amr_reoffer_result_t result = amr_reoffer(fst_session, "true", AMR_FMTP_OA, "octet-align=1; mode-set=4,5");
+			amr_reoffer_result_t result = amr_reoffer(fst_session, "true", AMR_FMTP_OA,
+													  amr_offer(fst_session, 2, "octet-align=1; mode-set=4,5"), AMR_FMTP_OA);
 
 			fst_requires(result.negotiated);
 			fst_xcheck(!result.codec_reset, "a mode-set change alone does not reset the codec");
 			fst_xcheck(result.decoded, "octet aligned frames still decode");
+			fst_xcheck(result.answer_octet_align == 1, "the answer still advertises octet aligned framing");
 		}
 		FST_SESSION_END()
 
-		FST_SESSION_BEGIN(amr_legacy_reoffer_keeps_codec)
+		FST_SESSION_BEGIN(amr_strict_reoffer_prefers_map_with_running_framing)
 		{
-			amr_reoffer_result_t result = amr_reoffer(fst_session, NULL, AMR_FMTP_OA, AMR_FMTP_BE);
+			amr_reoffer_result_t result = amr_reoffer(fst_session, "true", AMR_FMTP_OA,
+													  amr_offer_two_maps(fst_session, 2, AMR_FMTP_BE, AMR_FMTP_OA), AMR_FMTP_OA);
+
+			fst_requires(result.negotiated);
+			fst_xcheck(result.decoded, "octet aligned frames still decode");
+			fst_xcheck(result.answer_octet_align == 1, "the answer keeps octet aligned framing");
+		}
+		FST_SESSION_END()
+
+		FST_SESSION_BEGIN(amr_legacy_reoffer_keeps_stale_framing)
+		{
+			amr_reoffer_result_t result = amr_reoffer(fst_session, NULL, AMR_FMTP_OA, amr_offer(fst_session, 2, AMR_FMTP_BE), AMR_FMTP_BE);
 
 			fst_requires(result.negotiated);
 			fst_xcheck(!result.codec_reset, "without strict matching the codec is kept across the re-offer");
+			fst_xcheck(!result.decoded, "the kept codec still decodes with the old framing");
 		}
 		FST_SESSION_END()
 
