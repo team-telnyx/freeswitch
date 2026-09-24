@@ -838,16 +838,18 @@ SWITCH_DECLARE(switch_status_t) switch_core_codec_decode(switch_codec_t *codec,
 	if (encoded_data_len == 0 && (status == SWITCH_STATUS_SUCCESS || status == SWITCH_STATUS_RESAMPLE) &&
 		codec->implementation->decoded_bytes_per_packet &&
 		*decoded_data_len > codec->implementation->decoded_bytes_per_packet) {
-		/* A codec that gets this wrong gets it wrong on every silent packet, so
-		 * rate-limit rather than emit a line per 20 ms for the life of the call.
-		 * The unsynchronised static is deliberate: the worst a race can do is
-		 * let a second thread log the same complaint once more. */
-		static switch_time_t last_complained = 0;
-		switch_time_t now = switch_micro_time_now();
-
-		if (now - last_complained > 10000000) {
-			last_complained = now;
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT,
+		/* A codec that gets this wrong gets it wrong on every silent packet, so log
+		 * once per codec handle rather than a line per 20 ms for the life of the
+		 * call. Per handle, not process-wide: a handle is per leg, so every affected
+		 * call still reports, and one call cannot silence another or a different
+		 * codec. codec->session is set for the media paths that transcode and NULL
+		 * for a bare switch_core_codec_init() (tests, file handles), so tag the line
+		 * with the leg when we have one. */
+		if (!(codec->flags & SWITCH_CODEC_FLAG_CONCEAL_OVERRUN_LOGGED)) {
+			codec->flags |= SWITCH_CODEC_FLAG_CONCEAL_OVERRUN_LOGGED;
+			switch_log_printf(codec->session ? SWITCH_CHANNEL_ID_SESSION : SWITCH_CHANNEL_ID_LOG,
+							  __FILE__, __SWITCH_FUNC__, __LINE__, (const char *) codec->session,
+							  SWITCH_LOG_CRIT,
 							  "Codec %s decoded a zero-length frame into %u bytes, more than one %u byte packet - dropping\n",
 							  codec->implementation->iananame, *decoded_data_len,
 							  codec->implementation->decoded_bytes_per_packet);
