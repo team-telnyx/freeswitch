@@ -11,7 +11,7 @@ AM_LDFLAGS  += $(CARES_LIBS) -lboost_system -lpthread
 noinst_PROGRAMS = test_zmqsocket_timeouts test_web_server_registry
 test_zmqsocket_timeouts_SOURCES = test_zmqsocket_timeouts.cpp
 test_zmqsocket_timeouts_LDADD   = -lzmq -lstdc++
-test_web_server_registry_SOURCES = test_web_server_registry.cpp
+test_web_server_registry_SOURCES = test_web_server_registry.cpp test_web_server_registry_raw.c
 
 if HAVE_CARES
 noinst_PROGRAMS += test_resolver test_mod_resolver

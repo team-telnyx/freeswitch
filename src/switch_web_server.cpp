@@ -19,6 +19,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
@@ -65,31 +66,27 @@ constexpr switch_web_method_t kConcreteMethods[] = {
 	SWITCH_WEB_METHOD_PATCH,
 };
 
-/* The enum values are pinned precisely so a module built against an older
+/* Both validators take the RAW integer, never the enum. Neither enum has a
+   fixed underlying type, so in C++ a value outside its enumerators' range is
+   not a value the type can hold: forming one is UB and a compiler may fold a
+   range check on it away. The C ABI entry points below therefore read the
+   caller's argument as bytes (raw_enum) and only convert to the enum once it
+   is known to be valid.
+
+   The enum values are pinned precisely so a module built against an older
    header keeps meaning what it meant. Reject anything outside the set anyway:
    an out-of-range value overlaps nothing, so it would register successfully,
    never match a request, and never conflict with a legitimate route on the
-   same path — a dead endpoint with no diagnostic. method_name() would also
-   render it as "?" in the Allow: header.
+   same path — a dead endpoint with no diagnostic.
 
-   A switch over every enumerator with no default: label, so appending a verb
-   to switch_web_method_t fails the build here. The pragma is load-bearing:
-   src/ compiles with plain `-g -O2`, so -Wswitch is otherwise off.
-   Adding a case here still needs the verb added to kConcreteMethods above —
-   nothing enforces that half, and skipping it means ANY routes serve a verb
-   they do not advertise. */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic error "-Wswitch"
-bool valid_method(switch_web_method_t m)
+   Derived from kConcreteMethods, so the two cannot drift. What catches a verb
+   appended to the enum but not to that list is the -Wswitch guard on
+   method_name() below. */
+bool valid_method(int m)
 {
-	switch (m) {
-	case SWITCH_WEB_METHOD_GET:
-	case SWITCH_WEB_METHOD_POST:
-	case SWITCH_WEB_METHOD_PUT:
-	case SWITCH_WEB_METHOD_DELETE:
-	case SWITCH_WEB_METHOD_PATCH:
-	case SWITCH_WEB_METHOD_ANY:
-		return true;
+	if (m == SWITCH_WEB_METHOD_ANY) return true;
+	for (auto v : kConcreteMethods) {
+		if (m == v) return true;
 	}
 	return false;
 }
@@ -99,16 +96,23 @@ bool valid_method(switch_web_method_t m)
    unrecognised value silently means LITE — a handler that was written to block
    then runs on the shared IO strand and stalls every route on every listener.
    A dead endpoint is recoverable; this is not. */
-bool valid_mode(switch_web_dispatch_t m)
+bool valid_mode(int m)
 {
-	switch (m) {
-	case SWITCH_WEB_DISPATCH_LITE:
-	case SWITCH_WEB_DISPATCH_POOL:
-		return true;
-	}
-	return false;
+	return m == SWITCH_WEB_DISPATCH_LITE || m == SWITCH_WEB_DISPATCH_POOL;
 }
-#pragma GCC diagnostic pop
+
+/* An enum argument as the integer the caller passed, read without an
+   lvalue-to-rvalue conversion of the enum itself (see valid_method). The
+   callers are C modules, for which any int is a legitimate value of these
+   types. */
+template <typename E>
+int raw_enum(const E &e)
+{
+	static_assert(sizeof(E) == sizeof(int), "switch_web_* enums are int-sized");
+	int v;
+	std::memcpy(&v, &e, sizeof v);
+	return v;
+}
 
 /* A registrable path is matched against the target with the query string
    already stripped, so a '?' in it can never match; likewise a space or a
@@ -187,17 +191,37 @@ bool methods_overlap(switch_web_method_t a, switch_web_method_t b)
 }
 
 /* True iff some request path matches both patterns, i.e. their match-sets
-   intersect: same segment count and, at every position, at least one side is
-   a {capture} or the literals are equal. Param names do not affect matching,
-   so "/users/{id}" and "/users/{name}" overlap; "/a/{x}" and "/{y}/b" also
-   overlap (both match "/a/b"); "/a/{x}" and "/c/{y}" do not. */
+   intersect: same segment count and, at every position, the two sides can
+   match a common segment. Param names do not affect matching, so
+   "/users/{id}" and "/users/{name}" overlap; "/a/{x}" and "/{y}/b" also
+   overlap (both match "/a/b"); "/a/{x}" and "/c/{y}" do not.
+
+   A {capture} matches any NON-EMPTY segment (match_pattern rejects an empty
+   one), so it does not meet an empty literal: "/{x}/" (only "/foo/") and
+   "/{y}/{z}" are disjoint. */
 bool patterns_overlap(const std::vector<PatternToken> &a,
                       const std::vector<PatternToken> &b)
 {
 	if (a.size() != b.size()) return false;
 	for (std::size_t i = 0; i < a.size(); ++i) {
-		if (a[i].is_param || b[i].is_param) continue;
+		if (a[i].is_param && b[i].is_param) continue;
+		if (a[i].is_param) { if (b[i].text.empty()) return false; continue; }
+		if (b[i].is_param) { if (a[i].text.empty()) return false; continue; }
 		if (a[i].text != b[i].text) return false;
+	}
+	return true;
+}
+
+/* Every capture needs a name, and a distinct one. Registration accepted
+   "{}" and "/acct/{id}/sub/{id}" silently, and match_pattern() writes captures
+   into a map, so the later segment overwrote the earlier: a handler reading
+   param "id" got the sub id and acted on the wrong account. */
+bool capture_names_ok(const std::vector<PatternToken> &tokens)
+{
+	std::set<std::string> seen;
+	for (const auto &t : tokens) {
+		if (!t.is_param) continue;
+		if (t.text.empty() || !seen.insert(t.text).second) return false;
 	}
 	return true;
 }
@@ -300,17 +324,25 @@ public:
 	}
 
 	switch_status_t add(const std::string &module,
-	                    switch_web_method_t method,
+	                    int raw_method,
 	                    const std::string &path,
-	                    switch_web_dispatch_t mode,
+	                    int raw_mode,
 	                    switch_web_handler_func handler,
 	                    void *user_data)
 	{
 		/* GENERR = malformed call; FALSE = route conflict. Keep them
 		   distinct so callers can log "bad input" vs "shadowed route". */
 		if (module.empty() || !handler || !valid_reg_path(path) ||
-		    !valid_method(method) || !valid_mode(mode)) {
+		    !valid_method(raw_method) || !valid_mode(raw_mode)) {
 			return SWITCH_STATUS_GENERR;
+		}
+		const auto method = static_cast<switch_web_method_t>(raw_method);
+		const auto mode   = static_cast<switch_web_dispatch_t>(raw_mode);
+		const bool pattern = is_pattern(path);
+		std::vector<PatternToken> cand_tokens;
+		if (pattern) {
+			cand_tokens = tokenize(path);
+			if (!capture_names_ok(cand_tokens)) return SWITCH_STATUS_GENERR;
 		}
 
 		std::unique_lock<std::shared_mutex> lock(mu_);
@@ -323,8 +355,7 @@ public:
 		   existence as "this module has routes". */
 		auto slot = slot_for_locked(module);
 
-		if (is_pattern(path)) {
-			auto cand_tokens = tokenize(path);
+		if (pattern) {
 			for (auto &p : patterns_) {
 				if (!methods_overlap(p.method, method)) continue;
 				if (!patterns_overlap(p.tokens, cand_tokens)) continue;
@@ -360,16 +391,18 @@ public:
 	}
 
 	switch_status_t add_prefix(const std::string &module,
-	                           switch_web_method_t method,
+	                           int raw_method,
 	                           const std::string &prefix,
-	                           switch_web_dispatch_t mode,
+	                           int raw_mode,
 	                           switch_web_handler_func handler,
 	                           void *user_data)
 	{
 		if (module.empty() || !handler || !valid_reg_path(prefix) ||
-		    !valid_method(method) || !valid_mode(mode)) {
+		    !valid_method(raw_method) || !valid_mode(raw_mode)) {
 			return SWITCH_STATUS_GENERR;
 		}
+		const auto method = static_cast<switch_web_method_t>(raw_method);
+		const auto mode   = static_cast<switch_web_dispatch_t>(raw_mode);
 
 		std::unique_lock<std::shared_mutex> lock(mu_);
 		if (module_draining_locked(module)) return SWITCH_STATUS_INUSE;
@@ -391,17 +424,34 @@ public:
 		return SWITCH_STATUS_SUCCESS;
 	}
 
+	/* `prefix_only` targets the prefix tier alone. Without it the search is
+	   exact, then pattern, then prefix, removing the first match — so when a
+	   module owns an exact and a prefix route on the same raw string (legal:
+	   cross-tier duplicates are allowed), plain remove() takes the exact one.
+	   A path is either a pattern or not, so exact and pattern never collide.
+	   An out-of-range method compares unequal to every entry: NOTFOUND. */
 	bool remove(const std::string &module,
-	            switch_web_method_t method,
-	            const std::string &path)
+	            int raw_method,
+	            const std::string &path,
+	            bool prefix_only)
 	{
 		std::unique_lock<std::shared_mutex> lock(mu_);
+		auto same_method = [&](switch_web_method_t m) { return (int)m == raw_method; };
+
+		if (prefix_only) {
+			auto prit = std::find_if(prefixes_.begin(), prefixes_.end(), [&](const Entry &e) {
+				return same_method(e.method) && e.module == module && e.raw == path;
+			});
+			if (prit == prefixes_.end()) return false;
+			prefixes_.erase(prit);
+			return true;
+		}
 
 		auto eit = exact_.find(path);
 		if (eit != exact_.end()) {
 			auto &bucket = eit->second;
 			auto it = std::find_if(bucket.begin(), bucket.end(), [&](const Entry &e) {
-				return e.method == method && e.module == module;
+				return same_method(e.method) && e.module == module;
 			});
 			if (it != bucket.end()) {
 				bucket.erase(it);
@@ -411,12 +461,12 @@ public:
 		}
 
 		auto pit = std::find_if(patterns_.begin(), patterns_.end(), [&](const PatternEntry &p) {
-			return p.method == method && p.module == module && p.raw == path;
+			return same_method(p.method) && p.module == module && p.raw == path;
 		});
 		if (pit != patterns_.end()) { patterns_.erase(pit); return true; }
 
 		auto prit = std::find_if(prefixes_.begin(), prefixes_.end(), [&](const Entry &e) {
-			return e.method == method && e.module == module && e.raw == path;
+			return same_method(e.method) && e.module == module && e.raw == path;
 		});
 		if (prit != prefixes_.end()) { prefixes_.erase(prit); return true; }
 
@@ -804,11 +854,12 @@ const std::string &response_body(const switch_web_response_t *res)
 	return res ? res->body : empty;
 }
 
-/* No default: label, for the same reason valid_method() has none — an appended
-   verb must fail the build here too. With a default: this rendered a new verb
-   as "?" in Allow:, which is the visible half of the same bug the -Wswitch
-   guard exists to catch. The unreachable return keeps the compiler happy for
-   a cast-in out-of-range value, which add() already rejects. */
+/* A switch over every enumerator with no default: label, so appending a verb
+   to switch_web_method_t fails the build here — the reminder to also add it to
+   kConcreteMethods, from which valid_method() and ANY's Allow: expansion are
+   derived. The pragma is load-bearing: src/ compiles with plain `-g -O2`, so
+   -Wswitch is otherwise off. Only ever called with a registered (validated)
+   method; the trailing return is for the compiler. */
 #pragma GCC diagnostic push
 #pragma GCC diagnostic error "-Wswitch"
 const char *method_name(switch_web_method_t m)
@@ -980,7 +1031,7 @@ SWITCH_DECLARE(switch_status_t) switch_web_server_register(const char *module_na
                                                             void *user_data)
 {
 	if (!module_name || !path) return SWITCH_STATUS_GENERR;
-	return Registry::instance().add(module_name, method, path, mode, handler, user_data);
+	return Registry::instance().add(module_name, raw_enum(method), path, raw_enum(mode), handler, user_data);
 }
 
 SWITCH_DECLARE(switch_status_t) switch_web_server_register_prefix(const char *module_name,
@@ -991,7 +1042,7 @@ SWITCH_DECLARE(switch_status_t) switch_web_server_register_prefix(const char *mo
                                                                    void *user_data)
 {
 	if (!module_name || !prefix) return SWITCH_STATUS_GENERR;
-	return Registry::instance().add_prefix(module_name, method, prefix, mode, handler, user_data);
+	return Registry::instance().add_prefix(module_name, raw_enum(method), prefix, raw_enum(mode), handler, user_data);
 }
 
 SWITCH_DECLARE(switch_status_t) switch_web_server_unregister(const char *module_name,
@@ -999,7 +1050,17 @@ SWITCH_DECLARE(switch_status_t) switch_web_server_unregister(const char *module_
                                                               const char *path)
 {
 	if (!module_name || !path) return SWITCH_STATUS_GENERR;
-	return Registry::instance().remove(module_name, method, path) ? SWITCH_STATUS_SUCCESS : SWITCH_STATUS_NOTFOUND;
+	return Registry::instance().remove(module_name, raw_enum(method), path, false)
+		? SWITCH_STATUS_SUCCESS : SWITCH_STATUS_NOTFOUND;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_web_server_unregister_prefix(const char *module_name,
+                                                                     switch_web_method_t method,
+                                                                     const char *prefix)
+{
+	if (!module_name || !prefix) return SWITCH_STATUS_GENERR;
+	return Registry::instance().remove(module_name, raw_enum(method), prefix, true)
+		? SWITCH_STATUS_SUCCESS : SWITCH_STATUS_NOTFOUND;
 }
 
 SWITCH_DECLARE(void) switch_web_server_unregister_module(const char *module_name)
