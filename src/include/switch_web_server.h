@@ -162,7 +162,9 @@ SWITCH_DECLARE(void) switch_web_response_printf(switch_web_response_t *res, cons
  *   - exact paths overlap only when identical;
  *   - patterns overlap at equal segment count when, at every position, one
  *     side is a {capture} or the literals match — "/users/{id}" conflicts
- *     with "/users/{name}" (capture names do not affect matching);
+ *     with "/users/{name}" (capture names do not affect matching). A
+ *     {capture} never matches an empty segment, so it does not overlap an
+ *     empty literal: "/{x}/" and "/{y}/{z}" coexist;
  *   - prefixes overlap when one segment-bounded-contains the other — "/api"
  *     conflicts with "/api/v2" but not with "/apiv2".
  * ANY overlaps every specific method and vice versa. The check is symmetric.
@@ -177,8 +179,11 @@ SWITCH_DECLARE(void) switch_web_response_printf(switch_web_response_t *res, cons
  *   INUSE    — switch_web_server_unregister_module() is draining this module;
  *              registrations are refused until it returns.
  *   GENERR   — null/empty module_name, null handler, a `method` or `mode`
- *              outside its enum, or a path that does not start with '/' or
- *              contains a space, control character, '?' or '#'. Both enums are
+ *              outside its enum, a path that does not start with '/' or
+ *              contains a space, control character, '?' or '#', or a pattern
+ *              with an empty ("{}") or repeated capture name — captures are
+ *              looked up by name, so "/a/{id}/b/{id}" would hand the handler
+ *              only the last one. Both enums are
  *              pinned, so an out-of-range value needs a cast. They are rejected
  *              rather than accepted because the results are silent: an unknown
  *              method matches nothing and conflicts with nothing (a dead
@@ -212,7 +217,7 @@ SWITCH_DECLARE(switch_status_t) switch_web_server_register_prefix(const char *mo
                                                                   void *user_data);
 
 /*
- * Remove a single route.
+ * Remove a single route registered with switch_web_server_register().
  *
  * WARNING: unlike switch_web_server_unregister_module() below, this does NOT
  * drain. It returns as soon as the route is out of the index, while a handler
@@ -220,11 +225,24 @@ SWITCH_DECLARE(switch_status_t) switch_web_server_register_prefix(const char *mo
  * Never use it as the last step before unloading, or before freeing anything a
  * handler touches — use switch_web_server_unregister_module() for that.
  *
+ * Matches (module_name, method, raw path) exactly — ANY removes only a route
+ * registered as ANY. Searches the exact/pattern tier first and falls back to
+ * the prefix tier, so when this module owns BOTH an exact and a prefix route
+ * on the same string, this removes the exact one. To target the prefix route,
+ * use switch_web_server_unregister_prefix().
+ *
  * Returns SUCCESS if a route was removed, NOTFOUND if none matched.
  */
 SWITCH_DECLARE(switch_status_t) switch_web_server_unregister(const char *module_name,
                                                              switch_web_method_t method,
                                                              const char *path);
+
+/* Remove a single route registered with switch_web_server_register_prefix(),
+   and only from the prefix tier. Same no-drain WARNING and return values as
+   switch_web_server_unregister() above. */
+SWITCH_DECLARE(switch_status_t) switch_web_server_unregister_prefix(const char *module_name,
+                                                                    switch_web_method_t method,
+                                                                    const char *prefix);
 
 /*
  * Drop every route registered by module_name, then block until every handler
