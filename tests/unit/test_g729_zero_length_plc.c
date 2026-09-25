@@ -14,8 +14,8 @@
  *                                     greater than recommended size 8192
  *   [DEBUG]   switch_ivr_bridge.c     ending bridge by request from write function
  *
- * Root cause (in the codec module, fixed separately in team-telnyx/mod_bcg729)
- * ---------------------------------------------------------------------------
+ * Root cause (in the codec module, fixed separately)
+ * --------------------------------------------------
  * With G.729 Annex B negotiated, the B-leg's re-encode emits untransmitted
  * frames, so a zero-length frame reaches the G729 decoder. Its PLC branch
  * returned SWITCH_STATUS_SUCCESS without writing through decoded_data_len - it
