@@ -1428,6 +1428,214 @@ static int run_superseded_trial(int settle_ms, int *held)
 	return ok;
 }
 
+/*
+ * Which thread chose the state after a transfer landed in the routing pass.
+ *
+ * A ROUTING handler can pick a state other than CS_EXECUTE: originate_on_routing() and
+ * switch_core_standard_on_routing() both pick CS_CONSUME_MEDIA for an outbound leg. A
+ * transfer landing after the handler read the profile finds the channel already in
+ * CS_ROUTING, so its set_state() is a no-op, and the handler then moves the channel on
+ * from a profile the transfer has replaced. That transfer must still route - uuid_transfer
+ * has returned +OK.
+ *
+ * The same state set by another thread is a later command and must stand:
+ * switch_ivr_multi_threaded_bridge() sets its peer to CS_CONSUME_MEDIA. So the state
+ * cannot decide it; only which thread set it can.
+ *
+ *   (c) own:     the held handler sets CS_CONSUME_MEDIA itself - the transfer must route.
+ *   (d) foreign: the test thread sets CS_CONSUME_MEDIA while the handler is held - the
+ *                state must stand and the transfer's extension must not run.
+ */
+static switch_mutex_t *pick_mutex = NULL;
+static char pick_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1] = { 0 };
+static int pick_armed = 0;
+static int pick_reached = 0;
+static int pick_release = 0;
+static int pick_own_state = 0;
+
+/* Vetoes the standard handler like veto_on_routing(), and in "own" mode picks
+   CS_CONSUME_MEDIA from the session thread on the way out, as originate_on_routing()
+   does. */
+static switch_status_t pick_on_routing(switch_core_session_t *session)
+{
+	const char *uuid = switch_core_session_get_uuid(session);
+	switch_time_t deadline;
+	int mine = 0, own = 0;
+
+	switch_mutex_lock(pick_mutex);
+	if (pick_armed && uuid && !strcmp(uuid, pick_uuid)) {
+		pick_armed = 0;
+		pick_reached = 1;
+		mine = 1;
+	}
+	switch_mutex_unlock(pick_mutex);
+
+	if (!mine) {
+		return SWITCH_STATUS_SUCCESS;
+	}
+
+	deadline = switch_micro_time_now() + 5000000;
+	while (switch_micro_time_now() < deadline) {
+		int go;
+
+		switch_mutex_lock(pick_mutex);
+		go = pick_release;
+		own = pick_own_state;
+		switch_mutex_unlock(pick_mutex);
+
+		if (go) {
+			break;
+		}
+		switch_yield(1000);
+	}
+
+	if (own) {
+		switch_channel_set_state(switch_core_session_get_channel(session), CS_CONSUME_MEDIA);
+	}
+
+	return SWITCH_STATUS_FALSE;
+}
+
+static switch_state_handler_table_t pick_handlers = {
+	/*.on_init */ NULL,
+	/*.on_routing */ pick_on_routing,
+	/*.on_execute */ NULL,
+	/*.on_hangup */ NULL,
+	/*.on_exchange_media */ NULL,
+	/*.on_soft_execute */ NULL,
+	/*.on_consume_media */ NULL,
+	/*.on_hibernate */ NULL,
+	/*.on_reset */ NULL,
+	/*.on_park */ NULL,
+	/*.on_reporting */ NULL,
+	/*.on_destroy */ NULL,
+	/*.flags */ SSH_FLAG_PRE_EXEC | SSH_FLAG_STICKY
+};
+
+static void pick_arm(const char *uuid, int own_state)
+{
+	switch_mutex_lock(pick_mutex);
+	switch_set_string(pick_uuid, uuid ? uuid : "");
+	pick_armed = uuid ? 1 : 0;
+	pick_reached = 0;
+	pick_release = 0;
+	pick_own_state = own_state;
+	switch_mutex_unlock(pick_mutex);
+}
+
+static void pick_let_go(void)
+{
+	switch_mutex_lock(pick_mutex);
+	pick_armed = 0;
+	pick_release = 1;
+	switch_mutex_unlock(pick_mutex);
+}
+
+static int pick_is_reached(void)
+{
+	int reached;
+
+	switch_mutex_lock(pick_mutex);
+	reached = pick_reached;
+	switch_mutex_unlock(pick_mutex);
+
+	return reached;
+}
+
+/* Returns 1 when the channel ended where the mode says it must. */
+static int run_pick_trial(int own_state, int settle_ms, int *held)
+{
+	switch_core_session_t *session = NULL;
+	switch_call_cause_t cause = SWITCH_CAUSE_NORMAL_CLEARING;
+	switch_channel_t *channel = NULL;
+	const char *uuid = NULL;
+	const char *marker = NULL;
+	const char *mode = own_state ? "own-state" : "foreign-state";
+	switch_channel_state_t state = CS_NONE;
+	switch_time_t deadline;
+	int routed = 0, ok = 0;
+
+	if (switch_ivr_originate(NULL, &session, &cause, "null/+15553334444", 5,
+							 NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) != SWITCH_STATUS_SUCCESS || !session) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "[transfer-handoff] %s trial: originate failed\n", mode);
+		return 0;
+	}
+
+	channel = switch_core_session_get_channel(session);
+	uuid = switch_core_session_get_uuid(session);
+
+	uuid_transfer(uuid, XFER_A_DEST);
+
+	if (switch_channel_wait_for_flag(channel, CF_PARK, SWITCH_TRUE, 5000, NULL) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "[transfer-handoff] %s trial: never parked\n", mode);
+		goto done;
+	}
+
+	switch_channel_set_variable(channel, MARKER_VAR, NULL);
+
+	/* Hold the routing pass this transfer starts... */
+	pick_arm(uuid, own_state);
+	uuid_transfer(uuid, XFER_A_DEST);
+
+	deadline = switch_micro_time_now() + 3000000;
+	while (switch_micro_time_now() < deadline) {
+		if (pick_is_reached()) {
+			break;
+		}
+		switch_yield(1000);
+	}
+
+	if (!pick_is_reached()) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "[transfer-handoff] %s trial: routing never held\n", mode);
+		pick_let_go();
+		goto done;
+	}
+
+	/* ...and land the second transfer inside it, after the profile was read. The channel
+	   is already CS_ROUTING, so this set_state() is a no-op. */
+	uuid_transfer(uuid, XFER_B_DEST);
+
+	if (!own_state) {
+		/* A later command from another thread, the way switch_ivr_multi_threaded_bridge()
+		   claims its peer. */
+		switch_channel_set_state(channel, CS_CONSUME_MEDIA);
+	}
+
+	if (held) {
+		*held = 1;
+	}
+
+	pick_let_go();
+
+	switch_sleep(settle_ms * 1000);
+
+	state = switch_channel_get_state(channel);
+	marker = switch_channel_get_variable(channel, MARKER_VAR);
+	routed = (marker && !strcmp(marker, MARKER_VALUE));
+
+	/* Own: the transfer routes. Foreign: the later state stands and it does not. */
+	ok = own_state ? routed : (state == CS_CONSUME_MEDIA && !routed);
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE,
+					  "[transfer-handoff] %s trial -> %s state=%s running_state=%s transfer_routed=%s\n",
+					  mode, ok ? "OK" : "WRONG",
+					  switch_channel_state_name(state),
+					  switch_channel_state_name(switch_channel_get_running_state(channel)),
+					  routed ? "yes" : "no");
+
+  done:
+	pick_arm(NULL, 0);
+	pick_let_go();
+
+	if (switch_channel_up(channel)) {
+		switch_channel_hangup(channel, SWITCH_CAUSE_NORMAL_CLEARING);
+	}
+	switch_core_session_rwunlock(session);
+	switch_sleep(200000);
+
+	return ok;
+}
+
 static int env_int(const char *name, int dflt)
 {
 	const char *val = getenv(name);
@@ -1470,6 +1678,7 @@ FST_CORE_BEGIN("./conf_transfer_handoff")
 				switch_mutex_init(&hunt_mutex, SWITCH_MUTEX_NESTED, test_pool);
 				switch_mutex_init(&gate_mutex, SWITCH_MUTEX_NESTED, test_pool);
 				switch_mutex_init(&veto_mutex, SWITCH_MUTEX_NESTED, test_pool);
+				switch_mutex_init(&pick_mutex, SWITCH_MUTEX_NESTED, test_pool);
 			}
 		}
 		FST_SETUP_END()
@@ -1812,6 +2021,69 @@ FST_CORE_BEGIN("./conf_transfer_handoff")
 
 			/* The stale generation must not drag the channel back to CS_ROUTING. */
 			fst_check(won == trials);
+		}
+		FST_TEST_END()
+		FST_TEST_BEGIN(a_transfer_survives_a_state_the_routing_handler_picked)
+		{
+			int settle_ms = env_int("TRANSFER_HANDOFF_SETTLE_MS", 1200);
+			int trials = env_int("TRANSFER_HANDOFF_TRIALS", 2);
+			int t, held_total = 0, routed = 0;
+
+			fst_requires(switch_core_add_state_handler(&pick_handlers) >= 0);
+
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+							  "========== transfer while the handler picks CONSUME_MEDIA x %d ==========\n", trials);
+
+			for (t = 0; t < trials; t++) {
+				int held = 0;
+
+				routed += run_pick_trial(1, settle_ms, &held);
+				held_total += held;
+			}
+
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+							  "========== handler-picked state: held %d/%d | transfer routed %d ==========\n",
+							  held_total, trials, routed);
+
+			switch_core_remove_state_handler(&pick_handlers);
+
+			/* The probe itself must work, or the result below means nothing. */
+			fst_requires(held_total == trials);
+
+			/* uuid_transfer said +OK, and nothing later superseded it. */
+			fst_check(routed == trials);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(the_same_state_from_another_thread_still_wins)
+		{
+			int settle_ms = env_int("TRANSFER_HANDOFF_SETTLE_MS", 1200);
+			int trials = env_int("TRANSFER_HANDOFF_TRIALS", 2);
+			int t, held_total = 0, stood = 0;
+
+			fst_requires(switch_core_add_state_handler(&pick_handlers) >= 0);
+
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+							  "========== CONSUME_MEDIA from another thread after a transfer x %d ==========\n", trials);
+
+			for (t = 0; t < trials; t++) {
+				int held = 0;
+
+				stood += run_pick_trial(0, settle_ms, &held);
+				held_total += held;
+			}
+
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+							  "========== foreign state: held %d/%d | state stood %d ==========\n",
+							  held_total, trials, stood);
+
+			switch_core_remove_state_handler(&pick_handlers);
+
+			/* The probe itself must work, or the result below means nothing. */
+			fst_requires(held_total == trials);
+
+			/* The same state as (c), set by a later command: it must not be rerouted. */
+			fst_check(stood == trials);
 		}
 		FST_TEST_END()
 	}

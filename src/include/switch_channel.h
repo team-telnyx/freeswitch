@@ -91,6 +91,13 @@ SWITCH_DECLARE(void) switch_channel_inc_transfer_generation(switch_channel_t *ch
 SWITCH_DECLARE(uint32_t) switch_channel_get_transfer_generation(switch_channel_t *channel);
 
 /*!
+  \brief Test whether another thread set the channel's state after its latest transfer
+  \param channel channel to test
+  \return SWITCH_TRUE when a later command, not the session thread, chose the current state
+*/
+SWITCH_DECLARE(switch_bool_t) switch_channel_transfer_superseded(switch_channel_t *channel);
+
+/*!
   \brief Test for an extension queued by switch_channel_transfer_to_extension() and not yet
          consumed by switch_channel_get_queued_extension(); does not consume it
   \param channel channel to test

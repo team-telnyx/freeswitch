@@ -165,6 +165,10 @@ struct switch_channel {
 	switch_channel_state_t state;
 	switch_channel_state_t running_state;
 	switch_atomic_t transfer_generation;
+	/* Under state_mutex: the transfer generation current when another thread last set a
+	   state other than CS_ROUTING. See note_state_from_another_thread(). */
+	uint32_t superseding_generation;
+	uint8_t superseding_valid;
 	switch_channel_callstate_t callstate;
 	uint32_t flags[CF_FLAG_MAX];
 	uint32_t caps[CC_FLAG_MAX];
@@ -2488,6 +2492,43 @@ SWITCH_DECLARE(uint32_t) switch_channel_get_transfer_generation(switch_channel_t
 	return switch_atomic_read(&channel->transfer_generation);
 }
 
+/*
+ * Who moved the channel after the latest transfer: its own session thread, or a command
+ * from another thread. The state alone cannot say - CS_CONSUME_MEDIA is both what the
+ * ROUTING handler picks for an originated leg and what switch_ivr_multi_threaded_bridge()
+ * sets on a peer - so the state machine asks this instead of testing for particular
+ * states.
+ *
+ * Recorded under state_mutex, in the same critical section as the state it describes, so
+ * the generation read here and the state that stands are ordered the same way against a
+ * transfer's own set_state(CS_ROUTING). A same-state set counts: a bridge that finds its
+ * peer already in CS_CONSUME_MEDIA has still claimed it. CS_ROUTING is the transfer's own
+ * request, and CS_HANGUP and later win on their own, so neither is recorded.
+ */
+static inline void note_state_from_another_thread(switch_channel_t *channel, switch_channel_state_t state)
+{
+	if (state == CS_ROUTING || state >= CS_HANGUP || !channel->session || switch_core_session_in_thread(channel->session)) {
+		return;
+	}
+
+	channel->superseding_generation = switch_atomic_read(&channel->transfer_generation);
+	channel->superseding_valid = 1;
+}
+
+SWITCH_DECLARE(switch_bool_t) switch_channel_transfer_superseded(switch_channel_t *channel)
+{
+	switch_bool_t superseded;
+
+	switch_assert(channel != NULL);
+
+	switch_mutex_lock(channel->state_mutex);
+	superseded = (channel->superseding_valid &&
+				  channel->superseding_generation == switch_atomic_read(&channel->transfer_generation)) ? SWITCH_TRUE : SWITCH_FALSE;
+	switch_mutex_unlock(channel->state_mutex);
+
+	return superseded;
+}
+
 SWITCH_DECLARE(switch_channel_state_t) switch_channel_perform_set_running_state(switch_channel_t *channel, switch_channel_state_t state,
 																				const char *file, const char *func, int line)
 {
@@ -2555,6 +2596,7 @@ SWITCH_DECLARE(switch_channel_state_t) switch_channel_perform_set_state(switch_c
 	switch_assert(last_state <= CS_DESTROY);
 
 	if (last_state == state) {
+		note_state_from_another_thread(channel, state);
 		goto done;
 	}
 
@@ -2741,6 +2783,7 @@ SWITCH_DECLARE(switch_channel_state_t) switch_channel_perform_set_state(switch_c
 						  channel->name, state_names[last_state], state_names[state]);
 
 		careful_set(channel, &channel->state, state);
+		note_state_from_another_thread(channel, state);
 
 		if (state == CS_HANGUP && !channel->hangup_cause) {
 			channel->hangup_cause = SWITCH_CAUSE_NORMAL_CLEARING;
