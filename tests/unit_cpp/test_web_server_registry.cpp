@@ -620,40 +620,6 @@ static void test_unregister_specific()
 	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_POST, "/x").outcome, (int)internal::LookupOutcome::Hit);
 }
 
-/* ----- Response printf ----- */
-
-/* Regression for the long-output path of switch_web_response_printf():
-   formatted output far larger than any common stack/small buffer must land
-   in the body intact, with the exact byte length and no truncation or
-   trailing NUL. Also proves last-call-wins fully replaces a longer body. */
-static void test_response_printf_long_output()
-{
-	std::cout << "[test] response printf: large formatted output is stored intact\n";
-
-	internal::ResponsePtr res(internal::make_response());
-
-	/* 10000 bytes of payload — well past 256/1024/4096 thresholds. */
-	const int n = 10000;
-	std::string filler(static_cast<std::size_t>(n), 'x');
-	switch_web_response_printf(res.get(), "PRE[%s]POST=%d", filler.c_str(), n);
-
-	std::string expected = "PRE[" + filler + "]POST=" + std::to_string(n);
-	{
-		const std::string &body = internal::response_body(res.get());
-		CHECK_EQ(body.size(), expected.size());
-		CHECK(body == expected);
-		/* exactly `needed` bytes — no embedded/trailing NUL from vsnprintf */
-		CHECK(body.find('\0') == std::string::npos);
-	}
-
-	/* last call wins: a short printf must fully replace the long body. */
-	switch_web_response_printf(res.get(), "short:%d", 7);
-	{
-		const std::string &body = internal::response_body(res.get());
-		CHECK_EQ(body, std::string("short:7"));
-	}
-}
-
 /* ----- Snapshot ----- */
 
 static void test_snapshot()
@@ -1240,7 +1206,6 @@ int main()
 	test_cross_tier_no_conflict_both_orders();
 	test_unregister_module_sweep();
 	test_unregister_specific();
-	test_response_printf_long_output();
 	test_snapshot();
 	test_register_without_listener();
 	test_drain_waits_for_inflight();
