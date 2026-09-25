@@ -95,7 +95,7 @@ SWITCH_DECLARE(const char *)        switch_web_request_param(const switch_web_re
  */
 SWITCH_DECLARE(const char *)        switch_web_request_query_param(const switch_web_request_t *req, const char *name);
 
-/* Response setters. set_body / printf may be called multiple times; the last call wins. */
+/* Response setters. set_body may be called multiple times; the last call wins. */
 SWITCH_DECLARE(void) switch_web_response_set_status(switch_web_response_t *res, int code);
 /*!
  * \brief Set a response header, replacing any previous value for that name.
@@ -122,7 +122,6 @@ SWITCH_DECLARE(void) switch_web_response_set_status(switch_web_response_t *res, 
  */
 SWITCH_DECLARE(void) switch_web_response_set_header(switch_web_response_t *res, const char *name, const char *value);
 SWITCH_DECLARE(void) switch_web_response_set_body(switch_web_response_t *res, const char *body, size_t len);
-SWITCH_DECLARE(void) switch_web_response_printf(switch_web_response_t *res, const char *fmt, ...);
 
 /*
  * Register a route. `path` is an exact path ("/foo") or a pattern with

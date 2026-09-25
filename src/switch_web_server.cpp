@@ -14,7 +14,6 @@
 #include <chrono>
 #include <cctype>
 #include <cstring>
-#include <cstdarg>
 #include <cstdio>
 #include <map>
 #include <memory>
@@ -1002,25 +1001,6 @@ SWITCH_DECLARE(void) switch_web_response_set_body(switch_web_response_t *res, co
 	if (!res) return;
 	if (!body || !len) { res->body.clear(); return; }
 	res->body.assign(body, len);
-}
-
-SWITCH_DECLARE(void) switch_web_response_printf(switch_web_response_t *res, const char *fmt, ...)
-{
-	if (!res || !fmt) return;
-	va_list ap, ap2;
-	va_start(ap, fmt);
-	va_copy(ap2, ap);
-	int needed = std::vsnprintf(nullptr, 0, fmt, ap);
-	va_end(ap);
-	if (needed < 0) { va_end(ap2); return; }
-	/* Format into an owned char buffer of needed+1 (room for vsnprintf's
-	   trailing NUL), then assign exactly `needed` bytes into body. Writing
-	   the NUL into std::string's own terminator slot would be relying on a
-	   subtle library-contract corner; a vector we own has no such rule. */
-	std::vector<char> buf(static_cast<std::size_t>(needed) + 1);
-	std::vsnprintf(buf.data(), buf.size(), fmt, ap2);
-	va_end(ap2);
-	res->body.assign(buf.data(), static_cast<std::size_t>(needed));
 }
 
 SWITCH_DECLARE(switch_status_t) switch_web_server_register(const char *module_name,
