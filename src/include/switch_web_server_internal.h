@@ -26,6 +26,13 @@
 #include <string>
 #include <vector>
 
+/*
+ * Every out-of-line symbol below is SWITCH_DECLARE'd. The default configure
+ * builds libfreeswitch with -fvisibility=hidden, and mod_web_server resolves
+ * these against the core at dlopen() time; without the attribute the module
+ * links only when the core was configured with --disable-visibility, and
+ * otherwise fails to load with "undefined symbol".
+ */
 namespace switch_web_server_internal {
 
 enum class LookupOutcome {
@@ -55,7 +62,7 @@ struct ModuleSlot {
  * its destructor decrements ModuleSlot::in_flight and notifies the cv
  * when the count reaches zero. Move-only.
  */
-class InFlightTicket {
+class SWITCH_DECLARE_CLASS InFlightTicket {
 public:
 	InFlightTicket() = default;
 	explicit InFlightTicket(std::shared_ptr<ModuleSlot> slot);
@@ -98,13 +105,13 @@ struct RouteSnapshot {
 	std::string           path;
 };
 
-LookupResult                lookup(switch_web_method_t method, const std::string &path);
+SWITCH_DECLARE(LookupResult)                  lookup(switch_web_method_t method, const std::string &path);
 /* Every method registered for this path, across all three tiers. Empty when
    nothing matches. Used to answer OPTIONS without inventing an Allow: list. */
-std::set<switch_web_method_t> allowed_methods(const std::string &path);
-std::vector<RouteSnapshot>  snapshot();
-std::size_t                 route_count();
-void                        set_listener_present(bool present);
+SWITCH_DECLARE(std::set<switch_web_method_t>) allowed_methods(const std::string &path);
+SWITCH_DECLARE(std::vector<RouteSnapshot>)    snapshot();
+SWITCH_DECLARE(std::size_t)                   route_count();
+SWITCH_DECLARE(void)                          set_listener_present(bool present);
 
 /* Request / response object factories. mod_web_server constructs these
    on each incoming request; the registry knows how to deallocate them. */
@@ -119,11 +126,11 @@ struct RequestInit {
 	std::shared_ptr<std::map<std::string, std::string>> params;
 };
 
-switch_web_request_t  *make_request(RequestInit init);
-void                   free_request(switch_web_request_t *req);
+SWITCH_DECLARE(switch_web_request_t *)  make_request(RequestInit init);
+SWITCH_DECLARE(void)                    free_request(switch_web_request_t *req);
 
-switch_web_response_t *make_response();
-void                   free_response(switch_web_response_t *res);
+SWITCH_DECLARE(switch_web_response_t *) make_response();
+SWITCH_DECLARE(void)                    free_response(switch_web_response_t *res);
 
 /* Custom deleters so request/response can be owned by std::unique_ptr in lambdas. */
 struct RequestDeleter  { void operator()(switch_web_request_t  *r) const noexcept { free_request(r);  } };
@@ -132,11 +139,13 @@ using RequestPtr  = std::unique_ptr<switch_web_request_t,  RequestDeleter>;
 using ResponsePtr = std::unique_ptr<switch_web_response_t, ResponseDeleter>;
 
 /* Read finalized response state after the handler has returned. */
-int                                       response_status(const switch_web_response_t *res);
-const std::map<std::string, std::string> &response_headers(const switch_web_response_t *res);
-const std::string                        &response_body(const switch_web_response_t *res);
+SWITCH_DECLARE(int)                 response_status(const switch_web_response_t *res);
+/* Alias only so the type survives SWITCH_DECLARE's single macro argument. */
+using HeaderMap = std::map<std::string, std::string>;
+SWITCH_DECLARE(const HeaderMap &)   response_headers(const switch_web_response_t *res);
+SWITCH_DECLARE(const std::string &) response_body(const switch_web_response_t *res);
 
-const char *method_name(switch_web_method_t m);
+SWITCH_DECLARE(const char *) method_name(switch_web_method_t m);
 
 } /* namespace switch_web_server_internal */
 
