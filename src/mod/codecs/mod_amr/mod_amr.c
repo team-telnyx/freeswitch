@@ -587,12 +587,20 @@ static switch_status_t switch_amr_decode(switch_codec_t *codec,
 	if (switch_test_flag(context, AMR_OPT_OCTET_ALIGN)) {
 		/* Octed Aligned */
 		if (!switch_amr_unpack_oa(buf, tmp, encoded_data_len)) {
-			goto decode_error;
+			memcpy(buf, encoded_data, encoded_data_len);
+			if (!switch_amr_unpack_be(buf, tmp, encoded_data_len)) {
+				goto decode_error;
+			}
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AMR decoder (OA): decoded a bandwidth efficient packet\n");
 		}
 	} else {
 		/* Bandwidth Efficient */
 		if (!switch_amr_unpack_be(buf, tmp, encoded_data_len)) {
-			goto decode_error;
+			memcpy(buf, encoded_data, encoded_data_len);
+			if (!switch_amr_unpack_oa(buf, tmp, encoded_data_len)) {
+				goto decode_error;
+			}
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AMR decoder (BE): decoded an octet aligned packet\n");
 		}
 	}
 

@@ -43,6 +43,8 @@ typedef struct {
 	int decoded;
 	int codec_reset;
 	int answer_octet_align;
+	int stale_decode_failures;
+	int framing_stale;
 } amr_reoffer_result_t;
 
 static const char *amr_offer(switch_core_session_t *session, int version, const char *fmtp)
@@ -145,6 +147,58 @@ static int amr_decodes_as(switch_codec_t *codec, switch_memory_pool_t *pool, con
 		ref_len == 320 && got_len == ref_len && !memcmp(ref, got, ref_len);
 }
 
+static int amr_decode_failures(switch_codec_t *codec, switch_memory_pool_t *pool, const char *fmtp, int frames)
+{
+	switch_codec_t enc_codec = { 0 };
+	switch_codec_settings_t codec_settings = {{ 0 }};
+	unsigned char decoded[SWITCH_RECOMMENDED_BUFFER_SIZE];
+	uint8_t pkt[64];
+	int16_t pcm[160];
+	uint32_t seed = 54321, pkt_len, decoded_len, rate, flags;
+	int f, i, failures = 0;
+
+	if (switch_core_codec_init(&enc_codec, "AMR", "mod_amr", fmtp, 8000, 20, 1,
+							   SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, &codec_settings, pool) != SWITCH_STATUS_SUCCESS) {
+		return -1;
+	}
+
+	for (f = 0; f < frames; f++) {
+		for (i = 0; i < 160; i++) {
+			seed = seed * 1103515245 + 12345;
+			pcm[i] = (int16_t) ((int) ((seed >> 16) & 0x3fff) - 0x2000);
+		}
+
+		pkt_len = sizeof(pkt);
+		rate = 8000;
+		flags = 0;
+
+		if (switch_core_codec_encode(&enc_codec, NULL, pcm, sizeof(pcm), 8000, pkt, &pkt_len, &rate, &flags) != SWITCH_STATUS_SUCCESS) {
+			failures = -1;
+			break;
+		}
+
+		decoded_len = sizeof(decoded);
+
+		if (switch_core_codec_decode(codec, NULL, pkt, pkt_len, 8000, decoded, &decoded_len, &rate, &flags) != SWITCH_STATUS_SUCCESS) {
+			failures++;
+		}
+	}
+
+	switch_core_codec_destroy(&enc_codec);
+
+	return failures;
+}
+
+static int amr_framing_changes(switch_codec_t *codec, const char *fmtp)
+{
+	switch_codec_control_type_t reply_type = SCCT_NONE;
+	void *reply = NULL;
+
+	return switch_core_codec_control(codec, SCC_CODEC_SPECIFIC, SCCT_STRING, (void *) "fmtp_changes_framing",
+									 SCCT_STRING, (void *) fmtp, &reply_type, &reply) == SWITCH_STATUS_SUCCESS &&
+		reply_type == SCCT_STRING && switch_true((const char *) reply);
+}
+
 static amr_reoffer_result_t amr_reoffer(switch_core_session_t *session, const char *strict,
 										const char *first_fmtp, const char *second_offer, const char *frame_fmtp)
 {
@@ -184,12 +238,14 @@ static amr_reoffer_result_t amr_reoffer(switch_core_session_t *session, const ch
 
 	result.negotiated = 1;
 	result.codec_reset = read_codec->private_info != initial_context;
+	result.framing_stale = amr_framing_changes(read_codec, frame_fmtp);
 
 	if (amr_encode_frame(pool, frame_fmtp, pkt, &pkt_len) == SWITCH_STATUS_SUCCESS && pkt_len > 20) {
 		result.decoded = amr_decodes_as(read_codec, pool, frame_fmtp, pkt, pkt_len);
 	}
 
 	result.answer_octet_align = amr_answer_octet_align(session);
+	result.stale_decode_failures = amr_decode_failures(read_codec, pool, first_fmtp, 50);
 
 	return result;
 }
@@ -244,6 +300,7 @@ FST_CORE_BEGIN(".")
 			fst_xcheck(result.codec_reset, "a framing change resets the codec");
 			fst_xcheck(result.decoded, "bandwidth efficient frames decode after the re-offer");
 			fst_xcheck(result.answer_octet_align == 0, "the answer advertises bandwidth efficient framing");
+			fst_xcheck(result.stale_decode_failures == 0, "octet aligned frames sent before the answer do not fail to decode");
 		}
 		FST_SESSION_END()
 
@@ -255,6 +312,7 @@ FST_CORE_BEGIN(".")
 			fst_xcheck(result.codec_reset, "a framing change resets the codec");
 			fst_xcheck(result.decoded, "octet aligned frames decode after the re-offer");
 			fst_xcheck(result.answer_octet_align == 1, "the answer advertises octet aligned framing");
+			fst_xcheck(result.stale_decode_failures == 0, "bandwidth efficient frames sent before the answer do not fail to decode");
 		}
 		FST_SESSION_END()
 
@@ -287,7 +345,7 @@ FST_CORE_BEGIN(".")
 
 			fst_requires(result.negotiated);
 			fst_xcheck(!result.codec_reset, "without strict matching the codec is kept across the re-offer");
-			fst_xcheck(!result.decoded, "the kept codec still decodes with the old framing");
+			fst_xcheck(result.framing_stale, "the kept codec still runs the old framing");
 		}
 		FST_SESSION_END()
 
