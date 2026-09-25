@@ -1636,6 +1636,21 @@ static switch_status_t switch_loadable_module_unprocess(switch_loadable_module_t
 }
 
 
+/* Routes are keyed by the modname a module passed to
+   create_module_interface(). `filename` also covers a LOAD that registered
+   before creating its interface, since by convention the two are the same
+   string. Each sweep is a no-op for a name with no routes. `modname` lives in
+   the module's pool, so call this before destroying it. */
+static void sweep_failed_load_routes(const char *modname, const char *filename)
+{
+	if (modname) {
+		switch_web_server_unregister_module(modname);
+	}
+	if (filename && (!modname || strcmp(modname, filename))) {
+		switch_web_server_unregister_module(filename);
+	}
+}
+
 static switch_status_t switch_loadable_module_load_file(char *path, char *filename, switch_bool_t global, switch_loadable_module_t **new_module)
 {
 	switch_loadable_module_t *module = NULL;
@@ -1651,6 +1666,8 @@ static switch_status_t switch_loadable_module_load_file(char *path, char *filena
 	const char *err = NULL;
 	switch_memory_pool_t *pool = NULL;
 	switch_bool_t load_global = global;
+	const char *loaded_modname = NULL;
+	switch_bool_t load_ran = SWITCH_FALSE;
 
 	switch_assert(path != NULL);
 
@@ -1721,6 +1738,10 @@ static switch_status_t switch_loadable_module_load_file(char *path, char *filena
 		}
 
 		status = load_func_ptr(&module_interface, pool);
+		load_ran = SWITCH_TRUE;
+		if (module_interface) {
+			loaded_modname = module_interface->module_name;
+		}
 
 		if (status != SWITCH_STATUS_SUCCESS && status != SWITCH_STATUS_NOUNLOAD) {
 			err = "Module load routine returned an error";
@@ -1746,6 +1767,14 @@ static switch_status_t switch_loadable_module_load_file(char *path, char *filena
 
 
 	if (err) {
+
+		/* The unload backstop in do_shutdown() never runs for a module whose
+		   LOAD failed, yet LOAD may already have registered HTTP routes before
+		   the step that failed. Sweep them before dlclose(), or the next request
+		   to such a route jumps into unmapped text. */
+		if (load_ran) {
+			sweep_failed_load_routes(loaded_modname, filename);
+		}
 
 		if (dso) {
 			switch_dso_destroy(&dso);
@@ -1998,6 +2027,8 @@ SWITCH_DECLARE(switch_status_t) switch_loadable_module_build_dynamic(char *filen
 	const char *err = NULL;
 	switch_loadable_module_interface_t *module_interface = NULL;
 	switch_memory_pool_t *pool;
+	const char *loaded_modname = NULL;
+	switch_bool_t load_ran = SWITCH_FALSE;
 
 
 	if (switch_core_new_memory_pool(&pool) != SWITCH_STATUS_SUCCESS) {
@@ -2022,6 +2053,10 @@ SWITCH_DECLARE(switch_status_t) switch_loadable_module_build_dynamic(char *filen
 		}
 
 		status = load_func_ptr(&module_interface, pool);
+		load_ran = SWITCH_TRUE;
+		if (module_interface) {
+			loaded_modname = module_interface->module_name;
+		}
 
 		if (status != SWITCH_STATUS_SUCCESS && status != SWITCH_STATUS_NOUNLOAD) {
 			err = "Module load routine returned an error";
@@ -2041,6 +2076,11 @@ SWITCH_DECLARE(switch_status_t) switch_loadable_module_build_dynamic(char *filen
 	}
 
 	if (err) {
+		/* Built in, so no dlclose() — but the pool that user_data likely
+		   points into is destroyed just below. */
+		if (load_ran) {
+			sweep_failed_load_routes(loaded_modname, filename);
+		}
 		switch_core_destroy_memory_pool(&pool);
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CONSOLE, "Error Loading module %s\n**%s**\n", filename, err);
 		return SWITCH_STATUS_GENERR;
@@ -2396,6 +2436,13 @@ static switch_status_t do_shutdown(switch_loadable_module_t *module, switch_bool
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CONSOLE, "%s stopping runtime thread.\n", module->module_interface->module_name);
 			switch_thread_join(&st, module->thread);
 		}
+
+		/* Second sweep, after the runtime thread is joined and immediately
+		   before dlclose(). The one above runs before that join, so a route
+		   the runtime thread registered after it would otherwise survive into
+		   the dlclose(). On process shutdown this is the only sweep on the
+		   unload pass. No-op for a module with no routes left. */
+		switch_web_server_unregister_module(module->module_interface->module_name);
 
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CONSOLE, "%s unloaded.\n", module->module_interface->module_name);
 		switch_dso_destroy(&module->lib);
