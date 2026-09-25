@@ -587,6 +587,10 @@ SWITCH_DECLARE(void) switch_core_session_run(switch_core_session_t *session)
 
 
 	 */
+	uint32_t routed_generation;
+	switch_caller_profile_t *routed_profile = NULL;
+	switch_channel_state_t routed_endstate = CS_NONE;
+
 	switch_assert(session != NULL);
 
 	switch_set_flag(session, SSF_THREAD_RUNNING);
@@ -598,6 +602,10 @@ SWITCH_DECLARE(void) switch_core_session_run(switch_core_session_t *session)
 
 	switch_mutex_lock(session->mutex);
 
+	/* Last transfer generation routed by this thread; != only, it wraps. */
+	routed_generation = switch_channel_get_transfer_generation(session->channel);
+	routed_profile = switch_channel_get_caller_profile(session->channel);
+
 	while ((state = switch_channel_get_state(session->channel)) != CS_DESTROY) {
 
 		if (switch_channel_test_flag(session->channel, CF_BLOCK_STATE)) {
@@ -608,7 +616,10 @@ SWITCH_DECLARE(void) switch_core_session_run(switch_core_session_t *session)
 		}
 
 		midstate = state;
-		if (state != switch_channel_get_running_state(session->channel) || state >= CS_HANGUP) {
+		/* Third clause: a transfer that landed mid-transition can leave
+		   state == running_state == CS_ROUTING with nothing having routed its profile. */
+		if (state != switch_channel_get_running_state(session->channel) || state >= CS_HANGUP ||
+			(state == CS_ROUTING && switch_channel_get_transfer_generation(session->channel) != routed_generation)) {
 			int index = 0;
 			int proceed = 1;
 			int global_proceed = 1;
@@ -617,6 +628,12 @@ SWITCH_DECLARE(void) switch_core_session_run(switch_core_session_t *session)
 			switch_status_t rstatus = SWITCH_STATUS_SUCCESS;
 
 			switch_channel_set_running_state(session->channel, state);
+			if (state == CS_ROUTING) {
+				/* Before the handler, so a transfer landing during it still reads as
+				   unrouted. Only ROUTING updates these. */
+				routed_generation = switch_channel_get_transfer_generation(session->channel);
+				routed_profile = switch_channel_get_caller_profile(session->channel);
+			}
 			switch_channel_clear_flag(session->channel, CF_TRANSFER);
 			switch_channel_clear_flag(session->channel, CF_REDIRECT);
 			switch_ivr_parse_all_messages(session);
@@ -676,6 +693,65 @@ SWITCH_DECLARE(void) switch_core_session_run(switch_core_session_t *session)
 				break;
 			case CS_ROUTING:	/* Look for a dialplan and find something to do */
 				STATE_MACRO(routing, "ROUTING");
+
+				/*
+				 * A transfer that landed after the handler read the profile it routed
+				 * from. The handler has installed an extension hunted from a profile the
+				 * transfer has since replaced and pointed the channel at its next state,
+				 * so from here on state != running_state and neither the top-of-loop
+				 * guard nor the sleep branch below looks again - the stale extension
+				 * runs, and with the production payload (a park) it blocks, deferring
+				 * the transfer for the life of the call. Route again.
+				 *
+				 * Deliberately NOT the transfer generation, which is what the guards
+				 * above use. The generation says a transfer arrived, not that it is
+				 * still outstanding, and the two transfer payloads are consumed
+				 * differently: switch_ivr_session_transfer() installs a caller profile,
+				 * which the next hunt simply re-reads, but
+				 * switch_channel_transfer_to_extension() queues an extension that
+				 * switch_channel_get_queued_extension() destructively pops. Re-routing
+				 * on the generation therefore throws away a pass that had already
+				 * consumed the queued extension, and pass two - with nothing queued and
+				 * the caller profile untouched - re-hunts the pre-transfer destination
+				 * or hangs up with NO_ROUTE_DESTINATION. Test the payloads instead:
+				 * an unconsumed queued extension, or a caller profile swapped since we
+				 * entered ROUTING.
+				 *
+				 * Still conservative on the profile arm: a transfer landing before the
+				 * handler read the profile also swaps it, and re-routing then is
+				 * redundant because the hunt already used the new profile. That costs
+				 * one extra hunt and a duplicate CHANNEL_STATE event; distinguishing it
+				 * would mean having the handler publish which profile it hunted from.
+				 *
+				 * Only a state this thread chose, and only with the generation moved.
+				 * Both narrow this to the ROUTING handler's own decision after a
+				 * transfer, so a command that arrived later keeps the state it asked
+				 * for: switch_ivr_uuid_bridge() steps both caller profiles
+				 * (switch_ivr_bridge.c) and then sets CS_HIBERNATE, mod_fifo steps them
+				 * too, and switch_ivr_multi_threaded_bridge() sets its peer to
+				 * CS_CONSUME_MEDIA. Rewriting one of those to CS_ROUTING would have the
+				 * originator re-hunt its dialplan while the originatee slept waiting for
+				 * a bridge that never starts. Which thread set the state is the test,
+				 * not which state it is: the handler's own picks include
+				 * CS_CONSUME_MEDIA too (originate_on_routing(), or an unanswered
+				 * outbound leg with no dialplan), and a transfer that landed while it
+				 * chose one would otherwise be dropped by the sleep branch below after
+				 * uuid_transfer had returned +OK. Without the generation test a profile
+				 * swap alone would count as a transfer. A hangup is left alone.
+				 */
+				routed_endstate = switch_channel_get_state(session->channel);
+
+				if (routed_endstate != CS_ROUTING && routed_endstate < CS_HANGUP &&
+					switch_channel_get_transfer_generation(session->channel) != routed_generation &&
+					!switch_channel_transfer_superseded(session->channel) &&
+					(switch_channel_has_queued_extension(session->channel) ||
+					 switch_channel_get_caller_profile(session->channel) != routed_profile)) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+									  "%s transfer landed during routing, discarding the %s decision and routing again\n",
+									  switch_channel_get_name(session->channel),
+									  switch_channel_state_name(routed_endstate));
+					switch_channel_set_state(session->channel, CS_ROUTING);
+				}
 				break;
 			case CS_RESET:		/* Reset */
 				STATE_MACRO(reset, "RESET");
@@ -731,7 +807,34 @@ SWITCH_DECLARE(void) switch_core_session_run(switch_core_session_t *session)
 
 				if (switch_channel_test_flag(session->channel, CF_STATE_REPEAT)) {
 					switch_channel_clear_flag(session->channel, CF_STATE_REPEAT);
+				} else if (switch_channel_get_transfer_generation(session->channel) != routed_generation &&
+						   switch_channel_get_state(session->channel) == CS_ROUTING) {
+					/* Unconsumed transfer, and the channel is still in the state the
+					   transfer asked for. Don't sleep: loop, and the top-of-loop guard's
+					   third clause re-enters ROUTING. */
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+									  "%s unrouted transfer in state %s, routing again instead of sleeping\n",
+									  switch_channel_get_name(session->channel),
+									  switch_channel_state_name(switch_channel_get_running_state(session->channel)));
 				} else if (switch_channel_get_state(session->channel) == switch_channel_get_running_state(session->channel)) {
+					if (switch_channel_get_transfer_generation(session->channel) != routed_generation) {
+						/* Stale bump in a state the transfer did not ask for. Every
+						   transfer's set_state(CS_ROUTING) is accepted below CS_HANGUP,
+						   and the check after a ROUTING pass re-routes when the handler
+						   itself moved the channel off a transfer it had not used - so
+						   being here means either that pass did use it, or a later
+						   command from another thread (switch_ivr_uuid_bridge() drives
+						   HIBERNATE then RESET) superseded it. Dragging the channel back
+						   would run a transfer twice or pull it out of whatever the
+						   later command set up. Consume the bump instead. */
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+										  "%s transfer %s, dropping it in state %s\n",
+										  switch_channel_get_name(session->channel),
+										  switch_channel_transfer_superseded(session->channel) ?
+										  "superseded by a later command" : "already used by the routing pass",
+										  switch_channel_state_name(switch_channel_get_running_state(session->channel)));
+						routed_generation = switch_channel_get_transfer_generation(session->channel);
+					}
 					switch_channel_set_flag(session->channel, CF_THREAD_SLEEPING);
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG1, "%s session thread sleep state: %s!\n",
 									  switch_channel_get_name(session->channel),
