@@ -3,7 +3,7 @@
   <X-PRE-PROCESS cmd="set" data="rtp_timer_name=soft"/>
   <section name="configuration" description="Various Configuration">
     <configuration name="modules.conf" description="Modules">
-      <!-- Only what the TELCORE-412 handoff test needs: the null/loopback endpoint,
+      <!-- Only what the transfer handoff test needs: the null/loopback endpoint,
            uuid_transfer, and the inline dialplan plus the park application. -->
       <modules>
         <load module="mod_console"/>

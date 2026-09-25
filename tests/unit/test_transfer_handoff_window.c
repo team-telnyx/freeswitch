@@ -1,5 +1,5 @@
 /*
- * TELCORE-412 - a uuid_transfer that lands in the state machine's handoff window is lost.
+ * A uuid_transfer that lands in the state machine's handoff window is lost.
  *
  * switch_ivr_session_transfer() installs a caller profile and calls
  * switch_channel_set_state(CS_ROUTING). That is edge-triggered on (state, running_state),
@@ -8,8 +8,8 @@
  * only runs a handler when they differ - sleeps without routing the profile. Every later
  * set_state(CS_ROUTING) then hits the equality guard, so the channel never recovers.
  *
- * transfer_pair_is_not_coalesced replays the real tel-apps command pair. It does NOT
- * reproduce at their 11ms spacing, nor across a 0-50ms sweep - the window is far narrower
+ * transfer_pair_is_not_coalesced replays a real production command pair. It does NOT
+ * reproduce at its 11ms spacing, nor across a 0-50ms sweep - the window is far narrower
  * than any delay schedulable from a test. Kept as that measurement.
  *
  * second_transfer_survives_the_handoff_window freezes the session thread inside the
@@ -116,7 +116,7 @@ static int park_watch_count(void)
 	return count;
 }
 
-/* Run uuid_transfer exactly the way tel-apps does, and report whether it said +OK. */
+/* Run uuid_transfer exactly the way a call-control client does, and report whether it said +OK. */
 static switch_bool_t uuid_transfer(const char *uuid, const char *dest)
 {
 	switch_stream_handle_t stream = { 0 };
@@ -141,7 +141,7 @@ static switch_bool_t uuid_transfer(const char *uuid, const char *dest)
 
 /*
  * One trial: park a fresh channel the way the inbound dialplan does, fire the
- * tel-apps transfer pair separated by delay_ms, then classify where the channel
+ * production transfer pair separated by delay_ms, then classify where the channel
  * ended up.
  */
 static trial_result_t run_trial(int delay_ms, int settle_ms, switch_bool_t *both_ok)
@@ -1497,7 +1497,7 @@ FST_CORE_BEGIN("./conf_transfer_handoff")
 			argc = switch_separate_string(delays_buf, ',', argv, (sizeof(argv) / sizeof(argv[0])));
 
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-							  "========== TELCORE-412 transfer pair race: %d delays x %d trials ==========\n",
+							  "========== transfer pair race: %d delays x %d trials ==========\n",
 							  argc, trials);
 
 			for (i = 0; i < argc; i++) {
@@ -1529,7 +1529,7 @@ FST_CORE_BEGIN("./conf_transfer_handoff")
 			}
 
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-							  "========== TELCORE-412 totals: %d trials | reached %d | wedged %d | reparked %d | unknown %d "
+							  "========== totals: %d trials | reached %d | wedged %d | reparked %d | unknown %d "
 							  "| returned +OK but dropped the transfer: %d ==========\n",
 							  total, reached, wedged, reparked, unknown, ok_but_dropped);
 
@@ -1562,7 +1562,7 @@ FST_CORE_BEGIN("./conf_transfer_handoff")
 			fst_requires(switch_core_add_state_handler(&freeze_handlers) >= 0);
 
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-							  "========== TELCORE-412 frozen handoff window x %d ==========\n", trials);
+							  "========== frozen handoff window x %d ==========\n", trials);
 
 			for (t = 0; t < trials; t++) {
 				int froze = 0, recovered = 0, first_ran = 0;
@@ -1586,7 +1586,7 @@ FST_CORE_BEGIN("./conf_transfer_handoff")
 			}
 
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-							  "========== TELCORE-412 frozen window: froze %d/%d | reached %d | wedged %d "
+							  "========== frozen window: froze %d/%d | reached %d | wedged %d "
 							  "| reparked %d | unknown %d | +OK but dropped: %d | wedges recovered by a retry: %d/%d ==========\n",
 							  froze_total, trials, reached, wedged, reparked, unknown, ok_but_dropped,
 							  recovered_total, wedged);
@@ -1619,7 +1619,7 @@ FST_CORE_BEGIN("./conf_transfer_handoff")
 			fst_requires(switch_core_add_state_handler(&stall_handlers) >= 0);
 
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-							  "========== TELCORE-412 xferext into a sleeping routing thread x %d ==========\n", trials);
+							  "========== xferext into a sleeping routing thread x %d ==========\n", trials);
 
 			for (t = 0; t < trials; t++) {
 				int stalled = 0;
@@ -1635,7 +1635,7 @@ FST_CORE_BEGIN("./conf_transfer_handoff")
 			}
 
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-							  "========== TELCORE-412 xferext: stalled %d/%d | reached %d | wedged %d | unknown %d ==========\n",
+							  "========== xferext: stalled %d/%d | reached %d | wedged %d | unknown %d ==========\n",
 							  stalled_total, trials, reached, wedged, unknown);
 
 			switch_core_remove_state_handler(&stall_handlers);
@@ -1661,7 +1661,7 @@ FST_CORE_BEGIN("./conf_transfer_handoff")
 										   park_event_handler, NULL) == SWITCH_STATUS_SUCCESS);
 
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-							  "========== TELCORE-412 transfer landing after the hunt x %d ==========\n", trials);
+							  "========== transfer landing after the hunt x %d ==========\n", trials);
 
 			for (t = 0; t < trials; t++) {
 				int hunted = 0, first_ran = 0;
@@ -1684,7 +1684,7 @@ FST_CORE_BEGIN("./conf_transfer_handoff")
 			}
 
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-							  "========== TELCORE-412 post-hunt: hooked %d/%d | reached %d | wedged %d | reparked %d "
+							  "========== post-hunt: hooked %d/%d | reached %d | wedged %d | reparked %d "
 							  "| unknown %d | stale extension ran: %d | +OK but dropped: %d ==========\n",
 							  hunted_total, trials, reached, wedged, reparked, unknown, first_ran_total, ok_but_dropped);
 
@@ -1716,7 +1716,7 @@ FST_CORE_BEGIN("./conf_transfer_handoff")
 			fst_requires(switch_core_add_state_handler(&gate_handlers) >= 0);
 
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-							  "========== TELCORE-412 xferext landing before the pop x %d ==========\n", trials);
+							  "========== xferext landing before the pop x %d ==========\n", trials);
 
 			for (t = 0; t < trials; t++) {
 				int gated = 0, first_ran = 0;
@@ -1734,7 +1734,7 @@ FST_CORE_BEGIN("./conf_transfer_handoff")
 			}
 
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-							  "========== TELCORE-412 queued-ext: gated %d/%d | reached %d | wedged %d | reparked %d "
+							  "========== queued-ext: gated %d/%d | reached %d | wedged %d | reparked %d "
 							  "| unknown %d | pre-transfer destination ran: %d ==========\n",
 							  gated_total, trials, reached, wedged, reparked, unknown, first_ran_total);
 
@@ -1763,7 +1763,7 @@ FST_CORE_BEGIN("./conf_transfer_handoff")
 			fst_requires(switch_core_add_state_handler(&veto_handlers) >= 0);
 
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-							  "========== TELCORE-412 bridge-style profile swap during routing x %d ==========\n", trials);
+							  "========== bridge-style profile swap during routing x %d ==========\n", trials);
 
 			for (t = 0; t < trials; t++) {
 				int held = 0;
@@ -1773,7 +1773,7 @@ FST_CORE_BEGIN("./conf_transfer_handoff")
 			}
 
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-							  "========== TELCORE-412 profile swap: held %d/%d | state stood %d ==========\n",
+							  "========== profile swap: held %d/%d | state stood %d ==========\n",
 							  held_total, trials, stood);
 
 			switch_core_remove_state_handler(&veto_handlers);
@@ -1794,7 +1794,7 @@ FST_CORE_BEGIN("./conf_transfer_handoff")
 			int t, held_total = 0, won = 0;
 
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-							  "========== TELCORE-412 transfer superseded before it routed x %d ==========\n", trials);
+							  "========== transfer superseded before it routed x %d ==========\n", trials);
 
 			for (t = 0; t < trials; t++) {
 				int held = 0;
@@ -1804,7 +1804,7 @@ FST_CORE_BEGIN("./conf_transfer_handoff")
 			}
 
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-							  "========== TELCORE-412 superseded: held %d/%d | later command won %d ==========\n",
+							  "========== superseded: held %d/%d | later command won %d ==========\n",
 							  held_total, trials, won);
 
 			/* The probe itself must work, or the result below means nothing. */
