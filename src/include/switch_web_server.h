@@ -5,7 +5,12 @@
  * Boost.Beast listener owned by mod_web_server. Two dispatch modes:
  *
  *   LITE: handler runs inline on the connection's IO strand.
- *         MUST NOT block. Use for in-memory probes (/health, /metrics).
+ *         MUST NOT block. Use only for handlers that read in-memory state
+ *         and return — a /health that reports cached check results, say.
+ *         Anything that calls into another module (switch_api_execute),
+ *         takes a lock another thread holds for long, or touches the disk is
+ *         POOL. A Prometheus /metrics that aggregates via switch_api_execute
+ *         is the typical example of a POOL route, not a LITE one.
  *
  *   POOL: handler runs on a worker thread pool. May block on I/O.
  *         Response is delivered back to the connection asynchronously.
