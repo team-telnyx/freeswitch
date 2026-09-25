@@ -17,6 +17,16 @@
 
 namespace internal = switch_web_server_internal;
 
+/* test_web_server_registry_raw.c: out-of-range enum values passed from C,
+   where they are legal to form. */
+extern "C" {
+switch_status_t wsr_register_raw(const char *module_name, int method, const char *path,
+                                 int mode, switch_web_handler_func handler);
+switch_status_t wsr_register_prefix_raw(const char *module_name, int method, const char *prefix,
+                                        int mode, switch_web_handler_func handler);
+switch_status_t wsr_unregister_raw(const char *module_name, int method, const char *path);
+}
+
 static std::atomic<int> g_pass{0};
 static std::atomic<int> g_fail{0};
 
@@ -878,17 +888,23 @@ static void test_invalid_method_rejected()
 {
 	std::cout << "[test] out-of-range method is rejected\n";
 	wipe();
-	CHECK_EQ((int)switch_web_server_register("modA", (switch_web_method_t)5, "/bad",
-	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	CHECK_EQ((int)wsr_register_raw("modA", 5, "/bad", SWITCH_WEB_DISPATCH_LITE, dummy_handler),
 	         (int)SWITCH_STATUS_GENERR);
-	CHECK_EQ((int)switch_web_server_register("modA", (switch_web_method_t)99999, "/bad2",
-	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	CHECK_EQ((int)wsr_register_raw("modA", 99999, "/bad2", SWITCH_WEB_DISPATCH_LITE, dummy_handler),
 	         (int)SWITCH_STATUS_GENERR);
-	CHECK_EQ((int)switch_web_server_register_prefix("modA", (switch_web_method_t)5, "/bad3",
-	                                                SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	CHECK_EQ((int)wsr_register_raw("modA", -1, "/bad4", SWITCH_WEB_DISPATCH_LITE, dummy_handler),
+	         (int)SWITCH_STATUS_GENERR);
+	CHECK_EQ((int)wsr_register_prefix_raw("modA", 5, "/bad3", SWITCH_WEB_DISPATCH_LITE, dummy_handler),
 	         (int)SWITCH_STATUS_GENERR);
 	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/bad").outcome,
 	         (int)internal::LookupOutcome::NotFound);
+
+	/* A garbage method on unregister matches nothing rather than misbehaving. */
+	switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/keep",
+	                           SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	CHECK_EQ((int)wsr_unregister_raw("modA", 99999, "/keep"), (int)SWITCH_STATUS_NOTFOUND);
+	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/keep").outcome,
+	         (int)internal::LookupOutcome::Hit);
 }
 
 /* An unrecognised dispatch mode is worse than an unrecognised method: the
@@ -898,24 +914,14 @@ static void test_invalid_mode_rejected()
 {
 	std::cout << "[test] out-of-range dispatch mode is rejected\n";
 	wipe();
-	/* Values outside an unfixed enum's value range are UB to form, so these go
-	   through an int and a memcpy rather than a direct cast — a compiler is
-	   entitled to assume a directly-cast out-of-range enum cannot exist, which
-	   would make the whole test vacuous. What is exercised here is what a
-	   module built against a different header would actually pass in. */
-	auto as_mode = [](int v) {
-		switch_web_dispatch_t m;
-		std::memcpy(&m, &v, sizeof m);
-		return m;
-	};
-	CHECK_EQ((int)switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/m1",
-	                                         as_mode(42), dummy_handler, NULL),
+	/* Values outside an unfixed enum's value range are UB to form in C++, so
+	   they are passed from C (test_web_server_registry_raw.c), exactly as a
+	   module built against a different header would pass them. */
+	CHECK_EQ((int)wsr_register_raw("modA", SWITCH_WEB_METHOD_GET, "/m1", 42, dummy_handler),
 	         (int)SWITCH_STATUS_GENERR);
-	CHECK_EQ((int)switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/m2",
-	                                         as_mode(-1), dummy_handler, NULL),
+	CHECK_EQ((int)wsr_register_raw("modA", SWITCH_WEB_METHOD_GET, "/m2", -1, dummy_handler),
 	         (int)SWITCH_STATUS_GENERR);
-	CHECK_EQ((int)switch_web_server_register_prefix("modA", SWITCH_WEB_METHOD_GET, "/m3",
-	                                                as_mode(9), dummy_handler, NULL),
+	CHECK_EQ((int)wsr_register_prefix_raw("modA", SWITCH_WEB_METHOD_GET, "/m3", 9, dummy_handler),
 	         (int)SWITCH_STATUS_GENERR);
 	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/m1").outcome,
 	         (int)internal::LookupOutcome::NotFound);
@@ -927,6 +933,101 @@ static void test_invalid_mode_rejected()
 	CHECK_EQ((int)switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/pool",
 	                                         SWITCH_WEB_DISPATCH_POOL, dummy_handler, NULL),
 	         (int)SWITCH_STATUS_SUCCESS);
+}
+
+/* A module may own an exact and a prefix route on the same raw string —
+   cross-tier duplicates are legal. unregister() takes the exact one;
+   unregister_prefix() is the only way to target the prefix one. */
+static void test_unregister_tier_targeting()
+{
+	std::cout << "[test] unregister vs unregister_prefix on a shared raw path\n";
+	wipe();
+	CHECK_EQ((int)switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/static",
+	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_SUCCESS);
+	CHECK_EQ((int)switch_web_server_register_prefix("modA", SWITCH_WEB_METHOD_GET, "/static",
+	                                                SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_SUCCESS);
+
+	/* unregister_prefix removes the prefix route and leaves the exact one. */
+	CHECK_EQ((int)switch_web_server_unregister_prefix("modA", SWITCH_WEB_METHOD_GET, "/static"),
+	         (int)SWITCH_STATUS_SUCCESS);
+	CHECK_EQ(internal::lookup(SWITCH_WEB_METHOD_GET, "/static").route.kind, std::string("exact"));
+	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/static/a.css").outcome,
+	         (int)internal::LookupOutcome::NotFound);
+	/* ...and never falls through to another tier. */
+	CHECK_EQ((int)switch_web_server_unregister_prefix("modA", SWITCH_WEB_METHOD_GET, "/static"),
+	         (int)SWITCH_STATUS_NOTFOUND);
+	CHECK_EQ(internal::lookup(SWITCH_WEB_METHOD_GET, "/static").route.kind, std::string("exact"));
+
+	/* Plain unregister takes the exact route first, documented as such. */
+	switch_web_server_register_prefix("modA", SWITCH_WEB_METHOD_GET, "/static",
+	                                  SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	CHECK_EQ((int)switch_web_server_unregister("modA", SWITCH_WEB_METHOD_GET, "/static"),
+	         (int)SWITCH_STATUS_SUCCESS);
+	CHECK_EQ(internal::lookup(SWITCH_WEB_METHOD_GET, "/static").route.kind, std::string("prefix"));
+	/* With no exact route left, it falls back to the prefix tier. */
+	CHECK_EQ((int)switch_web_server_unregister("modA", SWITCH_WEB_METHOD_GET, "/static"),
+	         (int)SWITCH_STATUS_SUCCESS);
+	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/static").outcome,
+	         (int)internal::LookupOutcome::NotFound);
+}
+
+/* A {capture} never matches an empty segment, so a pattern whose only
+   difference is a capture against an empty literal is disjoint, not a
+   conflict. */
+static void test_pattern_capture_vs_empty_literal()
+{
+	std::cout << "[test] pattern: {capture} does not overlap an empty literal segment\n";
+	wipe();
+	CHECK_EQ((int)switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/{x}/",
+	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_SUCCESS);
+	CHECK_EQ((int)switch_web_server_register("modB", SWITCH_WEB_METHOD_GET, "/{y}/{z}",
+	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_SUCCESS);
+	CHECK_EQ(internal::lookup(SWITCH_WEB_METHOD_GET, "/foo/").route.module,    std::string("modA"));
+	CHECK_EQ(internal::lookup(SWITCH_WEB_METHOD_GET, "/foo/bar").route.module, std::string("modB"));
+
+	/* Symmetric, in the other registration order. */
+	wipe();
+	CHECK_EQ((int)switch_web_server_register("modB", SWITCH_WEB_METHOD_GET, "/{y}/{z}",
+	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_SUCCESS);
+	CHECK_EQ((int)switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/{x}/",
+	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_SUCCESS);
+
+	/* A capture against a NON-empty literal still overlaps. */
+	CHECK_EQ((int)switch_web_server_register("modC", SWITCH_WEB_METHOD_GET, "/{w}/bar",
+	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_FALSE);
+}
+
+/* Captures are read back by name, so an empty or repeated name is a caller bug
+   that would otherwise register and silently hand the handler the wrong
+   segment. */
+static void test_capture_names_validated()
+{
+	std::cout << "[test] pattern: empty or duplicate capture names are rejected\n";
+	wipe();
+	CHECK_EQ((int)switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/acct/{id}/sub/{id}",
+	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_GENERR);
+	CHECK_EQ((int)switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/acct/{}",
+	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_GENERR);
+	CHECK_EQ(internal::route_count(), (std::size_t)0);
+
+	CHECK_EQ((int)switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/acct/{id}/sub/{sub}",
+	                                         SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_SUCCESS);
+	auto r = internal::lookup(SWITCH_WEB_METHOD_GET, "/acct/1/sub/2");
+	CHECK_EQ((int)r.outcome, (int)internal::LookupOutcome::Hit);
+	if (r.params) {
+		CHECK_EQ((*r.params)["id"],  std::string("1"));
+		CHECK_EQ((*r.params)["sub"], std::string("2"));
+	}
 }
 
 /* A path the dispatcher can never match is a dead endpoint with no
@@ -1149,6 +1250,9 @@ int main()
 	test_invalid_method_rejected();
 	test_invalid_mode_rejected();
 	test_invalid_registration_path_rejected();
+	test_unregister_tier_targeting();
+	test_pattern_capture_vs_empty_literal();
+	test_capture_names_validated();
 	test_query_params();
 	test_allowed_methods();
 	test_header_validation();
