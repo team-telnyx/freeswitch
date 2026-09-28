@@ -167,6 +167,56 @@ static switch_bool_t has_crypto(const char *sdp, const char *crypto_key)
 	return SWITCH_TRUE;
 }
 
+/* Count the audio m-lines in an SDP */
+static int count_audio_mlines(const char *sdp)
+{
+	int count = 0;
+
+	while (sdp && (sdp = strstr(sdp, "m=audio "))) {
+		count++;
+		sdp++;
+	}
+
+	return count;
+}
+
+/* Helper to generate the local offer an inbound proxy 3PCC call answers a late-offer INVITE with */
+static const char *gen_proxy_3pcc_offer(switch_core_session_t *session, const char *var, const char *val, const char *opt_in)
+{
+	switch_channel_t *channel = switch_core_session_get_channel(session);
+	switch_core_media_params_t *mparams;
+	switch_media_handle_t *media_handle;
+
+	switch_channel_set_direction(channel, SWITCH_CALL_DIRECTION_INBOUND);
+	switch_channel_set_flag(channel, CF_3PCC_PROXY);
+
+	if (var) {
+		switch_channel_set_variable(channel, var, val);
+	}
+
+	if (opt_in) {
+		switch_channel_set_variable(channel, "rtp_secure_media_3pcc_proxy_offer", opt_in);
+	}
+
+	mparams = switch_core_session_alloc(session, sizeof(switch_core_media_params_t));
+	mparams->num_codecs = 1;
+	mparams->inbound_codec_string = switch_core_session_strdup(session, "PCMU");
+	mparams->outbound_codec_string = switch_core_session_strdup(session, "PCMU");
+	mparams->rtpip = switch_core_session_strdup(session, "127.0.0.1");
+
+	if (switch_media_handle_create(&media_handle, session, mparams) != SWITCH_STATUS_SUCCESS) {
+		return NULL;
+	}
+
+	switch_channel_set_variable(channel, "absolute_codec_string", "PCMU");
+
+	switch_core_media_choose_port(session, SWITCH_MEDIA_TYPE_AUDIO, 0);
+	switch_core_media_prepare_codecs(session, SWITCH_TRUE);
+	switch_core_media_gen_local_sdp(session, SDP_OFFER, NULL, 0, NULL, 1);
+
+	return switch_channel_get_variable(channel, "rtp_local_sdp_str");
+}
+
 FST_CORE_BEGIN("./conf")
 {
 	FST_SUITE_BEGIN(switch_3pcc)
@@ -732,6 +782,97 @@ FST_CORE_BEGIN("./conf")
 				"SDP and crypto validation test PASS\n");
 		}
 		FST_TEST_END()
+
+		/* ========== PROXY 3PCC LATE OFFER ========== */
+
+		/* Test Case 16: proxy 3PCC late offer, rtp_secure_media=true and opt-in: SRTP offer only */
+		FST_SESSION_BEGIN(proxy_3pcc_late_offer_secure_opt_in)
+		{
+			switch_channel_t *channel;
+			const char *local_sdp;
+
+			channel = switch_core_session_get_channel(fst_session);
+			fst_requires(channel != NULL);
+
+			local_sdp = gen_proxy_3pcc_offer(fst_session, "rtp_secure_media", "true", "true");
+			fst_requires(local_sdp != NULL);
+
+			fst_check(!switch_channel_test_flag(channel, CF_3PCC));
+			fst_check(has_crypto(local_sdp, NULL));
+			fst_check(count_audio_mlines(local_sdp) == 1);
+			fst_check(strstr(local_sdp, "RTP/AVP ") == NULL);
+			fst_check(switch_channel_test_flag(channel, CF_SECURE));
+
+			switch_media_handle_destroy(fst_session);
+		}
+		FST_SESSION_END()
+
+		/* Test Case 17: proxy 3PCC late offer, rtp_secure_media_inbound=mandatory and opt-in: SRTP offer only */
+		FST_SESSION_BEGIN(proxy_3pcc_late_offer_inbound_mandatory_opt_in)
+		{
+			const char *local_sdp;
+
+			local_sdp = gen_proxy_3pcc_offer(fst_session, "rtp_secure_media_inbound", "mandatory", "true");
+			fst_requires(local_sdp != NULL);
+
+			fst_check(has_crypto(local_sdp, NULL));
+			fst_check(count_audio_mlines(local_sdp) == 1);
+			fst_check(strstr(local_sdp, "RTP/AVP ") == NULL);
+
+			switch_media_handle_destroy(fst_session);
+		}
+		FST_SESSION_END()
+
+		/* Test Case 18: proxy 3PCC late offer, rtp_secure_media=true without opt-in: plain RTP offer */
+		FST_SESSION_BEGIN(proxy_3pcc_late_offer_secure_no_opt_in)
+		{
+			const char *local_sdp;
+
+			local_sdp = gen_proxy_3pcc_offer(fst_session, "rtp_secure_media", "true", NULL);
+			fst_requires(local_sdp != NULL);
+
+			fst_check(strstr(local_sdp, "a=crypto:") == NULL);
+			fst_check(strstr(local_sdp, "RTP/SAVP") == NULL);
+			fst_check(count_audio_mlines(local_sdp) == 1);
+			fst_check(strstr(local_sdp, "RTP/AVP ") != NULL);
+
+			switch_media_handle_destroy(fst_session);
+		}
+		FST_SESSION_END()
+
+		/* Test Case 19: proxy 3PCC late offer, rtp_secure_media=true with opt-in false: plain RTP offer */
+		FST_SESSION_BEGIN(proxy_3pcc_late_offer_secure_opt_in_false)
+		{
+			const char *local_sdp;
+
+			local_sdp = gen_proxy_3pcc_offer(fst_session, "rtp_secure_media", "true", "false");
+			fst_requires(local_sdp != NULL);
+
+			fst_check(strstr(local_sdp, "a=crypto:") == NULL);
+			fst_check(strstr(local_sdp, "RTP/SAVP") == NULL);
+			fst_check(count_audio_mlines(local_sdp) == 1);
+			fst_check(strstr(local_sdp, "RTP/AVP ") != NULL);
+
+			switch_media_handle_destroy(fst_session);
+		}
+		FST_SESSION_END()
+
+		/* Test Case 20: proxy 3PCC late offer, opt-in without a secure media preference: single plain RTP offer */
+		FST_SESSION_BEGIN(proxy_3pcc_late_offer_opt_in_no_preference)
+		{
+			const char *local_sdp;
+
+			local_sdp = gen_proxy_3pcc_offer(fst_session, NULL, NULL, "true");
+			fst_requires(local_sdp != NULL);
+
+			fst_check(strstr(local_sdp, "a=crypto:") == NULL);
+			fst_check(strstr(local_sdp, "RTP/SAVP") == NULL);
+			fst_check(count_audio_mlines(local_sdp) == 1);
+			fst_check(strstr(local_sdp, "RTP/AVP ") != NULL);
+
+			switch_media_handle_destroy(fst_session);
+		}
+		FST_SESSION_END()
 	}
 	FST_SUITE_END()
 }
