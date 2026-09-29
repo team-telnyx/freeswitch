@@ -120,6 +120,63 @@ def test_run_all():
     check(marker() == "after", "run_all: marker set by the command after the failure", "(marker=%r)" % marker())
 
 
+def test_continue_on_fail():
+    print("[continue_on_fail]")
+    expect_result("(b) marked failure continues",
+                  [[["echo", "1"], [BAD, "2", True], ["echo", "3"]]], ["1", "ERROR!", "3"])
+    expect_result("(c) later unmarked failure still stops",
+                  [[["echo", "1"], [BAD, "2", True], [BAD, "3"], ["echo", "4"]]],
+                  ["1", "ERROR!", "ERROR!", NOT_COMPLETED])
+    expect_result("(b) freeswitch_batch alias",
+                  [[["echo", "1"], [BAD, "2", True], ["echo", "3"]]], ["1", "ERROR!", "3"], method="freeswitch_batch")
+    expect_result("consecutive marked failures continue",
+                  [[[BAD, "1", True], [BAD, "2", True], ["echo", "3"]]], ["ERROR!", "ERROR!", "3"])
+    expect_result("false flag stops like an unmarked command",
+                  [[["echo", "1"], [BAD, "2", False], ["echo", "3"]]], ["1", "ERROR!", NOT_COMPLETED])
+    expect_result("marked successful command",
+                  [[["echo", "1", True], ["echo", "2"]]], ["1", "2"])
+    expect_result("run_all overrides a false flag",
+                  [[["echo", "1"], [BAD, "2", False], ["echo", "3"]], True], ["1", "ERROR!", "3"])
+    expect_result("both flags",
+                  [[["echo", "1"], [BAD, "2", True], [BAD, "3"], ["echo", "4"]], True],
+                  ["1", "ERROR!", "ERROR!", "4"])
+
+    set_marker("before")
+    expect_result("marked failure: next command runs",
+                  [[[BAD, "1", True], set_marker_cmd("after")]], ["ERROR!", "+OK"])
+    check(marker() == "after", "marked failure: marker set by the next command", "(marker=%r)" % marker())
+
+
+def test_malformed_commands():
+    print("[malformed_commands]")
+    expect_fault_prefix_ran("non-boolean flag", [["echo", "x", "yes"]], TYPE_ERROR, "type BOOL was expected")
+    expect_fault_prefix_ran("integer flag", [["echo", "x", 1]], TYPE_ERROR, "type BOOL was expected")
+    expect_fault_prefix_ran("non-string command in a marked item", [[1, "x", True]], TYPE_ERROR,
+                            "string type was expected")
+    expect_fault_prefix_ran("four items", [["echo", "x", True, True]], INDEX_ERROR, "requests exactly 2 items")
+    expect_fault_prefix_ran("four items under run_all", [["echo", "x", True, True]], INDEX_ERROR,
+                            "requests exactly 2 items", run_all=True)
+
+    expect_result("malformed item in a skipped suffix is not parsed",
+                  [[[BAD, "1"], ["echo", "x", "yes"], ["echo", "y", True, True]]],
+                  ["ERROR!", NOT_COMPLETED, NOT_COMPLETED])
+
+
+def expect_fault_prefix_ran(name, bad_items, code, text, run_all=False):
+    set_marker("before")
+    params = [[set_marker_cmd("first")] + bad_items + [set_marker_cmd("last")]]
+    if run_all:
+        params.append(True)
+    try:
+        got = batch(*params)
+        check(False, name, "(no fault, got %r)" % (got,))
+        return
+    except xmlrpc.client.Fault as e:
+        check(fault_matches(e, code, text), name + ": fault code and reason",
+              "(fault %d: %s; expected %d containing %r)" % (e.faultCode, e.faultString, code, text))
+    check(marker() == "first", name + ": earlier command ran, later did not", "(marker=%r)" % marker())
+
+
 def test_empty_batch():
     print("[empty_batch]")
     expect_result("empty batch", [[]], [])
@@ -152,7 +209,8 @@ def main():
         print("FS_XMLRPC_URL is not set", file=sys.stderr)
         return 2
 
-    for test in (test_default_stops_at_first_failure, test_run_all, test_empty_batch,
+    for test in (test_default_stops_at_first_failure, test_run_all, test_continue_on_fail,
+                 test_malformed_commands, test_empty_batch,
                  test_invalid_parameters, test_direct_api_unchanged):
         test()
 
