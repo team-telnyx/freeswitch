@@ -356,6 +356,17 @@ SWITCH_DECLARE(void) switch_core_media_bug_inuse(switch_media_bug_t *bug, switch
 SWITCH_DECLARE(void *) switch_core_media_bug_get_user_data(_In_ switch_media_bug_t *bug);
 
 /*!
+  \brief Replace the private data of a media bug
+  \param bug the bug to set the data on
+  \param user_data the new private data, or NULL
+  \note A callback that releases its own user_data must clear it here first, or
+  the core hands the stale pointer back as SWITCH_ABC_TYPE_DESTROY_USER_DATA.
+  The store is unsynchronized, so call it only where no other thread can be
+  walking to this bug: from the bug's own callback, or once it is unlinked.
+*/
+SWITCH_DECLARE(void) switch_core_media_bug_set_user_data(_In_ switch_media_bug_t *bug, _In_opt_ void *user_data);
+
+/*!
   \brief Obtain a replace frame from a media bug
   \param bug the bug to get the data from
 */
