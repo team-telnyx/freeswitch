@@ -1845,6 +1845,26 @@ SWITCH_DECLARE(uint32_t) switch_channel_test_flag(switch_channel_t *channel, swi
 	return r;
 }
 
+SWITCH_DECLARE(switch_bool_t) switch_channel_test_and_clear_flag(switch_channel_t *channel, switch_channel_flag_t flag)
+{
+	switch_bool_t r = SWITCH_FALSE;
+
+	switch_assert(channel != NULL);
+
+	if (channel->flag_mutex) {
+		switch_mutex_lock(channel->flag_mutex);
+	}
+	if (channel->flags[flag]) {
+		channel->flags[flag] = 0;
+		r = SWITCH_TRUE;
+	}
+	if (channel->flag_mutex) {
+		switch_mutex_unlock(channel->flag_mutex);
+	}
+
+	return r;
+}
+
 SWITCH_DECLARE(switch_bool_t) switch_channel_set_flag_partner(switch_channel_t *channel, switch_channel_flag_t flag)
 {
 	const char *uuid;
@@ -4191,7 +4211,26 @@ SWITCH_DECLARE(switch_status_t) switch_channel_perform_mark_answered(switch_chan
 	 */
 	if ((uuid = switch_channel_get_variable(channel, SWITCH_ORIGINATOR_VARIABLE))
 		&& (other_session = switch_core_session_locate(uuid))) {
+		switch_channel_t *other_channel = switch_core_session_get_channel(other_session);
 		switch_core_session_kill_channel(other_session, SWITCH_SIG_BREAK);
+
+		/* TELCORE-564: deliver deferred blind-transfer confirmation now that the target answered */
+		if (switch_channel_test_flag(other_channel, CF_CONFIRM_BLIND_TRANSFER)) {
+			const char *xfer_uuid = switch_channel_get_variable(other_channel, "blind_transfer_uuid");
+			switch_core_session_t *xfer_session;
+
+			if (!zstr(xfer_uuid) && (xfer_session = switch_core_session_locate(xfer_uuid))) {
+				if (switch_channel_test_and_clear_flag(other_channel, CF_CONFIRM_BLIND_TRANSFER)) {
+					switch_core_session_message_t msg = { 0 };
+					msg.message_id = SWITCH_MESSAGE_INDICATE_BLIND_TRANSFER_RESPONSE;
+					msg.from = __FILE__;
+					msg.numeric_arg = 1;
+					switch_core_session_receive_message(xfer_session, &msg);
+				}
+				switch_core_session_rwunlock(xfer_session);
+			}
+		}
+
 		switch_core_session_rwunlock(other_session);
 	}
 

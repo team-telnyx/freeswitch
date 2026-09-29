@@ -4543,16 +4543,19 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_blind_transfer_ack(switch_core_sessio
 		switch_core_session_t *other_session;
 		const char *uuid = switch_channel_get_variable(channel, "blind_transfer_uuid");
 
-		switch_channel_clear_flag(channel, CF_CONFIRM_BLIND_TRANSFER);
-
 		if (!zstr(uuid) && (other_session = switch_core_session_locate(uuid))) {
-			switch_core_session_message_t msg = { 0 };
-			msg.message_id = SWITCH_MESSAGE_INDICATE_BLIND_TRANSFER_RESPONSE;
-			msg.from = __FILE__;
-			msg.numeric_arg = success;
-			switch_core_session_receive_message(other_session, &msg);
+			if (switch_channel_test_and_clear_flag(channel, CF_CONFIRM_BLIND_TRANSFER)) {
+				switch_core_session_message_t msg = { 0 };
+				msg.message_id = SWITCH_MESSAGE_INDICATE_BLIND_TRANSFER_RESPONSE;
+				msg.from = __FILE__;
+				msg.numeric_arg = success;
+				switch_core_session_receive_message(other_session, &msg);
+				status = SWITCH_STATUS_SUCCESS;
+			}
 			switch_core_session_rwunlock(other_session);
-			status = SWITCH_STATUS_SUCCESS;
+		} else {
+			/* REFER sender is gone: clear the flag so no later producer can fire */
+			switch_channel_clear_flag(channel, CF_CONFIRM_BLIND_TRANSFER);
 		}
 	}
 
