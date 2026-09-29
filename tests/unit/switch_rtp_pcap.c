@@ -619,7 +619,12 @@ FST_TEARDOWN_END()
 			pkt[8] = 0x61; pkt[9] = 0x5a; pkt[10] = 0xe1; pkt[11] = 0x37;
 			n = 12;
 			pkt[n++] = 0xbe; pkt[n++] = 0xde; pkt[n++] = (ew >> 8) & 0xff; pkt[n++] = ew & 0xff;
-			for (i = 0; i < ew * 4; i++) pkt[n++] = (i == 0) ? 0x10 : (unsigned char)(0x40 + i);
+			/* Valid 0xbede one-byte extension: id=1 len=0 + one payload byte, then zero padding. */
+			if (ew > 0) {
+				pkt[n++] = 0x10;
+				pkt[n++] = 0x41;
+				for (i = 2; i < ew * 4; i++) pkt[n++] = 0x00;
+			}
 			for (i = 0; i < payload_len; i++) pkt[n++] = (unsigned char)(0x80 + i);
 			seq++; tsv += 160;
 

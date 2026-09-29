@@ -21,7 +21,7 @@ noinst_LTLIBRARIES = libmodconference.la
 libmodconference_la_SOURCES  = $(mod_conference_la_SOURCES)
 libmodconference_la_CFLAGS   = $(AM_CFLAGS) -I.
 
-noinst_PROGRAMS = test/test_image test/test_member test/test_record_teardown
+noinst_PROGRAMS = test/test_image test/test_member test/test_record_teardown test/test_member_media_reset
 
 test_test_image_SOURCES = test/test_image.c
 test_test_image_CFLAGS = $(AM_CFLAGS) -I. -DSWITCH_TEST_BASE_DIR_FOR_CONF=\"${abs_builddir}/test\" -DSWITCH_TEST_BASE_DIR_OVERRIDE=\"${abs_builddir}/test\"
@@ -37,5 +37,10 @@ test_test_record_teardown_SOURCES = test/test_record_teardown.c
 test_test_record_teardown_CFLAGS = $(AM_CFLAGS) -I. -DSWITCH_TEST_BASE_DIR_FOR_CONF=\"${abs_builddir}/test\" -DSWITCH_TEST_BASE_DIR_OVERRIDE=\"${abs_builddir}/test\"
 test_test_record_teardown_LDFLAGS = $(AM_LDFLAGS) -avoid-version -no-undefined $(freeswitch_LDFLAGS) $(switch_builddir)/libfreeswitch.la $(CORE_LIBS) $(APR_LIBS)
 test_test_record_teardown_LDADD = libmodconference.la
+
+test_test_member_media_reset_SOURCES = test/test_member_media_reset.c
+test_test_member_media_reset_CFLAGS = $(AM_CFLAGS) -I. -DSWITCH_TEST_BASE_DIR_FOR_CONF=\"${abs_builddir}/test\" -DSWITCH_TEST_BASE_DIR_OVERRIDE=\"${abs_builddir}/test\"
+test_test_member_media_reset_LDFLAGS = $(AM_LDFLAGS) -avoid-version -no-undefined $(freeswitch_LDFLAGS) $(switch_builddir)/libfreeswitch.la $(CORE_LIBS) $(APR_LIBS)
+test_test_member_media_reset_LDADD = libmodconference.la
 
 TESTS = $(noinst_PROGRAMS)

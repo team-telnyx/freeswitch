@@ -76,7 +76,7 @@ static void record_video_thread(switch_core_session_t *session, void *obj)
 			break;
 		}
 
-		if (switch_test_flag(read_frame, SFF_CNG)) {
+		if (!read_frame || switch_test_flag(read_frame, SFF_CNG)) {
 			continue;
 		}
 
@@ -233,7 +233,7 @@ SWITCH_STANDARD_APP(record_fsv_function)
 			break;
 		}
 
-		if (switch_test_flag(read_frame, SFF_CNG)) {
+		if (!read_frame || switch_test_flag(read_frame, SFF_CNG)) {
 			continue;
 		}
 
