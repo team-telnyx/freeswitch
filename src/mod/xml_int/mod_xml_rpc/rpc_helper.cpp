@@ -53,6 +53,13 @@ switch_bool_t is_api_response_error(const char* response)
 	return SWITCH_FALSE;
 }
 
+switch_bool_t should_stop_batch(const char* response, switch_bool_t continue_on_fail, switch_bool_t run_all)
+{
+	if (continue_on_fail || run_all) return SWITCH_FALSE;
+
+	return is_api_response_error(response);
+}
+
 void set_min_idle_cpu_watermark(const char* idle_cpu)
 {
 	MIN_IDLE_CPU = string_to_number<int>(idle_cpu);
