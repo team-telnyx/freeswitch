@@ -971,15 +971,32 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_perform_receive_message(swit
 			switch_channel_test_flag(session->channel, CF_CONFIRM_BLIND_TRANSFER)) {
 			switch_core_session_t *other_session;
 			const char *uuid = switch_channel_get_variable(session->channel, "blind_transfer_uuid");
+			int peer_answered = 1; /* legacy default when no peer uuid available */
 
-			switch_channel_clear_flag(session->channel, CF_CONFIRM_BLIND_TRANSFER);
+			/* message->string_arg carries the bridge peer uuid on both the media-bridge
+			   (switch_ivr_bridge.c) and signal-bridge paths. Conference/eavesdrop raise
+			   INDICATE_BRIDGE without string_arg; treat those as completed transfers. */
+			if (!zstr(message->string_arg)) {
+				switch_core_session_t *peer_session;
+				if ((peer_session = switch_core_session_locate(message->string_arg))) {
+					peer_answered = switch_channel_test_flag(switch_core_session_get_channel(peer_session), CF_ANSWERED);
+					switch_core_session_rwunlock(peer_session);
+				}
+			}
 
-			if (!zstr(uuid) && (other_session = switch_core_session_locate(uuid))) {
-				switch_core_session_message_t msg = { 0 };
-				msg.message_id = SWITCH_MESSAGE_INDICATE_BLIND_TRANSFER_RESPONSE;
-				msg.from = __FILE__;
-				msg.numeric_arg = 1;
-				switch_core_session_receive_message(other_session, &msg);
+			if (!peer_answered) {
+				/* early media only: defer; leave CF_CONFIRM_BLIND_TRANSFER set so the
+				   answer-time producer (mark_answered) or a failure producer fires later */
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+								  "Deferring blind transfer confirmation until the peer answers\n");
+			} else if (!zstr(uuid) && (other_session = switch_core_session_locate(uuid))) {
+				if (switch_channel_test_and_clear_flag(session->channel, CF_CONFIRM_BLIND_TRANSFER)) {
+					switch_core_session_message_t msg = { 0 };
+					msg.message_id = SWITCH_MESSAGE_INDICATE_BLIND_TRANSFER_RESPONSE;
+					msg.from = __FILE__;
+					msg.numeric_arg = 1;
+					switch_core_session_receive_message(other_session, &msg);
+				}
 				switch_core_session_rwunlock(other_session);
 			}
 		}

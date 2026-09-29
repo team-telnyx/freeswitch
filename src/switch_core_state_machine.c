@@ -403,16 +403,20 @@ static void switch_core_standard_on_execute(switch_core_session_t *session)
 		switch_core_session_t *other_session;
 
 		if ((other_session = switch_core_session_locate(uuid))) {
-			switch_core_session_message_t msg = { 0 };
-			msg.message_id = SWITCH_MESSAGE_INDICATE_BLIND_TRANSFER_RESPONSE;
-			msg.from = __FILE__;
-			msg.numeric_arg = 0;
-			switch_core_session_receive_message(other_session, &msg);
-			switch_core_session_rwunlock(other_session);
+			if (switch_channel_test_and_clear_flag(session->channel, CF_CONFIRM_BLIND_TRANSFER)) {
+				switch_core_session_message_t msg = { 0 };
+				msg.message_id = SWITCH_MESSAGE_INDICATE_BLIND_TRANSFER_RESPONSE;
+				msg.from = __FILE__;
+				msg.numeric_arg = 0;
+				switch_core_session_receive_message(other_session, &msg);
+				switch_core_session_rwunlock(other_session);
 
-			switch_channel_set_variable(session->channel, "park_timeout", "10:blind_transfer");
-			switch_channel_set_state(session->channel, CS_PARK);
-			switch_channel_clear_flag(session->channel, CF_CONFIRM_BLIND_TRANSFER);
+				switch_channel_set_variable(session->channel, "park_timeout", "10:blind_transfer");
+				switch_channel_set_state(session->channel, CS_PARK);
+			} else {
+				/* a success producer won the race and already delivered the final outcome */
+				switch_core_session_rwunlock(other_session);
+			}
 		}
 	}
 
