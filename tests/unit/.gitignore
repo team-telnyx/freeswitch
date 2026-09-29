@@ -57,3 +57,5 @@ conf_async/*/
 x64
 win32
 *.vcxproj.user
+test_record_transfer_helper_uaf
+test_record_helper_destroy_uaf
