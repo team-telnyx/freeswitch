@@ -11,6 +11,10 @@ noinst_PROGRAMS += switch_hold switch_sip switch_mod_telnyx switch_mod_gstt swit
 # may have zeroed.
 noinst_PROGRAMS += test_read_frame_codec_teardown
 
+# Regression: a transfer landing in the state-machine handoff window must
+# still be routed. See switch_channel_inc_transfer_generation().
+noinst_PROGRAMS += test_transfer_handoff_window
+
 # switch_mod_lumenvox is intentionally NOT built/run in CI yet: LumenVox servers
 # are not reachable from CI, so the ASR tests cannot run there. Re-enable by
 # appending switch_mod_lumenvox to the line above. See TELCORE-249.
