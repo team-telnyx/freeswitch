@@ -1344,7 +1344,7 @@ static xmlrpc_value *freeswitch_batch(xmlrpc_env * const envP, xmlrpc_value * co
 			break;
 		}
 
-		if (is_api_response_error(response)) {
+		if (should_stop_batch(response, SWITCH_FALSE, SWITCH_FALSE)) {
 			unsigned int j = 0;
 
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Stopping XML-RPC batch after failed command response: [%s].\n", response);
