@@ -1293,10 +1293,20 @@ static xmlrpc_value *freeswitch_batch(xmlrpc_env * const envP, xmlrpc_value * co
 {
 	xmlrpc_value *commandResults = NULL;
 	xmlrpc_value *commands = NULL;
-	unsigned int i = 0,commandSize = 0;
+	xmlrpc_bool run_all = 0;
+	unsigned int i = 0,commandSize = 0,paramSize = 0;
 
-	/* Parse our argument array. */
-	xmlrpc_decompose_value(envP, paramArrayP, "(A)", &commands);
+	/* Parse our argument array: the commands, then an optional run_all boolean. */
+	paramSize = xmlrpc_array_size(envP, paramArrayP);
+	if (!envP->fault_occurred) {
+		if (paramSize == 1) {
+			xmlrpc_decompose_value(envP, paramArrayP, "(A)", &commands);
+		} else if (paramSize == 2) {
+			xmlrpc_decompose_value(envP, paramArrayP, "(Ab)", &commands, &run_all);
+		} else {
+			xmlrpc_env_set_fault_formatted(envP, XMLRPC_INDEX_ERROR, "Expected 1 or 2 parameters, got %u", paramSize);
+		}
+	}
 	if (envP->fault_occurred) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Invalid Request!\n");
 		return NULL;
@@ -1344,7 +1354,7 @@ static xmlrpc_value *freeswitch_batch(xmlrpc_env * const envP, xmlrpc_value * co
 			break;
 		}
 
-		if (should_stop_batch(response, SWITCH_FALSE, SWITCH_FALSE)) {
+		if (should_stop_batch(response, SWITCH_FALSE, run_all ? SWITCH_TRUE : SWITCH_FALSE)) {
 			unsigned int j = 0;
 
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Stopping XML-RPC batch after failed command response: [%s].\n", response);
@@ -1374,6 +1384,13 @@ static xmlrpc_value *freeswitch_batch(xmlrpc_env * const envP, xmlrpc_value * co
 	}
 
 	xmlrpc_DECREF(commands);
+
+	/* On a fault xmlrpc-c discards our result without releasing it. */
+	if (envP->fault_occurred) {
+		xmlrpc_DECREF(commandResults);
+		return NULL;
+	}
+
 	return commandResults;
 }
 
