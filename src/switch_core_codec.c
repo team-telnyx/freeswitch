@@ -824,6 +824,41 @@ SWITCH_DECLARE(switch_status_t) switch_core_codec_decode(switch_codec_t *codec,
 										   decoded_data, decoded_data_len, decoded_rate, flag);
 	if (codec->mutex) switch_mutex_unlock(codec->mutex);
 
+	/* Post-condition for the concealment path. With no encoded bytes to work
+	 * from, a decoder can produce at most one packet of concealment, so anything
+	 * larger means it returned without writing through decoded_data_len - our
+	 * callers pass in the size of their buffer (raw_write_frame.datalen =
+	 * raw_write_frame.buflen), and that preset value then travels on as "this
+	 * much valid audio". switch_core_session_write_frame() resamples it for the
+	 * far leg, which on an 8000 -> 16000 transcode doubles it past the write
+	 * buffer, fails the write, and ends the bridge - a codec bug should never be
+	 * able to do that. Drop the frame instead; both read and write paths already
+	 * treat SWITCH_STATUS_BREAK as "no audio this tick". Seen with mod_bcg729's
+	 * G.729 PLC branch on G722 <-> G729 bridges. */
+	if (encoded_data_len == 0 && (status == SWITCH_STATUS_SUCCESS || status == SWITCH_STATUS_RESAMPLE) &&
+		codec->implementation->decoded_bytes_per_packet &&
+		*decoded_data_len > codec->implementation->decoded_bytes_per_packet) {
+		/* A codec that gets this wrong gets it wrong on every silent packet, so log
+		 * once per codec handle rather than a line per 20 ms for the life of the
+		 * call. Per handle, not process-wide: a handle is per leg, so every affected
+		 * call still reports, and one call cannot silence another or a different
+		 * codec. codec->session is set for the media paths that transcode and NULL
+		 * for a bare switch_core_codec_init() (tests, file handles), so tag the line
+		 * with the leg when we have one. */
+		if (!(codec->flags & SWITCH_CODEC_FLAG_CONCEAL_OVERRUN_LOGGED)) {
+			codec->flags |= SWITCH_CODEC_FLAG_CONCEAL_OVERRUN_LOGGED;
+			switch_log_printf(codec->session ? SWITCH_CHANNEL_ID_SESSION : SWITCH_CHANNEL_ID_LOG,
+							  __FILE__, __SWITCH_FUNC__, __LINE__, (const char *) codec->session,
+							  SWITCH_LOG_CRIT,
+							  "Codec %s decoded a zero-length frame into %u bytes, more than one %u byte packet - dropping\n",
+							  codec->implementation->iananame, *decoded_data_len,
+							  codec->implementation->decoded_bytes_per_packet);
+		}
+
+		*decoded_data_len = 0;
+		return SWITCH_STATUS_BREAK;
+	}
+
 	return status;
 }
 
