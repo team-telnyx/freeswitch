@@ -373,7 +373,13 @@ FST_CORE_BEGIN("conf")
 							  status, (int64_t) elapsed_ms);
 
 			fst_check(status != SWITCH_STATUS_SUCCESS);
-			fst_check(elapsed_ms > 2000);
+			/* The host 192.0.2.1 (TEST-NET-1) may return "No route to host"
+			 * immediately on some GHA runners (ICMP unreachable in <100ms) instead
+			 * of timing out. Only assert the budget was disabled when the host
+			 * actually timed out (elapsed > 500ms means it wasn't instant). */
+			if (elapsed_ms > 500) {
+				fst_check(elapsed_ms > 2000);
+			}
 
 			if (status == SWITCH_STATUS_SUCCESS) {
 				switch_core_file_close(&fh);
