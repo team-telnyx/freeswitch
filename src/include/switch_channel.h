@@ -412,6 +412,18 @@ SWITCH_DECLARE(switch_caller_extension_t *) switch_channel_get_caller_extension(
 SWITCH_DECLARE(uint32_t) switch_channel_test_flag(switch_channel_t *channel, switch_channel_flag_t flag);
 
 /*!
+  \brief Test and clear given flag on a given channel in one atomic step
+  \param channel channel to test and clear the flag on
+  \param flag to test and clear
+  \return SWITCH_TRUE if the flag was set, SWITCH_FALSE if it was not
+  \note This is a raw clear that deliberately skips the side effects of
+        switch_channel_clear_flag (CF_LEG_HOLDING / CF_VIDEO_PASSIVE /
+        CF_DIALPLAN). It is intended only for side-effect-free flags such
+        as CF_CONFIRM_BLIND_TRANSFER, used as an exactly-once gate.
+*/
+SWITCH_DECLARE(switch_bool_t) switch_channel_test_and_clear_flag(switch_channel_t *channel, switch_channel_flag_t flag);
+
+/*!
   \brief Set given flag(s) on a given channel
   \param channel channel on which to set flag
   \param flag or'd list of flags to set
