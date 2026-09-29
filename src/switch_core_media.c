@@ -15221,6 +15221,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 	//int red = 0;
 	payload_map_t *pmap;
 	int is_outbound = switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_OUTBOUND;
+	int proxy_3pcc_offer;
 	const char *vbw;
 	int bw = 256, i = 0;
 	int audio_mid_emitted = 0;
@@ -15291,6 +15292,23 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 		switch_core_session_check_outgoing_crypto(session, sdp_type);
 	}
 
+	/*
+	 * An inbound 3PCC proxy call answering a late-offer INVITE generates its own
+	 * offer here without CF_3PCC. When rtp_secure_media_3pcc_proxy_offer is set,
+	 * prepare SDES crypto for that offer as for the other 3PCC offers. Media we
+	 * don't terminate (proxy/bypass) and WebRTC/DTLS offers are left as they are.
+	 */
+	proxy_3pcc_offer = !is_outbound &&
+		sdp_type == SDP_OFFER &&
+		switch_channel_test_flag(session->channel, CF_3PCC_PROXY) &&
+		!switch_channel_test_flag(session->channel, CF_PROXY_MODE) &&
+		!switch_channel_test_flag(session->channel, CF_PROXY_MEDIA) &&
+		!switch_channel_test_flag(session->channel, CF_AVPF) &&
+		!switch_channel_test_flag(session->channel, CF_DTLS) &&
+		!switch_true(switch_channel_get_variable(session->channel, "media_webrtc")) &&
+		!switch_true(switch_channel_get_variable(session->channel, "rtp_use_dtls")) &&
+		switch_channel_var_true(session->channel, "rtp_secure_media_3pcc_proxy_offer");
+
 	if (is_outbound || switch_channel_test_flag(session->channel, CF_RECOVERING) ||
 		switch_channel_test_flag(session->channel, CF_3PCC)) {
 		if (!switch_channel_test_flag(session->channel, CF_AVPF) &&
@@ -15318,6 +15336,10 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 				generate_local_fingerprint(smh, SWITCH_MEDIA_TYPE_AUDIO);
 			}
 		}
+	}
+
+	if (is_outbound || switch_channel_test_flag(session->channel, CF_RECOVERING) ||
+		switch_channel_test_flag(session->channel, CF_3PCC) || proxy_3pcc_offer) {
 		switch_core_session_parse_crypto_prefs(session);
 
 		/*
@@ -15330,7 +15352,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 		 */
 		if (!is_outbound &&
 		    sdp_type == SDP_OFFER &&
-		    switch_channel_test_flag(session->channel, CF_3PCC) &&
+		    (switch_channel_test_flag(session->channel, CF_3PCC) || proxy_3pcc_offer) &&
 		    !switch_channel_test_flag(session->channel, CF_RECOVERING) &&
 		    smh->crypto_mode == CRYPTO_MODE_OPTIONAL &&
 		    !switch_channel_var_true(session->channel, "rtp_secure_media_3pcc_offer_both")) {
