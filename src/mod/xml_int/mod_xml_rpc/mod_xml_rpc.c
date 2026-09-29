@@ -1323,12 +1323,33 @@ static xmlrpc_value *freeswitch_batch(xmlrpc_env * const envP, xmlrpc_value * co
 	for (i = 0; i < commandSize; i++) {
 		xmlrpc_value *command = NULL;
 		xmlrpc_value *value = NULL;
+		xmlrpc_bool continue_on_fail = 0;
 		char *response = NULL;
 		
 		xmlrpc_array_read_item(envP, commands, i, &command);
 		if (envP->fault_occurred) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to read command item from array!\n");
 			break;
+		}
+
+		/* A third item marks the command continue-on-fail; pass the api only the command and its argument. */
+		if (xmlrpc_value_type(command) == XMLRPC_TYPE_ARRAY && xmlrpc_array_size(envP, command) == 3) {
+			xmlrpc_value *pair = NULL;
+			char *api_command = NULL, *api_arg = NULL;
+
+			xmlrpc_decompose_value(envP, command, "(ssb)", &api_command, &api_arg, &continue_on_fail);
+			if (!envP->fault_occurred) {
+				pair = xmlrpc_build_value(envP, "(ss)", api_command, api_arg);
+				switch_safe_free(api_command);
+				switch_safe_free(api_arg);
+			}
+
+			xmlrpc_DECREF(command);
+			command = pair;
+			if (envP->fault_occurred) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Invalid batch command item!\n");
+				break;
+			}
 		}
 
 		value = freeswitch_api(envP, command, userData, callInfo);
@@ -1354,7 +1375,7 @@ static xmlrpc_value *freeswitch_batch(xmlrpc_env * const envP, xmlrpc_value * co
 			break;
 		}
 
-		if (should_stop_batch(response, SWITCH_FALSE, run_all ? SWITCH_TRUE : SWITCH_FALSE)) {
+		if (should_stop_batch(response, continue_on_fail ? SWITCH_TRUE : SWITCH_FALSE, run_all ? SWITCH_TRUE : SWITCH_FALSE)) {
 			unsigned int j = 0;
 
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Stopping XML-RPC batch after failed command response: [%s].\n", response);
