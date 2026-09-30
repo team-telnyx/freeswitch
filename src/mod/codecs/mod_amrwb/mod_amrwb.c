@@ -525,32 +525,19 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 
 		} else {
 
-			/* It is inbound fmtp with no mode-set or outbound */
+			/* no mode-set in the fmtp, or mode-set-overwrite: answer the configured mode-set,
+			 * default-bitrate with mode-set-overwrite-with-default-bitrate or nothing configured */
+			uint16_t answer_modes = globals.context.enc_modes;
 
-			if (globals.mode_set_overwrite_with_default_bitrate) {
-				fmtptmp_pos = switch_snprintf(fmtptmp, sizeof(fmtptmp), "mode-set=%d", globals.default_bitrate);
-			} else {
-				char modes[100] = { 0 };
-				int i = 0, j = 0;
-
-				for (i = 0; SWITCH_AMRWB_MODES-1 > i; ++i) {
-					if (globals.context.enc_modes & (1 << i)) {
-						j++;
-						snprintf(modes + strlen(modes), sizeof(modes) - strlen(modes), j > 1 ? ",%d" : "%d", i);
-					}
-				}
-
-				fmtptmp_pos = switch_snprintf(fmtptmp, sizeof(fmtptmp), "mode-set=%s", modes);
+			if (!answer_modes || (globals.mode_set_overwrite && globals.mode_set_overwrite_with_default_bitrate)) {
+				answer_modes = (uint16_t) (1 << globals.default_bitrate);
 			}
 
-			/* When carrier omits mode-set, sync enc_mode with configured mode-set
-			 * so the encoder does not exceed the modes advertised in our answer SDP. */
-			if (globals.context.enc_modes) {
-				for (i = SWITCH_AMRWB_MODES-2; i > -1; i--) {
-					if (globals.context.enc_modes & (1 << i)) {
-						context->enc_mode = (switch_byte_t) i;
-						break;
-					}
+			fmtptmp_pos = switch_snprintf(fmtptmp, sizeof(fmtptmp), "mode-set=");
+			for (i = 0; SWITCH_AMRWB_MODES-1 > i; ++i) {
+				if (answer_modes & (1 << i)) {
+					fmtptmp_pos += switch_snprintf(fmtptmp + fmtptmp_pos, sizeof(fmtptmp) - fmtptmp_pos, fmtptmp_pos > strlen("mode-set=") ? ",%d" : "%d", i);
+					context->enc_mode = (switch_byte_t) i;
 				}
 			}
 		}

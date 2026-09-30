@@ -11,6 +11,7 @@
       <settings>
         <param name="fmtp-extra" value="x-extra=1"/>
         <param name="force-be" value="1"/>
+        <param name="mode-set" value="0,1,2"/>
       </settings>
     </configuration>
   </section>
