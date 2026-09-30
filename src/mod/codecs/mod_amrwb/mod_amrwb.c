@@ -76,6 +76,7 @@ int global_debug;
 char AMRWB_CONFIGURATION[2000];
 
 #define SWITCH_AMRWB_MAX_FMTP_PARAMS 32
+#define SWITCH_AMRWB_FMTP_SIZE 1024
 
 #ifndef AMRWB_PASSTHROUGH
 #include "opencore-amrwb/dec_if.h" /*AMR-WB decoder API*/
@@ -415,7 +416,7 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 	int encoding, decoding;
 	int x, i, argc, fmtptmp_pos;
 	char *argv[SWITCH_AMRWB_MAX_FMTP_PARAMS];
-	char fmtptmp[128];
+	char fmtptmp[SWITCH_AMRWB_FMTP_SIZE];
 	char *fmtp_dup = NULL;
 	switch_core_session_t *session = codec->session;
 	switch_bool_t octet_align_given = SWITCH_FALSE;
@@ -936,7 +937,7 @@ static switch_status_t matches_fmtp(const char *fmtp, const char *codec_fmtp)
 
 static char *generate_fmtp(switch_memory_pool_t *pool , int octet_align)
 {
-	char buf[256] = { 0 };
+	char buf[SWITCH_AMRWB_FMTP_SIZE] = { 0 };
 #ifndef AMRWB_PASSTHROUGH
 	int i = 0, j =0;
 #endif
