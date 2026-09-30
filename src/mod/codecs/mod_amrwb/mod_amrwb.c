@@ -545,16 +545,24 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 			/* no mode-set in the fmtp, or mode-set-overwrite: answer the configured mode-set,
 			 * default-bitrate with mode-set-overwrite-with-default-bitrate or nothing configured */
 			uint16_t answer_modes = globals.context.enc_modes;
+			uint16_t offered_modes = context->enc_modes;
 
 			if (!answer_modes || (globals.mode_set_overwrite && globals.mode_set_overwrite_with_default_bitrate)) {
 				answer_modes = (uint16_t) (1 << globals.default_bitrate);
 			}
+
+			/* encode within both mode-sets, else within the offered one */
 			context->enc_modes = answer_modes;
+			if (offered_modes) {
+				context->enc_modes = (offered_modes & answer_modes) ? (offered_modes & answer_modes) : offered_modes;
+			}
 
 			fmtptmp_pos = switch_snprintf(fmtptmp, sizeof(fmtptmp), "mode-set=");
 			for (i = 0; SWITCH_AMRWB_MODES-1 > i; ++i) {
 				if (answer_modes & (1 << i)) {
 					fmtptmp_pos += switch_snprintf(fmtptmp + fmtptmp_pos, sizeof(fmtptmp) - fmtptmp_pos, fmtptmp_pos > strlen("mode-set=") ? ",%d" : "%d", i);
+				}
+				if (context->enc_modes & (1 << i)) {
 					context->enc_mode = (switch_byte_t) i;
 				}
 			}

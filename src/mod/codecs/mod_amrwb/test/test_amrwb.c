@@ -149,6 +149,39 @@ static int amrwb_encoded_ft(switch_codec_t *codec, switch_bool_t octet_aligned)
 
 	return octet_aligned ? (encoded[1] >> 3) & 0x0f : ((encoded[0] & 0x07) << 1) | (encoded[1] >> 7);
 }
+static const char *amrwb_conf_settings;
+
+static switch_xml_t amrwb_conf_lookup(const char *section, const char *tag_name, const char *key_name, const char *key_value, switch_event_t *params, void *user_data)
+{
+	char *xml;
+	switch_xml_t conf;
+
+	if (!key_value || strcmp(key_value, "amrwb.conf")) return NULL;
+	xml = switch_mprintf("<document type=\"freeswitch/xml\"><section name=\"configuration\">"
+						 "<configuration name=\"amrwb.conf\"><settings>%s</settings></configuration></section></document>", amrwb_conf_settings);
+	conf = switch_xml_parse_str_dynamic(xml, SWITCH_FALSE);
+	return conf;
+}
+
+/* reload mod_amrwb with the given settings, or with freeswitch.xml when NULL */
+static switch_status_t amrwb_reload(const char *settings)
+{
+	switch_xml_binding_t *binding = NULL;
+	const char *err = NULL;
+	switch_status_t status;
+
+	switch_loadable_module_unload_module(SWITCH_GLOBAL_dirs.mod_dir, "mod_amrwb", SWITCH_FALSE, &err);
+	if (settings) {
+		amrwb_conf_settings = settings;
+		switch_xml_bind_search_function_ret(amrwb_conf_lookup, SWITCH_XML_SECTION_CONFIG, NULL, &binding);
+	}
+	status = switch_loadable_module_load_module(SWITCH_GLOBAL_dirs.mod_dir, "mod_amrwb", SWITCH_TRUE, &err);
+	if (binding) {
+		switch_xml_unbind_search_function(&binding);
+	}
+	return status;
+}
+
 FST_CORE_BEGIN(".")
 {
 	FST_SUITE_BEGIN(test_amrwb)
@@ -1002,6 +1035,39 @@ FST_CORE_BEGIN(".")
 			switch_api_execute("amrwb_show", "", NULL, &stream);
 			fst_check(stream.data && strstr((char *) stream.data, "default-bitrate: 8,"));
 			switch_safe_free(stream.data);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_overwrite_encodes_within_both_mode_sets)
+		{
+			switch_codec_t codec = { 0 };
+
+			fst_requires(amrwb_reload("<param name=\"mode-set\" value=\"0,1,2\"/><param name=\"mode-set-overwrite\" value=\"1\"/>"
+									  "<param name=\"mode-set-overwrite-with-default-bitrate\" value=\"0\"/>") == SWITCH_STATUS_SUCCESS);
+
+			fst_requires(amrwb_init(&codec, "mode-set=0,1,2,3,4,5,6,7,8;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "mode-set=0,1,2;"));
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 2);
+			switch_core_codec_destroy(&codec);
+
+			/* intersection */
+			fst_requires(amrwb_init(&codec, "mode-set=1,8;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "mode-set=0,1,2;"));
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 1);
+			amrwb_adjust(&codec, "increase");
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 1);
+			switch_core_codec_destroy(&codec);
+
+			/* no intersection: the offered mode-set */
+			fst_requires(amrwb_init(&codec, "mode-set=7,8;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 8);
+			amrwb_adjust(&codec, "decrease");
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 7);
+			amrwb_adjust(&codec, "decrease");
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 7);
+			switch_core_codec_destroy(&codec);
+
+			fst_requires(amrwb_reload(NULL) == SWITCH_STATUS_SUCCESS);
 		}
 		FST_TEST_END()
 
