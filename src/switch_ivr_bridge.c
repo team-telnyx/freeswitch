@@ -372,6 +372,22 @@ static void send_display(switch_core_session_t *session, switch_core_session_t *
 
 }
 
+/* no generated fill this long after the last forwarded frame: 3 SID intervals */
+#define NATIVE_DTX_FILL_HOLDOFF_MS 480
+
+/* Passthrough pair whose codec carries its own silence descriptors.
+ * Compares copies of the implementations: the live codecs may be destroyed by a re-INVITE meanwhile. */
+static switch_bool_t native_dtx_passthrough(switch_core_session_t *session_a, switch_core_session_t *session_b)
+{
+	switch_codec_t *read_codec = switch_core_session_get_read_codec(session_a);
+	switch_codec_implementation_t read_impl = { 0 }, write_impl = { 0 };
+
+	return (read_codec && switch_test_flag(read_codec, SWITCH_CODEC_FLAG_NATIVE_DTX) &&
+			switch_core_session_get_real_read_impl(session_a, &read_impl) == SWITCH_STATUS_SUCCESS &&
+			switch_core_session_get_write_impl(session_b, &write_impl) == SWITCH_STATUS_SUCCESS &&
+			read_impl.codec_id == write_impl.codec_id) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
 static switch_bool_t is_silence_frame(switch_frame_t *frame, int silence_threshold, switch_codec_implementation_t *codec_impl)
 {
 	int16_t *fdata = (int16_t *) frame->data;
@@ -440,6 +456,8 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 	const char *silence_var;
 	const char *continuous_silence_var;
 	int silence_val = 0, bypass_media_after_bridge = 0, max_continuous_silence_ms = 0, silence_threshold = 0;
+	uint32_t native_dtx_quiet_ms = NATIVE_DTX_FILL_HOLDOFF_MS;
+	switch_bool_t native_dtx;
 	const char *bridge_answer_timeout = NULL;
 	int bridge_filter_dtmf, answer_timeout, sent_update = 0;
 	time_t answer_limit = 0;
@@ -1107,17 +1125,23 @@ static void *audio_bridge_thread(switch_thread_t *thread, void *obj)
 					total_silence_frame_ms = 0;
 				}
 
-				if (silence_val) {
+				/* far end still sending its own silence descriptors */
+				native_dtx = native_dtx_quiet_ms < NATIVE_DTX_FILL_HOLDOFF_MS && native_dtx_passthrough(session_a, session_b);
+
+				native_dtx_quiet_ms += per_read_frame_ms;
+
+				if (silence_val && !native_dtx) {
 					switch_generate_sln_silence((int16_t *) silence_frame.data, silence_frame.samples,
 												read_impl.number_of_channels, silence_val);
 					read_frame = &silence_frame;
-				} else if (!switch_channel_test_flag(chan_b, CF_ACCEPT_CNG)) {
+				} else if (native_dtx || !switch_channel_test_flag(chan_b, CF_ACCEPT_CNG)) {
 #if DEBUG_RTP
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session_a), SWITCH_LOG_NOTICE, "Audio bridge thread: skip write frame, reason: CF_ACCEPT_CNG %p %p -> %p\n", (void*)session_b, (void*)session_a, (void*)session_b);
 #endif
 					continue;
 				}
 			} else {
+				native_dtx_quiet_ms = 0;
 				if (silence_threshold && is_silence_frame(read_frame, silence_threshold, &read_impl)) {
 					total_silence_frame_ms += per_read_frame_ms;
 					if (total_silence_frame_ms >= max_continuous_silence_ms) {
