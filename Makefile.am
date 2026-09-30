@@ -17,10 +17,11 @@ AM_LIBAPR_LIBS := $(subst $(switch_builddir)/,,$(shell ./libs/apr/apr-1-config \
 endif
 
 
-AM_CFLAGS   = $(SWITCH_AM_CFLAGS) $(SWITCH_ANSI_CFLAGS) 
+AM_CFLAGS   = $(SWITCH_AM_CFLAGS) $(SWITCH_ANSI_CFLAGS)
 AM_CPPFLAGS =
 AM_CPPFLAGS += -I$(switch_srcdir)/libs/libvpx
 AM_CPPFLAGS += $(SWITCH_AM_CXXFLAGS)
+AM_CXXFLAGS = -std=c++17
 AM_LDFLAGS  = $(SWITCH_AM_LDFLAGS) $(AM_LIBAPR_LDFLAGS) $(AM_LIBAPU_LDFLAGS)
 
 DEFAULT_SOUNDS=en-us-callie-8000
@@ -287,6 +288,7 @@ library_include_HEADERS = \
 	src/include/switch_regex.h \
 	src/include/switch_types.h \
 	src/include/switch_utils.h \
+	src/include/switch_web_server.h \
 	src/include/switch_rtp.h \
 	src/include/switch_jitterbuffer.h \
 	src/include/switch_estimators.h \
@@ -395,6 +397,7 @@ libfreeswitch_la_SOURCES = \
 	src/switch_vpx.c \
 	src/switch_telnyx.cpp \
 	src/switch_telnyx_kv.cpp \
+	src/switch_web_server.cpp \
 	libs/libteletone/src/libteletone_detect.c \
 	libs/libteletone/src/libteletone_generate.c \
 	libs/miniupnpc/miniwget.c \
