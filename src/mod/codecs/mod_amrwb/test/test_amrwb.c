@@ -715,6 +715,25 @@ FST_CORE_BEGIN(".")
 		}
 		FST_TEST_END()
 
+		FST_TEST_BEGIN(amrwb_relayed_sid_keeps_q_bit_in_be)
+		{
+			switch_codec_t source_oa = { 0 }, target_be = { 0 };
+			static const unsigned char sid_oa_q0[] = { 0xf0, 0x48, 0xe3, 0xdf, 0x3d, 0xe0, 0x02 };
+			unsigned char decoded[SWITCH_RECOMMENDED_BUFFER_SIZE], encoded[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
+			uint32_t decoded_len = sizeof(decoded), encoded_len = sizeof(encoded), rate = 16000;
+			unsigned int flag = 0;
+
+			fst_requires(amrwb_init(&source_oa, "mode-set=0,1,2;octet-align=1", SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(amrwb_init(&target_be, "mode-set=0,1,2;octet-align=0", SWITCH_CODEC_FLAG_ENCODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_core_codec_decode(&source_oa, NULL, (void *) sid_oa_q0, sizeof(sid_oa_q0), 16000, decoded, &decoded_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_core_codec_encode(&target_be, &source_oa, decoded, decoded_len, 16000, encoded, &encoded_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(((encoded[0] & 0x07) << 1) | (encoded[1] >> 7), 9);
+			fst_check_int_equals((encoded[1] >> 6) & 1, 0);
+			switch_core_codec_destroy(&target_be);
+			switch_core_codec_destroy(&source_oa);
+		}
+		FST_TEST_END()
+
 	}
 	FST_SUITE_END()
 }
