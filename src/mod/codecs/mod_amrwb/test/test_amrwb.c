@@ -43,7 +43,40 @@ static switch_status_t amrwb_init(switch_codec_t *codec, const char *fmtp, uint3
 	return switch_core_codec_init(codec, "AMR-WB", "mod_amrwb", fmtp, 16000, 20, 1, flags, &codec_settings, pool);
 }
 
-/* a fresh decoder decodes payload exactly as it decodes a lost frame */
+static switch_bool_t amrwb_nonzero(const unsigned char *pcm, uint32_t len)
+{
+	uint32_t i;
+
+	for (i = 0; i < len; i++) {
+		if (pcm[i]) return SWITCH_TRUE;
+	}
+	return SWITCH_FALSE;
+}
+
+/* decode the same five frames of a 440 Hz tone on both decoders */
+static void amrwb_prime(switch_codec_t *a, switch_codec_t *b, const char *fmtp, switch_memory_pool_t *pool)
+{
+	switch_codec_t encoder = { 0 };
+	int16_t pcm[320];
+	unsigned char frame[SWITCH_RECOMMENDED_BUFFER_SIZE], out[SWITCH_RECOMMENDED_BUFFER_SIZE];
+	uint32_t frame_len, out_len, rate = 16000;
+	unsigned int flag = 0;
+	int f, i;
+
+	amrwb_init(&encoder, fmtp, SWITCH_CODEC_FLAG_ENCODE, pool);
+	for (f = 0; f < 5; f++) {
+		for (i = 0; i < 320; i++) pcm[i] = (int16_t) (8000 * sin(2 * M_PI * 440 * (f * 320 + i) / 16000.0));
+		frame_len = sizeof(frame);
+		switch_core_codec_encode(&encoder, NULL, pcm, sizeof(pcm), 16000, frame, &frame_len, &rate, &flag);
+		out_len = sizeof(out);
+		switch_core_codec_decode(a, NULL, frame, frame_len, 16000, out, &out_len, &rate, &flag);
+		out_len = sizeof(out);
+		switch_core_codec_decode(b, NULL, frame, frame_len, 16000, out, &out_len, &rate, &flag);
+	}
+	switch_core_codec_destroy(&encoder);
+}
+
+/* after the same history, a decoder decodes payload exactly as it decodes a lost frame */
 static switch_bool_t amrwb_decodes_as_lost(const char *fmtp, const unsigned char *payload, uint32_t len, switch_memory_pool_t *pool)
 {
 	static const unsigned char lost_be[] = { 0xf7, 0x40 };
@@ -57,13 +90,15 @@ static switch_bool_t amrwb_decodes_as_lost(const char *fmtp, const unsigned char
 
 	amrwb_init(&codec, fmtp, SWITCH_CODEC_FLAG_DECODE, pool);
 	amrwb_init(&reference, fmtp, SWITCH_CODEC_FLAG_DECODE, pool);
+	/* same speech history first, so concealment output is not silence */
+	amrwb_prime(&codec, &reference, fmtp, pool);
 	status = switch_core_codec_decode(&codec, NULL, (void *) payload, len, 16000, out, &out_len, &rate, &flag);
 	ref_status = switch_core_codec_decode(&reference, NULL, (void *) (oa ? lost_oa : lost_be), 2, 16000, ref, &ref_len, &rate, &flag);
 	switch_core_codec_destroy(&codec);
 	switch_core_codec_destroy(&reference);
 
 	return (status == SWITCH_STATUS_SUCCESS && ref_status == SWITCH_STATUS_SUCCESS && out_len == 640 && out_len == ref_len &&
-			!memcmp(out, ref, out_len)) ? SWITCH_TRUE : SWITCH_FALSE;
+			!memcmp(out, ref, out_len) && amrwb_nonzero(ref, ref_len)) ? SWITCH_TRUE : SWITCH_FALSE;
 }
 
 static void amrwb_adjust(switch_codec_t *codec, const char *how)
@@ -494,8 +529,8 @@ FST_CORE_BEGIN(".")
 			switch_codec_t codec = { 0 };
 
 			fst_requires(amrwb_init(&codec, "mode-set=9,15;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
-			fst_check(codec.fmtp_out && !strstr(codec.fmtp_out, "mode-set=;") && !strstr(codec.fmtp_out, "9") && !strstr(codec.fmtp_out, "15"));
-			fst_check(amrwb_encoded_ft(&codec, SWITCH_TRUE) <= 8);
+			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "mode-set=0,1,2;"));
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 2);
 			switch_core_codec_destroy(&codec);
 
 			fst_requires(amrwb_init(&codec, "mode-set=1,9;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
