@@ -75,6 +75,8 @@ switch_mutex_t *global_lock;
 int global_debug;
 char AMRWB_CONFIGURATION[2000];
 
+#define SWITCH_AMRWB_MAX_FMTP_PARAMS 32
+
 #ifndef AMRWB_PASSTHROUGH
 #include "opencore-amrwb/dec_if.h" /*AMR-WB decoder API*/
 #include "vo-amrwbenc/enc_if.h" /*AMR-WB encoder API*/
@@ -303,7 +305,7 @@ static switch_status_t amrwb_parse_fmtp_cb(const char *fmtp, switch_codec_fmtp_t
 
 	if (!zstr(fmtp)) {
 		int x, argc;
-		char *argv[10];
+		char *argv[SWITCH_AMRWB_MAX_FMTP_PARAMS];
 		char *fmtp_dup = strdup(fmtp);
 
 		/* If there is no octet-align param on fmtp then default is 0 (bandwidth efficient). */
@@ -354,7 +356,7 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 	struct amrwb_context *context = NULL;
 	int encoding, decoding;
 	int x, i, argc, fmtptmp_pos;
-	char *argv[10];
+	char *argv[SWITCH_AMRWB_MAX_FMTP_PARAMS];
 	char fmtptmp[128];
 	char *fmtp_dup = NULL;
 	switch_core_session_t *session = codec->session;
@@ -798,7 +800,7 @@ static int extract_octet_align(const char *fmtp)
 {
 	int oa = 0;
 	int argc;
-	char *argv[10];
+	char *argv[SWITCH_AMRWB_MAX_FMTP_PARAMS];
 	char *fmtp_dup;
 
 	if (zstr(fmtp)) return oa;
@@ -831,7 +833,7 @@ static switch_bool_t has_unsupported_option(const char *fmtp)
 {
 	switch_bool_t unsupported = SWITCH_FALSE;
 	int argc;
-	char *argv[32];
+	char *argv[SWITCH_AMRWB_MAX_FMTP_PARAMS];
 	char *fmtp_dup;
 
 	if (zstr(fmtp) || !(fmtp_dup = strdup(fmtp))) return SWITCH_FALSE;
