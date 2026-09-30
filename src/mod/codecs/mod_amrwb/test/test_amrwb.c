@@ -587,17 +587,25 @@ FST_CORE_BEGIN(".")
 
 		FST_TEST_BEGIN(amrwb_negotiated_octet_align_wins_over_force)
 		{
-			switch_codec_t codec = { 0 };
-			int16_t pcm[320] = { 0 };
-			unsigned char encoded[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
-			uint32_t encoded_len = sizeof(encoded), rate = 16000;
-			unsigned int flag = 0;
+			const struct { const char *fmtp; uint32_t len; } cases[] = {
+				{ "mode-set=2;octet-align=0", 33 },	/* stated: bandwidth-efficient despite force-oa */
+				{ "mode-set=2;octet-align=1", 34 },
+				{ "mode-set=2", 34 }			/* not stated: force-oa applies */
+			};
+			int i;
 
-			fst_requires(amrwb_init(&codec, "mode-set=2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
-			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "octet-align=1"));
-			fst_requires(switch_core_codec_encode(&codec, NULL, pcm, sizeof(pcm), 16000, encoded, &encoded_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
-			fst_check_int_equals(encoded_len, 34);
-			switch_core_codec_destroy(&codec);
+			for (i = 0; i < 3; i++) {
+				switch_codec_t codec = { 0 };
+				int16_t pcm[320] = { 0 };
+				unsigned char encoded[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
+				uint32_t encoded_len = sizeof(encoded), rate = 16000;
+				unsigned int flag = 0;
+
+				fst_requires(amrwb_init(&codec, cases[i].fmtp, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+				fst_requires(switch_core_codec_encode(&codec, NULL, pcm, sizeof(pcm), 16000, encoded, &encoded_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+				fst_check_int_equals(encoded_len, cases[i].len);
+				switch_core_codec_destroy(&codec);
+			}
 		}
 		FST_TEST_END()
 
