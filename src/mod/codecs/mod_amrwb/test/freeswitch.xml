@@ -10,7 +10,7 @@
     <configuration name="amrwb.conf" description="AMR-WB">
       <settings>
         <param name="fmtp-extra" value="x-extra=1;x-pct=%s%s%s"/>
-        <param name="force-be" value="1"/>
+        <param name="force-oa" value="1"/>
         <param name="mode-set" value="0,1,2"/>
       </settings>
     </configuration>
