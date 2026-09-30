@@ -128,6 +128,8 @@ struct amrwb_context {
 	switch_bool_t decoded_sid_valid;
 	switch_mutex_t *decoded_sid_mutex;
 	switch_byte_t cmr;
+	switch_atomic_t *session_cmr;
+	switch_bool_t cmr_published;
 	switch_byte_t cur_mode;
 	uint32_t frames;
 	uint32_t concealed;
@@ -210,11 +212,33 @@ static switch_byte_t amrwb_next_mode(struct amrwb_context *context, switch_byte_
 	return context->cur_mode;
 }
 
-/* CMR 15: no mode request */
+/* CMR handoff from the session read codec to the session write codec: session memory, atomic access */
+static switch_atomic_t *amrwb_session_cmr(switch_codec_t *codec, struct amrwb_context *context)
+{
+	switch_channel_t *channel;
+	switch_atomic_t *shared;
+
+	if (context->session_cmr || !codec->session) {
+		return context->session_cmr;
+	}
+
+	channel = switch_core_session_get_channel(codec->session);
+	switch_mutex_lock(global_lock);
+	if (!(shared = switch_channel_get_private(channel, "mod_amrwb_cmr"))) {
+		shared = switch_core_session_alloc(codec->session, sizeof(*shared));
+		switch_atomic_set(shared, SWITCH_AMRWB_CMR_NONE);
+		switch_channel_set_private(channel, "mod_amrwb_cmr", shared);
+	}
+	switch_mutex_unlock(global_lock);
+	context->session_cmr = shared;
+
+	return shared;
+}
+
+/* CMR 15: no mode request; the session read codec publishes it for the session write codec */
 static void amrwb_set_cmr(switch_codec_t *codec, struct amrwb_context *context, uint8_t cmr)
 {
-	switch_codec_t *write_codec;
-	struct amrwb_context *write_context;
+	switch_atomic_t *shared;
 
 	/* not a speech mode or NO_DATA, or outside the mode-set: ignored (RFC 4867 4.3.1) */
 	if (cmr != SWITCH_AMRWB_CMR_NONE && !amrwb_mode_allowed(context, cmr)) {
@@ -223,10 +247,9 @@ static void amrwb_set_cmr(switch_codec_t *codec, struct amrwb_context *context, 
 
 	context->cmr = cmr;
 
-	if (codec->session && (write_codec = switch_core_session_get_write_codec(codec->session)) && write_codec != codec &&
-		write_codec->implementation && write_codec->implementation->modname && !strcmp(write_codec->implementation->modname, "mod_amrwb") &&
-		(write_context = write_codec->private_info)) {
-		write_context->cmr = cmr;
+	if (codec->session && codec == switch_core_session_get_read_codec(codec->session) && (shared = amrwb_session_cmr(codec, context))) {
+		switch_atomic_set(shared, cmr);
+		context->cmr_published = SWITCH_TRUE;
 	}
 }
 
@@ -656,6 +679,10 @@ static switch_status_t switch_amrwb_destroy(switch_codec_t *codec)
 	if (context->decoder_state) {
 		D_IF_exit(context->decoder_state);
 	}
+	/* the request ends with the read codec that received it */
+	if (context->cmr_published) {
+		switch_atomic_set(context->session_cmr, SWITCH_AMRWB_CMR_NONE);
+	}
 	codec->private_info = NULL;
 #endif
 	return SWITCH_STATUS_SUCCESS;
@@ -676,7 +703,8 @@ static switch_status_t switch_amrwb_encode(switch_codec_t *codec,
 	int n;
 	int relayed_size;
 	int frame_type;
-	switch_byte_t mode;
+	switch_byte_t mode, cmr;
+	switch_atomic_t *shared;
 	unsigned char *shift_buf = encoded_data;
 
 	if (!context) {
@@ -686,8 +714,9 @@ static switch_status_t switch_amrwb_encode(switch_codec_t *codec,
 	/* Always advance the stateful encoder, even when the wire payload is replaced
 	 * with the source SID, so speech resumes from the correct encoder history. */
 	mode = context->enc_mode;
-	if (context->cmr < SWITCH_AMRWB_MODES - 1) {
-		switch_byte_t requested = amrwb_clamp_mode(context, context->cmr);
+	cmr = (shared = amrwb_session_cmr(codec, context)) ? (switch_byte_t) switch_atomic_read(shared) : context->cmr;
+	if (cmr < SWITCH_AMRWB_MODES - 1) {
+		switch_byte_t requested = amrwb_clamp_mode(context, cmr);
 
 		if (requested < mode) {
 			mode = requested;
