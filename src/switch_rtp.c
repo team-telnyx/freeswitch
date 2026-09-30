@@ -451,6 +451,9 @@ struct switch_rtp {
 	uint32_t ts;
 	//uint32_t last_clock_ts;
 	uint32_t last_write_ts;
+	uint32_t raw_ts_offset;		/* added to forwarded audio ts after generated frames */
+	uint8_t raw_ts_forwarded;
+	uint8_t raw_ts_generated;
 	uint32_t last_read_ts;
 	uint32_t prev_read_ts;
 	uint32_t last_cng_ts;
@@ -3603,6 +3606,38 @@ SWITCH_DECLARE(void) switch_rtp_init(switch_memory_pool_t *pool)
 	switch_mutex_init(&g_trickle_eoc_mutex, SWITCH_MUTEX_NESTED, pool);
 	switch_rtp_dtls_init();
 	global_init = 1;
+}
+
+/* RAW_WRITE audio: generated frames (ts 0) continue from the last ts sent, advanced by the
+ * time since (whole intervals, at least one); forwarded frames after them never go backwards.
+ * Never returns 0 once forwarding started: 0 means "no timestamp" downstream, 0xffffffff is used instead. */
+static uint32_t raw_write_audio_ts(switch_rtp_t *rtp_session, uint32_t ts)
+{
+	uint32_t out;
+
+	if (!ts) {
+		uint64_t elapsed, intervals;
+
+		if (!rtp_session->raw_ts_forwarded) {
+			return 0;
+		}
+		rtp_session->raw_ts_generated = 1;
+		elapsed = (uint64_t) (switch_micro_time_now() - rtp_session->last_write_timestamp) * rtp_session->samples_per_second / 1000000;
+		intervals = (elapsed + rtp_session->samples_per_interval / 2) / rtp_session->samples_per_interval;
+		out = rtp_session->last_write_ts + (uint32_t) (intervals ? intervals : 1) * rtp_session->samples_per_interval;
+		return out ? out : 0xffffffff;
+	}
+
+	if (rtp_session->raw_ts_generated) {
+		if ((int32_t) (ts + rtp_session->raw_ts_offset - rtp_session->last_write_ts) <= 0) {
+			rtp_session->raw_ts_offset = rtp_session->last_write_ts + rtp_session->samples_per_interval - ts;
+		}
+		rtp_session->raw_ts_generated = 0;
+	}
+	rtp_session->raw_ts_forwarded = 1;
+	out = ts + rtp_session->raw_ts_offset;
+
+	return out ? out : 0xffffffff;
 }
 
 static uint8_t get_next_write_ts(switch_rtp_t *rtp_session, uint32_t timestamp)
@@ -13489,6 +13524,9 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 		if (rtp_session->flags[SWITCH_RTP_FLAG_RAW_WRITE] || force_video ||
 			(rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] && frame->timestamp)) {
 			ts = (uint32_t) frame->timestamp;
+			if (!force_video && !write_state && !rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] && rtp_session->flags[SWITCH_RTP_FLAG_RAW_WRITE]) {
+				ts = raw_write_audio_ts(rtp_session, ts);
+			}
 		} else {
 			ts = 0;
 		}
