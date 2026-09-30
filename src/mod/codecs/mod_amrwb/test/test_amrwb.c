@@ -42,6 +42,29 @@ static switch_status_t amrwb_init(switch_codec_t *codec, const char *fmtp, uint3
 	return switch_core_codec_init(codec, "AMR-WB", "mod_amrwb", fmtp, 16000, 20, 1, flags, &codec_settings, pool);
 }
 
+/* a fresh decoder decodes payload exactly as it decodes a lost frame */
+static switch_bool_t amrwb_decodes_as_lost(const char *fmtp, const unsigned char *payload, uint32_t len, switch_memory_pool_t *pool)
+{
+	static const unsigned char lost_be[] = { 0xf7, 0x40 };
+	static const unsigned char lost_oa[] = { 0xf0, 0x74 };
+	switch_codec_t codec = { 0 }, reference = { 0 };
+	unsigned char out[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 }, ref[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
+	uint32_t out_len = sizeof(out), ref_len = sizeof(ref), rate = 16000;
+	unsigned int flag = 0;
+	switch_bool_t oa = strstr(fmtp, "octet-align=1") ? SWITCH_TRUE : SWITCH_FALSE;
+	switch_status_t status, ref_status;
+
+	amrwb_init(&codec, fmtp, SWITCH_CODEC_FLAG_DECODE, pool);
+	amrwb_init(&reference, fmtp, SWITCH_CODEC_FLAG_DECODE, pool);
+	status = switch_core_codec_decode(&codec, NULL, (void *) payload, len, 16000, out, &out_len, &rate, &flag);
+	ref_status = switch_core_codec_decode(&reference, NULL, (void *) (oa ? lost_oa : lost_be), 2, 16000, ref, &ref_len, &rate, &flag);
+	switch_core_codec_destroy(&codec);
+	switch_core_codec_destroy(&reference);
+
+	return (status == SWITCH_STATUS_SUCCESS && ref_status == SWITCH_STATUS_SUCCESS && out_len == 640 && out_len == ref_len &&
+			!memcmp(out, ref, out_len)) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
 /* frame type of the payload the encoder produces for 20 ms of silence */
 static int amrwb_encoded_ft(switch_codec_t *codec, switch_bool_t octet_aligned)
 {
@@ -114,7 +137,7 @@ FST_CORE_BEGIN(".")
 
 			/*Invalid frame type*/
 			status = switch_core_codec_decode(&read_codec, NULL, &fail, 2, 16000, &decbuf, &decoded_len, &rate, &flags);
-			fst_check(status != SWITCH_STATUS_SUCCESS);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
 
 			switch_core_codec_destroy(&read_codec);
 		}
@@ -228,7 +251,7 @@ FST_CORE_BEGIN(".")
 
 		FST_TEST_END()
 
-		FST_TEST_BEGIN(amrwb_rejects_multiple_frames)
+		FST_TEST_BEGIN(amrwb_conceals_multiple_frames)
 		{
 			switch_codec_t source_be = { 0 };
 			switch_codec_t source_oa = { 0 };
@@ -253,12 +276,12 @@ FST_CORE_BEGIN(".")
 			decoded_len = sizeof(decoded);
 			status = switch_core_codec_decode(&source_be, NULL, multiframes_be, sizeof(multiframes_be) - 1,
 				16000, decoded, &decoded_len, &rate, &flags);
-			fst_check(status != SWITCH_STATUS_SUCCESS);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
 
 			decoded_len = sizeof(decoded);
 			status = switch_core_codec_decode(&source_oa, NULL, multiframes_oa, sizeof(multiframes_oa) - 1,
 				16000, decoded, &decoded_len, &rate, &flags);
-			fst_check(status != SWITCH_STATUS_SUCCESS);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
 
 			switch_core_codec_destroy(&source_oa);
 			switch_core_codec_destroy(&source_be);
@@ -266,7 +289,7 @@ FST_CORE_BEGIN(".")
 
 		FST_TEST_END()
 
-		FST_TEST_BEGIN(amrwb_rejects_truncated_sid)
+		FST_TEST_BEGIN(amrwb_truncated_sid_not_relayed)
 		{
 			switch_codec_t source_be = { 0 };
 			switch_codec_t source_oa = { 0 };
@@ -308,15 +331,15 @@ FST_CORE_BEGIN(".")
 			decoded_len = sizeof(decoded);
 			status = switch_core_codec_decode(&source_be, NULL, sid_be, sizeof(sid_be) - 2,
 				16000, decoded, &decoded_len, &rate, &flags);
-			fst_check(status != SWITCH_STATUS_SUCCESS);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
 			decoded_len = sizeof(decoded);
 			status = switch_core_codec_decode(&source_be, NULL, short_payload, sizeof(short_payload) - 1,
 				16000, decoded, &decoded_len, &rate, &flags);
-			fst_check(status != SWITCH_STATUS_SUCCESS);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
 			decoded_len = sizeof(decoded);
 			status = switch_core_codec_decode(&source_be, NULL, reserved_be_ft10, sizeof(reserved_be_ft10) - 1,
 				16000, decoded, &decoded_len, &rate, &flags);
-			fst_check(status != SWITCH_STATUS_SUCCESS);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
 
 			decoded_len = cached_pcm_len;
 			encoded_len = sizeof(encoded);
@@ -334,15 +357,15 @@ FST_CORE_BEGIN(".")
 			decoded_len = sizeof(decoded);
 			status = switch_core_codec_decode(&source_oa, NULL, sid_oa, sizeof(sid_oa) - 2,
 				16000, decoded, &decoded_len, &rate, &flags);
-			fst_check(status != SWITCH_STATUS_SUCCESS);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
 			decoded_len = sizeof(decoded);
 			status = switch_core_codec_decode(&source_oa, NULL, short_payload, sizeof(short_payload) - 1,
 				16000, decoded, &decoded_len, &rate, &flags);
-			fst_check(status != SWITCH_STATUS_SUCCESS);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
 			decoded_len = sizeof(decoded);
 			status = switch_core_codec_decode(&source_oa, NULL, reserved_oa, sizeof(reserved_oa) - 1,
 				16000, decoded, &decoded_len, &rate, &flags);
-			fst_check(status != SWITCH_STATUS_SUCCESS);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
 
 			decoded_len = cached_pcm_len;
 			encoded_len = sizeof(encoded);
@@ -455,6 +478,26 @@ FST_CORE_BEGIN(".")
 			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "octet-align=1"));
 			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "x-extra=1"));
 			switch_core_codec_destroy(&codec);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_conceals_undecodable_payloads)
+		{
+			static const unsigned char short_payload[] = { 0xf0 };
+			static const unsigned char reserved_be[] = { 0xf5, 0x40 };
+			static const unsigned char reserved_oa[] = { 0xf0, 0x54 };
+			static const unsigned char multi_be[] = { 0xfc, 0xf8, 0xf7, 0xcf, 0x78, 0x00, 0x80 };
+			static const unsigned char multi_oa[] = { 0xf0, 0xcc, 0x4c, 0xe3, 0xdf, 0x3d, 0xe0, 0x02, 0xe3, 0xdf, 0x3d, 0xe0, 0x02 };
+			static const unsigned char truncated_sid_be[] = { 0xf4, 0xf8, 0xf7, 0xcf, 0x78, 0x00 };
+			unsigned char oversized[70] = { 0xf0, 0x44 };
+
+			fst_check(amrwb_decodes_as_lost("octet-align=0", short_payload, sizeof(short_payload), fst_pool));
+			fst_check(amrwb_decodes_as_lost("octet-align=0", reserved_be, sizeof(reserved_be), fst_pool));
+			fst_check(amrwb_decodes_as_lost("octet-align=1", reserved_oa, sizeof(reserved_oa), fst_pool));
+			fst_check(amrwb_decodes_as_lost("octet-align=0", multi_be, sizeof(multi_be), fst_pool));
+			fst_check(amrwb_decodes_as_lost("octet-align=1", multi_oa, sizeof(multi_oa), fst_pool));
+			fst_check(amrwb_decodes_as_lost("octet-align=0", truncated_sid_be, sizeof(truncated_sid_be), fst_pool));
+			fst_check(amrwb_decodes_as_lost("octet-align=1", oversized, sizeof(oversized), fst_pool));
 		}
 		FST_TEST_END()
 
