@@ -12,6 +12,7 @@
         <param name="fmtp-extra" value="x-extra=1;x-pct=%s%s%s;x-long=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;x-tail=1"/>
         <param name="force-oa" value="1"/>
         <param name="mode-set" value="0,1,2"/>
+        <param name="default-bitrate" value="12"/>
       </settings>
     </configuration>
   </section>
