@@ -128,6 +128,8 @@ struct amrwb_context {
 	switch_bool_t decoded_sid_valid;
 	switch_mutex_t *decoded_sid_mutex;
 	switch_byte_t cmr;
+	switch_byte_t cur_mode;
+	uint32_t frames;
 	uint32_t concealed;
 };
 
@@ -187,6 +189,25 @@ static switch_byte_t amrwb_clamp_mode(struct amrwb_context *context, int mode)
 		if (amrwb_mode_allowed(context, m)) return (switch_byte_t) m;
 	}
 	return context->enc_mode;
+}
+
+/* mode-change-neighbor: one allowed mode per step; mode-change-period N: steps at every Nth frame */
+static switch_byte_t amrwb_next_mode(struct amrwb_context *context, switch_byte_t target)
+{
+	int m = target, step;
+
+	if (context->cur_mode >= SWITCH_AMRWB_MODES - 1) {
+		context->cur_mode = target;
+	} else if (context->cur_mode != target && (context->change_period < 2 || context->frames % context->change_period == 0)) {
+		if (switch_test_flag(context, AMRWB_OPT_MODE_CHANGE_NEIGHBOR)) {
+			step = target > context->cur_mode ? 1 : -1;
+			for (m = context->cur_mode + step; m != target && !amrwb_mode_allowed(context, m); m += step);
+		}
+		context->cur_mode = (switch_byte_t) m;
+	}
+	context->frames++;
+
+	return context->cur_mode;
 }
 
 /* CMR 15: no mode request */
@@ -612,6 +633,7 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 		switch_mutex_init(&context->decoded_sid_mutex, SWITCH_MUTEX_UNNESTED, codec->memory_pool);
 
 		context->cmr = SWITCH_AMRWB_CMR_NONE;
+		context->cur_mode = SWITCH_AMRWB_CMR_NONE;
 		codec->private_info = context;
 
 		return SWITCH_STATUS_SUCCESS;
@@ -671,6 +693,7 @@ static switch_status_t switch_amrwb_encode(switch_codec_t *codec,
 			mode = requested;
 		}
 	}
+	mode = amrwb_next_mode(context, mode);
 
 	n = E_IF_encode(context->encoder_state, mode, (int16_t *) decoded_data, (switch_byte_t *) encoded_data + 1, 0);
 	if (n < 0) {
