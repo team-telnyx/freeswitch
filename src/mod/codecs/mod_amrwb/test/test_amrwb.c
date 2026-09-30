@@ -872,7 +872,7 @@ FST_CORE_BEGIN(".")
 			amrwb_adjust(&codec, "increase");
 			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 1);
 			amrwb_adjust(&codec, "default");
-			fst_check(amrwb_encoded_ft(&codec, SWITCH_TRUE) <= 2);
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 2);
 			amrwb_adjust(&codec, "minimum");
 			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 0);
 			switch_core_codec_destroy(&codec);
@@ -892,6 +892,9 @@ FST_CORE_BEGIN(".")
 			static const unsigned char cmr8_oa[] = { 0x80, 0x7c };
 			static const unsigned char cmr9_oa[] = { 0x90, 0x7c };
 			static const unsigned char cmr12_oa[] = { 0xc0, 0x7c };
+			static const unsigned char cmr5_oa[] = { 0x50, 0x7c };
+			static const unsigned char cmr2_oa[] = { 0x20, 0x7c };
+			static const unsigned char cmr0_oa[] = { 0x00, 0x7c };
 			unsigned char out[SWITCH_RECOMMENDED_BUFFER_SIZE];
 			uint32_t out_len, rate = 16000;
 			unsigned int flag = 0;
@@ -923,6 +926,22 @@ FST_CORE_BEGIN(".")
 			out_len = sizeof(out);
 			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr15_oa, sizeof(cmr15_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
 			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 2);
+			switch_core_codec_destroy(&codec);
+
+			/* non-contiguous mode-set: requests outside it are ignored */
+			fst_requires(amrwb_init(&codec, "mode-set=0,2,8;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr5_oa, sizeof(cmr5_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 8);
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr2_oa, sizeof(cmr2_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 2);
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr1_oa, sizeof(cmr1_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 2);
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr0_oa, sizeof(cmr0_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 0);
 			switch_core_codec_destroy(&codec);
 		}
 		FST_TEST_END()
@@ -1152,10 +1171,9 @@ FST_CORE_BEGIN(".")
 			int32_t level = 1;
 
 			amrwb_init(&codec, "octet-align=1", 0, fst_pool);
-			switch_core_codec_control(&codec, SCC_DEBUG, SCCT_INT, &level, SCCT_NONE, NULL, NULL, NULL);
-			amrwb_adjust(&codec, "increase");
+			fst_check(switch_core_codec_control(&codec, SCC_DEBUG, SCCT_INT, &level, SCCT_NONE, NULL, NULL, NULL) == SWITCH_STATUS_FALSE);
+			fst_check(switch_core_codec_control(&codec, SCC_AUDIO_ADJUST_BITRATE, SCCT_STRING, (void *) "increase", SCCT_NONE, NULL, NULL, NULL) == SWITCH_STATUS_FALSE);
 			switch_core_codec_destroy(&codec);
-			fst_check(1);
 		}
 		FST_TEST_END()
 
