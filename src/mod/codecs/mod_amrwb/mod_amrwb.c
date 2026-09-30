@@ -395,9 +395,10 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 
 				if ((arg = strchr(data, '='))) {
 					*arg++ = '\0';
+					while (*arg == ' ') arg++;
 					if (!strcasecmp(data, "octet-align")) {
 						octet_align_given = SWITCH_TRUE;
-						if (atoi(arg)) {
+						if (switch_true(arg)) {
 							switch_set_flag(context, AMRWB_OPT_OCTET_ALIGN);
 						}
 					} else if (!strcasecmp(data, "mode-change-neighbor")) {
