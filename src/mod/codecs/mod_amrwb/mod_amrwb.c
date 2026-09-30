@@ -602,6 +602,10 @@ static switch_status_t switch_amrwb_destroy(switch_codec_t *codec)
 #ifndef AMRWB_PASSTHROUGH
 	struct amrwb_context *context = codec->private_info;
 
+	if (!context) {
+		return SWITCH_STATUS_SUCCESS;
+	}
+
 	if (context->encoder_state) {
 		E_IF_exit(context->encoder_state);
 }
@@ -784,6 +788,10 @@ static switch_status_t switch_amrwb_control(switch_codec_t *codec,
 {
 	struct amrwb_context *context = codec->private_info;
 	int debug = 0;
+
+	if (!context) {
+		return SWITCH_STATUS_FALSE;
+	}
 
 	switch_mutex_lock(global_lock);
 	debug = global_debug;
