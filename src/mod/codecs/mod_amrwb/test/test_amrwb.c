@@ -894,6 +894,27 @@ FST_CORE_BEGIN(".")
 		}
 		FST_TEST_END()
 
+		FST_TEST_BEGIN(amrwb_long_fmtp_extra_is_not_truncated)
+		{
+			switch_codec_t codec = { 0 };
+			switch_codec_interface_t *codec_interface;
+			const switch_codec_implementation_t *impl;
+			int offers = 0, complete = 0;
+
+			fst_requires(amrwb_init(&codec, "mode-set=0,1,2,3,4,5,6,7,8;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "x-tail=1"));
+			switch_core_codec_destroy(&codec);
+
+			fst_requires((codec_interface = switch_loadable_module_get_codec_interface("AMR-WB", "mod_amrwb")));
+			for (impl = codec_interface->implementations; impl; impl = impl->next) {
+				offers++;
+				complete += impl->fmtp && strstr(impl->fmtp, "x-tail=1") != NULL;
+			}
+			UNPROTECT_INTERFACE(codec_interface);
+			fst_check(offers > 0 && complete == offers);
+		}
+		FST_TEST_END()
+
 	}
 	FST_SUITE_END()
 }
