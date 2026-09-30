@@ -7,6 +7,11 @@
         <load module="mod_amrwb"/>
       </modules>
     </configuration>
+    <configuration name="amrwb.conf" description="AMR-WB">
+      <settings>
+        <param name="fmtp-extra" value="x-extra=1"/>
+      </settings>
+    </configuration>
   </section>
 
   <section name="dialplan" description="Regex/XML Dialplan">
