@@ -727,6 +727,26 @@ decode_error:
 }
 
 #ifndef AMRWB_PASSTHROUGH
+/* no mode-set negotiated: all speech modes allowed */
+static switch_bool_t amrwb_mode_allowed(struct amrwb_context *context, int mode)
+{
+	return (mode >= 0 && mode < SWITCH_AMRWB_MODES - 1 && (!context->enc_modes || (context->enc_modes & (1 << mode)))) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
+/* highest allowed mode not above mode, else the lowest allowed mode */
+static switch_byte_t amrwb_clamp_mode(struct amrwb_context *context, int mode)
+{
+	int m;
+
+	for (m = mode; m >= 0; m--) {
+		if (amrwb_mode_allowed(context, m)) return (switch_byte_t) m;
+	}
+	for (m = mode + 1; m < SWITCH_AMRWB_MODES - 1; m++) {
+		if (amrwb_mode_allowed(context, m)) return (switch_byte_t) m;
+	}
+	return context->enc_mode;
+}
+
 static switch_status_t switch_amrwb_control(switch_codec_t *codec,
 										   switch_codec_control_command_t cmd,
 										   switch_codec_control_type_t ctype,
@@ -753,38 +773,26 @@ static switch_status_t switch_amrwb_control(switch_codec_t *codec,
 	case SCC_AUDIO_ADJUST_BITRATE:
 		{
 			const char *cmd = (const char *)cmd_data;
+			int mode;
 
 			if (!strcasecmp(cmd, "increase")) {
-				if (context->enc_mode < SWITCH_AMRWB_MODES - 1) {
-					int mode_step = 2; /*this is the mode, not the actual bitrate*/
-					context->enc_mode = context->enc_mode + mode_step;
-					if (debug || context->debug) {
-						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
-								"AMRWB encoder: Adjusting mode to %d (increase)\n", context->enc_mode);
-					}
+				for (mode = context->enc_mode + 1; mode < SWITCH_AMRWB_MODES - 1 && !amrwb_mode_allowed(context, mode); mode++);
+				if (mode < SWITCH_AMRWB_MODES - 1) {
+					context->enc_mode = (switch_byte_t) mode;
 				}
 			} else if (!strcasecmp(cmd, "decrease")) {
-				if (context->enc_mode > 0) {
-					int mode_step = 2; /*this is the mode, not the actual bitrate*/
-					context->enc_mode = context->enc_mode - mode_step;
-					if (debug || context->debug) {
-						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
-								"AMRWB encoder: Adjusting mode to %d (decrease)\n", context->enc_mode);
-					}
+				for (mode = context->enc_mode - 1; mode >= 0 && !amrwb_mode_allowed(context, mode); mode--);
+				if (mode >= 0) {
+					context->enc_mode = (switch_byte_t) mode;
 				}
 			} else if (!strcasecmp(cmd, "default")) {
-					context->enc_mode = globals.default_bitrate;
-					if (debug || context->debug) {
-						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
-								"AMRWB encoder: Adjusting mode to %d (default)\n", context->enc_mode);
-					}
+				context->enc_mode = amrwb_clamp_mode(context, globals.default_bitrate);
 			} else {
-				/*minimum bitrate (AMRWB mode)*/
-				context->enc_mode = 0;
-				if (debug || context->debug) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
-							"AMRWB encoder: Adjusting mode to %d (minimum)\n", context->enc_mode);
-				}
+				context->enc_mode = amrwb_clamp_mode(context, 0);
+			}
+
+			if (debug || context->debug) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AMRWB encoder: Adjusting mode to %d (%s)\n", context->enc_mode, cmd);
 			}
 		}
 		break;

@@ -66,6 +66,11 @@ static switch_bool_t amrwb_decodes_as_lost(const char *fmtp, const unsigned char
 			!memcmp(out, ref, out_len)) ? SWITCH_TRUE : SWITCH_FALSE;
 }
 
+static void amrwb_adjust(switch_codec_t *codec, const char *how)
+{
+	switch_core_codec_control(codec, SCC_AUDIO_ADJUST_BITRATE, SCCT_STRING, (void *) how, SCCT_NONE, NULL, NULL, NULL);
+}
+
 /* frame type of the payload the encoder produces for 20 ms of silence */
 static int amrwb_encoded_ft(switch_codec_t *codec, switch_bool_t octet_aligned)
 {
@@ -624,6 +629,35 @@ FST_CORE_BEGIN(".")
 			switch_core_codec_destroy(&lost);
 			switch_core_codec_destroy(&damaged);
 			switch_core_codec_destroy(&encoder);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_bitrate_adjustment_stays_in_mode_set)
+		{
+			switch_codec_t codec = { 0 };
+
+			fst_requires(amrwb_init(&codec, "mode-set=0,1,2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 2);
+			amrwb_adjust(&codec, "increase");
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 2);
+			amrwb_adjust(&codec, "decrease");
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 1);
+			amrwb_adjust(&codec, "decrease");
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 0);
+			amrwb_adjust(&codec, "decrease");
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 0);
+			amrwb_adjust(&codec, "increase");
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 1);
+			amrwb_adjust(&codec, "default");
+			fst_check(amrwb_encoded_ft(&codec, SWITCH_TRUE) <= 2);
+			amrwb_adjust(&codec, "minimum");
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 0);
+			switch_core_codec_destroy(&codec);
+
+			fst_requires(amrwb_init(&codec, "mode-set=1,2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			amrwb_adjust(&codec, "minimum");
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 1);
+			switch_core_codec_destroy(&codec);
 		}
 		FST_TEST_END()
 
