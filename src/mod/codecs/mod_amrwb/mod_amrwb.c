@@ -1080,7 +1080,13 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_amrwb_load)
 				char *var = (char *) switch_xml_attr_soft(param, "name");
 				char *val = (char *) switch_xml_attr_soft(param, "value");
 				if (!strcasecmp(var, "default-bitrate")) {
-					globals.default_bitrate = (switch_byte_t) atoi(val);
+					int mode = amrwb_parse_mode(val);
+
+					if (mode < 0) {
+						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "AMRWB: invalid default-bitrate %s, using %d\n", val, SWITCH_AMRWB_DEFAULT_BITRATE);
+					} else {
+						globals.default_bitrate = (switch_byte_t) mode;
+					}
 				}
 				if (!strcasecmp(var, "volte")) {
 					/* ETSI TS 126 236 compatibility:  http://www.etsi.org/deliver/etsi_ts/126200_126299/126236/10.00.00_60/ts_126236v100000p.pdf */

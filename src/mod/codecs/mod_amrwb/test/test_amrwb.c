@@ -914,6 +914,17 @@ FST_CORE_BEGIN(".")
 		}
 		FST_TEST_END()
 
+		FST_TEST_BEGIN(amrwb_ignores_invalid_default_bitrate)
+		{
+			switch_stream_handle_t stream = { 0 };
+
+			SWITCH_STANDARD_STREAM(stream);
+			switch_api_execute("amrwb_show", "", NULL, &stream);
+			fst_check(stream.data && strstr((char *) stream.data, "default-bitrate: 8,"));
+			switch_safe_free(stream.data);
+		}
+		FST_TEST_END()
+
 	}
 	FST_SUITE_END()
 }
