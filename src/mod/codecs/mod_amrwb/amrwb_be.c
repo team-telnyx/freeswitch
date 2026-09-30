@@ -81,8 +81,12 @@ extern switch_bool_t switch_amrwb_pack_be(unsigned char *shift_buf, int n)
 	shift_buf[0] |= (ft >> 1); /* first 3 bits of FT */
 
 	switch_amr_array_lshift(6, shift_buf+1, n);
-	/*make sure we clear the bit - it will be used as padding of the trailing byte */
-	shift_buf[1] |= 1 << 6; /* set bit Q instead of P1 */
+	/* Q from the frame's own ToC */
+	if (save_toc & (1 << 2)) {
+		shift_buf[1] |= 1 << 6;
+	} else {
+		shift_buf[1] &= ~(1 << 6);
+	}
 	if (( ft >> 0 ) & 1) {
 		/* set last bit of TOC instead of P2 */
 		shift_buf[1] |= 1 << 7;
