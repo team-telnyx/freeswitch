@@ -694,7 +694,8 @@ static switch_status_t switch_amrwb_decode(switch_codec_t *codec,
 
 	frame_type = (tmp[0] >> 3) & 0x0f;
 
-	D_IF_decode(context->decoder_state, tmp, (int16_t *) decoded_data, 0);
+	/* Q=0: decoded as a lost frame (the decoder has no SPEECH_BAD/SID_BAD input) */
+	D_IF_decode(context->decoder_state, tmp, (int16_t *) decoded_data, frame_type <= SWITCH_AMRWB_SID_FRAME_TYPE && !(tmp[0] & 0x04));
 	*decoded_data_len = codec->implementation->decoded_bytes_per_packet;
 
 	if (frame_type == SWITCH_AMRWB_SID_FRAME_TYPE) {

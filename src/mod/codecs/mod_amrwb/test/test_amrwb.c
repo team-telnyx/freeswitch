@@ -32,6 +32,7 @@
 #ifndef AMRWB_PASSTHROUGH
 #include <switch.h>
 #include <stdlib.h>
+#include <math.h>
 
 #include <test/switch_test.h>
 
@@ -578,6 +579,51 @@ FST_CORE_BEGIN(".")
 			fst_requires(switch_core_codec_encode(&codec, NULL, pcm, sizeof(pcm), 16000, encoded, &encoded_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
 			fst_check_int_equals(encoded_len, 34);
 			switch_core_codec_destroy(&codec);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_q0_frame_is_decoded_as_bad)
+		{
+			switch_codec_t encoder = { 0 }, damaged = { 0 }, lost = { 0 };
+			static const unsigned char lost_oa[] = { 0xf0, 0x74 };
+			int16_t pcm[320];
+			unsigned char frames[6][64];
+			uint32_t frame_len[6];
+			unsigned char out_damaged[SWITCH_RECOMMENDED_BUFFER_SIZE], out_lost[SWITCH_RECOMMENDED_BUFFER_SIZE];
+			uint32_t len_damaged = 0, len_lost = 0, rate = 16000;
+			unsigned int flag = 0;
+			int f, i;
+
+			fst_requires(amrwb_init(&encoder, "mode-set=2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(amrwb_init(&damaged, "mode-set=2;octet-align=1", SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(amrwb_init(&lost, "mode-set=2;octet-align=1", SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+
+			for (f = 0; f < 6; f++) {
+				for (i = 0; i < 320; i++) {
+					pcm[i] = (int16_t) (8000 * sin(2 * M_PI * 440 * (f * 320 + i) / 16000.0));
+				}
+				frame_len[f] = sizeof(frames[f]);
+				fst_requires(switch_core_codec_encode(&encoder, NULL, pcm, sizeof(pcm), 16000, frames[f], &frame_len[f], &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			}
+			frames[5][1] &= ~0x04;
+
+			/* same history, then the Q=0 frame vs a lost frame */
+			for (f = 0; f < 6; f++) {
+				len_damaged = sizeof(out_damaged);
+				fst_requires(switch_core_codec_decode(&damaged, NULL, frames[f], frame_len[f], 16000, out_damaged, &len_damaged, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+				len_lost = sizeof(out_lost);
+				if (f < 5) {
+					fst_requires(switch_core_codec_decode(&lost, NULL, frames[f], frame_len[f], 16000, out_lost, &len_lost, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+				} else {
+					fst_requires(switch_core_codec_decode(&lost, NULL, (void *) lost_oa, sizeof(lost_oa), 16000, out_lost, &len_lost, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+				}
+			}
+
+			fst_check(len_damaged == len_lost && !memcmp(out_damaged, out_lost, len_lost));
+
+			switch_core_codec_destroy(&lost);
+			switch_core_codec_destroy(&damaged);
+			switch_core_codec_destroy(&encoder);
 		}
 		FST_TEST_END()
 
