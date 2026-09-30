@@ -154,6 +154,19 @@ const int switch_amrwb_frame_bits[] = {132, 177, 253, 285, 317, 365, 397, 461, 4
 
 #define invalid_frame_type (index >= SWITCH_AMRWB_MODES && index != 0xe && index != 0xf) /* include SPEECH_LOST and NO_DATA*/
 
+/* mode-set entry: a speech mode 0-8, else -1 */
+static int amrwb_parse_mode(const char *str)
+{
+	char *end;
+	long mode;
+
+	while (*str == ' ') str++;
+	if (*str < '0' || *str > '9') return -1;
+	mode = strtol(str, &end, 10);
+	while (*end == ' ') end++;
+	return (*end || mode > SWITCH_AMRWB_MODES - 2) ? -1 : (int) mode;
+}
+
 /* no mode-set negotiated: all speech modes allowed */
 static switch_bool_t amrwb_mode_allowed(struct amrwb_context *context, int mode)
 {
@@ -480,9 +493,9 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 						m_argc = switch_separate_string(arg, ',', m_argv, (sizeof(m_argv) / sizeof(m_argv[0])));
 
 						for (y = 0; y < m_argc; y++) {
-							int mode = atoi(m_argv[y]);
+							int mode = amrwb_parse_mode(m_argv[y]);
 
-							if (mode < 0 || mode > SWITCH_AMRWB_MODES - 2) {
+							if (mode < 0) {
 								continue;
 							}
 							context->enc_modes |= (1 << mode);
@@ -1091,9 +1104,9 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_amrwb_load)
 					char *m_argv[SWITCH_AMRWB_MODES-1]; /* AMRWB has 9 modes */
 					m_argc = switch_separate_string(val, ',', m_argv, (sizeof(m_argv) / sizeof(m_argv[0])));
 					for (y = 0; y < m_argc; y++) {
-						int mode = atoi(m_argv[y]);
+						int mode = amrwb_parse_mode(m_argv[y]);
 
-						if (mode < 0 || mode > SWITCH_AMRWB_MODES - 2) {
+						if (mode < 0) {
 							continue;
 						}
 						globals.context.enc_modes |= (1 << mode);

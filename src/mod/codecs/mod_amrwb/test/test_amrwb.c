@@ -793,6 +793,20 @@ FST_CORE_BEGIN(".")
 		}
 		FST_TEST_END()
 
+		FST_TEST_BEGIN(amrwb_mode_set_ignores_non_numeric_entries)
+		{
+			switch_codec_t codec = { 0 };
+
+			fst_requires(amrwb_init(&codec, "mode-set=2,,8;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "mode-set=2,8;"));
+			switch_core_codec_destroy(&codec);
+
+			fst_requires(amrwb_init(&codec, "mode-set=abc,1;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "mode-set=1;"));
+			switch_core_codec_destroy(&codec);
+		}
+		FST_TEST_END()
+
 	}
 	FST_SUITE_END()
 }
