@@ -490,7 +490,7 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 						context->max_red = atoi(arg);
 					} else if (!strcasecmp(data, "mode-set")) {
 						int y, m_argc;
-						char *m_argv[SWITCH_AMRWB_MODES-1]; /* AMRWB has 9 modes */
+						char *m_argv[SWITCH_AMRWB_MAX_FMTP_PARAMS];
 
 						m_argc = switch_separate_string(arg, ',', m_argv, (sizeof(m_argv) / sizeof(m_argv[0])));
 
@@ -1121,7 +1121,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_amrwb_load)
 				}
 				if (!strcasecmp(var, "mode-set")) {
 					int y, m_argc;
-					char *m_argv[SWITCH_AMRWB_MODES-1]; /* AMRWB has 9 modes */
+					char *m_argv[SWITCH_AMRWB_MAX_FMTP_PARAMS];
 					m_argc = switch_separate_string(val, ',', m_argv, (sizeof(m_argv) / sizeof(m_argv[0])));
 					for (y = 0; y < m_argc; y++) {
 						int mode = amrwb_parse_mode(m_argv[y]);
