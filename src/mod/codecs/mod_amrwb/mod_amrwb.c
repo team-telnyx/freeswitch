@@ -237,7 +237,7 @@ static switch_bool_t switch_amrwb_pack_oa(unsigned char *shift_buf, int n)
 	return SWITCH_TRUE;
 }
 
-static int switch_amrwb_relay_sid(switch_codec_t *other_codec, void *decoded_data, uint32_t decoded_data_len, switch_byte_t *encoded_data)
+static int switch_amrwb_relay_sid(switch_codec_t *other_codec, void *decoded_data, uint32_t decoded_data_len, switch_byte_t *encoded_data, switch_byte_t mode)
 {
 	struct amrwb_context *other_context;
 	int size = 0;
@@ -265,6 +265,8 @@ static int switch_amrwb_relay_sid(switch_codec_t *other_codec, void *decoded_dat
 
 	encoded_data[0] = 0xf0;
 	memcpy(encoded_data + 1, other_context->decoded_sid, SWITCH_AMRWB_SID_FRAME_SIZE);
+	/* mode indication: last 4 bits, the mode this encoder sends */
+	encoded_data[SWITCH_AMRWB_SID_FRAME_SIZE] = (encoded_data[SWITCH_AMRWB_SID_FRAME_SIZE] & 0xf0) | (mode & 0x0f);
 	size = SWITCH_AMRWB_SID_FRAME_SIZE;
 
 done:
@@ -648,7 +650,7 @@ static switch_status_t switch_amrwb_encode(switch_codec_t *codec,
 		return SWITCH_STATUS_FALSE;
 	}
 
-	relayed_size = switch_amrwb_relay_sid(other_codec, decoded_data, decoded_data_len, encoded_data);
+	relayed_size = switch_amrwb_relay_sid(other_codec, decoded_data, decoded_data_len, encoded_data, mode);
 	if (relayed_size) {
 		n = relayed_size;
 	}
