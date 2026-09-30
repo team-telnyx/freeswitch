@@ -430,8 +430,13 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 						m_argc = switch_separate_string(arg, ',', m_argv, (sizeof(m_argv) / sizeof(m_argv[0])));
 
 						for (y = 0; y < m_argc; y++) {
-							context->enc_modes |= (1 << atoi(m_argv[y]));
-							context->enc_mode = atoi(m_argv[y]);
+							int mode = atoi(m_argv[y]);
+
+							if (mode < 0 || mode > SWITCH_AMRWB_MODES - 2) {
+								continue;
+							}
+							context->enc_modes |= (1 << mode);
+							context->enc_mode = (switch_byte_t) mode;
 						}
 					}
 				}
@@ -997,8 +1002,13 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_amrwb_load)
 					char *m_argv[SWITCH_AMRWB_MODES-1]; /* AMRWB has 9 modes */
 					m_argc = switch_separate_string(val, ',', m_argv, (sizeof(m_argv) / sizeof(m_argv[0])));
 					for (y = 0; y < m_argc; y++) {
-						globals.context.enc_modes |= (1 << atoi(m_argv[y]));
-						globals.context.enc_mode = atoi(m_argv[y]);
+						int mode = atoi(m_argv[y]);
+
+						if (mode < 0 || mode > SWITCH_AMRWB_MODES - 2) {
+							continue;
+						}
+						globals.context.enc_modes |= (1 << mode);
+						globals.context.enc_mode = (switch_byte_t) mode;
 					}
 				}
 				if (!strcasecmp(var, "debug")) {
