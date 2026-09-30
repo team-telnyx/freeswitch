@@ -43,9 +43,9 @@
  * adjust-bitrate
  *		Vary bitrate according to feedback from RTCP.
  * force-oa
- *		Configure codec in octet aligned mode.
+ *		Octet aligned when the fmtp does not state octet-align.
  * force-be
- *		Configure codec in bandwidth efficient mode.
+ *		Bandwidth efficient when the fmtp does not state octet-align (the RFC 4867 default).
  * mode-set-overwrite
  *		When answering a call, use codec bitrate modes from mode-set param, instead of mirroring the OFFER.
  * mode-set-overwrite-with-default-bitrate
