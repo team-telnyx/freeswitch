@@ -501,6 +501,32 @@ FST_CORE_BEGIN(".")
 		}
 		FST_TEST_END()
 
+		FST_TEST_BEGIN(amrwb_does_not_match_unsupported_payload_options)
+		{
+			switch_codec_interface_t *codec_interface = switch_loadable_module_get_codec_interface("AMR-WB", "mod_amrwb");
+			const switch_codec_implementation_t *impl;
+			int matched = 0, unsupported_matched = 0;
+
+			fst_requires(codec_interface);
+			for (impl = codec_interface->implementations; impl; impl = impl->next) {
+				if (!impl->matches_fmtp) {
+					continue;
+				}
+				matched += impl->matches_fmtp("octet-align=1", impl->fmtp) == SWITCH_STATUS_SUCCESS;
+				unsupported_matched += impl->matches_fmtp("octet-align=1;crc=1", impl->fmtp) == SWITCH_STATUS_SUCCESS;
+				unsupported_matched += impl->matches_fmtp("octet-align=1;robust-sorting=1", impl->fmtp) == SWITCH_STATUS_SUCCESS;
+				unsupported_matched += impl->matches_fmtp("octet-align=1;interleaving=4", impl->fmtp) == SWITCH_STATUS_SUCCESS;
+				unsupported_matched += impl->matches_fmtp("octet-align=1;channels=2", impl->fmtp) == SWITCH_STATUS_SUCCESS;
+				unsupported_matched += impl->matches_fmtp(impl->fmtp, "octet-align=1;crc=1") == SWITCH_STATUS_SUCCESS;
+				unsupported_matched += impl->matches_fmtp(impl->fmtp, "octet-align=1;interleaving=4") == SWITCH_STATUS_SUCCESS;
+			}
+			UNPROTECT_INTERFACE(codec_interface);
+
+			fst_check(matched > 0);
+			fst_check_int_equals(unsupported_matched, 0);
+		}
+		FST_TEST_END()
+
 	}
 	FST_SUITE_END()
 }
