@@ -939,6 +939,47 @@ FST_CORE_BEGIN(".")
 		}
 		FST_TEST_END()
 
+		FST_TEST_BEGIN(amrwb_only_the_read_codec_passes_cmr_to_the_write_codec)
+		{
+			switch_core_session_t *session = NULL;
+			switch_call_cause_t cause;
+			switch_codec_t writer = { 0 }, reader = { 0 }, other = { 0 };
+			static const unsigned char cmr0_oa[] = { 0x00, 0x7c };
+			unsigned char out[SWITCH_RECOMMENDED_BUFFER_SIZE];
+			uint32_t out_len, rate = 16000;
+			unsigned int flag = 0;
+			int ft;
+
+			fst_requires(switch_ivr_originate(NULL, &session, &cause, "null/amrwb-cmr", 0, NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) == SWITCH_STATUS_SUCCESS);
+			fst_requires(amrwb_init(&writer, "mode-set=0,1,2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(amrwb_init(&reader, "mode-set=0,1,2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(amrwb_init(&other, "mode-set=0,1,2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			switch_core_session_unset_read_codec(session);
+			switch_core_session_unset_write_codec(session);
+			fst_requires(switch_core_session_set_write_codec(session, &writer) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_core_session_set_read_codec(session, &reader) == SWITCH_STATUS_SUCCESS);
+			writer.session = reader.session = other.session = session;
+
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&other, NULL, (void *) cmr0_oa, sizeof(cmr0_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			ft = amrwb_encoded_ft(&writer, SWITCH_TRUE);
+			fst_check_int_equals(ft, 2);
+
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&reader, NULL, (void *) cmr0_oa, sizeof(cmr0_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			ft = amrwb_encoded_ft(&writer, SWITCH_TRUE);
+			fst_check_int_equals(ft, 0);
+
+			switch_core_session_unset_read_codec(session);
+			switch_core_session_unset_write_codec(session);
+			switch_channel_hangup(switch_core_session_get_channel(session), SWITCH_CAUSE_NORMAL_CLEARING);
+			switch_core_session_rwunlock(session);
+			switch_core_codec_destroy(&other);
+			switch_core_codec_destroy(&reader);
+			switch_core_codec_destroy(&writer);
+		}
+		FST_TEST_END()
+
 		FST_TEST_BEGIN(amrwb_encoder_mode_matches_answered_mode_set)
 		{
 			switch_codec_t codec = { 0 };

@@ -210,7 +210,7 @@ static switch_byte_t amrwb_next_mode(struct amrwb_context *context, switch_byte_
 	return context->cur_mode;
 }
 
-/* CMR 15: no mode request */
+/* CMR 15: no mode request; the session read codec also sets it on the session write codec */
 static void amrwb_set_cmr(switch_codec_t *codec, struct amrwb_context *context, uint8_t cmr)
 {
 	switch_codec_t *write_codec;
@@ -223,7 +223,8 @@ static void amrwb_set_cmr(switch_codec_t *codec, struct amrwb_context *context, 
 
 	context->cmr = cmr;
 
-	if (codec->session && (write_codec = switch_core_session_get_write_codec(codec->session)) && write_codec != codec &&
+	if (codec->session && codec == switch_core_session_get_read_codec(codec->session) &&
+		(write_codec = switch_core_session_get_write_codec(codec->session)) && write_codec != codec &&
 		write_codec->implementation && write_codec->implementation->modname && !strcmp(write_codec->implementation->modname, "mod_amrwb") &&
 		(write_context = write_codec->private_info)) {
 		write_context->cmr = cmr;
