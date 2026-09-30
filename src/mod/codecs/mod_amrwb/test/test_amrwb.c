@@ -149,6 +149,61 @@ static int amrwb_encoded_ft(switch_codec_t *codec, switch_bool_t octet_aligned)
 
 	return octet_aligned ? (encoded[1] >> 3) & 0x0f : ((encoded[0] & 0x07) << 1) | (encoded[1] >> 7);
 }
+struct amrwb_cmr_feeder {
+	switch_codec_t *reader;
+	int frames;
+};
+
+/* decodes frames with CMR 0, 1, 2 in turn on the session read codec */
+static void *SWITCH_THREAD_FUNC amrwb_cmr_feeder_run(switch_thread_t *thread, void *obj)
+{
+	struct amrwb_cmr_feeder *feeder = (struct amrwb_cmr_feeder *) obj;
+	unsigned char payload[2] = { 0x00, 0x7c };
+	unsigned char out[SWITCH_RECOMMENDED_BUFFER_SIZE];
+	uint32_t out_len, rate = 16000;
+	unsigned int flag = 0;
+	int i;
+
+	for (i = 0; i < feeder->frames; i++) {
+		payload[0] = (unsigned char) ((i % 3) << 4);
+		out_len = sizeof(out);
+		switch_core_codec_decode(feeder->reader, NULL, payload, sizeof(payload), 16000, out, &out_len, &rate, &flag);
+	}
+
+	return NULL;
+}
+
+/* a session with its own AMR-WB read and write codecs */
+static switch_core_session_t *amrwb_cmr_session(switch_codec_t *reader, switch_codec_t *writer, switch_memory_pool_t *pool)
+{
+	switch_core_session_t *session = NULL;
+	switch_call_cause_t cause;
+
+	if (switch_ivr_originate(NULL, &session, &cause, "null/amrwb-cmr-handoff", 0, NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) != SWITCH_STATUS_SUCCESS) {
+		return NULL;
+	}
+	amrwb_init(writer, "mode-set=0,1,2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, pool);
+	amrwb_init(reader, "mode-set=0,1,2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, pool);
+	switch_core_session_unset_read_codec(session);
+	switch_core_session_unset_write_codec(session);
+	switch_core_session_set_write_codec(session, writer);
+	switch_core_session_set_read_codec(session, reader);
+	writer->session = reader->session = session;
+
+	return session;
+}
+
+/* codecs that used the session go before it */
+static void amrwb_cmr_session_end(switch_core_session_t *session, switch_codec_t *a, switch_codec_t *b)
+{
+	switch_core_session_unset_read_codec(session);
+	switch_core_session_unset_write_codec(session);
+	switch_core_codec_destroy(a);
+	switch_core_codec_destroy(b);
+	switch_channel_hangup(switch_core_session_get_channel(session), SWITCH_CAUSE_NORMAL_CLEARING);
+	switch_core_session_rwunlock(session);
+}
+
 static const char *amrwb_conf_settings;
 
 static switch_xml_t amrwb_conf_lookup(const char *section, const char *tag_name, const char *key_name, const char *key_value, switch_event_t *params, void *user_data)
@@ -937,6 +992,105 @@ FST_CORE_BEGIN(".")
 			ft = amrwb_encoded_ft(&codec, SWITCH_TRUE);
 			fst_check_int_equals(ft, 2);
 			switch_core_codec_destroy(&codec);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_only_the_read_codec_passes_cmr_to_the_write_codec)
+		{
+			switch_core_session_t *session = NULL;
+			switch_call_cause_t cause;
+			switch_codec_t writer = { 0 }, reader = { 0 }, other = { 0 };
+			static const unsigned char cmr0_oa[] = { 0x00, 0x7c };
+			unsigned char out[SWITCH_RECOMMENDED_BUFFER_SIZE];
+			uint32_t out_len, rate = 16000;
+			unsigned int flag = 0;
+			int ft;
+
+			fst_requires(switch_ivr_originate(NULL, &session, &cause, "null/amrwb-cmr", 0, NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) == SWITCH_STATUS_SUCCESS);
+			fst_requires(amrwb_init(&writer, "mode-set=0,1,2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(amrwb_init(&reader, "mode-set=0,1,2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(amrwb_init(&other, "mode-set=0,1,2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			switch_core_session_unset_read_codec(session);
+			switch_core_session_unset_write_codec(session);
+			fst_requires(switch_core_session_set_write_codec(session, &writer) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_core_session_set_read_codec(session, &reader) == SWITCH_STATUS_SUCCESS);
+			writer.session = reader.session = other.session = session;
+
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&other, NULL, (void *) cmr0_oa, sizeof(cmr0_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			ft = amrwb_encoded_ft(&writer, SWITCH_TRUE);
+			fst_check_int_equals(ft, 2);
+
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&reader, NULL, (void *) cmr0_oa, sizeof(cmr0_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			ft = amrwb_encoded_ft(&writer, SWITCH_TRUE);
+			fst_check_int_equals(ft, 0);
+
+			switch_core_codec_destroy(&other);
+			amrwb_cmr_session_end(session, &reader, &writer);
+		}
+		FST_TEST_END()
+
+		/* the request ends with the read codec that received it (e.g. replaced on re-INVITE) */
+		FST_TEST_BEGIN(amrwb_cmr_request_ends_with_the_read_codec)
+		{
+			switch_core_session_t *session;
+			switch_codec_t writer = { 0 }, reader = { 0 }, reader2 = { 0 };
+			static const unsigned char cmr0_oa[] = { 0x00, 0x7c };
+			unsigned char out[SWITCH_RECOMMENDED_BUFFER_SIZE];
+			uint32_t out_len = sizeof(out), rate = 16000;
+			unsigned int flag = 0;
+			int ft;
+
+			fst_requires((session = amrwb_cmr_session(&reader, &writer, fst_pool)));
+			fst_requires(switch_core_codec_decode(&reader, NULL, (void *) cmr0_oa, sizeof(cmr0_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			ft = amrwb_encoded_ft(&writer, SWITCH_TRUE);
+			fst_check_int_equals(ft, 0);
+
+			switch_core_session_unset_read_codec(session);
+			switch_core_codec_destroy(&reader);
+			fst_requires(amrwb_init(&reader2, "mode-set=0,1,2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_core_session_set_read_codec(session, &reader2) == SWITCH_STATUS_SUCCESS);
+			reader2.session = session;
+			ft = amrwb_encoded_ft(&writer, SWITCH_TRUE);
+			fst_check_int_equals(ft, 2);
+
+			amrwb_cmr_session_end(session, &reader2, &writer);
+		}
+		FST_TEST_END()
+
+		/* decode on the session read codec while the session write codec encodes */
+		FST_TEST_BEGIN(amrwb_cmr_handoff_with_concurrent_decode_and_encode)
+		{
+			switch_core_session_t *session;
+			switch_codec_t writer = { 0 }, reader = { 0 };
+			struct amrwb_cmr_feeder feeder = { 0 };
+			switch_thread_t *thread = NULL;
+			switch_threadattr_t *attr = NULL;
+			switch_status_t retval;
+			static const unsigned char cmr0_oa[] = { 0x00, 0x7c };
+			unsigned char out[SWITCH_RECOMMENDED_BUFFER_SIZE];
+			uint32_t out_len = sizeof(out), rate = 16000;
+			unsigned int flag = 0;
+			int i, ft, outside = 0;
+
+			fst_requires((session = amrwb_cmr_session(&reader, &writer, fst_pool)));
+			feeder.reader = &reader;
+			feeder.frames = 3000;
+			switch_threadattr_create(&attr, fst_pool);
+			fst_requires(switch_thread_create(&thread, attr, amrwb_cmr_feeder_run, &feeder, fst_pool) == SWITCH_STATUS_SUCCESS);
+			for (i = 0; i < 1000; i++) {
+				ft = amrwb_encoded_ft(&writer, SWITCH_TRUE);
+				if (ft < 0 || ft > 2) outside++;
+			}
+			switch_thread_join(&retval, thread);
+			fst_check_int_equals(outside, 0);
+
+			fst_requires(switch_core_codec_decode(&reader, NULL, (void *) cmr0_oa, sizeof(cmr0_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			ft = amrwb_encoded_ft(&writer, SWITCH_TRUE);
+			fst_check_int_equals(ft, 0);
+
+			amrwb_cmr_session_end(session, &reader, &writer);
 		}
 		FST_TEST_END()
 
