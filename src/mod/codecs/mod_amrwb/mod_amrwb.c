@@ -108,7 +108,7 @@ typedef enum {
 struct amrwb_context {
 	void *encoder_state;
 	void *decoder_state;
-	switch_byte_t enc_modes;
+	uint16_t enc_modes;
 	switch_byte_t enc_mode;
 	uint32_t change_period;
 	switch_byte_t max_ptime;
