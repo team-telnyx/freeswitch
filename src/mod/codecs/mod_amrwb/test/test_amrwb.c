@@ -90,6 +90,16 @@ static switch_bool_t amrwb_decode_same(const char *fmtp, const unsigned char *a,
 	return (sa == SWITCH_STATUS_SUCCESS && sb == SWITCH_STATUS_SUCCESS && len_a == len_b && !memcmp(out_a, out_b, len_a)) ? SWITCH_TRUE : SWITCH_FALSE;
 }
 
+static int amrwb_warning_lines = 0;
+
+static switch_status_t amrwb_count_warnings(const switch_log_node_t *node, switch_log_level_t level)
+{
+	if (node->level <= SWITCH_LOG_WARNING && strstr(node->file, "mod_amrwb")) {
+		amrwb_warning_lines++;
+	}
+	return SWITCH_STATUS_SUCCESS;
+}
+
 /* frame type of the payload the encoder produces for 20 ms of silence */
 static int amrwb_encoded_ft(switch_codec_t *codec, switch_bool_t octet_aligned)
 {
@@ -846,6 +856,32 @@ FST_CORE_BEGIN(".")
 			fst_requires(amrwb_init(&codec, "mode-set=abc,1;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
 			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "mode-set=1;"));
 			switch_core_codec_destroy(&codec);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_concealment_does_not_flood_the_log)
+		{
+			switch_codec_t codec = { 0 };
+			static const unsigned char multi_oa[] = { 0xf0, 0xcc, 0x4c, 0xe3, 0xdf, 0x3d, 0xe0, 0x02, 0xe3, 0xdf, 0x3d, 0xe0, 0x02 };
+			unsigned char out[SWITCH_RECOMMENDED_BUFFER_SIZE];
+			uint32_t out_len, rate = 16000;
+			unsigned int flag = 0;
+			int i;
+
+			fst_requires(amrwb_init(&codec, "mode-set=2;octet-align=1", SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			switch_yield(200000);
+			amrwb_warning_lines = 0;
+			switch_log_bind_logger(amrwb_count_warnings, SWITCH_LOG_DEBUG, SWITCH_FALSE);
+			for (i = 0; i < 100; i++) {
+				out_len = sizeof(out);
+				switch_core_codec_decode(&codec, NULL, (void *) multi_oa, sizeof(multi_oa), 16000, out, &out_len, &rate, &flag);
+			}
+			switch_yield(500000);
+			switch_log_unbind_logger(amrwb_count_warnings);
+			switch_core_codec_destroy(&codec);
+
+			fst_check(amrwb_warning_lines >= 1);
+			fst_check(amrwb_warning_lines <= 2);
 		}
 		FST_TEST_END()
 
