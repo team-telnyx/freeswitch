@@ -127,6 +127,7 @@ struct amrwb_context {
 	switch_bool_t decoded_sid_valid;
 	switch_mutex_t *decoded_sid_mutex;
 	switch_byte_t cmr;
+	uint32_t concealed;
 };
 
 #define SWITCH_AMRWB_DEFAULT_BITRATE AMRWB_BITRATE_24K
@@ -214,26 +215,26 @@ static switch_bool_t switch_amrwb_unpack_oa(unsigned char *buf, uint8_t *tmp, in
 	int framesz;
 
 	if (!buf || !tmp || encoded_data_len < 2) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB decoder (OA): Invalid frame size: %d\n", encoded_data_len);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AMRWB decoder (OA): Invalid frame size: %d\n", encoded_data_len);
 		return SWITCH_FALSE;
 	}
 
 	buf++;/* CMR skip */
 	tocs = buf;
 	if (tocs[0] & 0x80) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB decoder (OA): Multiple frames per payload are not supported\n");
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AMRWB decoder (OA): Multiple frames per payload are not supported\n");
 		return SWITCH_FALSE;
 	}
 	index = ((tocs[0]>>3) & 0xf);
 	buf++; /* point to voice payload */
 
 	if (invalid_frame_type) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB decoder (OA): Invalid TOC: 0x%x", index);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AMRWB decoder (OA): Invalid TOC: 0x%x\n", index);
 		return SWITCH_FALSE;
 	}
 	framesz = switch_amrwb_frame_sizes[index];
 	if (encoded_data_len < framesz + 2) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB decoder (OA): Invalid frame size: %d\n", framesz);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AMRWB decoder (OA): Invalid frame size: %d\n", framesz);
 		return SWITCH_FALSE;
 	}
 	tmp[0] = tocs[0];
@@ -746,7 +747,6 @@ static switch_status_t switch_amrwb_decode(switch_codec_t *codec,
 	if (switch_test_flag(context, AMRWB_OPT_OCTET_ALIGN)) {
 		/* Octed Aligned */
 		if (!switch_amrwb_unpack_oa(buf, tmp, encoded_data_len)) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB decoder (OA): Invalid frame size: %d\n", encoded_data_len);
 			goto conceal;
 		}
 	} else {
@@ -778,6 +778,9 @@ static switch_status_t switch_amrwb_decode(switch_codec_t *codec,
 
 conceal:
 	/* undecodable payload: treat as a lost frame */
+	if (context->concealed++ % 250 == 0) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "AMRWB decoder: %u undecodable payloads concealed\n", context->concealed);
+	}
 	tmp[0] = SWITCH_AMRWB_SPEECH_LOST_TOC;
 	D_IF_decode(context->decoder_state, tmp, (int16_t *) decoded_data, 0);
 	*decoded_data_len = codec->implementation->decoded_bytes_per_packet;
