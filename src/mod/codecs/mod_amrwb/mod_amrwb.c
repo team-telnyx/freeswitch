@@ -960,7 +960,7 @@ static char *generate_fmtp(switch_memory_pool_t *pool , int octet_align)
 
 #ifndef AMRWB_PASSTHROUGH
 	// ENGDESK-15706
-	if (globals.context.enc_modes && !globals.mode_set_overwrite) {
+	if (globals.context.enc_modes && !(globals.mode_set_overwrite && globals.mode_set_overwrite_with_default_bitrate)) {
 			for (i = 0; SWITCH_AMRWB_MODES-1 > i; ++i) {
 				if (globals.context.enc_modes & (1 << i)) {
 					j++;
