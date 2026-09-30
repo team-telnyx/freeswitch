@@ -104,6 +104,7 @@ typedef enum {
 
 #define SWITCH_AMRWB_SID_FRAME_TYPE 9
 #define SWITCH_AMRWB_SID_FRAME_SIZE 6
+#define SWITCH_AMRWB_SPEECH_LOST_TOC ((14 << 3) | (1 << 2))
 
 struct amrwb_context {
 	void *encoder_state;
@@ -661,7 +662,7 @@ static switch_status_t switch_amrwb_decode(switch_codec_t *codec,
 
 	if (!encoded_data || encoded_data_len > SWITCH_AMRWB_OUT_MAX_SIZE) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB decoder: Invalid encoded data or length: %d\n", encoded_data_len);
-		goto decode_error;
+		goto conceal;
 	}
 
 	memcpy(buf, encoded_data, encoded_data_len);
@@ -676,12 +677,12 @@ static switch_status_t switch_amrwb_decode(switch_codec_t *codec,
 		/* Octed Aligned */
 		if (!switch_amrwb_unpack_oa(buf, tmp, encoded_data_len)) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB decoder (OA): Invalid frame size: %d\n", encoded_data_len);
-			goto decode_error;
+			goto conceal;
 		}
 	} else {
 		/* Bandwidth Efficient */
 		if (!switch_amrwb_unpack_be(buf, tmp, encoded_data_len)) {
-			goto decode_error;
+			goto conceal;
 		}
 	}
 
@@ -700,6 +701,13 @@ static switch_status_t switch_amrwb_decode(switch_codec_t *codec,
 		switch_mutex_unlock(context->decoded_sid_mutex);
 	}
 
+	return SWITCH_STATUS_SUCCESS;
+
+conceal:
+	/* undecodable payload: treat as a lost frame */
+	tmp[0] = SWITCH_AMRWB_SPEECH_LOST_TOC;
+	D_IF_decode(context->decoder_state, tmp, (int16_t *) decoded_data, 0);
+	*decoded_data_len = codec->implementation->decoded_bytes_per_packet;
 	return SWITCH_STATUS_SUCCESS;
 
 decode_error:
