@@ -726,9 +726,13 @@ static switch_status_t switch_amrwb_decode(switch_codec_t *codec,
 	context->decoded_sid_pcm_len = 0;
 	switch_mutex_unlock(context->decoded_sid_mutex);
 
-	if (!encoded_data || encoded_data_len > SWITCH_AMRWB_OUT_MAX_SIZE) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB decoder: Invalid encoded data or length: %d\n", encoded_data_len);
+	if (!encoded_data) {
 		goto conceal;
+	}
+
+	/* bytes after the largest frame are padding */
+	if (encoded_data_len > SWITCH_AMRWB_OUT_MAX_SIZE) {
+		encoded_data_len = SWITCH_AMRWB_OUT_MAX_SIZE;
 	}
 
 	memcpy(buf, encoded_data, encoded_data_len);
