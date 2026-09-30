@@ -1071,6 +1071,25 @@ FST_CORE_BEGIN(".")
 		}
 		FST_TEST_END()
 
+		FST_TEST_BEGIN(amrwb_overwrite_offers_the_answered_mode_set)
+		{
+			switch_codec_interface_t *codec_interface;
+			const switch_codec_implementation_t *impl;
+			int offers = 0, configured = 0;
+
+			fst_requires(amrwb_reload("<param name=\"mode-set\" value=\"0,1,2\"/><param name=\"mode-set-overwrite\" value=\"1\"/>"
+									  "<param name=\"mode-set-overwrite-with-default-bitrate\" value=\"0\"/>") == SWITCH_STATUS_SUCCESS);
+			fst_requires((codec_interface = switch_loadable_module_get_codec_interface("AMR-WB", "mod_amrwb")));
+			for (impl = codec_interface->implementations; impl; impl = impl->next) {
+				offers++;
+				configured += impl->fmtp && strstr(impl->fmtp, "mode-set=0,1,2") != NULL;
+			}
+			UNPROTECT_INTERFACE(codec_interface);
+			fst_check(offers > 0 && configured == offers);
+			fst_requires(amrwb_reload(NULL) == SWITCH_STATUS_SUCCESS);
+		}
+		FST_TEST_END()
+
 	}
 	FST_SUITE_END()
 }
