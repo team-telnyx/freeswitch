@@ -71,6 +71,25 @@ static void amrwb_adjust(switch_codec_t *codec, const char *how)
 	switch_core_codec_control(codec, SCC_AUDIO_ADJUST_BITRATE, SCCT_STRING, (void *) how, SCCT_NONE, NULL, NULL, NULL);
 }
 
+/* two fresh decoders produce the same audio for two payloads */
+static switch_bool_t amrwb_decode_same(const char *fmtp, const unsigned char *a, uint32_t a_len, const unsigned char *b, uint32_t b_len, switch_memory_pool_t *pool)
+{
+	switch_codec_t ca = { 0 }, cb = { 0 };
+	unsigned char out_a[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 }, out_b[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
+	uint32_t len_a = sizeof(out_a), len_b = sizeof(out_b), rate = 16000;
+	unsigned int flag = 0;
+	switch_status_t sa, sb;
+
+	amrwb_init(&ca, fmtp, SWITCH_CODEC_FLAG_DECODE, pool);
+	amrwb_init(&cb, fmtp, SWITCH_CODEC_FLAG_DECODE, pool);
+	sa = switch_core_codec_decode(&ca, NULL, (void *) a, a_len, 16000, out_a, &len_a, &rate, &flag);
+	sb = switch_core_codec_decode(&cb, NULL, (void *) b, b_len, 16000, out_b, &len_b, &rate, &flag);
+	switch_core_codec_destroy(&ca);
+	switch_core_codec_destroy(&cb);
+
+	return (sa == SWITCH_STATUS_SUCCESS && sb == SWITCH_STATUS_SUCCESS && len_a == len_b && !memcmp(out_a, out_b, len_a)) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
 /* frame type of the payload the encoder produces for 20 ms of silence */
 static int amrwb_encoded_ft(switch_codec_t *codec, switch_bool_t octet_aligned)
 {
@@ -495,7 +514,6 @@ FST_CORE_BEGIN(".")
 			static const unsigned char multi_be[] = { 0xfc, 0xf8, 0xf7, 0xcf, 0x78, 0x00, 0x80 };
 			static const unsigned char multi_oa[] = { 0xf0, 0xcc, 0x4c, 0xe3, 0xdf, 0x3d, 0xe0, 0x02, 0xe3, 0xdf, 0x3d, 0xe0, 0x02 };
 			static const unsigned char truncated_sid_be[] = { 0xf4, 0xf8, 0xf7, 0xcf, 0x78, 0x00 };
-			unsigned char oversized[70] = { 0xf0, 0x44 };
 
 			fst_check(amrwb_decodes_as_lost("octet-align=0", short_payload, sizeof(short_payload), fst_pool));
 			fst_check(amrwb_decodes_as_lost("octet-align=0", reserved_be, sizeof(reserved_be), fst_pool));
@@ -503,7 +521,31 @@ FST_CORE_BEGIN(".")
 			fst_check(amrwb_decodes_as_lost("octet-align=0", multi_be, sizeof(multi_be), fst_pool));
 			fst_check(amrwb_decodes_as_lost("octet-align=1", multi_oa, sizeof(multi_oa), fst_pool));
 			fst_check(amrwb_decodes_as_lost("octet-align=0", truncated_sid_be, sizeof(truncated_sid_be), fst_pool));
-			fst_check(amrwb_decodes_as_lost("octet-align=1", oversized, sizeof(oversized), fst_pool));
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_ignores_padding_after_the_frame)
+		{
+			const char *fmtps[] = { "mode-set=2;octet-align=1", "mode-set=2;octet-align=0" };
+			int i;
+
+			for (i = 0; i < 2; i++) {
+				switch_codec_t encoder = { 0 };
+				int16_t pcm[320];
+				unsigned char frame[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
+				uint32_t frame_len = sizeof(frame), rate = 16000;
+				unsigned int flag = 0;
+				int j;
+
+				for (j = 0; j < 320; j++) pcm[j] = (int16_t) (8000 * sin(2 * M_PI * 440 * j / 16000.0));
+				fst_requires(amrwb_init(&encoder, fmtps[i], SWITCH_CODEC_FLAG_ENCODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+				fst_requires(switch_core_codec_encode(&encoder, NULL, pcm, sizeof(pcm), 16000, frame, &frame_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+				switch_core_codec_destroy(&encoder);
+
+				fst_check(amrwb_decode_same(fmtps[i], frame, frame_len, frame, frame_len + 3, fst_pool));
+				fst_check(!amrwb_decodes_as_lost(fmtps[i], frame, frame_len, fst_pool));
+				fst_check(amrwb_decodes_as_lost(fmtps[i], frame, frame_len - 1, fst_pool));
+			}
 		}
 		FST_TEST_END()
 

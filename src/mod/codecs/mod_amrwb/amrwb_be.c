@@ -126,7 +126,7 @@ extern switch_bool_t switch_amrwb_unpack_be(unsigned char *encoded_buf, uint8_t 
 	}
 
 	framesz = switch_amrwb_frame_sizes[index];
-	if (encoded_len * 8 < switch_amrwb_frame_bits[index] + 10) {
+	if (encoded_len < (switch_amrwb_frame_bits[index] + 10 + 7) / 8) {
 		return SWITCH_FALSE;
 	}
 	tmp[0] = shift_tocs[0]; /* save TOC */
