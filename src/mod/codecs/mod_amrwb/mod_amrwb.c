@@ -822,12 +822,45 @@ static int extract_octet_align(const char *fmtp)
 	return oa;
 }
 
+/* crc, robust-sorting, interleaving and multi-channel payloads are not supported */
+static switch_bool_t has_unsupported_option(const char *fmtp)
+{
+	switch_bool_t unsupported = SWITCH_FALSE;
+	int argc;
+	char *argv[32];
+	char *fmtp_dup;
+
+	if (zstr(fmtp) || !(fmtp_dup = strdup(fmtp))) return SWITCH_FALSE;
+
+	argc = switch_separate_string(fmtp_dup, ';', argv, (int)(sizeof(argv) / sizeof(argv[0])));
+	for (int i = 0; i < argc && !unsupported; ++i) {
+		char *data = argv[i];
+		char *arg;
+		while (*data == ' ') data++;
+		if (!(arg = strchr(data, '='))) continue;
+		*arg++ = '\0';
+		while (*arg == ' ') arg++;
+		if (!strcasecmp(data, "crc") || !strcasecmp(data, "robust-sorting") || !strcasecmp(data, "interleaving")) {
+			unsupported = atoi(arg) != 0;
+		} else if (!strcasecmp(data, "channels")) {
+			unsupported = atoi(arg) > 1;
+		}
+	}
+
+	switch_safe_free(fmtp_dup);
+	return unsupported;
+}
+
 static switch_status_t matches_fmtp(const char *fmtp, const char *codec_fmtp)
 {
 	int oa1 = extract_octet_align(fmtp);
 	int oa2 = extract_octet_align(codec_fmtp);
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AMRWB fmtp: %s, codec_fmtp: %s\n", switch_str_nil(fmtp), switch_str_nil(codec_fmtp));
+
+	if (has_unsupported_option(fmtp) || has_unsupported_option(codec_fmtp)) {
+		return SWITCH_STATUS_FALSE;
+	}
 
 	return (oa1 == oa2) ? SWITCH_STATUS_SUCCESS : SWITCH_STATUS_FALSE;
 }
