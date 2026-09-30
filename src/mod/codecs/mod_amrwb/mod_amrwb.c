@@ -1031,7 +1031,7 @@ SWITCH_STANDARD_API(mod_amrwb_show)
 {
 	if (stream && stream->write_function) {
 		mod_amrwb_configuration_snprintf();
-		stream->write_function(stream, AMRWB_CONFIGURATION);
+		stream->write_function(stream, "%s", AMRWB_CONFIGURATION);
 	}
 	return SWITCH_STATUS_SUCCESS;
 }
