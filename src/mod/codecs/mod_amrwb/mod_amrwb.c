@@ -534,6 +534,7 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 			if (!answer_modes || (globals.mode_set_overwrite && globals.mode_set_overwrite_with_default_bitrate)) {
 				answer_modes = (uint16_t) (1 << globals.default_bitrate);
 			}
+			context->enc_modes = answer_modes;
 
 			fmtptmp_pos = switch_snprintf(fmtptmp, sizeof(fmtptmp), "mode-set=");
 			for (i = 0; SWITCH_AMRWB_MODES-1 > i; ++i) {

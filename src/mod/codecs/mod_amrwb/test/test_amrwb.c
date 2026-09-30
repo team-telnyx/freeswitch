@@ -781,6 +781,19 @@ FST_CORE_BEGIN(".")
 		}
 		FST_TEST_END()
 
+		FST_TEST_BEGIN(amrwb_answered_mode_set_bounds_adjustments)
+		{
+			switch_codec_t codec = { 0 };
+
+			/* offer without mode-set: the answered mode-set (configured 0,1,2) is binding */
+			fst_requires(amrwb_init(&codec, "octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(codec.fmtp_out && strstr(codec.fmtp_out, "mode-set=0,1,2;"));
+			amrwb_adjust(&codec, "increase");
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 2);
+			switch_core_codec_destroy(&codec);
+		}
+		FST_TEST_END()
+
 	}
 	FST_SUITE_END()
 }
