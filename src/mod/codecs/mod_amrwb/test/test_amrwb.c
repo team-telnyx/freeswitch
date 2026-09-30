@@ -564,6 +564,23 @@ FST_CORE_BEGIN(".")
 		}
 		FST_TEST_END()
 
+		FST_TEST_BEGIN(amrwb_parses_long_fmtp)
+		{
+			switch_codec_t codec = { 0 };
+			int16_t pcm[320] = { 0 };
+			unsigned char encoded[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
+			uint32_t encoded_len = sizeof(encoded), rate = 16000;
+			unsigned int flag = 0;
+
+			fst_requires(amrwb_init(&codec, "a=1;b=1;c=1;d=1;e=1;f=1;g=1;h=1;i=1;j=1;k=1;mode-set=2;octet-align=1",
+									SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "mode-set=2;"));
+			fst_requires(switch_core_codec_encode(&codec, NULL, pcm, sizeof(pcm), 16000, encoded, &encoded_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(encoded_len, 34);
+			switch_core_codec_destroy(&codec);
+		}
+		FST_TEST_END()
+
 	}
 	FST_SUITE_END()
 }
