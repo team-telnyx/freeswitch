@@ -107,6 +107,7 @@ typedef enum {
 #define SWITCH_AMRWB_SID_FRAME_TYPE 9
 #define SWITCH_AMRWB_SID_FRAME_SIZE 6
 #define SWITCH_AMRWB_SPEECH_LOST_TOC ((14 << 3) | (1 << 2))
+#define SWITCH_AMRWB_CMR_NONE 15
 
 struct amrwb_context {
 	void *encoder_state;
@@ -125,6 +126,7 @@ struct amrwb_context {
 	uint32_t decoded_sid_pcm_len;
 	switch_bool_t decoded_sid_valid;
 	switch_mutex_t *decoded_sid_mutex;
+	switch_byte_t cmr;
 };
 
 #define SWITCH_AMRWB_DEFAULT_BITRATE AMRWB_BITRATE_24K
@@ -151,6 +153,46 @@ const int switch_amrwb_frame_bits[] = {132, 177, 253, 285, 317, 365, 397, 461, 4
 #define SWITCH_AMRWB_MODES 10 /* Silence Indicator (SID) included */
 
 #define invalid_frame_type (index >= SWITCH_AMRWB_MODES && index != 0xe && index != 0xf) /* include SPEECH_LOST and NO_DATA*/
+
+/* no mode-set negotiated: all speech modes allowed */
+static switch_bool_t amrwb_mode_allowed(struct amrwb_context *context, int mode)
+{
+	return (mode >= 0 && mode < SWITCH_AMRWB_MODES - 1 && (!context->enc_modes || (context->enc_modes & (1 << mode)))) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
+/* highest allowed mode not above mode, else the lowest allowed mode */
+static switch_byte_t amrwb_clamp_mode(struct amrwb_context *context, int mode)
+{
+	int m;
+
+	for (m = mode; m >= 0; m--) {
+		if (amrwb_mode_allowed(context, m)) return (switch_byte_t) m;
+	}
+	for (m = mode + 1; m < SWITCH_AMRWB_MODES - 1; m++) {
+		if (amrwb_mode_allowed(context, m)) return (switch_byte_t) m;
+	}
+	return context->enc_mode;
+}
+
+/* CMR 15: no mode request */
+static void amrwb_set_cmr(switch_codec_t *codec, struct amrwb_context *context, uint8_t cmr)
+{
+	switch_codec_t *write_codec;
+	struct amrwb_context *write_context;
+
+	/* not a speech mode or NO_DATA, or outside the mode-set: ignored (RFC 4867 4.3.1) */
+	if (cmr != SWITCH_AMRWB_CMR_NONE && !amrwb_mode_allowed(context, cmr)) {
+		return;
+	}
+
+	context->cmr = cmr;
+
+	if (codec->session && (write_codec = switch_core_session_get_write_codec(codec->session)) && write_codec != codec &&
+		write_codec->implementation && write_codec->implementation->modname && !strcmp(write_codec->implementation->modname, "mod_amrwb") &&
+		(write_context = write_codec->private_info)) {
+		write_context->cmr = cmr;
+	}
+}
 
 static switch_bool_t switch_amrwb_unpack_oa(unsigned char *buf, uint8_t *tmp, int encoded_data_len)
 {
@@ -556,6 +598,7 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 		context->decoded_sid_pcm = switch_core_alloc(codec->memory_pool, codec->implementation->decoded_bytes_per_packet);
 		switch_mutex_init(&context->decoded_sid_mutex, SWITCH_MUTEX_UNNESTED, codec->memory_pool);
 
+		context->cmr = SWITCH_AMRWB_CMR_NONE;
 		codec->private_info = context;
 
 		return SWITCH_STATUS_SUCCESS;
@@ -594,6 +637,7 @@ static switch_status_t switch_amrwb_encode(switch_codec_t *codec,
 	int n;
 	int relayed_size;
 	int frame_type;
+	switch_byte_t mode;
 	unsigned char *shift_buf = encoded_data;
 
 	if (!context) {
@@ -602,7 +646,16 @@ static switch_status_t switch_amrwb_encode(switch_codec_t *codec,
 
 	/* Always advance the stateful encoder, even when the wire payload is replaced
 	 * with the source SID, so speech resumes from the correct encoder history. */
-	n = E_IF_encode(context->encoder_state, context->enc_mode, (int16_t *) decoded_data, (switch_byte_t *) encoded_data + 1, 0);
+	mode = context->enc_mode;
+	if (context->cmr < SWITCH_AMRWB_MODES - 1) {
+		switch_byte_t requested = amrwb_clamp_mode(context, context->cmr);
+
+		if (requested < mode) {
+			mode = requested;
+		}
+	}
+
+	n = E_IF_encode(context->encoder_state, mode, (int16_t *) decoded_data, (switch_byte_t *) encoded_data + 1, 0);
 	if (n < 0) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB encoder: E_IF_encode() ERROR!\n");
 		return SWITCH_STATUS_FALSE;
@@ -692,6 +745,8 @@ static switch_status_t switch_amrwb_decode(switch_codec_t *codec,
 		}
 	}
 
+	amrwb_set_cmr(codec, context, buf[0] >> 4);
+
 	frame_type = (tmp[0] >> 3) & 0x0f;
 
 	/* Q=0: decoded as a lost frame (the decoder has no SPEECH_BAD/SID_BAD input) */
@@ -727,26 +782,6 @@ decode_error:
 }
 
 #ifndef AMRWB_PASSTHROUGH
-/* no mode-set negotiated: all speech modes allowed */
-static switch_bool_t amrwb_mode_allowed(struct amrwb_context *context, int mode)
-{
-	return (mode >= 0 && mode < SWITCH_AMRWB_MODES - 1 && (!context->enc_modes || (context->enc_modes & (1 << mode)))) ? SWITCH_TRUE : SWITCH_FALSE;
-}
-
-/* highest allowed mode not above mode, else the lowest allowed mode */
-static switch_byte_t amrwb_clamp_mode(struct amrwb_context *context, int mode)
-{
-	int m;
-
-	for (m = mode; m >= 0; m--) {
-		if (amrwb_mode_allowed(context, m)) return (switch_byte_t) m;
-	}
-	for (m = mode + 1; m < SWITCH_AMRWB_MODES - 1; m++) {
-		if (amrwb_mode_allowed(context, m)) return (switch_byte_t) m;
-	}
-	return context->enc_mode;
-}
-
 static switch_status_t switch_amrwb_control(switch_codec_t *codec,
 										   switch_codec_control_command_t cmd,
 										   switch_codec_control_type_t ctype,

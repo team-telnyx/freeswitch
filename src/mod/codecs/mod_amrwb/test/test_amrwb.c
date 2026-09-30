@@ -661,6 +661,49 @@ FST_CORE_BEGIN(".")
 		}
 		FST_TEST_END()
 
+		FST_TEST_BEGIN(amrwb_encoder_follows_received_cmr)
+		{
+			switch_codec_t codec = { 0 };
+			static const unsigned char cmr1_oa[] = { 0x10, 0x7c };
+			static const unsigned char cmr15_oa[] = { 0xf0, 0x7c };
+			static const unsigned char cmr8_oa[] = { 0x80, 0x7c };
+			static const unsigned char cmr9_oa[] = { 0x90, 0x7c };
+			static const unsigned char cmr12_oa[] = { 0xc0, 0x7c };
+			unsigned char out[SWITCH_RECOMMENDED_BUFFER_SIZE];
+			uint32_t out_len, rate = 16000;
+			unsigned int flag = 0;
+
+			fst_requires(amrwb_init(&codec, "mode-set=0,1,2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 2);
+
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr1_oa, sizeof(cmr1_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 1);
+
+			/* outside the mode-set: ignored, the previous request stays */
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr8_oa, sizeof(cmr8_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 1);
+
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr1_oa, sizeof(cmr1_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 1);
+
+			/* reserved CMR 9-14: ignored, the previous request stays */
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr9_oa, sizeof(cmr9_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 1);
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr12_oa, sizeof(cmr12_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 1);
+
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr15_oa, sizeof(cmr15_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 2);
+			switch_core_codec_destroy(&codec);
+		}
+		FST_TEST_END()
+
 	}
 	FST_SUITE_END()
 }
