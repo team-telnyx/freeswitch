@@ -714,7 +714,8 @@ static switch_status_t switch_amrwb_decode(switch_codec_t *codec,
 	struct amrwb_context *context = codec->private_info;
 	unsigned char buf[SWITCH_AMRWB_OUT_MAX_SIZE] = { 0 };
 	uint8_t tmp[SWITCH_AMRWB_OUT_MAX_SIZE] = { 0 };
-	int frame_type;
+	int frame_type, frame_len;
+	uint32_t payload_len = encoded_data_len;
 
 	if (!context) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB decoder: Invalid context\n");
@@ -732,7 +733,6 @@ static switch_status_t switch_amrwb_decode(switch_codec_t *codec,
 		goto conceal;
 	}
 
-	/* bytes after the largest frame are padding */
 	if (encoded_data_len > SWITCH_AMRWB_OUT_MAX_SIZE) {
 		encoded_data_len = SWITCH_AMRWB_OUT_MAX_SIZE;
 	}
@@ -757,9 +757,15 @@ static switch_status_t switch_amrwb_decode(switch_codec_t *codec,
 		}
 	}
 
-	amrwb_set_cmr(codec, context, buf[0] >> 4);
-
 	frame_type = (tmp[0] >> 3) & 0x0f;
+
+	/* trailing bytes: up to 3, or RTP padding (count in the last byte, RFC 3550 5.1) */
+	frame_len = switch_test_flag(context, AMRWB_OPT_OCTET_ALIGN) ? switch_amrwb_frame_sizes[frame_type] + 2 : (switch_amrwb_frame_bits[frame_type] + 10 + 7) / 8;
+	if (payload_len > (uint32_t) frame_len + 3 && ((uint8_t *) encoded_data)[payload_len - 1] != payload_len - frame_len) {
+		goto conceal;
+	}
+
+	amrwb_set_cmr(codec, context, buf[0] >> 4);
 
 	/* Q=0: decoded as a lost frame (the decoder has no SPEECH_BAD/SID_BAD input) */
 	D_IF_decode(context->decoder_state, tmp, (int16_t *) decoded_data, frame_type <= SWITCH_AMRWB_SID_FRAME_TYPE && !(tmp[0] & 0x04));

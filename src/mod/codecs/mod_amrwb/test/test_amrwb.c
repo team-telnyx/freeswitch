@@ -575,6 +575,44 @@ FST_CORE_BEGIN(".")
 
 		FST_TEST_BEGIN(amrwb_ignores_padding_after_the_frame)
 		{
+			const char *fmtps[] = { "mode-set=2;octet-align=1", "mode-set=2;octet-align=0", "mode-set=8;octet-align=1", "mode-set=8;octet-align=0" };
+			int i;
+
+			for (i = 0; i < 4; i++) {
+				switch_codec_t encoder = { 0 };
+				int16_t pcm[320];
+				unsigned char frame[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
+				uint32_t frame_len = sizeof(frame), rate = 16000;
+				unsigned int flag = 0;
+				int j;
+
+				for (j = 0; j < 320; j++) pcm[j] = (int16_t) (8000 * sin(2 * M_PI * 440 * j / 16000.0));
+				fst_requires(amrwb_init(&encoder, fmtps[i], SWITCH_CODEC_FLAG_ENCODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+				fst_requires(switch_core_codec_encode(&encoder, NULL, pcm, sizeof(pcm), 16000, frame, &frame_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+				switch_core_codec_destroy(&encoder);
+
+				fst_check(amrwb_decode_same(fmtps[i], frame, frame_len, frame, frame_len + 3, fst_pool));
+				fst_check(!amrwb_decodes_as_lost(fmtps[i], frame, frame_len, fst_pool));
+				fst_check(!amrwb_decodes_as_lost(fmtps[i], frame, frame_len + 3, fst_pool));
+				fst_check(amrwb_decodes_as_lost(fmtps[i], frame, frame_len + 4, fst_pool));
+				fst_check(amrwb_decodes_as_lost(fmtps[i], frame, frame_len - 1, fst_pool));
+
+				/* RTP padding (RFC 3550 5.1): any length, count in the last byte */
+				frame[frame_len + 7] = 7;
+				fst_check(amrwb_decodes_as_lost(fmtps[i], frame, frame_len + 8, fst_pool));
+				frame[frame_len + 7] = 8;
+				fst_check(amrwb_decode_same(fmtps[i], frame, frame_len, frame, frame_len + 8, fst_pool));
+				fst_check(!amrwb_decodes_as_lost(fmtps[i], frame, frame_len + 8, fst_pool));
+				frame[frame_len + 7] = 0;
+				frame[frame_len + 39] = 40;
+				fst_check(amrwb_decode_same(fmtps[i], frame, frame_len, frame, frame_len + 40, fst_pool));
+				frame[frame_len + 39] = 0;
+			}
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_conceals_octet_align_mismatch)
+		{
 			const char *fmtps[] = { "mode-set=2;octet-align=1", "mode-set=2;octet-align=0" };
 			int i;
 
@@ -591,9 +629,7 @@ FST_CORE_BEGIN(".")
 				fst_requires(switch_core_codec_encode(&encoder, NULL, pcm, sizeof(pcm), 16000, frame, &frame_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
 				switch_core_codec_destroy(&encoder);
 
-				fst_check(amrwb_decode_same(fmtps[i], frame, frame_len, frame, frame_len + 3, fst_pool));
-				fst_check(!amrwb_decodes_as_lost(fmtps[i], frame, frame_len, fst_pool));
-				fst_check(amrwb_decodes_as_lost(fmtps[i], frame, frame_len - 1, fst_pool));
+				fst_check(amrwb_decodes_as_lost(fmtps[1 - i], frame, frame_len, fst_pool));
 			}
 		}
 		FST_TEST_END()
