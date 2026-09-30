@@ -358,6 +358,7 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 	char fmtptmp[128];
 	char *fmtp_dup = NULL;
 	switch_core_session_t *session = codec->session;
+	switch_bool_t octet_align_given = SWITCH_FALSE;
 
 	encoding = (flags & SWITCH_CODEC_FLAG_ENCODE);
 	decoding = (flags & SWITCH_CODEC_FLAG_DECODE);
@@ -395,6 +396,7 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 				if ((arg = strchr(data, '='))) {
 					*arg++ = '\0';
 					if (!strcasecmp(data, "octet-align")) {
+						octet_align_given = SWITCH_TRUE;
 						if (atoi(arg)) {
 							switch_set_flag(context, AMRWB_OPT_OCTET_ALIGN);
 						}
@@ -446,11 +448,12 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 			free(fmtp_dup);
 		}
 
-		if (globals.force_oa) {
+		/* force-oa / force-be only when the fmtp does not state octet-align */
+		if (globals.force_oa && !octet_align_given) {
 			switch_set_flag(context, AMRWB_OPT_OCTET_ALIGN);
 		}
 
-		if (globals.force_be) {
+		if (globals.force_be && !octet_align_given) {
 			switch_clear_flag(context, AMRWB_OPT_OCTET_ALIGN);
 		}
 
