@@ -755,6 +755,19 @@ FST_CORE_BEGIN(".")
 		}
 		FST_TEST_END()
 
+		FST_TEST_BEGIN(amrwb_control_and_destroy_without_context)
+		{
+			switch_codec_t codec = { 0 };
+			int32_t level = 1;
+
+			amrwb_init(&codec, "octet-align=1", 0, fst_pool);
+			switch_core_codec_control(&codec, SCC_DEBUG, SCCT_INT, &level, SCCT_NONE, NULL, NULL, NULL);
+			amrwb_adjust(&codec, "increase");
+			switch_core_codec_destroy(&codec);
+			fst_check(1);
+		}
+		FST_TEST_END()
+
 	}
 	FST_SUITE_END()
 }
