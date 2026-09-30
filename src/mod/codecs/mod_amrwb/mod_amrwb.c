@@ -37,17 +37,17 @@
  * XML Parameters
  *
  * default-bitrate
- *		Bitrate mode that will be used if mode-set-overwrite and mode-set-overwrite-with-default-bitrate are set).
+ *		Mode 0-8 offered and answered when mode-set is not configured, or with mode-set-overwrite and mode-set-overwrite-with-default-bitrate.
  * volte
  *		If set, configures codec for use on cellular networks.
  * adjust-bitrate
- *		Vary bitrate according to feedback from RTCP.
+ *		Vary bitrate according to feedback from RTCP, within the negotiated mode-set.
  * force-oa
  *		Octet aligned when the fmtp does not state octet-align.
  * force-be
  *		Bandwidth efficient when the fmtp does not state octet-align (the RFC 4867 default).
  * mode-set-overwrite
- *		When answering a call, use codec bitrate modes from mode-set param, instead of mirroring the OFFER.
+ *		Answer the configured mode-set instead of the offered one. Encode within both, else within the offered one.
  * mode-set-overwrite-with-default-bitrate
  *		If mode-set-overwrite is on, then use default-bitrate mode instead of mode-set.
  * invite-prefer-oa
@@ -55,7 +55,7 @@
  * invite-prefer-be
  *		When answering a call, if AMR-WB is offered in 2 modes (octet aligned and bandwidth efficient), select bandwidth efficient.
  * mode-set
- *		Provides bitrate modes to be used with mode-set-overwrite (if mode-set-overwrite-with-default-bitrate is off).
+ *		Modes 0-8 offered, and answered to an offer without mode-set or with mode-set-overwrite.
  * debug
  *		If on, print extra codec info (CMR, ToC, last frame flag) at the FS's DEBUG level.
  * silence-supp-off
@@ -139,7 +139,7 @@ static struct {
 	switch_byte_t default_bitrate;
 	switch_byte_t volte;
 	switch_byte_t adjust_bitrate;
-	switch_byte_t force_oa; /*force OA when originating*/
+	switch_byte_t force_oa;
 	switch_byte_t force_be;
 	switch_byte_t mode_set_overwrite;
 	switch_byte_t mode_set_overwrite_with_default_bitrate;
@@ -171,10 +171,9 @@ static int amrwb_parse_mode(const char *str)
 	return (*end || mode > SWITCH_AMRWB_MODES - 2) ? -1 : (int) mode;
 }
 
-/* no mode-set negotiated: all speech modes allowed */
 static switch_bool_t amrwb_mode_allowed(struct amrwb_context *context, int mode)
 {
-	return (mode >= 0 && mode < SWITCH_AMRWB_MODES - 1 && (!context->enc_modes || (context->enc_modes & (1 << mode)))) ? SWITCH_TRUE : SWITCH_FALSE;
+	return (mode >= 0 && mode < SWITCH_AMRWB_MODES - 1 && (context->enc_modes & (1 << mode))) ? SWITCH_TRUE : SWITCH_FALSE;
 }
 
 /* highest allowed mode not above mode, else the lowest allowed mode */
@@ -818,7 +817,7 @@ static switch_status_t switch_amrwb_decode(switch_codec_t *codec,
 conceal:
 	/* undecodable payload: treat as a lost frame */
 	if (context->concealed++ % 250 == 0) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "AMRWB decoder: %u undecodable payloads concealed\n", context->concealed);
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(codec->session), SWITCH_LOG_WARNING, "AMRWB decoder: %u undecodable payloads concealed\n", context->concealed);
 	}
 	tmp[0] = SWITCH_AMRWB_SPEECH_LOST_TOC;
 	D_IF_decode(context->decoder_state, tmp, (int16_t *) decoded_data, 0);
