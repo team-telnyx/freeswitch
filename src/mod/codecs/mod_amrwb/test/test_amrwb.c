@@ -939,6 +939,10 @@ FST_CORE_BEGIN(".")
 			fst_requires(amrwb_init(&codec, "mode-set=abc,1;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
 			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "mode-set=1;"));
 			switch_core_codec_destroy(&codec);
+
+			fst_requires(amrwb_init(&codec, "mode-set=0,1,2,3,4,5,6,7,1,8;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "mode-set=0,1,2,3,4,5,6,7,8;"));
+			switch_core_codec_destroy(&codec);
 		}
 		FST_TEST_END()
 
