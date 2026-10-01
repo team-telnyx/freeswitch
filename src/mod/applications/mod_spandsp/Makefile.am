@@ -14,7 +14,8 @@ mod_spandsp_la_LDFLAGS  = -avoid-version -module -no-undefined -shared
 # no libfreeswitch: it makes the same calls as mod_spandsp_fax.c in gateway
 # mode. Declared with noinst_PROGRAMS so that `make all` builds it: the
 # unit-test runner (tests/unit/run-tests.mk + test.sh) runs test binaries
-# directly and never runs `make check`. test/run.sh runs it without autotools.
+# directly and never runs `make check`. The header of the test shows how to run
+# it without autotools.
 noinst_PROGRAMS = test/test_t38_gateway_cng
 TESTS = test/test_t38_gateway_cng
 
