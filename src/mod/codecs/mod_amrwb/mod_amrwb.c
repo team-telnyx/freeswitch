@@ -37,17 +37,17 @@
  * XML Parameters
  *
  * default-bitrate
- *		Bitrate mode that will be used if mode-set-overwrite and mode-set-overwrite-with-default-bitrate are set).
+ *		Mode 0-8 offered and answered when mode-set is not configured, or with mode-set-overwrite and mode-set-overwrite-with-default-bitrate.
  * volte
  *		If set, configures codec for use on cellular networks.
  * adjust-bitrate
- *		Vary bitrate according to feedback from RTCP.
+ *		Vary bitrate according to feedback from RTCP, within the negotiated mode-set.
  * force-oa
- *		Configure codec in octet aligned mode.
+ *		Octet aligned when the fmtp does not state octet-align.
  * force-be
- *		Configure codec in bandwidth efficient mode.
+ *		Bandwidth efficient when the fmtp does not state octet-align (the RFC 4867 default).
  * mode-set-overwrite
- *		When answering a call, use codec bitrate modes from mode-set param, instead of mirroring the OFFER.
+ *		Answer the configured mode-set instead of the offered one. Encode within both, else within the offered one.
  * mode-set-overwrite-with-default-bitrate
  *		If mode-set-overwrite is on, then use default-bitrate mode instead of mode-set.
  * invite-prefer-oa
@@ -55,7 +55,7 @@
  * invite-prefer-be
  *		When answering a call, if AMR-WB is offered in 2 modes (octet aligned and bandwidth efficient), select bandwidth efficient.
  * mode-set
- *		Provides bitrate modes to be used with mode-set-overwrite (if mode-set-overwrite-with-default-bitrate is off).
+ *		Modes 0-8 offered, and answered to an offer without mode-set or with mode-set-overwrite.
  * debug
  *		If on, print extra codec info (CMR, ToC, last frame flag) at the FS's DEBUG level.
  * silence-supp-off
@@ -74,6 +74,9 @@ SWITCH_MODULE_DEFINITION(mod_amrwb, mod_amrwb_load, mod_amrwb_unload, NULL);
 switch_mutex_t *global_lock;
 int global_debug;
 char AMRWB_CONFIGURATION[2000];
+
+#define SWITCH_AMRWB_MAX_FMTP_PARAMS 32
+#define SWITCH_AMRWB_FMTP_SIZE 1024
 
 #ifndef AMRWB_PASSTHROUGH
 #include "opencore-amrwb/dec_if.h" /*AMR-WB decoder API*/
@@ -104,11 +107,13 @@ typedef enum {
 
 #define SWITCH_AMRWB_SID_FRAME_TYPE 9
 #define SWITCH_AMRWB_SID_FRAME_SIZE 6
+#define SWITCH_AMRWB_SPEECH_LOST_TOC ((14 << 3) | (1 << 2))
+#define SWITCH_AMRWB_CMR_NONE 15
 
 struct amrwb_context {
 	void *encoder_state;
 	void *decoder_state;
-	switch_byte_t enc_modes;
+	uint16_t enc_modes;
 	switch_byte_t enc_mode;
 	uint32_t change_period;
 	switch_byte_t max_ptime;
@@ -122,6 +127,10 @@ struct amrwb_context {
 	uint32_t decoded_sid_pcm_len;
 	switch_bool_t decoded_sid_valid;
 	switch_mutex_t *decoded_sid_mutex;
+	switch_byte_t cmr;
+	switch_byte_t cur_mode;
+	uint32_t frames;
+	uint32_t concealed;
 };
 
 #define SWITCH_AMRWB_DEFAULT_BITRATE AMRWB_BITRATE_24K
@@ -130,7 +139,7 @@ static struct {
 	switch_byte_t default_bitrate;
 	switch_byte_t volte;
 	switch_byte_t adjust_bitrate;
-	switch_byte_t force_oa; /*force OA when originating*/
+	switch_byte_t force_oa;
 	switch_byte_t force_be;
 	switch_byte_t mode_set_overwrite;
 	switch_byte_t mode_set_overwrite_with_default_bitrate;
@@ -149,6 +158,78 @@ const int switch_amrwb_frame_bits[] = {132, 177, 253, 285, 317, 365, 397, 461, 4
 
 #define invalid_frame_type (index >= SWITCH_AMRWB_MODES && index != 0xe && index != 0xf) /* include SPEECH_LOST and NO_DATA*/
 
+/* mode-set entry: a speech mode 0-8, else -1 */
+static int amrwb_parse_mode(const char *str)
+{
+	char *end;
+	long mode;
+
+	while (*str == ' ') str++;
+	if (*str < '0' || *str > '9') return -1;
+	mode = strtol(str, &end, 10);
+	while (*end == ' ') end++;
+	return (*end || mode > SWITCH_AMRWB_MODES - 2) ? -1 : (int) mode;
+}
+
+static switch_bool_t amrwb_mode_allowed(struct amrwb_context *context, int mode)
+{
+	return (mode >= 0 && mode < SWITCH_AMRWB_MODES - 1 && (context->enc_modes & (1 << mode))) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
+/* highest allowed mode not above mode, else the lowest allowed mode */
+static switch_byte_t amrwb_clamp_mode(struct amrwb_context *context, int mode)
+{
+	int m;
+
+	for (m = mode; m >= 0; m--) {
+		if (amrwb_mode_allowed(context, m)) return (switch_byte_t) m;
+	}
+	for (m = mode + 1; m < SWITCH_AMRWB_MODES - 1; m++) {
+		if (amrwb_mode_allowed(context, m)) return (switch_byte_t) m;
+	}
+	return context->enc_mode;
+}
+
+/* mode-change-neighbor: one allowed mode per step; mode-change-period N: steps at every Nth frame */
+static switch_byte_t amrwb_next_mode(struct amrwb_context *context, switch_byte_t target)
+{
+	int m = target, step;
+
+	if (context->cur_mode >= SWITCH_AMRWB_MODES - 1) {
+		context->cur_mode = target;
+	} else if (context->cur_mode != target && (context->change_period < 2 || context->frames % context->change_period == 0)) {
+		if (switch_test_flag(context, AMRWB_OPT_MODE_CHANGE_NEIGHBOR)) {
+			step = target > context->cur_mode ? 1 : -1;
+			for (m = context->cur_mode + step; m != target && !amrwb_mode_allowed(context, m); m += step);
+		}
+		context->cur_mode = (switch_byte_t) m;
+	}
+	context->frames++;
+
+	return context->cur_mode;
+}
+
+/* CMR 15: no mode request; the session read codec also sets it on the session write codec */
+static void amrwb_set_cmr(switch_codec_t *codec, struct amrwb_context *context, uint8_t cmr)
+{
+	switch_codec_t *write_codec;
+	struct amrwb_context *write_context;
+
+	/* not a speech mode or NO_DATA: ignored (RFC 4867 4.3.1) */
+	if (cmr >= SWITCH_AMRWB_MODES - 1 && cmr != SWITCH_AMRWB_CMR_NONE) {
+		return;
+	}
+
+	context->cmr = cmr;
+
+	if (codec->session && codec == switch_core_session_get_read_codec(codec->session) &&
+		(write_codec = switch_core_session_get_write_codec(codec->session)) && write_codec != codec &&
+		write_codec->implementation && write_codec->implementation->modname && !strcmp(write_codec->implementation->modname, "mod_amrwb") &&
+		(write_context = write_codec->private_info)) {
+		write_context->cmr = cmr;
+	}
+}
+
 static switch_bool_t switch_amrwb_unpack_oa(unsigned char *buf, uint8_t *tmp, int encoded_data_len)
 {
 	uint8_t *tocs;
@@ -156,26 +237,26 @@ static switch_bool_t switch_amrwb_unpack_oa(unsigned char *buf, uint8_t *tmp, in
 	int framesz;
 
 	if (!buf || !tmp || encoded_data_len < 2) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB decoder (OA): Invalid frame size: %d\n", encoded_data_len);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AMRWB decoder (OA): Invalid frame size: %d\n", encoded_data_len);
 		return SWITCH_FALSE;
 	}
 
 	buf++;/* CMR skip */
 	tocs = buf;
 	if (tocs[0] & 0x80) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB decoder (OA): Multiple frames per payload are not supported\n");
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AMRWB decoder (OA): Multiple frames per payload are not supported\n");
 		return SWITCH_FALSE;
 	}
 	index = ((tocs[0]>>3) & 0xf);
 	buf++; /* point to voice payload */
 
 	if (invalid_frame_type) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB decoder (OA): Invalid TOC: 0x%x", index);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AMRWB decoder (OA): Invalid TOC: 0x%x\n", index);
 		return SWITCH_FALSE;
 	}
 	framesz = switch_amrwb_frame_sizes[index];
 	if (encoded_data_len < framesz + 2) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB decoder (OA): Invalid frame size: %d\n", framesz);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AMRWB decoder (OA): Invalid frame size: %d\n", framesz);
 		return SWITCH_FALSE;
 	}
 	tmp[0] = tocs[0];
@@ -192,7 +273,7 @@ static switch_bool_t switch_amrwb_pack_oa(unsigned char *shift_buf, int n)
 	return SWITCH_TRUE;
 }
 
-static int switch_amrwb_relay_sid(switch_codec_t *other_codec, void *decoded_data, uint32_t decoded_data_len, switch_byte_t *encoded_data)
+static int switch_amrwb_relay_sid(switch_codec_t *other_codec, void *decoded_data, uint32_t decoded_data_len, switch_byte_t *encoded_data, switch_byte_t mode)
 {
 	struct amrwb_context *other_context;
 	int size = 0;
@@ -220,6 +301,8 @@ static int switch_amrwb_relay_sid(switch_codec_t *other_codec, void *decoded_dat
 
 	encoded_data[0] = 0xf0;
 	memcpy(encoded_data + 1, other_context->decoded_sid, SWITCH_AMRWB_SID_FRAME_SIZE);
+	/* mode indication: last 4 bits, the mode this encoder sends */
+	encoded_data[SWITCH_AMRWB_SID_FRAME_SIZE] = (encoded_data[SWITCH_AMRWB_SID_FRAME_SIZE] & 0xf0) | (mode & 0x0f);
 	size = SWITCH_AMRWB_SID_FRAME_SIZE;
 
 done:
@@ -302,7 +385,7 @@ static switch_status_t amrwb_parse_fmtp_cb(const char *fmtp, switch_codec_fmtp_t
 
 	if (!zstr(fmtp)) {
 		int x, argc;
-		char *argv[10];
+		char *argv[SWITCH_AMRWB_MAX_FMTP_PARAMS];
 		char *fmtp_dup = strdup(fmtp);
 
 		/* If there is no octet-align param on fmtp then default is 0 (bandwidth efficient). */
@@ -353,10 +436,11 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 	struct amrwb_context *context = NULL;
 	int encoding, decoding;
 	int x, i, argc, fmtptmp_pos;
-	char *argv[10];
-	char fmtptmp[128];
+	char *argv[SWITCH_AMRWB_MAX_FMTP_PARAMS];
+	char fmtptmp[SWITCH_AMRWB_FMTP_SIZE];
 	char *fmtp_dup = NULL;
 	switch_core_session_t *session = codec->session;
+	switch_bool_t octet_align_given = SWITCH_FALSE;
 
 	encoding = (flags & SWITCH_CODEC_FLAG_ENCODE);
 	decoding = (flags & SWITCH_CODEC_FLAG_DECODE);
@@ -393,8 +477,10 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 
 				if ((arg = strchr(data, '='))) {
 					*arg++ = '\0';
+					while (*arg == ' ') arg++;
 					if (!strcasecmp(data, "octet-align")) {
-						if (atoi(arg)) {
+						octet_align_given = SWITCH_TRUE;
+						if (switch_true(arg)) {
 							switch_set_flag(context, AMRWB_OPT_OCTET_ALIGN);
 						}
 					} else if (!strcasecmp(data, "mode-change-neighbor")) {
@@ -425,13 +511,18 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 						context->max_red = atoi(arg);
 					} else if (!strcasecmp(data, "mode-set")) {
 						int y, m_argc;
-						char *m_argv[SWITCH_AMRWB_MODES-1]; /* AMRWB has 9 modes */
+						char *m_argv[SWITCH_AMRWB_MAX_FMTP_PARAMS];
 
 						m_argc = switch_separate_string(arg, ',', m_argv, (sizeof(m_argv) / sizeof(m_argv[0])));
 
 						for (y = 0; y < m_argc; y++) {
-							context->enc_modes |= (1 << atoi(m_argv[y]));
-							context->enc_mode = atoi(m_argv[y]);
+							int mode = amrwb_parse_mode(m_argv[y]);
+
+							if (mode < 0) {
+								continue;
+							}
+							context->enc_modes |= (1 << mode);
+							context->enc_mode = (switch_byte_t) mode;
 						}
 					}
 				}
@@ -440,11 +531,12 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 			free(fmtp_dup);
 		}
 
-		if (globals.force_oa) {
+		/* force-oa / force-be only when the fmtp does not state octet-align */
+		if (globals.force_oa && !octet_align_given) {
 			switch_set_flag(context, AMRWB_OPT_OCTET_ALIGN);
 		}
 
-		if (globals.force_be) {
+		if (globals.force_be && !octet_align_given) {
 			switch_clear_flag(context, AMRWB_OPT_OCTET_ALIGN);
 		}
 
@@ -471,32 +563,28 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 
 		} else {
 
-			/* It is inbound fmtp with no mode-set or outbound */
+			/* no mode-set in the fmtp, or mode-set-overwrite: answer the configured mode-set,
+			 * default-bitrate with mode-set-overwrite-with-default-bitrate or nothing configured */
+			uint16_t answer_modes = globals.context.enc_modes;
+			uint16_t offered_modes = context->enc_modes;
 
-			if (globals.mode_set_overwrite_with_default_bitrate) {
-				fmtptmp_pos = switch_snprintf(fmtptmp, sizeof(fmtptmp), "mode-set=%d", globals.default_bitrate);
-			} else {
-				char modes[100] = { 0 };
-				int i = 0, j = 0;
-
-				for (i = 0; SWITCH_AMRWB_MODES-1 > i; ++i) {
-					if (globals.context.enc_modes & (1 << i)) {
-						j++;
-						snprintf(modes + strlen(modes), sizeof(modes) - strlen(modes), j > 1 ? ",%d" : "%d", i);
-					}
-				}
-
-				fmtptmp_pos = switch_snprintf(fmtptmp, sizeof(fmtptmp), "mode-set=%s", modes);
+			if (!answer_modes || (globals.mode_set_overwrite && globals.mode_set_overwrite_with_default_bitrate)) {
+				answer_modes = (uint16_t) (1 << globals.default_bitrate);
 			}
 
-			/* When carrier omits mode-set, sync enc_mode with configured mode-set
-			 * so the encoder does not exceed the modes advertised in our answer SDP. */
-			if (globals.context.enc_modes) {
-				for (i = SWITCH_AMRWB_MODES-2; i > -1; i--) {
-					if (globals.context.enc_modes & (1 << i)) {
-						context->enc_mode = (switch_byte_t) i;
-						break;
-					}
+			/* encode within both mode-sets, else within the offered one */
+			context->enc_modes = answer_modes;
+			if (offered_modes) {
+				context->enc_modes = (offered_modes & answer_modes) ? (offered_modes & answer_modes) : offered_modes;
+			}
+
+			fmtptmp_pos = switch_snprintf(fmtptmp, sizeof(fmtptmp), "mode-set=");
+			for (i = 0; SWITCH_AMRWB_MODES-1 > i; ++i) {
+				if (answer_modes & (1 << i)) {
+					fmtptmp_pos += switch_snprintf(fmtptmp + fmtptmp_pos, sizeof(fmtptmp) - fmtptmp_pos, fmtptmp_pos > strlen("mode-set=") ? ",%d" : "%d", i);
+				}
+				if (context->enc_modes & (1 << i)) {
+					context->enc_mode = (switch_byte_t) i;
 				}
 			}
 		}
@@ -506,10 +594,10 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 		}
 
 		if (!globals.volte) {
-			switch_snprintf(fmtptmp + fmtptmp_pos, sizeof(fmtptmp) - fmtptmp_pos, ";octet-align=%d",
+			fmtptmp_pos += switch_snprintf(fmtptmp + fmtptmp_pos, sizeof(fmtptmp) - fmtptmp_pos, ";octet-align=%d",
 					switch_test_flag(context, AMRWB_OPT_OCTET_ALIGN) ? 1 : 0);
 		} else {
-			switch_snprintf(fmtptmp + fmtptmp_pos, sizeof(fmtptmp) - fmtptmp_pos, ";octet-align=%d;max-red=0;mode-change-capability=2",
+			fmtptmp_pos += switch_snprintf(fmtptmp + fmtptmp_pos, sizeof(fmtptmp) - fmtptmp_pos, ";octet-align=%d;max-red=0;mode-change-capability=2",
 					switch_test_flag(context, AMRWB_OPT_OCTET_ALIGN) ? 1 : 0);
 		}
 
@@ -544,6 +632,8 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 		context->decoded_sid_pcm = switch_core_alloc(codec->memory_pool, codec->implementation->decoded_bytes_per_packet);
 		switch_mutex_init(&context->decoded_sid_mutex, SWITCH_MUTEX_UNNESTED, codec->memory_pool);
 
+		context->cmr = SWITCH_AMRWB_CMR_NONE;
+		context->cur_mode = SWITCH_AMRWB_CMR_NONE;
 		codec->private_info = context;
 
 		return SWITCH_STATUS_SUCCESS;
@@ -555,6 +645,10 @@ static switch_status_t switch_amrwb_destroy(switch_codec_t *codec)
 {
 #ifndef AMRWB_PASSTHROUGH
 	struct amrwb_context *context = codec->private_info;
+
+	if (!context) {
+		return SWITCH_STATUS_SUCCESS;
+	}
 
 	if (context->encoder_state) {
 		E_IF_exit(context->encoder_state);
@@ -582,6 +676,7 @@ static switch_status_t switch_amrwb_encode(switch_codec_t *codec,
 	int n;
 	int relayed_size;
 	int frame_type;
+	switch_byte_t mode;
 	unsigned char *shift_buf = encoded_data;
 
 	if (!context) {
@@ -590,13 +685,23 @@ static switch_status_t switch_amrwb_encode(switch_codec_t *codec,
 
 	/* Always advance the stateful encoder, even when the wire payload is replaced
 	 * with the source SID, so speech resumes from the correct encoder history. */
-	n = E_IF_encode(context->encoder_state, context->enc_mode, (int16_t *) decoded_data, (switch_byte_t *) encoded_data + 1, 0);
+	mode = context->enc_mode;
+	if (context->cmr < SWITCH_AMRWB_MODES - 1) {
+		switch_byte_t requested = amrwb_clamp_mode(context, context->cmr);
+
+		if (requested < mode) {
+			mode = requested;
+		}
+	}
+	mode = amrwb_next_mode(context, mode);
+
+	n = E_IF_encode(context->encoder_state, mode, (int16_t *) decoded_data, (switch_byte_t *) encoded_data + 1, 0);
 	if (n < 0) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB encoder: E_IF_encode() ERROR!\n");
 		return SWITCH_STATUS_FALSE;
 	}
 
-	relayed_size = switch_amrwb_relay_sid(other_codec, decoded_data, decoded_data_len, encoded_data);
+	relayed_size = switch_amrwb_relay_sid(other_codec, decoded_data, decoded_data_len, encoded_data, mode);
 	if (relayed_size) {
 		n = relayed_size;
 	}
@@ -640,7 +745,8 @@ static switch_status_t switch_amrwb_decode(switch_codec_t *codec,
 	struct amrwb_context *context = codec->private_info;
 	unsigned char buf[SWITCH_AMRWB_OUT_MAX_SIZE] = { 0 };
 	uint8_t tmp[SWITCH_AMRWB_OUT_MAX_SIZE] = { 0 };
-	int frame_type;
+	int frame_type, frame_len;
+	uint32_t payload_len = encoded_data_len;
 
 	if (!context) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB decoder: Invalid context\n");
@@ -654,9 +760,12 @@ static switch_status_t switch_amrwb_decode(switch_codec_t *codec,
 	context->decoded_sid_pcm_len = 0;
 	switch_mutex_unlock(context->decoded_sid_mutex);
 
-	if (!encoded_data || encoded_data_len > SWITCH_AMRWB_OUT_MAX_SIZE) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB decoder: Invalid encoded data or length: %d\n", encoded_data_len);
-		goto decode_error;
+	if (!encoded_data) {
+		goto conceal;
+	}
+
+	if (encoded_data_len > SWITCH_AMRWB_OUT_MAX_SIZE) {
+		encoded_data_len = SWITCH_AMRWB_OUT_MAX_SIZE;
 	}
 
 	memcpy(buf, encoded_data, encoded_data_len);
@@ -670,19 +779,27 @@ static switch_status_t switch_amrwb_decode(switch_codec_t *codec,
 	if (switch_test_flag(context, AMRWB_OPT_OCTET_ALIGN)) {
 		/* Octed Aligned */
 		if (!switch_amrwb_unpack_oa(buf, tmp, encoded_data_len)) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB decoder (OA): Invalid frame size: %d\n", encoded_data_len);
-			goto decode_error;
+			goto conceal;
 		}
 	} else {
 		/* Bandwidth Efficient */
 		if (!switch_amrwb_unpack_be(buf, tmp, encoded_data_len)) {
-			goto decode_error;
+			goto conceal;
 		}
 	}
 
 	frame_type = (tmp[0] >> 3) & 0x0f;
 
-	D_IF_decode(context->decoder_state, tmp, (int16_t *) decoded_data, 0);
+	/* trailing bytes: up to 3, or RTP padding (count in the last byte, RFC 3550 5.1) */
+	frame_len = switch_test_flag(context, AMRWB_OPT_OCTET_ALIGN) ? switch_amrwb_frame_sizes[frame_type] + 2 : (switch_amrwb_frame_bits[frame_type] + 10 + 7) / 8;
+	if (payload_len > (uint32_t) frame_len + 3 && ((uint8_t *) encoded_data)[payload_len - 1] != payload_len - frame_len) {
+		goto conceal;
+	}
+
+	amrwb_set_cmr(codec, context, buf[0] >> 4);
+
+	/* Q=0: decoded as a lost frame (the decoder has no SPEECH_BAD/SID_BAD input) */
+	D_IF_decode(context->decoder_state, tmp, (int16_t *) decoded_data, frame_type <= SWITCH_AMRWB_SID_FRAME_TYPE && !(tmp[0] & 0x04));
 	*decoded_data_len = codec->implementation->decoded_bytes_per_packet;
 
 	if (frame_type == SWITCH_AMRWB_SID_FRAME_TYPE) {
@@ -695,6 +812,16 @@ static switch_status_t switch_amrwb_decode(switch_codec_t *codec,
 		switch_mutex_unlock(context->decoded_sid_mutex);
 	}
 
+	return SWITCH_STATUS_SUCCESS;
+
+conceal:
+	/* undecodable payload: treat as a lost frame */
+	if (context->concealed++ % 250 == 0) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(codec->session), SWITCH_LOG_WARNING, "AMRWB decoder: %u undecodable payloads concealed\n", context->concealed);
+	}
+	tmp[0] = SWITCH_AMRWB_SPEECH_LOST_TOC;
+	D_IF_decode(context->decoder_state, tmp, (int16_t *) decoded_data, 0);
+	*decoded_data_len = codec->implementation->decoded_bytes_per_packet;
 	return SWITCH_STATUS_SUCCESS;
 
 decode_error:
@@ -719,6 +846,10 @@ static switch_status_t switch_amrwb_control(switch_codec_t *codec,
 	struct amrwb_context *context = codec->private_info;
 	int debug = 0;
 
+	if (!context) {
+		return SWITCH_STATUS_FALSE;
+	}
+
 	switch_mutex_lock(global_lock);
 	debug = global_debug;
 	switch_mutex_unlock(global_lock);
@@ -733,38 +864,26 @@ static switch_status_t switch_amrwb_control(switch_codec_t *codec,
 	case SCC_AUDIO_ADJUST_BITRATE:
 		{
 			const char *cmd = (const char *)cmd_data;
+			int mode;
 
 			if (!strcasecmp(cmd, "increase")) {
-				if (context->enc_mode < SWITCH_AMRWB_MODES - 1) {
-					int mode_step = 2; /*this is the mode, not the actual bitrate*/
-					context->enc_mode = context->enc_mode + mode_step;
-					if (debug || context->debug) {
-						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
-								"AMRWB encoder: Adjusting mode to %d (increase)\n", context->enc_mode);
-					}
+				for (mode = context->enc_mode + 1; mode < SWITCH_AMRWB_MODES - 1 && !amrwb_mode_allowed(context, mode); mode++);
+				if (mode < SWITCH_AMRWB_MODES - 1) {
+					context->enc_mode = (switch_byte_t) mode;
 				}
 			} else if (!strcasecmp(cmd, "decrease")) {
-				if (context->enc_mode > 0) {
-					int mode_step = 2; /*this is the mode, not the actual bitrate*/
-					context->enc_mode = context->enc_mode - mode_step;
-					if (debug || context->debug) {
-						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
-								"AMRWB encoder: Adjusting mode to %d (decrease)\n", context->enc_mode);
-					}
+				for (mode = context->enc_mode - 1; mode >= 0 && !amrwb_mode_allowed(context, mode); mode--);
+				if (mode >= 0) {
+					context->enc_mode = (switch_byte_t) mode;
 				}
 			} else if (!strcasecmp(cmd, "default")) {
-					context->enc_mode = globals.default_bitrate;
-					if (debug || context->debug) {
-						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
-								"AMRWB encoder: Adjusting mode to %d (default)\n", context->enc_mode);
-					}
+				context->enc_mode = amrwb_clamp_mode(context, globals.default_bitrate);
 			} else {
-				/*minimum bitrate (AMRWB mode)*/
-				context->enc_mode = 0;
-				if (debug || context->debug) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
-							"AMRWB encoder: Adjusting mode to %d (minimum)\n", context->enc_mode);
-				}
+				context->enc_mode = amrwb_clamp_mode(context, 0);
+			}
+
+			if (debug || context->debug) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AMRWB encoder: Adjusting mode to %d (%s)\n", context->enc_mode, cmd);
 			}
 		}
 		break;
@@ -781,7 +900,7 @@ static int extract_octet_align(const char *fmtp)
 {
 	int oa = 0;
 	int argc;
-	char *argv[10];
+	char *argv[SWITCH_AMRWB_MAX_FMTP_PARAMS];
 	char *fmtp_dup;
 
 	if (zstr(fmtp)) return oa;
@@ -809,6 +928,35 @@ static int extract_octet_align(const char *fmtp)
 	return oa;
 }
 
+/* crc, robust-sorting, interleaving and multi-channel payloads are not supported */
+static switch_bool_t has_unsupported_option(const char *fmtp)
+{
+	switch_bool_t unsupported = SWITCH_FALSE;
+	int argc;
+	char *argv[SWITCH_AMRWB_MAX_FMTP_PARAMS];
+	char *fmtp_dup;
+
+	if (zstr(fmtp) || !(fmtp_dup = strdup(fmtp))) return SWITCH_FALSE;
+
+	argc = switch_separate_string(fmtp_dup, ';', argv, (int)(sizeof(argv) / sizeof(argv[0])));
+	for (int i = 0; i < argc && !unsupported; ++i) {
+		char *data = argv[i];
+		char *arg;
+		while (*data == ' ') data++;
+		if (!(arg = strchr(data, '='))) continue;
+		*arg++ = '\0';
+		while (*arg == ' ') arg++;
+		if (!strcasecmp(data, "crc") || !strcasecmp(data, "robust-sorting") || !strcasecmp(data, "interleaving")) {
+			unsupported = atoi(arg) != 0;
+		} else if (!strcasecmp(data, "channels")) {
+			unsupported = atoi(arg) > 1;
+		}
+	}
+
+	switch_safe_free(fmtp_dup);
+	return unsupported;
+}
+
 static switch_status_t matches_fmtp(const char *fmtp, const char *codec_fmtp)
 {
 	int oa1 = extract_octet_align(fmtp);
@@ -816,13 +964,17 @@ static switch_status_t matches_fmtp(const char *fmtp, const char *codec_fmtp)
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AMRWB fmtp: %s, codec_fmtp: %s\n", switch_str_nil(fmtp), switch_str_nil(codec_fmtp));
 
+	if (has_unsupported_option(fmtp) || has_unsupported_option(codec_fmtp)) {
+		return SWITCH_STATUS_FALSE;
+	}
+
 	return (oa1 == oa2) ? SWITCH_STATUS_SUCCESS : SWITCH_STATUS_FALSE;
 }
 #endif
 
 static char *generate_fmtp(switch_memory_pool_t *pool , int octet_align)
 {
-	char buf[256] = { 0 };
+	char buf[SWITCH_AMRWB_FMTP_SIZE] = { 0 };
 #ifndef AMRWB_PASSTHROUGH
 	int i = 0, j =0;
 #endif
@@ -831,7 +983,7 @@ static char *generate_fmtp(switch_memory_pool_t *pool , int octet_align)
 
 #ifndef AMRWB_PASSTHROUGH
 	// ENGDESK-15706
-	if (globals.context.enc_modes && !globals.mode_set_overwrite) {
+	if (globals.context.enc_modes && !(globals.mode_set_overwrite && globals.mode_set_overwrite_with_default_bitrate)) {
 			for (i = 0; SWITCH_AMRWB_MODES-1 > i; ++i) {
 				if (globals.context.enc_modes & (1 << i)) {
 					j++;
@@ -938,7 +1090,7 @@ SWITCH_STANDARD_API(mod_amrwb_show)
 {
 	if (stream && stream->write_function) {
 		mod_amrwb_configuration_snprintf();
-		stream->write_function(stream, AMRWB_CONFIGURATION);
+		stream->write_function(stream, "%s", AMRWB_CONFIGURATION);
 	}
 	return SWITCH_STATUS_SUCCESS;
 }
@@ -965,7 +1117,13 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_amrwb_load)
 				char *var = (char *) switch_xml_attr_soft(param, "name");
 				char *val = (char *) switch_xml_attr_soft(param, "value");
 				if (!strcasecmp(var, "default-bitrate")) {
-					globals.default_bitrate = (switch_byte_t) atoi(val);
+					int mode = amrwb_parse_mode(val);
+
+					if (mode < 0) {
+						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "AMRWB: invalid default-bitrate %s, using %d\n", val, SWITCH_AMRWB_DEFAULT_BITRATE);
+					} else {
+						globals.default_bitrate = (switch_byte_t) mode;
+					}
 				}
 				if (!strcasecmp(var, "volte")) {
 					/* ETSI TS 126 236 compatibility:  http://www.etsi.org/deliver/etsi_ts/126200_126299/126236/10.00.00_60/ts_126236v100000p.pdf */
@@ -994,11 +1152,16 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_amrwb_load)
 				}
 				if (!strcasecmp(var, "mode-set")) {
 					int y, m_argc;
-					char *m_argv[SWITCH_AMRWB_MODES-1]; /* AMRWB has 9 modes */
+					char *m_argv[SWITCH_AMRWB_MAX_FMTP_PARAMS];
 					m_argc = switch_separate_string(val, ',', m_argv, (sizeof(m_argv) / sizeof(m_argv[0])));
 					for (y = 0; y < m_argc; y++) {
-						globals.context.enc_modes |= (1 << atoi(m_argv[y]));
-						globals.context.enc_mode = atoi(m_argv[y]);
+						int mode = amrwb_parse_mode(m_argv[y]);
+
+						if (mode < 0) {
+							continue;
+						}
+						globals.context.enc_modes |= (1 << mode);
+						globals.context.enc_mode = (switch_byte_t) mode;
 					}
 				}
 				if (!strcasecmp(var, "debug")) {

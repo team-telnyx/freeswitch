@@ -32,8 +32,156 @@
 #ifndef AMRWB_PASSTHROUGH
 #include <switch.h>
 #include <stdlib.h>
+#include <math.h>
 
 #include <test/switch_test.h>
+
+static switch_status_t amrwb_init(switch_codec_t *codec, const char *fmtp, uint32_t flags, switch_memory_pool_t *pool)
+{
+	switch_codec_settings_t codec_settings = {{ 0 }};
+
+	return switch_core_codec_init(codec, "AMR-WB", "mod_amrwb", fmtp, 16000, 20, 1, flags, &codec_settings, pool);
+}
+
+static switch_bool_t amrwb_nonzero(const unsigned char *pcm, uint32_t len)
+{
+	uint32_t i;
+
+	for (i = 0; i < len; i++) {
+		if (pcm[i]) return SWITCH_TRUE;
+	}
+	return SWITCH_FALSE;
+}
+
+/* decode the same five frames of a 440 Hz tone on both decoders */
+static void amrwb_prime(switch_codec_t *a, switch_codec_t *b, const char *fmtp, switch_memory_pool_t *pool)
+{
+	switch_codec_t encoder = { 0 };
+	int16_t pcm[320];
+	unsigned char frame[SWITCH_RECOMMENDED_BUFFER_SIZE], out[SWITCH_RECOMMENDED_BUFFER_SIZE];
+	uint32_t frame_len, out_len, rate = 16000;
+	unsigned int flag = 0;
+	int f, i;
+
+	amrwb_init(&encoder, fmtp, SWITCH_CODEC_FLAG_ENCODE, pool);
+	for (f = 0; f < 5; f++) {
+		for (i = 0; i < 320; i++) pcm[i] = (int16_t) (8000 * sin(2 * M_PI * 440 * (f * 320 + i) / 16000.0));
+		frame_len = sizeof(frame);
+		switch_core_codec_encode(&encoder, NULL, pcm, sizeof(pcm), 16000, frame, &frame_len, &rate, &flag);
+		out_len = sizeof(out);
+		switch_core_codec_decode(a, NULL, frame, frame_len, 16000, out, &out_len, &rate, &flag);
+		out_len = sizeof(out);
+		switch_core_codec_decode(b, NULL, frame, frame_len, 16000, out, &out_len, &rate, &flag);
+	}
+	switch_core_codec_destroy(&encoder);
+}
+
+/* after the same history, a decoder decodes payload exactly as it decodes a lost frame */
+static switch_bool_t amrwb_decodes_as_lost(const char *fmtp, const unsigned char *payload, uint32_t len, switch_memory_pool_t *pool)
+{
+	static const unsigned char lost_be[] = { 0xf7, 0x40 };
+	static const unsigned char lost_oa[] = { 0xf0, 0x74 };
+	switch_codec_t codec = { 0 }, reference = { 0 };
+	unsigned char out[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 }, ref[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
+	uint32_t out_len = sizeof(out), ref_len = sizeof(ref), rate = 16000;
+	unsigned int flag = 0;
+	switch_bool_t oa = strstr(fmtp, "octet-align=1") ? SWITCH_TRUE : SWITCH_FALSE;
+	switch_status_t status, ref_status;
+
+	amrwb_init(&codec, fmtp, SWITCH_CODEC_FLAG_DECODE, pool);
+	amrwb_init(&reference, fmtp, SWITCH_CODEC_FLAG_DECODE, pool);
+	/* same speech history first, so concealment output is not silence */
+	amrwb_prime(&codec, &reference, fmtp, pool);
+	status = switch_core_codec_decode(&codec, NULL, (void *) payload, len, 16000, out, &out_len, &rate, &flag);
+	ref_status = switch_core_codec_decode(&reference, NULL, (void *) (oa ? lost_oa : lost_be), 2, 16000, ref, &ref_len, &rate, &flag);
+	switch_core_codec_destroy(&codec);
+	switch_core_codec_destroy(&reference);
+
+	return (status == SWITCH_STATUS_SUCCESS && ref_status == SWITCH_STATUS_SUCCESS && out_len == 640 && out_len == ref_len &&
+			!memcmp(out, ref, out_len) && amrwb_nonzero(ref, ref_len)) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
+static void amrwb_adjust(switch_codec_t *codec, const char *how)
+{
+	switch_core_codec_control(codec, SCC_AUDIO_ADJUST_BITRATE, SCCT_STRING, (void *) how, SCCT_NONE, NULL, NULL, NULL);
+}
+
+/* two fresh decoders produce the same audio for two payloads */
+static switch_bool_t amrwb_decode_same(const char *fmtp, const unsigned char *a, uint32_t a_len, const unsigned char *b, uint32_t b_len, switch_memory_pool_t *pool)
+{
+	switch_codec_t ca = { 0 }, cb = { 0 };
+	unsigned char out_a[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 }, out_b[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
+	uint32_t len_a = sizeof(out_a), len_b = sizeof(out_b), rate = 16000;
+	unsigned int flag = 0;
+	switch_status_t sa, sb;
+
+	amrwb_init(&ca, fmtp, SWITCH_CODEC_FLAG_DECODE, pool);
+	amrwb_init(&cb, fmtp, SWITCH_CODEC_FLAG_DECODE, pool);
+	sa = switch_core_codec_decode(&ca, NULL, (void *) a, a_len, 16000, out_a, &len_a, &rate, &flag);
+	sb = switch_core_codec_decode(&cb, NULL, (void *) b, b_len, 16000, out_b, &len_b, &rate, &flag);
+	switch_core_codec_destroy(&ca);
+	switch_core_codec_destroy(&cb);
+
+	return (sa == SWITCH_STATUS_SUCCESS && sb == SWITCH_STATUS_SUCCESS && len_a == len_b && !memcmp(out_a, out_b, len_a)) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
+static int amrwb_warning_lines = 0;
+
+static switch_status_t amrwb_count_warnings(const switch_log_node_t *node, switch_log_level_t level)
+{
+	if (node->level <= SWITCH_LOG_WARNING && strstr(node->file, "mod_amrwb")) {
+		amrwb_warning_lines++;
+	}
+	return SWITCH_STATUS_SUCCESS;
+}
+
+/* frame type of the payload the encoder produces for 20 ms of silence */
+static int amrwb_encoded_ft(switch_codec_t *codec, switch_bool_t octet_aligned)
+{
+	int16_t pcm[320] = { 0 };
+	unsigned char encoded[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
+	uint32_t encoded_len = sizeof(encoded), rate = 16000;
+	unsigned int flag = 0;
+
+	if (switch_core_codec_encode(codec, NULL, pcm, sizeof(pcm), 16000, encoded, &encoded_len, &rate, &flag) != SWITCH_STATUS_SUCCESS) {
+		return -1;
+	}
+
+	return octet_aligned ? (encoded[1] >> 3) & 0x0f : ((encoded[0] & 0x07) << 1) | (encoded[1] >> 7);
+}
+static const char *amrwb_conf_settings;
+
+static switch_xml_t amrwb_conf_lookup(const char *section, const char *tag_name, const char *key_name, const char *key_value, switch_event_t *params, void *user_data)
+{
+	char *xml;
+	switch_xml_t conf;
+
+	if (!key_value || strcmp(key_value, "amrwb.conf")) return NULL;
+	xml = switch_mprintf("<document type=\"freeswitch/xml\"><section name=\"configuration\">"
+						 "<configuration name=\"amrwb.conf\"><settings>%s</settings></configuration></section></document>", amrwb_conf_settings);
+	conf = switch_xml_parse_str_dynamic(xml, SWITCH_FALSE);
+	return conf;
+}
+
+/* reload mod_amrwb with the given settings, or with freeswitch.xml when NULL */
+static switch_status_t amrwb_reload(const char *settings)
+{
+	switch_xml_binding_t *binding = NULL;
+	const char *err = NULL;
+	switch_status_t status;
+
+	switch_loadable_module_unload_module(SWITCH_GLOBAL_dirs.mod_dir, "mod_amrwb", SWITCH_FALSE, &err);
+	if (settings) {
+		amrwb_conf_settings = settings;
+		switch_xml_bind_search_function_ret(amrwb_conf_lookup, SWITCH_XML_SECTION_CONFIG, NULL, &binding);
+	}
+	status = switch_loadable_module_load_module(SWITCH_GLOBAL_dirs.mod_dir, "mod_amrwb", SWITCH_TRUE, &err);
+	if (binding) {
+		switch_xml_unbind_search_function(&binding);
+	}
+	return status;
+}
+
 FST_CORE_BEGIN(".")
 {
 	FST_SUITE_BEGIN(test_amrwb)
@@ -69,7 +217,7 @@ FST_CORE_BEGIN(".")
 			status = switch_core_codec_init(&read_codec,
 			"AMR-WB",
 			"mod_amrwb",
-			NULL,
+			"octet-align=0",
 			16000,
 			20,
 			1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
@@ -92,9 +240,13 @@ FST_CORE_BEGIN(".")
 
 			/*Invalid frame type*/
 			status = switch_core_codec_decode(&read_codec, NULL, &fail, 2, 16000, &decbuf, &decoded_len, &rate, &flags);
-			fst_check(status != SWITCH_STATUS_SUCCESS);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
 
 			switch_core_codec_destroy(&read_codec);
+
+			SWITCH_STANDARD_STREAM(stream);
+			switch_api_execute("amrwb_debug", "off", NULL, &stream);
+			switch_safe_free(stream.data);
 		}
 
 		FST_TEST_END()
@@ -206,7 +358,7 @@ FST_CORE_BEGIN(".")
 
 		FST_TEST_END()
 
-		FST_TEST_BEGIN(amrwb_rejects_multiple_frames)
+		FST_TEST_BEGIN(amrwb_conceals_multiple_frames)
 		{
 			switch_codec_t source_be = { 0 };
 			switch_codec_t source_oa = { 0 };
@@ -231,12 +383,12 @@ FST_CORE_BEGIN(".")
 			decoded_len = sizeof(decoded);
 			status = switch_core_codec_decode(&source_be, NULL, multiframes_be, sizeof(multiframes_be) - 1,
 				16000, decoded, &decoded_len, &rate, &flags);
-			fst_check(status != SWITCH_STATUS_SUCCESS);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
 
 			decoded_len = sizeof(decoded);
 			status = switch_core_codec_decode(&source_oa, NULL, multiframes_oa, sizeof(multiframes_oa) - 1,
 				16000, decoded, &decoded_len, &rate, &flags);
-			fst_check(status != SWITCH_STATUS_SUCCESS);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
 
 			switch_core_codec_destroy(&source_oa);
 			switch_core_codec_destroy(&source_be);
@@ -244,7 +396,7 @@ FST_CORE_BEGIN(".")
 
 		FST_TEST_END()
 
-		FST_TEST_BEGIN(amrwb_rejects_truncated_sid)
+		FST_TEST_BEGIN(amrwb_truncated_sid_not_relayed)
 		{
 			switch_codec_t source_be = { 0 };
 			switch_codec_t source_oa = { 0 };
@@ -286,15 +438,15 @@ FST_CORE_BEGIN(".")
 			decoded_len = sizeof(decoded);
 			status = switch_core_codec_decode(&source_be, NULL, sid_be, sizeof(sid_be) - 2,
 				16000, decoded, &decoded_len, &rate, &flags);
-			fst_check(status != SWITCH_STATUS_SUCCESS);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
 			decoded_len = sizeof(decoded);
 			status = switch_core_codec_decode(&source_be, NULL, short_payload, sizeof(short_payload) - 1,
 				16000, decoded, &decoded_len, &rate, &flags);
-			fst_check(status != SWITCH_STATUS_SUCCESS);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
 			decoded_len = sizeof(decoded);
 			status = switch_core_codec_decode(&source_be, NULL, reserved_be_ft10, sizeof(reserved_be_ft10) - 1,
 				16000, decoded, &decoded_len, &rate, &flags);
-			fst_check(status != SWITCH_STATUS_SUCCESS);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
 
 			decoded_len = cached_pcm_len;
 			encoded_len = sizeof(encoded);
@@ -312,15 +464,15 @@ FST_CORE_BEGIN(".")
 			decoded_len = sizeof(decoded);
 			status = switch_core_codec_decode(&source_oa, NULL, sid_oa, sizeof(sid_oa) - 2,
 				16000, decoded, &decoded_len, &rate, &flags);
-			fst_check(status != SWITCH_STATUS_SUCCESS);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
 			decoded_len = sizeof(decoded);
 			status = switch_core_codec_decode(&source_oa, NULL, short_payload, sizeof(short_payload) - 1,
 				16000, decoded, &decoded_len, &rate, &flags);
-			fst_check(status != SWITCH_STATUS_SUCCESS);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
 			decoded_len = sizeof(decoded);
 			status = switch_core_codec_decode(&source_oa, NULL, reserved_oa, sizeof(reserved_oa) - 1,
 				16000, decoded, &decoded_len, &rate, &flags);
-			fst_check(status != SWITCH_STATUS_SUCCESS);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
 
 			decoded_len = cached_pcm_len;
 			encoded_len = sizeof(encoded);
@@ -396,6 +548,664 @@ FST_CORE_BEGIN(".")
 			switch_core_codec_destroy(&source_be);
 		}
 
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_mode_set_keeps_mode_8)
+		{
+			switch_codec_t codec = { 0 };
+
+			fst_requires(amrwb_init(&codec, "mode-set=2,8;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "mode-set=2,8"));
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 8);
+			switch_core_codec_destroy(&codec);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_mode_set_ignores_invalid_modes)
+		{
+			switch_codec_t codec = { 0 };
+
+			fst_requires(amrwb_init(&codec, "mode-set=9,15;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "mode-set=0,1,2;"));
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 2);
+			switch_core_codec_destroy(&codec);
+
+			fst_requires(amrwb_init(&codec, "mode-set=1,9;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "mode-set=1;"));
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 1);
+			switch_core_codec_destroy(&codec);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_answer_keeps_octet_align_with_fmtp_extra)
+		{
+			switch_codec_t codec = { 0 };
+
+			fst_requires(amrwb_init(&codec, "mode-set=2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "octet-align=1"));
+			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "x-extra=1"));
+			switch_core_codec_destroy(&codec);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_conceals_undecodable_payloads)
+		{
+			static const unsigned char short_payload[] = { 0xf0 };
+			static const unsigned char reserved_be[] = { 0xf5, 0x40 };
+			static const unsigned char reserved_oa[] = { 0xf0, 0x54 };
+			static const unsigned char multi_be[] = { 0xfc, 0xf8, 0xf7, 0xcf, 0x78, 0x00, 0x80 };
+			static const unsigned char multi_oa[] = { 0xf0, 0xcc, 0x4c, 0xe3, 0xdf, 0x3d, 0xe0, 0x02, 0xe3, 0xdf, 0x3d, 0xe0, 0x02 };
+			static const unsigned char truncated_sid_be[] = { 0xf4, 0xf8, 0xf7, 0xcf, 0x78, 0x00 };
+
+			fst_check(amrwb_decodes_as_lost("octet-align=0", short_payload, sizeof(short_payload), fst_pool));
+			fst_check(amrwb_decodes_as_lost("octet-align=0", reserved_be, sizeof(reserved_be), fst_pool));
+			fst_check(amrwb_decodes_as_lost("octet-align=1", reserved_oa, sizeof(reserved_oa), fst_pool));
+			fst_check(amrwb_decodes_as_lost("octet-align=0", multi_be, sizeof(multi_be), fst_pool));
+			fst_check(amrwb_decodes_as_lost("octet-align=1", multi_oa, sizeof(multi_oa), fst_pool));
+			fst_check(amrwb_decodes_as_lost("octet-align=0", truncated_sid_be, sizeof(truncated_sid_be), fst_pool));
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_ignores_padding_after_the_frame)
+		{
+			const char *fmtps[] = { "mode-set=2;octet-align=1", "mode-set=2;octet-align=0", "mode-set=8;octet-align=1", "mode-set=8;octet-align=0" };
+			int i;
+
+			for (i = 0; i < 4; i++) {
+				switch_codec_t encoder = { 0 };
+				int16_t pcm[320];
+				unsigned char frame[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
+				uint32_t frame_len = sizeof(frame), rate = 16000;
+				unsigned int flag = 0;
+				int j;
+
+				for (j = 0; j < 320; j++) pcm[j] = (int16_t) (8000 * sin(2 * M_PI * 440 * j / 16000.0));
+				fst_requires(amrwb_init(&encoder, fmtps[i], SWITCH_CODEC_FLAG_ENCODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+				fst_requires(switch_core_codec_encode(&encoder, NULL, pcm, sizeof(pcm), 16000, frame, &frame_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+				switch_core_codec_destroy(&encoder);
+
+				fst_check(amrwb_decode_same(fmtps[i], frame, frame_len, frame, frame_len + 3, fst_pool));
+				fst_check(!amrwb_decodes_as_lost(fmtps[i], frame, frame_len, fst_pool));
+				fst_check(!amrwb_decodes_as_lost(fmtps[i], frame, frame_len + 3, fst_pool));
+				fst_check(amrwb_decodes_as_lost(fmtps[i], frame, frame_len + 4, fst_pool));
+				fst_check(amrwb_decodes_as_lost(fmtps[i], frame, frame_len - 1, fst_pool));
+
+				/* RTP padding (RFC 3550 5.1): any length, count in the last byte */
+				frame[frame_len + 7] = 7;
+				fst_check(amrwb_decodes_as_lost(fmtps[i], frame, frame_len + 8, fst_pool));
+				frame[frame_len + 7] = 8;
+				fst_check(amrwb_decode_same(fmtps[i], frame, frame_len, frame, frame_len + 8, fst_pool));
+				fst_check(!amrwb_decodes_as_lost(fmtps[i], frame, frame_len + 8, fst_pool));
+				frame[frame_len + 7] = 0;
+				frame[frame_len + 39] = 40;
+				fst_check(amrwb_decode_same(fmtps[i], frame, frame_len, frame, frame_len + 40, fst_pool));
+				frame[frame_len + 39] = 0;
+			}
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_conceals_octet_align_mismatch)
+		{
+			const char *fmtps[] = { "mode-set=2;octet-align=1", "mode-set=2;octet-align=0" };
+			int i;
+
+			for (i = 0; i < 2; i++) {
+				switch_codec_t encoder = { 0 };
+				int16_t pcm[320];
+				unsigned char frame[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
+				uint32_t frame_len = sizeof(frame), rate = 16000;
+				unsigned int flag = 0;
+				int j;
+
+				for (j = 0; j < 320; j++) pcm[j] = (int16_t) (8000 * sin(2 * M_PI * 440 * j / 16000.0));
+				fst_requires(amrwb_init(&encoder, fmtps[i], SWITCH_CODEC_FLAG_ENCODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+				fst_requires(switch_core_codec_encode(&encoder, NULL, pcm, sizeof(pcm), 16000, frame, &frame_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+				switch_core_codec_destroy(&encoder);
+
+				fst_check(amrwb_decodes_as_lost(fmtps[1 - i], frame, frame_len, fst_pool));
+			}
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_does_not_match_unsupported_payload_options)
+		{
+			switch_codec_interface_t *codec_interface = switch_loadable_module_get_codec_interface("AMR-WB", "mod_amrwb");
+			const switch_codec_implementation_t *impl;
+			int matched = 0, unsupported_matched = 0;
+
+			fst_requires(codec_interface);
+			for (impl = codec_interface->implementations; impl; impl = impl->next) {
+				if (!impl->matches_fmtp) {
+					continue;
+				}
+				matched += impl->matches_fmtp("octet-align=1", impl->fmtp) == SWITCH_STATUS_SUCCESS;
+				unsupported_matched += impl->matches_fmtp("octet-align=1;crc=1", impl->fmtp) == SWITCH_STATUS_SUCCESS;
+				unsupported_matched += impl->matches_fmtp("octet-align=1;robust-sorting=1", impl->fmtp) == SWITCH_STATUS_SUCCESS;
+				unsupported_matched += impl->matches_fmtp("octet-align=1;interleaving=4", impl->fmtp) == SWITCH_STATUS_SUCCESS;
+				unsupported_matched += impl->matches_fmtp("octet-align=1;channels=2", impl->fmtp) == SWITCH_STATUS_SUCCESS;
+				unsupported_matched += impl->matches_fmtp(impl->fmtp, "octet-align=1;crc=1") == SWITCH_STATUS_SUCCESS;
+				unsupported_matched += impl->matches_fmtp(impl->fmtp, "octet-align=1;interleaving=4") == SWITCH_STATUS_SUCCESS;
+			}
+			UNPROTECT_INTERFACE(codec_interface);
+
+			fst_check(matched > 0);
+			fst_check_int_equals(unsupported_matched, 0);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_negotiated_octet_align_wins_over_force)
+		{
+			const struct { const char *fmtp; uint32_t len; } cases[] = {
+				{ "mode-set=2;octet-align=0", 33 },	/* stated: bandwidth-efficient despite force-oa */
+				{ "mode-set=2;octet-align=1", 34 },
+				{ "mode-set=2", 34 }			/* not stated: force-oa applies */
+			};
+			int i;
+
+			for (i = 0; i < 3; i++) {
+				switch_codec_t codec = { 0 };
+				int16_t pcm[320] = { 0 };
+				unsigned char encoded[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
+				uint32_t encoded_len = sizeof(encoded), rate = 16000;
+				unsigned int flag = 0;
+
+				fst_requires(amrwb_init(&codec, cases[i].fmtp, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+				fst_requires(switch_core_codec_encode(&codec, NULL, pcm, sizeof(pcm), 16000, encoded, &encoded_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+				fst_check_int_equals(encoded_len, cases[i].len);
+				switch_core_codec_destroy(&codec);
+			}
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_octet_align_parsed_like_the_matcher)
+		{
+			switch_codec_t codec = { 0 };
+			int16_t pcm[320] = { 0 };
+			unsigned char encoded[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
+			uint32_t encoded_len = sizeof(encoded), rate = 16000;
+			unsigned int flag = 0;
+
+			fst_requires(amrwb_init(&codec, "mode-set=2;octet-align=true", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_core_codec_encode(&codec, NULL, pcm, sizeof(pcm), 16000, encoded, &encoded_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(encoded_len, 34);
+			switch_core_codec_destroy(&codec);
+
+			encoded_len = sizeof(encoded);
+			fst_requires(amrwb_init(&codec, "mode-set=2;octet-align= 1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_core_codec_encode(&codec, NULL, pcm, sizeof(pcm), 16000, encoded, &encoded_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(encoded_len, 34);
+			switch_core_codec_destroy(&codec);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_parses_long_fmtp)
+		{
+			switch_codec_t codec = { 0 };
+			int16_t pcm[320] = { 0 };
+			unsigned char encoded[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
+			uint32_t encoded_len = sizeof(encoded), rate = 16000;
+			unsigned int flag = 0;
+
+			fst_requires(amrwb_init(&codec, "a=1;b=1;c=1;d=1;e=1;f=1;g=1;h=1;i=1;j=1;k=1;mode-set=2;octet-align=0",
+									SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "mode-set=2;"));
+			fst_requires(switch_core_codec_encode(&codec, NULL, pcm, sizeof(pcm), 16000, encoded, &encoded_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(encoded_len, 33);
+			switch_core_codec_destroy(&codec);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_q0_frame_is_decoded_as_bad)
+		{
+			switch_codec_t encoder = { 0 }, damaged = { 0 }, lost = { 0 };
+			static const unsigned char lost_oa[] = { 0xf0, 0x74 };
+			int16_t pcm[320];
+			unsigned char frames[6][64];
+			uint32_t frame_len[6];
+			unsigned char out_damaged[SWITCH_RECOMMENDED_BUFFER_SIZE], out_lost[SWITCH_RECOMMENDED_BUFFER_SIZE];
+			uint32_t len_damaged = 0, len_lost = 0, rate = 16000;
+			unsigned int flag = 0;
+			int f, i;
+
+			fst_requires(amrwb_init(&encoder, "mode-set=2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(amrwb_init(&damaged, "mode-set=2;octet-align=1", SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(amrwb_init(&lost, "mode-set=2;octet-align=1", SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+
+			for (f = 0; f < 6; f++) {
+				for (i = 0; i < 320; i++) {
+					pcm[i] = (int16_t) (8000 * sin(2 * M_PI * 440 * (f * 320 + i) / 16000.0));
+				}
+				frame_len[f] = sizeof(frames[f]);
+				fst_requires(switch_core_codec_encode(&encoder, NULL, pcm, sizeof(pcm), 16000, frames[f], &frame_len[f], &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			}
+			frames[5][1] &= ~0x04;
+
+			/* same history, then the Q=0 frame vs a lost frame */
+			for (f = 0; f < 6; f++) {
+				len_damaged = sizeof(out_damaged);
+				fst_requires(switch_core_codec_decode(&damaged, NULL, frames[f], frame_len[f], 16000, out_damaged, &len_damaged, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+				len_lost = sizeof(out_lost);
+				if (f < 5) {
+					fst_requires(switch_core_codec_decode(&lost, NULL, frames[f], frame_len[f], 16000, out_lost, &len_lost, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+				} else {
+					fst_requires(switch_core_codec_decode(&lost, NULL, (void *) lost_oa, sizeof(lost_oa), 16000, out_lost, &len_lost, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+				}
+			}
+
+			fst_check(len_damaged == len_lost && !memcmp(out_damaged, out_lost, len_lost));
+
+			switch_core_codec_destroy(&lost);
+			switch_core_codec_destroy(&damaged);
+			switch_core_codec_destroy(&encoder);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_bitrate_adjustment_stays_in_mode_set)
+		{
+			switch_codec_t codec = { 0 };
+
+			fst_requires(amrwb_init(&codec, "mode-set=0,1,2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 2);
+			amrwb_adjust(&codec, "increase");
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 2);
+			amrwb_adjust(&codec, "decrease");
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 1);
+			amrwb_adjust(&codec, "decrease");
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 0);
+			amrwb_adjust(&codec, "decrease");
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 0);
+			amrwb_adjust(&codec, "increase");
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 1);
+			amrwb_adjust(&codec, "default");
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 2);
+			amrwb_adjust(&codec, "minimum");
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 0);
+			switch_core_codec_destroy(&codec);
+
+			fst_requires(amrwb_init(&codec, "mode-set=1,2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			amrwb_adjust(&codec, "minimum");
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 1);
+			switch_core_codec_destroy(&codec);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_encoder_follows_received_cmr)
+		{
+			switch_codec_t codec = { 0 };
+			static const unsigned char cmr1_oa[] = { 0x10, 0x7c };
+			static const unsigned char cmr15_oa[] = { 0xf0, 0x7c };
+			static const unsigned char cmr8_oa[] = { 0x80, 0x7c };
+			static const unsigned char cmr9_oa[] = { 0x90, 0x7c };
+			static const unsigned char cmr12_oa[] = { 0xc0, 0x7c };
+			static const unsigned char cmr5_oa[] = { 0x50, 0x7c };
+			unsigned char out[SWITCH_RECOMMENDED_BUFFER_SIZE];
+			uint32_t out_len, rate = 16000;
+			unsigned int flag = 0;
+
+			fst_requires(amrwb_init(&codec, "mode-set=0,1,2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 2);
+
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr1_oa, sizeof(cmr1_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 1);
+
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr8_oa, sizeof(cmr8_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 2);
+
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr1_oa, sizeof(cmr1_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 1);
+
+			/* reserved CMR 9-14: ignored, the previous request stays */
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr9_oa, sizeof(cmr9_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 1);
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr12_oa, sizeof(cmr12_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 1);
+
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr15_oa, sizeof(cmr15_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 2);
+			switch_core_codec_destroy(&codec);
+
+			/* non-contiguous mode-set: the highest allowed mode not above the request */
+			fst_requires(amrwb_init(&codec, "mode-set=0,2,8;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr5_oa, sizeof(cmr5_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 2);
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr1_oa, sizeof(cmr1_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 0);
+			switch_core_codec_destroy(&codec);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_encoder_steps_to_received_cmr)
+		{
+			switch_codec_t codec = { 0 };
+			static const unsigned char cmr0_oa[] = { 0x00, 0x7c };
+			static const unsigned char cmr8_oa[] = { 0x80, 0x7c };
+			unsigned char out[SWITCH_RECOMMENDED_BUFFER_SIZE];
+			uint32_t out_len, rate = 16000;
+			unsigned int flag = 0;
+			int ft;
+
+			/* neighbor, every 2nd frame */
+			fst_requires(amrwb_init(&codec, "mode-set=0,1,2;mode-change-neighbor=1;mode-change-period=2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			ft = amrwb_encoded_ft(&codec, SWITCH_TRUE);
+			fst_check_int_equals(ft, 2);
+			ft = amrwb_encoded_ft(&codec, SWITCH_TRUE);
+			fst_check_int_equals(ft, 2);
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr0_oa, sizeof(cmr0_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			ft = amrwb_encoded_ft(&codec, SWITCH_TRUE);
+			fst_check_int_equals(ft, 1);
+			ft = amrwb_encoded_ft(&codec, SWITCH_TRUE);
+			fst_check_int_equals(ft, 1);
+			ft = amrwb_encoded_ft(&codec, SWITCH_TRUE);
+			fst_check_int_equals(ft, 0);
+			ft = amrwb_encoded_ft(&codec, SWITCH_TRUE);
+			fst_check_int_equals(ft, 0);
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr8_oa, sizeof(cmr8_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			ft = amrwb_encoded_ft(&codec, SWITCH_TRUE);
+			fst_check_int_equals(ft, 1);
+			ft = amrwb_encoded_ft(&codec, SWITCH_TRUE);
+			fst_check_int_equals(ft, 1);
+			ft = amrwb_encoded_ft(&codec, SWITCH_TRUE);
+			fst_check_int_equals(ft, 2);
+			switch_core_codec_destroy(&codec);
+
+			/* neighbor within a non-contiguous mode-set */
+			fst_requires(amrwb_init(&codec, "mode-set=0,2,8;mode-change-neighbor=1;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			ft = amrwb_encoded_ft(&codec, SWITCH_TRUE);
+			fst_check_int_equals(ft, 8);
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr0_oa, sizeof(cmr0_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			ft = amrwb_encoded_ft(&codec, SWITCH_TRUE);
+			fst_check_int_equals(ft, 2);
+			ft = amrwb_encoded_ft(&codec, SWITCH_TRUE);
+			fst_check_int_equals(ft, 0);
+			switch_core_codec_destroy(&codec);
+
+			/* period only: changes at even frames */
+			fst_requires(amrwb_init(&codec, "mode-set=0,1,2;mode-change-period=2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			ft = amrwb_encoded_ft(&codec, SWITCH_TRUE);
+			fst_check_int_equals(ft, 2);
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr0_oa, sizeof(cmr0_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			ft = amrwb_encoded_ft(&codec, SWITCH_TRUE);
+			fst_check_int_equals(ft, 2);
+			ft = amrwb_encoded_ft(&codec, SWITCH_TRUE);
+			fst_check_int_equals(ft, 0);
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr8_oa, sizeof(cmr8_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			ft = amrwb_encoded_ft(&codec, SWITCH_TRUE);
+			fst_check_int_equals(ft, 0);
+			ft = amrwb_encoded_ft(&codec, SWITCH_TRUE);
+			fst_check_int_equals(ft, 2);
+			switch_core_codec_destroy(&codec);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_only_the_read_codec_passes_cmr_to_the_write_codec)
+		{
+			switch_core_session_t *session = NULL;
+			switch_call_cause_t cause;
+			switch_codec_t writer = { 0 }, reader = { 0 }, other = { 0 };
+			static const unsigned char cmr0_oa[] = { 0x00, 0x7c };
+			unsigned char out[SWITCH_RECOMMENDED_BUFFER_SIZE];
+			uint32_t out_len, rate = 16000;
+			unsigned int flag = 0;
+			int ft;
+
+			fst_requires(switch_ivr_originate(NULL, &session, &cause, "null/amrwb-cmr", 0, NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) == SWITCH_STATUS_SUCCESS);
+			fst_requires(amrwb_init(&writer, "mode-set=0,1,2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(amrwb_init(&reader, "mode-set=0,1,2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(amrwb_init(&other, "mode-set=0,1,2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			switch_core_session_unset_read_codec(session);
+			switch_core_session_unset_write_codec(session);
+			fst_requires(switch_core_session_set_write_codec(session, &writer) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_core_session_set_read_codec(session, &reader) == SWITCH_STATUS_SUCCESS);
+			writer.session = reader.session = other.session = session;
+
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&other, NULL, (void *) cmr0_oa, sizeof(cmr0_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			ft = amrwb_encoded_ft(&writer, SWITCH_TRUE);
+			fst_check_int_equals(ft, 2);
+
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&reader, NULL, (void *) cmr0_oa, sizeof(cmr0_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			ft = amrwb_encoded_ft(&writer, SWITCH_TRUE);
+			fst_check_int_equals(ft, 0);
+
+			switch_core_session_unset_read_codec(session);
+			switch_core_session_unset_write_codec(session);
+			switch_channel_hangup(switch_core_session_get_channel(session), SWITCH_CAUSE_NORMAL_CLEARING);
+			switch_core_session_rwunlock(session);
+			switch_core_codec_destroy(&other);
+			switch_core_codec_destroy(&reader);
+			switch_core_codec_destroy(&writer);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_encoder_mode_matches_answered_mode_set)
+		{
+			switch_codec_t codec = { 0 };
+
+			/* offer without mode-set, mode-set-overwrite off: answer and encode within the configured mode-set */
+			fst_requires(amrwb_init(&codec, "octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "mode-set=0,1,2;"));
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 2);
+			switch_core_codec_destroy(&codec);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_relayed_sid_keeps_q_bit_in_be)
+		{
+			switch_codec_t source_oa = { 0 }, target_be = { 0 };
+			static const unsigned char sid_oa_q0[] = { 0xf0, 0x48, 0xe3, 0xdf, 0x3d, 0xe0, 0x02 };
+			unsigned char decoded[SWITCH_RECOMMENDED_BUFFER_SIZE], encoded[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
+			uint32_t decoded_len = sizeof(decoded), encoded_len = sizeof(encoded), rate = 16000;
+			unsigned int flag = 0;
+
+			fst_requires(amrwb_init(&source_oa, "mode-set=0,1,2;octet-align=1", SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(amrwb_init(&target_be, "mode-set=0,1,2;octet-align=0", SWITCH_CODEC_FLAG_ENCODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_core_codec_decode(&source_oa, NULL, (void *) sid_oa_q0, sizeof(sid_oa_q0), 16000, decoded, &decoded_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_core_codec_encode(&target_be, &source_oa, decoded, decoded_len, 16000, encoded, &encoded_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(((encoded[0] & 0x07) << 1) | (encoded[1] >> 7), 9);
+			fst_check_int_equals((encoded[1] >> 6) & 1, 0);
+			switch_core_codec_destroy(&target_be);
+			switch_core_codec_destroy(&source_oa);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_relayed_sid_carries_target_mode)
+		{
+			switch_codec_t source_oa = { 0 }, target_oa = { 0 };
+			static const unsigned char sid_oa[] = { 0xf0, 0x4c, 0xe3, 0xdf, 0x3d, 0xe0, 0x02 };
+			unsigned char decoded[SWITCH_RECOMMENDED_BUFFER_SIZE], encoded[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
+			uint32_t decoded_len = sizeof(decoded), encoded_len = sizeof(encoded), rate = 16000;
+			unsigned int flag = 0;
+
+			fst_requires(amrwb_init(&source_oa, "mode-set=0,1,2;octet-align=1", SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(amrwb_init(&target_oa, "mode-set=0,1;octet-align=1", SWITCH_CODEC_FLAG_ENCODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_core_codec_decode(&source_oa, NULL, (void *) sid_oa, sizeof(sid_oa), 16000, decoded, &decoded_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_core_codec_encode(&target_oa, &source_oa, decoded, decoded_len, 16000, encoded, &encoded_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_requires(encoded_len == sizeof(sid_oa));
+			fst_check_int_equals((encoded[1] >> 3) & 0x0f, 9);
+			fst_check_int_equals(encoded[6] & 0x0f, 1);
+			fst_check(!memcmp(encoded + 2, sid_oa + 2, 4) && (encoded[6] & 0xf0) == (sid_oa[6] & 0xf0));
+			switch_core_codec_destroy(&target_oa);
+			switch_core_codec_destroy(&source_oa);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_control_and_destroy_without_context)
+		{
+			switch_codec_t codec = { 0 };
+			int32_t level = 1;
+
+			amrwb_init(&codec, "octet-align=1", 0, fst_pool);
+			fst_check(switch_core_codec_control(&codec, SCC_DEBUG, SCCT_INT, &level, SCCT_NONE, NULL, NULL, NULL) == SWITCH_STATUS_FALSE);
+			fst_check(switch_core_codec_control(&codec, SCC_AUDIO_ADJUST_BITRATE, SCCT_STRING, (void *) "increase", SCCT_NONE, NULL, NULL, NULL) == SWITCH_STATUS_FALSE);
+			switch_core_codec_destroy(&codec);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_show_prints_config_literally)
+		{
+			switch_stream_handle_t stream = { 0 };
+			const char *literal = "x-pct=%s%s%s";
+
+			SWITCH_STANDARD_STREAM(stream);
+			switch_api_execute("amrwb_show", "", NULL, &stream);
+			fst_check(stream.data && strstr((char *) stream.data, literal));
+			switch_safe_free(stream.data);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_answered_mode_set_bounds_adjustments)
+		{
+			switch_codec_t codec = { 0 };
+
+			/* offer without mode-set: the answered mode-set (configured 0,1,2) is binding */
+			fst_requires(amrwb_init(&codec, "octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(codec.fmtp_out && strstr(codec.fmtp_out, "mode-set=0,1,2;"));
+			amrwb_adjust(&codec, "increase");
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 2);
+			switch_core_codec_destroy(&codec);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_mode_set_ignores_non_numeric_entries)
+		{
+			switch_codec_t codec = { 0 };
+
+			fst_requires(amrwb_init(&codec, "mode-set=2,,8;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "mode-set=2,8;"));
+			switch_core_codec_destroy(&codec);
+
+			fst_requires(amrwb_init(&codec, "mode-set=abc,1;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "mode-set=1;"));
+			switch_core_codec_destroy(&codec);
+
+			fst_requires(amrwb_init(&codec, "mode-set=0,1,2,3,4,5,6,7,1,8;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "mode-set=0,1,2,3,4,5,6,7,8;"));
+			switch_core_codec_destroy(&codec);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_concealment_does_not_flood_the_log)
+		{
+			switch_codec_t codec = { 0 };
+			static const unsigned char multi_oa[] = { 0xf0, 0xcc, 0x4c, 0xe3, 0xdf, 0x3d, 0xe0, 0x02, 0xe3, 0xdf, 0x3d, 0xe0, 0x02 };
+			unsigned char out[SWITCH_RECOMMENDED_BUFFER_SIZE];
+			uint32_t out_len, rate = 16000;
+			unsigned int flag = 0;
+			int i;
+
+			fst_requires(amrwb_init(&codec, "mode-set=2;octet-align=1", SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			switch_yield(200000);
+			amrwb_warning_lines = 0;
+			switch_log_bind_logger(amrwb_count_warnings, SWITCH_LOG_DEBUG, SWITCH_FALSE);
+			for (i = 0; i < 100; i++) {
+				out_len = sizeof(out);
+				switch_core_codec_decode(&codec, NULL, (void *) multi_oa, sizeof(multi_oa), 16000, out, &out_len, &rate, &flag);
+			}
+			switch_yield(500000);
+			switch_log_unbind_logger(amrwb_count_warnings);
+			switch_core_codec_destroy(&codec);
+
+			fst_check(amrwb_warning_lines >= 1);
+			fst_check(amrwb_warning_lines <= 2);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_long_fmtp_extra_is_not_truncated)
+		{
+			switch_codec_t codec = { 0 };
+			switch_codec_interface_t *codec_interface;
+			const switch_codec_implementation_t *impl;
+			int offers = 0, complete = 0;
+
+			fst_requires(amrwb_init(&codec, "mode-set=0,1,2,3,4,5,6,7,8;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "x-tail=1"));
+			switch_core_codec_destroy(&codec);
+
+			fst_requires((codec_interface = switch_loadable_module_get_codec_interface("AMR-WB", "mod_amrwb")));
+			for (impl = codec_interface->implementations; impl; impl = impl->next) {
+				offers++;
+				complete += impl->fmtp && strstr(impl->fmtp, "x-tail=1") != NULL;
+			}
+			UNPROTECT_INTERFACE(codec_interface);
+			fst_check(offers > 0 && complete == offers);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_ignores_invalid_default_bitrate)
+		{
+			switch_stream_handle_t stream = { 0 };
+
+			SWITCH_STANDARD_STREAM(stream);
+			switch_api_execute("amrwb_show", "", NULL, &stream);
+			fst_check(stream.data && strstr((char *) stream.data, "default-bitrate: 8,"));
+			switch_safe_free(stream.data);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_overwrite_encodes_within_both_mode_sets)
+		{
+			switch_codec_t codec = { 0 };
+
+			fst_requires(amrwb_reload("<param name=\"mode-set\" value=\"0,1,2\"/><param name=\"mode-set-overwrite\" value=\"1\"/>"
+									  "<param name=\"mode-set-overwrite-with-default-bitrate\" value=\"0\"/>") == SWITCH_STATUS_SUCCESS);
+
+			fst_requires(amrwb_init(&codec, "mode-set=0,1,2,3,4,5,6,7,8;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "mode-set=0,1,2;"));
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 2);
+			switch_core_codec_destroy(&codec);
+
+			/* intersection */
+			fst_requires(amrwb_init(&codec, "mode-set=1,8;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "mode-set=0,1,2;"));
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 1);
+			amrwb_adjust(&codec, "increase");
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 1);
+			switch_core_codec_destroy(&codec);
+
+			/* no intersection: the offered mode-set */
+			fst_requires(amrwb_init(&codec, "mode-set=7,8;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 8);
+			amrwb_adjust(&codec, "decrease");
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 7);
+			amrwb_adjust(&codec, "decrease");
+			fst_check_int_equals(amrwb_encoded_ft(&codec, SWITCH_TRUE), 7);
+			switch_core_codec_destroy(&codec);
+
+			fst_requires(amrwb_reload(NULL) == SWITCH_STATUS_SUCCESS);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_overwrite_offers_the_answered_mode_set)
+		{
+			switch_codec_interface_t *codec_interface;
+			const switch_codec_implementation_t *impl;
+			int offers = 0, configured = 0;
+
+			fst_requires(amrwb_reload("<param name=\"mode-set\" value=\"0,1,2\"/><param name=\"mode-set-overwrite\" value=\"1\"/>"
+									  "<param name=\"mode-set-overwrite-with-default-bitrate\" value=\"0\"/>") == SWITCH_STATUS_SUCCESS);
+			fst_requires((codec_interface = switch_loadable_module_get_codec_interface("AMR-WB", "mod_amrwb")));
+			for (impl = codec_interface->implementations; impl; impl = impl->next) {
+				offers++;
+				configured += impl->fmtp && strstr(impl->fmtp, "mode-set=0,1,2") != NULL;
+			}
+			UNPROTECT_INTERFACE(codec_interface);
+			fst_check(offers > 0 && configured == offers);
+			fst_requires(amrwb_reload(NULL) == SWITCH_STATUS_SUCCESS);
+		}
 		FST_TEST_END()
 
 	}
