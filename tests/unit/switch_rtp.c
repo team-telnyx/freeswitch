@@ -72,6 +72,91 @@ static switch_bool_t recv_rtp_seq(int fd, uint16_t *seq, int timeout_ms)
 	return SWITCH_TRUE;
 }
 
+static switch_bool_t recv_rtp_ts(int fd, uint32_t *ts, int timeout_ms)
+{
+	fd_set read_fds;
+	struct timeval timeout;
+	uint8_t packet[SWITCH_RTP_MAX_PACKET_LEN];
+	ssize_t bytes;
+
+	if (fd < 0 || !ts || timeout_ms < 0) return SWITCH_FALSE;
+
+	FD_ZERO(&read_fds);
+	FD_SET(fd, &read_fds);
+	timeout.tv_sec = timeout_ms / 1000;
+	timeout.tv_usec = (timeout_ms % 1000) * 1000;
+	if (select(fd + 1, &read_fds, NULL, NULL, &timeout) != 1) return SWITCH_FALSE;
+
+	bytes = recvfrom(fd, packet, sizeof(packet), 0, NULL, NULL);
+	if (bytes < SWITCH_RTP_HEADER_LEN) return SWITCH_FALSE;
+	if ((packet[1] & 0x7f) != TEST_PT) return recv_rtp_ts(fd, ts, timeout_ms);
+
+	*ts = ((uint32_t)packet[4] << 24) | ((uint32_t)packet[5] << 16) | ((uint32_t)packet[6] << 8) | packet[7];
+	return SWITCH_TRUE;
+}
+
+static switch_bool_t payload_write_ts(switch_rtp_t *raw_rtp, int sink_fd, uint32_t src_ts, uint32_t *out_ts)
+{
+	uint8_t data = 0xaa;
+	switch_frame_t frame = { 0 };
+
+	frame.data = &data;
+	frame.datalen = 1;
+	frame.payload = TEST_PT;
+	frame.timestamp = src_ts;
+
+	if (switch_rtp_write_frame(raw_rtp, &frame) <= 0) return SWITCH_FALSE;
+
+	return recv_rtp_ts(sink_fd, out_ts, 1000);
+}
+
+static switch_rtp_t *new_raw_write_rtp(switch_memory_pool_t *test_pool, switch_port_t sink_port, switch_bool_t rebase)
+{
+	switch_rtp_flag_t raw_flags[SWITCH_RTP_FLAG_INVALID] = { 0 };
+	const char *raw_err = NULL;
+	switch_port_t local_port = switch_rtp_request_port(rx_host);
+	switch_rtp_t *raw_rtp;
+
+	if (!local_port) return NULL;
+
+	raw_flags[SWITCH_RTP_FLAG_RAW_WRITE] = 1;
+	if (rebase) {
+		raw_flags[SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP] = 1;
+	}
+	raw_rtp = switch_rtp_new(rx_host, local_port, tx_host, sink_port, TEST_PT, 320, 20 * 1000,
+		raw_flags, "soft", &raw_err, test_pool);
+	if (raw_rtp) {
+		switch_rtp_clear_flag(raw_rtp, SWITCH_RTP_FLAG_PAUSE);
+	}
+
+	return raw_rtp;
+}
+
+static switch_bool_t raw_write_ts(switch_rtp_t *raw_rtp, int sink_fd, uint32_t src_ts, uint32_t *out_ts)
+{
+	switch_rtp_packet_t packet;
+	switch_frame_t frame = { 0 };
+
+	memset(&packet, 0, sizeof(packet));
+	packet.header.version = 2;
+	packet.header.pt = TEST_PT;
+	packet.header.ts = htonl(src_ts);
+	packet.header.ssrc = htonl(0x11223344);
+	packet.body[0] = (char)0xaa;
+
+	frame.packet = &packet;
+	frame.packetlen = SWITCH_RTP_HEADER_LEN + 1;
+	frame.data = packet.body;
+	frame.datalen = 1;
+	frame.payload = TEST_PT;
+	frame.timestamp = src_ts;
+	frame.flags = SFF_RAW_RTP | SFF_EXTERNAL;
+
+	if (switch_rtp_write_frame(raw_rtp, &frame) <= 0) return SWITCH_FALSE;
+
+	return recv_rtp_ts(sink_fd, out_ts, 1000);
+}
+
 static void prepare_mid_write_packet(switch_rtp_packet_t *packet, switch_bool_t malformed, uint32_t timestamp)
 {
 	switch_rtp_hdr_ext_t *ext;
@@ -776,6 +861,235 @@ FST_TEARDOWN_END()
 	}
 	FST_TEST_END()
 
+
+	FST_TEST_BEGIN(test_raw_write_ts_jump_is_rebased_once)
+	{
+		switch_memory_pool_t *test_pool = NULL;
+		switch_rtp_t *raw_rtp = NULL;
+		switch_port_t sink_port = 0;
+		uint32_t out = 0;
+		int sink_fd;
+
+		fst_requires(switch_core_new_memory_pool(&test_pool) == SWITCH_STATUS_SUCCESS);
+		sink_fd = make_udp_sink(&sink_port);
+		fst_requires(sink_fd >= 0);
+		raw_rtp = new_raw_write_rtp(test_pool, sink_port, SWITCH_TRUE);
+		fst_requires(raw_rtp);
+
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, 1000, &out));
+		fst_check(out == 1000);
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, 1320, &out));
+		fst_check(out == 1320);
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, 1320 + 48000, &out));
+		fst_check(out == 1640);
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, 1320 + 48000 + 320, &out));
+		fst_check(out == 1960);
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, 1320 + 48000 + 320 + 2560, &out));
+		fst_check(out == 4520);
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, 1320 + 48000 + 320 + 2560 + 320, &out));
+		fst_check(out == 4840);
+
+		switch_rtp_destroy(&raw_rtp);
+		close(sink_fd);
+		switch_core_destroy_memory_pool(&test_pool);
+	}
+	FST_TEST_END()
+
+	FST_TEST_BEGIN(test_raw_write_ts_backward_jump_is_rebased_once)
+	{
+		switch_memory_pool_t *test_pool = NULL;
+		switch_rtp_t *raw_rtp = NULL;
+		switch_port_t sink_port = 0;
+		uint32_t out = 0;
+		int sink_fd;
+
+		fst_requires(switch_core_new_memory_pool(&test_pool) == SWITCH_STATUS_SUCCESS);
+		sink_fd = make_udp_sink(&sink_port);
+		fst_requires(sink_fd >= 0);
+		raw_rtp = new_raw_write_rtp(test_pool, sink_port, SWITCH_TRUE);
+		fst_requires(raw_rtp);
+
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, 30000, &out));
+		fst_check(out == 30000);
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, (uint32_t)(30000 - 48000), &out));
+		fst_check(out == 30320);
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, (uint32_t)(30000 - 48000 + 2560), &out));
+		fst_check(out == 32880);
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, (uint32_t)(30000 - 48000 + 2560 + 320), &out));
+		fst_check(out == 33200);
+
+		switch_rtp_destroy(&raw_rtp);
+		close(sink_fd);
+		switch_core_destroy_memory_pool(&test_pool);
+	}
+	FST_TEST_END()
+
+	FST_TEST_BEGIN(test_raw_write_ts_real_pause_is_kept)
+	{
+		switch_memory_pool_t *test_pool = NULL;
+		switch_rtp_t *raw_rtp = NULL;
+		switch_port_t sink_port = 0;
+		uint32_t out = 0;
+		int sink_fd;
+
+		fst_requires(switch_core_new_memory_pool(&test_pool) == SWITCH_STATUS_SUCCESS);
+		sink_fd = make_udp_sink(&sink_port);
+		fst_requires(sink_fd >= 0);
+		raw_rtp = new_raw_write_rtp(test_pool, sink_port, SWITCH_TRUE);
+		fst_requires(raw_rtp);
+
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, 1000, &out));
+		fst_check(out == 1000);
+		switch_yield(2500000);
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, 1000 + 40000, &out));
+		fst_check(out == 41000);
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, 1000 + 40000 + 2560, &out));
+		fst_check(out == 43560);
+
+		switch_rtp_destroy(&raw_rtp);
+		close(sink_fd);
+		switch_core_destroy_memory_pool(&test_pool);
+	}
+	FST_TEST_END()
+
+	FST_TEST_BEGIN(test_raw_write_ts_two_second_boundary_and_wrap)
+	{
+		switch_memory_pool_t *test_pool = NULL;
+		switch_rtp_t *raw_rtp = NULL;
+		switch_port_t sink_port = 0;
+		uint32_t out = 0;
+		int sink_fd;
+
+		fst_requires(switch_core_new_memory_pool(&test_pool) == SWITCH_STATUS_SUCCESS);
+		sink_fd = make_udp_sink(&sink_port);
+		fst_requires(sink_fd >= 0);
+		raw_rtp = new_raw_write_rtp(test_pool, sink_port, SWITCH_TRUE);
+		fst_requires(raw_rtp);
+
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, 1000, &out));
+		fst_check(out == 1000);
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, 1000 + 32000, &out));
+		fst_check(out == 33000);
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, 33000 + 32001, &out));
+		fst_check(out == 33320);
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, 33000 + 32001 + 320, &out));
+		fst_check(out == 33640);
+
+		switch_rtp_destroy(&raw_rtp);
+
+		raw_rtp = new_raw_write_rtp(test_pool, sink_port, SWITCH_TRUE);
+		fst_requires(raw_rtp);
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, 0xffffff00, &out));
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, 0xffffff00 + 320, &out));
+		fst_check(out == 0x40);
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, 0x40 + 320, &out));
+		fst_check(out == 0x180);
+
+		switch_rtp_destroy(&raw_rtp);
+		close(sink_fd);
+		switch_core_destroy_memory_pool(&test_pool);
+	}
+	FST_TEST_END()
+
+	FST_TEST_BEGIN(test_raw_write_ts_jump_without_rebase_keeps_legacy_clamp)
+	{
+		switch_memory_pool_t *test_pool = NULL;
+		switch_rtp_t *raw_rtp = NULL;
+		switch_port_t sink_port = 0;
+		uint32_t out = 0;
+		int sink_fd;
+
+		fst_requires(switch_core_new_memory_pool(&test_pool) == SWITCH_STATUS_SUCCESS);
+		sink_fd = make_udp_sink(&sink_port);
+		fst_requires(sink_fd >= 0);
+		raw_rtp = new_raw_write_rtp(test_pool, sink_port, SWITCH_FALSE);
+		fst_requires(raw_rtp);
+
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, 1000, &out));
+		fst_check(out == 1000);
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, 1000 + 48000, &out));
+		fst_check(out == 1320);
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, 1000 + 48000 + 2560, &out));
+		fst_check(out == 1640);
+
+		switch_rtp_destroy(&raw_rtp);
+		close(sink_fd);
+		switch_core_destroy_memory_pool(&test_pool);
+	}
+	FST_TEST_END()
+
+	FST_TEST_BEGIN(test_raw_write_ts_rebase_applies_to_payload_frames)
+	{
+		switch_memory_pool_t *test_pool = NULL;
+		switch_rtp_t *raw_rtp = NULL;
+		switch_port_t sink_port = 0;
+		uint32_t out = 0;
+		int sink_fd;
+
+		fst_requires(switch_core_new_memory_pool(&test_pool) == SWITCH_STATUS_SUCCESS);
+		sink_fd = make_udp_sink(&sink_port);
+		fst_requires(sink_fd >= 0);
+		raw_rtp = new_raw_write_rtp(test_pool, sink_port, SWITCH_TRUE);
+		fst_requires(raw_rtp);
+
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, 1000, &out));
+		fst_check(out == 1000);
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, 1000 + 48000, &out));
+		fst_check(out == 1320);
+		fst_requires(payload_write_ts(raw_rtp, sink_fd, 1000 + 48000 + 320, &out));
+		fst_check(out == 1640);
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, 1000 + 48000 + 640, &out));
+		fst_check(out == 1960);
+		fst_requires(payload_write_ts(raw_rtp, sink_fd, 1000 + 48000 + 640 + 48000, &out));
+		fst_check(out == 2280);
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, 1000 + 48000 + 640 + 48000 + 2560, &out));
+		fst_check(out == 4840);
+
+		switch_rtp_destroy(&raw_rtp);
+		close(sink_fd);
+		switch_core_destroy_memory_pool(&test_pool);
+	}
+	FST_TEST_END()
+
+	FST_TEST_BEGIN(test_raw_write_ts_real_pause_after_generated_dtmf_is_kept)
+	{
+		switch_memory_pool_t *test_pool = NULL;
+		switch_rtp_t *raw_rtp = NULL;
+		switch_port_t sink_port = 0;
+		switch_dtmf_t dtmf = { '1', 16000, 0, SWITCH_DTMF_RTP };
+		switch_time_t sent_at;
+		uint32_t out = 0, src;
+		int sink_fd, i;
+
+		fst_requires(switch_core_new_memory_pool(&test_pool) == SWITCH_STATUS_SUCCESS);
+		sink_fd = make_udp_sink(&sink_port);
+		fst_requires(sink_fd >= 0);
+		raw_rtp = new_raw_write_rtp(test_pool, sink_port, SWITCH_TRUE);
+		fst_requires(raw_rtp);
+		switch_rtp_set_telephony_event(raw_rtp, 101);
+
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, 1000, &out));
+		fst_check(out == 1000);
+		sent_at = switch_time_ref();
+
+		fst_requires(switch_rtp_queue_rfc2833(raw_rtp, &dtmf) == SWITCH_STATUS_SUCCESS);
+		for (i = 0; i < 70; i++) {
+			do_2833(raw_rtp);
+			switch_yield(20000);
+		}
+		switch_yield(4000000 - (switch_time_ref() - sent_at));
+
+		src = 1000 + (uint32_t) ((switch_time_ref() - sent_at) * 16000 / 1000000);
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, src, &out));
+		fst_check(out == src);
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, src + 2560, &out));
+		fst_check(out == src + 2560);
+
+		switch_rtp_destroy(&raw_rtp);
+		close(sink_fd);
+		switch_core_destroy_memory_pool(&test_pool);
+	}
+	FST_TEST_END()
 }
 FST_SUITE_END()
 }

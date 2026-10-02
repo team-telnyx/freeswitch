@@ -13242,6 +13242,10 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 	if ((!val && !switch_media_handle_test_media_flag(smh, SCMF_REWRITE_TIMESTAMPS)) || (val && switch_false(val))) {
 		flags[SWITCH_RTP_FLAG_RAW_WRITE]++;
 	}
+
+	if (switch_true(switch_channel_get_variable(session->channel, "rtp_rebase_timestamps_on_jump"))) {
+		flags[SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP]++;
+	}
 	
 	// Deprecated channel variable. please use rtp_use_ms_per_packet
 	if (((val = switch_channel_get_variable(session->channel, "rtp_genesys_dtmf")) && switch_true(val))) {
