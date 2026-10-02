@@ -1,6 +1,12 @@
 
 #include <switch.h>
 #include <test/switch_test.h>
+#include "../../libs/srtp/include/srtp.h"
+
+#pragma weak srtp_create
+#pragma weak srtp_unprotect
+#pragma weak srtp_dealloc
+#pragma weak srtp_crypto_policy_set_rtp_default
 
 #ifndef MSG_CONFIRM
 #define MSG_CONFIRM 0
@@ -98,6 +104,120 @@ static switch_bool_t raw_write_event_ts(switch_rtp_t *raw_rtp, int sink_fd, uint
 	if (switch_rtp_write_frame(raw_rtp, &frame) <= 0) return SWITCH_FALSE;
 
 	return recv_rtp_pt_ts(sink_fd, 101, out_ts, 1000);
+}
+
+static switch_bool_t raw_write_srtp_ts(switch_rtp_t *raw_rtp, int sink_fd, srtp_t srtp_rx, uint32_t src_ts, uint32_t *out_ts, uint16_t *out_seq)
+{
+	switch_rtp_packet_t packet;
+	switch_frame_t frame = { 0 };
+	uint8_t buf[SWITCH_RTP_MAX_PACKET_LEN];
+	struct timeval timeout = { 1, 0 };
+	fd_set read_fds;
+	ssize_t bytes;
+	int len;
+
+	memset(&packet, 0, sizeof(packet));
+	packet.header.version = 2;
+	packet.header.pt = TEST_PT;
+	packet.header.ts = htonl(src_ts);
+	packet.header.ssrc = htonl(0x11223344);
+	packet.body[0] = (char)0xaa;
+
+	frame.packet = &packet;
+	frame.packetlen = SWITCH_RTP_HEADER_LEN + 1;
+	frame.data = packet.body;
+	frame.datalen = 1;
+	frame.payload = TEST_PT;
+	frame.timestamp = src_ts;
+	frame.flags = SFF_RAW_RTP | SFF_EXTERNAL;
+
+	if (switch_rtp_write_frame(raw_rtp, &frame) <= 0) return SWITCH_FALSE;
+
+	FD_ZERO(&read_fds);
+	FD_SET(sink_fd, &read_fds);
+	if (select(sink_fd + 1, &read_fds, NULL, NULL, &timeout) != 1) return SWITCH_FALSE;
+	bytes = recvfrom(sink_fd, buf, sizeof(buf), 0, NULL, NULL);
+	if (bytes < SWITCH_RTP_HEADER_LEN) return SWITCH_FALSE;
+
+	len = (int) bytes;
+	if (srtp_unprotect(srtp_rx, buf, &len) != srtp_err_status_ok) return SWITCH_FALSE;
+
+	*out_seq = (uint16_t)(((uint16_t)buf[2] << 8) | buf[3]);
+	*out_ts = ((uint32_t)buf[4] << 24) | ((uint32_t)buf[5] << 16) | ((uint32_t)buf[6] << 8) | buf[7];
+	return SWITCH_TRUE;
+}
+
+static switch_rtp_t *new_raw_write_rtp(switch_memory_pool_t *test_pool, switch_port_t sink_port, switch_bool_t rebase);
+
+static switch_bool_t run_srtp_rebase_case(const char **why)
+{
+	switch_memory_pool_t *test_pool = NULL;
+	switch_core_session_t *session = NULL;
+	switch_call_cause_t cause;
+	switch_rtp_t *raw_rtp = NULL;
+	switch_port_t sink_port = 0;
+	switch_secure_settings_t ssec;
+	srtp_policy_t policy;
+	srtp_t srtp_rx = NULL;
+	switch_time_t sent_at;
+	uint32_t out = 0, step;
+	uint16_t seq = 0, prev_seq = 0;
+	int sink_fd = -1, i;
+	switch_bool_t ok = SWITCH_FALSE;
+
+	*why = "setup";
+	if (switch_ivr_originate(NULL, &session, &cause, "null/+15553334444", 2, NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) != SWITCH_STATUS_SUCCESS || !session) goto end;
+	if (switch_core_new_memory_pool(&test_pool) != SWITCH_STATUS_SUCCESS) goto end;
+	switch_core_memory_pool_set_data(test_pool, "__session", session);
+	if ((sink_fd = make_udp_sink(&sink_port)) < 0) goto end;
+	if (!(raw_rtp = new_raw_write_rtp(test_pool, sink_port, SWITCH_TRUE))) goto end;
+
+	memset(&ssec, 0, sizeof(ssec));
+	ssec.crypto_type = AES_CM_128_HMAC_SHA1_80;
+	for (i = 0; i < 30; i++) {
+		ssec.local_raw_key[i] = (unsigned char)(i * 7 + 1);
+	}
+	*why = "send key";
+	if (switch_rtp_add_crypto_key(raw_rtp, SWITCH_RTP_CRYPTO_SEND, 1, &ssec) != SWITCH_STATUS_SUCCESS) goto end;
+
+	memset(&policy, 0, sizeof(policy));
+	srtp_crypto_policy_set_aes_cm_128_hmac_sha1_80(&policy.rtp);
+	srtp_crypto_policy_set_aes_cm_128_hmac_sha1_80(&policy.rtcp);
+	policy.ssrc.type = ssrc_any_inbound;
+	policy.key = ssec.local_raw_key;
+	policy.window_size = 1024;
+	*why = "receive context";
+	if (srtp_create(&srtp_rx, &policy) != srtp_err_status_ok) goto end;
+
+	*why = "first packet";
+	if (!raw_write_srtp_ts(raw_rtp, sink_fd, srtp_rx, 1000, &out, &prev_seq) || out != 1000) goto end;
+	*why = "inconsistent jump not corrected once";
+	if (!raw_write_srtp_ts(raw_rtp, sink_fd, srtp_rx, 1000 + 48000, &out, &seq) || out != 1320 || seq != (uint16_t)(prev_seq + 1)) goto end;
+	prev_seq = seq;
+	*why = "source spacing after the correction";
+	if (!raw_write_srtp_ts(raw_rtp, sink_fd, srtp_rx, 1000 + 48000 + 2560, &out, &seq) || out != 3880 || seq != (uint16_t)(prev_seq + 1)) goto end;
+	prev_seq = seq;
+	sent_at = switch_time_ref();
+
+	switch_yield(2500000);
+	step = (uint32_t) ((switch_time_ref() - sent_at) * 16000 / 1000000);
+	*why = "real pause not kept";
+	if (step <= 32000) goto end;
+	if (!raw_write_srtp_ts(raw_rtp, sink_fd, srtp_rx, 1000 + 48000 + 2560 + step, &out, &seq) || out != 3880 + step || seq != (uint16_t)(prev_seq + 1)) goto end;
+
+	ok = SWITCH_TRUE;
+	*why = NULL;
+
+ end:
+	if (srtp_rx) srtp_dealloc(srtp_rx);
+	if (raw_rtp) switch_rtp_destroy(&raw_rtp);
+	if (sink_fd >= 0) close(sink_fd);
+	if (test_pool) switch_core_destroy_memory_pool(&test_pool);
+	if (session) {
+		switch_channel_hangup(switch_core_session_get_channel(session), SWITCH_CAUSE_NORMAL_CLEARING);
+		switch_core_session_rwunlock(session);
+	}
+	return ok;
 }
 
 static switch_bool_t payload_write_ts(switch_rtp_t *raw_rtp, int sink_fd, uint32_t src_ts, uint32_t *out_ts)
@@ -487,6 +607,8 @@ FST_TEARDOWN_END()
 		switch_rtp_t *raw_rtp = NULL;
 		switch_port_t sink_port = 0;
 		uint32_t out = 0;
+		switch_time_t sent_at;
+		uint32_t step;
 		int sink_fd;
 
 		fst_requires(switch_core_new_memory_pool(&test_pool) == SWITCH_STATUS_SUCCESS);
@@ -497,11 +619,14 @@ FST_TEARDOWN_END()
 
 		fst_requires(raw_write_ts(raw_rtp, sink_fd, 1000, &out));
 		fst_check(out == 1000);
+		sent_at = switch_time_ref();
 		switch_yield(2500000);
-		fst_requires(raw_write_ts(raw_rtp, sink_fd, 1000 + 40000, &out));
-		fst_check(out == 41000);
-		fst_requires(raw_write_ts(raw_rtp, sink_fd, 1000 + 40000 + 2560, &out));
-		fst_check(out == 43560);
+		step = (uint32_t) ((switch_time_ref() - sent_at) * 16000 / 1000000);
+		fst_requires(step > 32000);
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, 1000 + step, &out));
+		fst_check(out == 1000 + step);
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, 1000 + step + 2560, &out));
+		fst_check(out == 1000 + step + 2560);
 
 		switch_rtp_destroy(&raw_rtp);
 		close(sink_fd);
@@ -744,6 +869,20 @@ FST_TEARDOWN_END()
 
 		close(sink_fd);
 		switch_core_destroy_memory_pool(&test_pool);
+	}
+	FST_TEST_END()
+
+	FST_TEST_BEGIN(test_raw_write_ts_rebase_over_srtp)
+	{
+		const char *why = NULL;
+
+		if (!srtp_create || !srtp_unprotect || !srtp_dealloc || !srtp_crypto_policy_set_rtp_default) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "SKIPPED test_raw_write_ts_rebase_over_srtp: no SRTP in this build\n");
+		} else {
+			switch_bool_t ok = run_srtp_rebase_case(&why);
+
+			fst_xcheck(ok, why ? why : "srtp rebase case");
+		}
 	}
 	FST_TEST_END()
 }
