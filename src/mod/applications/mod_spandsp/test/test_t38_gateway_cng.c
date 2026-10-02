@@ -24,11 +24,11 @@
  *
  * The test makes the call again and again, and changes only the times: the
  * start of the DIS, in 20 ms steps from 2 s before to 1 s after the start of
- * the gateway, and the CNG indicator, at 150, 225 and 750 ms (the range in the
- * captures). The DIS is the one of the answering terminals of the failing
- * calls, and the calling terminal answers the first DIS it receives 530 ms
- * later, as in the captures. It prints the ranges of DIS start that give each
- * result.
+ * the gateway, and the CNG indicator, at 150, 225 and 750 ms. The answering
+ * terminal sends its DIS again 11.5 s after the first one, and the calling
+ * terminal answers the first DIS it receives 530 ms later. The contents of the
+ * DIS have no effect on the result. It prints the ranges of DIS start that
+ * give each result.
  *
  * Exit status: 0 when the DCS is relayed in time in all runs, 1 when it is
  * not, 2 when the harness itself has a problem. -v prints every log line of
@@ -103,9 +103,8 @@ typedef struct {
 	bool active;
 } carrier_t;
 
-/* DIS of the answering terminals of the failing calls, as captured. */
-static const uint8_t dis_frame[] = { 0xFF, 0x13, FCF_DIS, 0x00, 0xEF, 0xFA, 0x80, 0x86, 0xDF,
-	0x83, 0x80, 0xD0, 0x98, 0x80, 0x80, 0xB3, 0x7F };
+/* DIS of the answering terminal: V.27ter, V.29 and V.17, fine resolution, 2-D coding, no ECM. */
+static const uint8_t dis_frame[] = { 0xFF, 0x13, FCF_DIS, 0x00, 0xEE, 0x78 };
 /* TSI of the calling terminal: 20 spaces. The contents have no effect on the gateway. */
 static const uint8_t tsi_frame[] = { 0xFF, 0x03, FCF_TSI | 1,
 	0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
@@ -118,7 +117,7 @@ static const char verdict_fault[] = "FAULT";
 static const char verdict_error[] = "HARNESS ERROR";
 static const char *verdict;
 static const char *sweep_verdict[SWEEP_RUNS];
-/* Times of the CNG indicator after the start of T.38, from the captures. */
+/* Times of the CNG indicator after the start of T.38. */
 static const int sweep_cng_ms[SWEEP_CNG_TIMES] = { 150, 225, 750 };
 static int sweep_cng_at_ms;
 
