@@ -11793,7 +11793,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 		flags[SWITCH_RTP_FLAG_RAW_WRITE]++;
 	}
 
-	if (switch_true(switch_channel_get_variable(session->channel, "rtp_rebase_timestamps_on_jump"))) {
+	val = switch_channel_get_variable(session->channel, "rtp_rebase_timestamps_on_jump");
+	if ((!val && switch_media_handle_test_media_flag(smh, SCMF_REBASE_TIMESTAMPS_ON_JUMP)) || (val && switch_true(val))) {
 		flags[SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP]++;
 	}
 	
