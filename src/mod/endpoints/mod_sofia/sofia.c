@@ -6025,6 +6025,12 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 						} else {
 							sofia_clear_media_flag(profile, SCMF_REWRITE_TIMESTAMPS);
 						}
+					} else if (!strcasecmp(var, "rtp-rebase-timestamps-on-jump")) {
+						if (switch_true(val)) {
+							sofia_set_media_flag(profile, SCMF_REBASE_TIMESTAMPS_ON_JUMP);
+						} else {
+							sofia_clear_media_flag(profile, SCMF_REBASE_TIMESTAMPS_ON_JUMP);
+						}
 					} else if (!strcasecmp(var, "sdp-reject-ipv6")) {
 						if (switch_true(val)) {
 							sofia_set_media_flag(profile, SCMF_REJECT_IPV6);
