@@ -9617,7 +9617,9 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 		}
 
 		if (channel) {
-			if (sofia_test_flag(tech_pvt, TFLAG_EARLY_MEDIA) && !sofia_test_flag(tech_pvt, TFLAG_ANS)) {
+			/* An offer-in-200 answer waiting for this ACK must negotiate the answer it carries below. */
+			if (sofia_test_flag(tech_pvt, TFLAG_EARLY_MEDIA) && !sofia_test_flag(tech_pvt, TFLAG_ANS) &&
+				(!sofia_test_flag(tech_pvt, TFLAG_3PCC_ANSWER_PENDING) || sofia_test_flag(tech_pvt, TFLAG_SDP))) {
 				sofia_set_flag_locked(tech_pvt, TFLAG_ANS);
 				sofia_set_flag(tech_pvt, TFLAG_SDP);
 				switch_channel_mark_answered(channel);

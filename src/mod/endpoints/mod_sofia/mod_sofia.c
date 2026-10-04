@@ -898,6 +898,40 @@ static switch_status_t sofia_acknowledge_call(switch_core_session_t *session)
 	return SWITCH_STATUS_FALSE;
 }
 
+/* Wait, with sofia_mutex released, until another thread clears the flag, the channel goes down or
+   timer T1x64 expires. Called and returns with sofia_mutex held. */
+static switch_bool_t sofia_wait_flag_cleared(private_object_t *tech_pvt, int flag)
+{
+	uint32_t t1x64 = tech_pvt->profile->timer_t1x64 ? tech_pvt->profile->timer_t1x64 : 32000;
+	switch_time_t deadline = switch_micro_time_now() + (switch_time_t)t1x64 * 1000;
+
+	switch_mutex_unlock(tech_pvt->sofia_mutex);
+	while (switch_channel_ready(tech_pvt->channel) && sofia_test_flag(tech_pvt, flag) && switch_micro_time_now() < deadline) {
+		switch_cond_next();
+	}
+	switch_mutex_lock(tech_pvt->sofia_mutex);
+
+	return sofia_test_flag(tech_pvt, flag) ? SWITCH_FALSE : SWITCH_TRUE;
+}
+
+/* 3pcc proxy mode, no-SDP INVITE: our offer is out in the 200 OK of an answer waiting for its ACK. Media
+   comes up when the ACK completes that answer; a second offer or provisional response would never reach the
+   far end and would stall the call. Wait for the answer instead, and succeed only if it completed. */
+static switch_status_t sofia_3pcc_proxy_join_pending_answer(private_object_t *tech_pvt)
+{
+	switch_channel_t *channel = tech_pvt->channel;
+
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(tech_pvt->session), SWITCH_LOG_DEBUG,
+					  "%s waiting for the pending answer\n", switch_channel_get_name(channel));
+
+	if (sofia_wait_flag_cleared(tech_pvt, TFLAG_3PCC_ANSWER_PENDING) &&
+		switch_channel_ready(channel) && switch_channel_test_flag(channel, CF_ANSWERED)) {
+		return SWITCH_STATUS_SUCCESS;
+	}
+
+	return SWITCH_STATUS_FALSE;
+}
+
 static switch_status_t sofia_answer_channel(switch_core_session_t *session)
 {
 	private_object_t *tech_pvt = (private_object_t *) switch_core_session_get_private(session);
@@ -974,6 +1008,11 @@ static switch_status_t sofia_answer_channel(switch_core_session_t *session)
 		sofia_set_flag_locked(tech_pvt, TFLAG_SDP);
 		switch_channel_mark_answered(channel);     // ... and remember to actually answer the call!
 		status = SWITCH_STATUS_SUCCESS;
+		goto done;
+	}
+
+	if (sofia_test_flag(tech_pvt, TFLAG_3PCC_ANSWER_PENDING)) {
+		status = sofia_3pcc_proxy_join_pending_answer(tech_pvt);
 		goto done;
 	}
 
@@ -1077,6 +1116,7 @@ static switch_status_t sofia_answer_channel(switch_core_session_t *session)
 
 			if (is_3pcc_proxy) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC-PROXY, Sent a 200 OK, waiting for ACK\n");
+				sofia_set_flag(tech_pvt, TFLAG_3PCC_ANSWER_PENDING);
 				/* Unlock the session signal to allow the ack to make it in */
 				// Maybe we should timeout?
 				switch_mutex_unlock(tech_pvt->sofia_mutex);
@@ -1087,6 +1127,7 @@ static switch_status_t sofia_answer_channel(switch_core_session_t *session)
 
 				/*  Regain lock on sofia */
 				switch_mutex_lock(tech_pvt->sofia_mutex);
+				sofia_clear_flag(tech_pvt, TFLAG_3PCC_ANSWER_PENDING);
 
 				if (is_proxy) {
 					sofia_clear_flag(tech_pvt, TFLAG_3PCC_HAS_ACK);
@@ -2905,7 +2946,8 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 			}
 
 			if (!switch_channel_test_flag(channel, CF_RING_READY) && !sofia_test_flag(tech_pvt, TFLAG_BYE) &&
-				!switch_channel_test_flag(channel, CF_EARLY_MEDIA) && !switch_channel_test_flag(channel, CF_ANSWERED)) {
+				!switch_channel_test_flag(channel, CF_EARLY_MEDIA) && !switch_channel_test_flag(channel, CF_ANSWERED) &&
+				!sofia_test_flag(tech_pvt, TFLAG_3PCC_ANSWER_PENDING)) {
 				char *extra_header = sofia_glue_get_extra_headers(channel, SOFIA_SIP_PROGRESS_HEADER_PREFIX);
 				const char *call_info = switch_channel_get_variable(channel, "presence_call_info_full");
 				char *cid = generate_pai_str(tech_pvt);
@@ -3065,6 +3107,11 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 			b_sdp = switch_channel_get_variable(channel, SWITCH_B_SDP_VARIABLE);
 			is_proxy = (switch_channel_test_flag(channel, CF_PROXY_MODE) || switch_channel_test_flag(channel, CF_PROXY_MEDIA));
 			is_3pcc_proxy = (sofia_test_pflag(tech_pvt->profile, PFLAG_3PCC_PROXY) && sofia_test_flag(tech_pvt, TFLAG_3PCC));
+
+			if (sofia_test_flag(tech_pvt, TFLAG_3PCC_ANSWER_PENDING)) {
+				status = sofia_3pcc_proxy_join_pending_answer(tech_pvt);
+				goto end_lock;
+			}
 
 			/* dialplan-mode early-offer: the no-SDP INVITE was deferred (CF_3PCC is set only by
 			   the no-SDP early-offer defer, which distinguishes this from a normal SDP INVITE

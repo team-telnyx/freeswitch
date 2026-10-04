@@ -37,6 +37,7 @@
 #include <signal.h>
 #include <spawn.h>
 #include <sys/wait.h>
+#include <pthread.h>
 
 extern char **environ;
 
@@ -239,6 +240,209 @@ static int stop_t38_sipp(pid_t *pid)
 	return wait_t38_sipp(pid, &status, 2000) == 1;
 }
 
+static int start_delayed_offer_sipp(const char *ip, const char *scenario, pid_t *pid)
+{
+	char *target = switch_mprintf("%s:5090", ip);
+	char *argv[] = {
+		"sipp", target, "-nr", "-p", "5062", "-m", "1", "-s", "3434343434",
+		"-recv_timeout", "15000", "-timeout", "20s", "-timeout_error", "-nostdin",
+		"-sf", (char *)scenario, "-trace_err", NULL
+	};
+	int result = posix_spawnp(pid, "sipp", NULL, NULL, argv, environ);
+
+	switch_safe_free(target);
+	return result;
+}
+
+typedef struct {
+	const char *cmd;
+	char *arg;
+	char *reply;
+	switch_time_t started_at;
+	switch_time_t elapsed_ms;
+	pthread_t thread;
+	int started;
+} api_call_t;
+
+static void *api_call_run(void *obj)
+{
+	api_call_t *call = (api_call_t *)obj;
+	switch_stream_handle_t stream = { 0 };
+	switch_time_t start = switch_time_now();
+
+	call->started_at = start;
+	SWITCH_STANDARD_STREAM(stream);
+	switch_api_execute(call->cmd, call->arg, NULL, &stream);
+	call->elapsed_ms = (switch_time_now() - start) / 1000;
+	call->reply = stream.data ? strdup((char *)stream.data) : strdup("");
+	switch_safe_free(stream.data);
+	return NULL;
+}
+
+static void api_call_start(api_call_t *call, const char *cmd, const char *fmt, const char *uuid)
+{
+	call->cmd = cmd;
+	call->arg = switch_mprintf(fmt, uuid);
+	call->started = !pthread_create(&call->thread, NULL, api_call_run, call);
+}
+
+static void api_call_join(api_call_t *call)
+{
+	if (call->started) {
+		pthread_join(call->thread, NULL);
+		call->started = 0;
+	}
+}
+
+static void api_call_finish(api_call_t *call)
+{
+	api_call_join(call);
+	switch_safe_free(call->arg);
+	switch_safe_free(call->reply);
+}
+
+static switch_bool_t api_call_ok(api_call_t *call)
+{
+	return (call->reply && !strncmp(call->reply, "+OK", 3)) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
+/* Inbound no-SDP call on the delayed-offer profile, parked after ring_ready. */
+static switch_core_session_t *delayed_offer_wait_parked(char *uuid)
+{
+	switch_core_session_t *session = NULL;
+	int loop_count = 100;
+
+	test_wait_for_uuid(uuid);
+	if (zstr(uuid) || !(session = switch_core_session_locate(uuid))) {
+		return NULL;
+	}
+	while (loop_count--) {
+		const char *app = switch_channel_get_variable(switch_core_session_get_channel(session), "current_application");
+		if (app && !strcmp(app, "park")) {
+			break;
+		}
+		switch_sleep(20 * 1000);
+	}
+	return session;
+}
+
+/* Joins of the pending answer logged by the endpoint for one call: proof that a request reached the
+   endpoint while the answer was still waiting for its ACK. */
+static struct {
+	pthread_mutex_t mutex;
+	char uuid[100];
+	int joins;
+	switch_time_t last_join;
+} join_watch = { PTHREAD_MUTEX_INITIALIZER, "", 0, 0 };
+
+static switch_status_t join_watch_logger(const switch_log_node_t *node, switch_log_level_t level)
+{
+	if (node->data && node->userdata && strstr(node->data, "waiting for the pending answer")) {
+		pthread_mutex_lock(&join_watch.mutex);
+		if (!zstr(join_watch.uuid) && !strcmp(node->userdata, join_watch.uuid)) {
+			join_watch.joins++;
+			join_watch.last_join = node->timestamp;
+		}
+		pthread_mutex_unlock(&join_watch.mutex);
+	}
+	return SWITCH_STATUS_SUCCESS;
+}
+
+typedef enum {
+	ACK_RACE_RECORD_ONLY,
+	ACK_RACE_DUPLICATE_ANSWER
+} ack_race_extra_t;
+
+typedef struct {
+	int sipp_started;
+	int parked;
+	int sipp_ok;
+	int up;
+	int media;
+	switch_time_t answered_at;
+	int joins;
+	switch_time_t last_join;
+	api_call_t answer;
+	api_call_t record;
+	api_call_t extra;
+} ack_race_t;
+
+/* Answer an offerless call (offer in our 200 OK) while the peer holds its ACK for 600 ms, and send media
+   requests from other threads before that ACK arrives. */
+static void delayed_offer_ack_race(const char *ip, ack_race_extra_t extra, ack_race_t *r)
+{
+	switch_core_session_t *session = NULL;
+	switch_channel_t *channel = NULL;
+	char uuid[100] = "";
+	pid_t sipp_pid = -1;
+	int sipp_status = 0;
+
+	if (start_delayed_offer_sipp(ip, "sipp-scenarios/uac_delayed_offer_slow_ack.xml", &sipp_pid) != 0) {
+		return;
+	}
+	r->sipp_started = 1;
+
+	if (!(session = delayed_offer_wait_parked(uuid))) {
+		goto end;
+	}
+	r->parked = 1;
+	channel = switch_core_session_get_channel(session);
+	pthread_mutex_lock(&join_watch.mutex);
+	switch_set_string(join_watch.uuid, uuid);
+	join_watch.joins = 0;
+	join_watch.last_join = 0;
+	pthread_mutex_unlock(&join_watch.mutex);
+	switch_log_bind_logger(join_watch_logger, SWITCH_LOG_DEBUG, SWITCH_FALSE);
+
+	api_call_start(&r->answer, "uuid_answer", "%s", uuid);
+	switch_sleep(150 * 1000);
+	api_call_start(&r->record, "uuid_record", "%s start /tmp/delayed_offer_ack_wait.wav", uuid);
+	if (extra == ACK_RACE_DUPLICATE_ANSWER) {
+		switch_sleep(50 * 1000);
+		api_call_start(&r->extra, "uuid_answer", "%s", uuid);
+	}
+	api_call_join(&r->answer);
+	api_call_join(&r->record);
+	api_call_join(&r->extra);
+
+	switch_sleep(200 * 1000);
+	switch_log_unbind_logger(join_watch_logger);
+	pthread_mutex_lock(&join_watch.mutex);
+	r->joins = join_watch.joins;
+	r->last_join = join_watch.last_join;
+	join_watch.uuid[0] = '\0';
+	pthread_mutex_unlock(&join_watch.mutex);
+	r->answered_at = switch_channel_get_timetable(channel) ? switch_channel_get_timetable(channel)->answered : 0;
+	r->up = switch_channel_ready(channel) && switch_channel_test_flag(channel, CF_ANSWERED);
+	r->media = switch_core_media_ready(session, SWITCH_MEDIA_TYPE_AUDIO);
+
+	switch_channel_hangup(channel, SWITCH_CAUSE_NORMAL_CLEARING);
+	r->sipp_ok = wait_t38_sipp(&sipp_pid, &sipp_status, 10000) == 1 && WIFEXITED(sipp_status) && WEXITSTATUS(sipp_status) == 0;
+
+ end:
+	stop_t38_sipp(&sipp_pid);
+	if (session) {
+		if (!switch_channel_down_nosig(channel)) {
+			switch_channel_hangup(channel, SWITCH_CAUSE_NORMAL_CLEARING);
+		}
+		switch_core_session_rwunlock(session);
+	}
+}
+
+/* Each racing request reached the endpoint while the answer was still waiting for its ACK: the endpoint
+   logged a join of the pending answer for it, before the ACK completed the answer. */
+static switch_bool_t ack_race_joined(ack_race_t *r, int requests)
+{
+	return (r->joins >= requests && r->answered_at && r->last_join < r->answered_at) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
+static void ack_race_free(ack_race_t *r)
+{
+	api_call_finish(&r->answer);
+	api_call_finish(&r->record);
+	api_call_finish(&r->extra);
+}
+
 static void show_event(switch_event_t *event) {
 	char *str;
 	/*print the event*/
@@ -305,7 +509,13 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 
 			switch_core_set_variable("spawn_instead_of_system", "true");
 
-			if (getenv("FST_T38_ONLY")) {
+			if (getenv("FST_DELAYED_OFFER_ONLY")) {
+				fst_requires_module("mod_sofia");
+				fst_requires_module("mod_dialplan_xml");
+				fst_requires_module("mod_dptools");
+				fst_requires_module("mod_commands");
+				fst_requires_module("mod_sndfile");
+			} else if (getenv("FST_T38_ONLY")) {
 				fst_requires_module("mod_sofia");
 				fst_requires_module("mod_dialplan_xml");
 				fst_requires_module("mod_dptools");
@@ -473,6 +683,37 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 				}
 				switch_core_session_rwunlock(session);
 			}
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(delayed_offer_media_request_during_ack_wait)
+		{
+			ack_race_t r = { 0 };
+
+			delayed_offer_ack_race(switch_core_get_variable("local_ip_v4"), ACK_RACE_RECORD_ONLY, &r);
+			fst_xcheck(r.sipp_started && r.parked, "SIPp call did not reach park");
+			fst_xcheck(ack_race_joined(&r, 1), "record request did not reach the endpoint while the ACK was pending");
+			fst_xcheck(api_call_ok(&r.answer) && r.answer.elapsed_ms < 3000, "uuid_answer did not complete when the ACK arrived");
+			fst_xcheck(api_call_ok(&r.record), "uuid_record failed");
+			fst_xcheck(r.up && r.media, "call not up with media after the ACK");
+			fst_xcheck(r.sipp_ok, "SIPp delayed-offer scenario failed; inspect uac_delayed_offer_slow_ack_*_errors.log");
+			ack_race_free(&r);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(delayed_offer_duplicate_answer_during_ack_wait)
+		{
+			ack_race_t r = { 0 };
+
+			delayed_offer_ack_race(switch_core_get_variable("local_ip_v4"), ACK_RACE_DUPLICATE_ANSWER, &r);
+			fst_xcheck(r.sipp_started && r.parked, "SIPp call did not reach park");
+			fst_xcheck(ack_race_joined(&r, 2), "second uuid_answer and record did not reach the endpoint while the ACK was pending");
+			fst_xcheck(api_call_ok(&r.answer) && r.answer.elapsed_ms < 3000, "uuid_answer did not complete when the ACK arrived");
+			fst_xcheck(api_call_ok(&r.extra) && r.extra.elapsed_ms < 3000, "second uuid_answer did not complete when the ACK arrived");
+			fst_xcheck(api_call_ok(&r.record), "uuid_record failed");
+			fst_xcheck(r.up && r.media, "call not up with media after the ACK");
+			fst_xcheck(r.sipp_ok, "SIPp delayed-offer scenario failed; inspect uac_delayed_offer_slow_ack_*_errors.log");
+			ack_race_free(&r);
 		}
 		FST_TEST_END()
 
