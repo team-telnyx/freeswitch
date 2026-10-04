@@ -627,6 +627,14 @@
       </condition>
     </extension>
 
+    <extension name="delayed_offer_ring_ready_early_media_park">
+      <condition field="destination_number" expression="^3434343435$">
+        <action application="set" data="ring_ready_early_media=true"/>
+        <action application="ring_ready"/>
+        <action application="park"/>
+      </condition>
+    </extension>
+
 	<extension name="sipp">
 		<condition>
 		   <action application="info"/>

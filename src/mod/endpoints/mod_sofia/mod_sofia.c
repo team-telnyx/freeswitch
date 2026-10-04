@@ -932,6 +932,33 @@ static switch_status_t sofia_3pcc_proxy_join_pending_answer(private_object_t *te
 	return SWITCH_STATUS_FALSE;
 }
 
+/* An SDP offer sent in a reliable provisional whose PRACK answer has not arrived yet. */
+static switch_bool_t sofia_early_offer_pending(private_object_t *tech_pvt)
+{
+	return (sofia_test_flag(tech_pvt, TFLAG_EARLY_OFFER_SENT) && sofia_test_flag(tech_pvt, TFLAG_3PCC_EARLY_OFFER)) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
+/* Wait for the PRACK answer to a pending early offer instead of starting another offer/answer exchange.
+   Media is up when it succeeds; on timeout the call is torn down. */
+static switch_status_t sofia_join_early_offer(private_object_t *tech_pvt)
+{
+	switch_channel_t *channel = tech_pvt->channel;
+
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(tech_pvt->session), SWITCH_LOG_DEBUG,
+					  "%s early-offer: waiting for the PRACK answer\n", switch_channel_get_name(channel));
+
+	if (!sofia_wait_flag_cleared(tech_pvt, TFLAG_3PCC_EARLY_OFFER)) {
+		if (switch_channel_ready(channel)) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(tech_pvt->session), SWITCH_LOG_ERROR,
+							  "%s early-offer: timeout waiting for PRACK answer\n", switch_channel_get_name(channel));
+			switch_channel_hangup(channel, SWITCH_CAUSE_NO_USER_RESPONSE);
+		}
+		return SWITCH_STATUS_FALSE;
+	}
+
+	return (switch_channel_ready(channel) && sofia_test_flag(tech_pvt, TFLAG_SDP)) ? SWITCH_STATUS_SUCCESS : SWITCH_STATUS_FALSE;
+}
+
 static switch_status_t sofia_answer_channel(switch_core_session_t *session)
 {
 	private_object_t *tech_pvt = (private_object_t *) switch_core_session_get_private(session);
@@ -1013,6 +1040,11 @@ static switch_status_t sofia_answer_channel(switch_core_session_t *session)
 
 	if (sofia_test_flag(tech_pvt, TFLAG_3PCC_ANSWER_PENDING)) {
 		status = sofia_3pcc_proxy_join_pending_answer(tech_pvt);
+		goto done;
+	}
+
+	if (switch_channel_direction(channel) == SWITCH_CALL_DIRECTION_INBOUND && sofia_early_offer_pending(tech_pvt) &&
+		(status = sofia_join_early_offer(tech_pvt)) != SWITCH_STATUS_SUCCESS) {
 		goto done;
 	}
 
@@ -3113,6 +3145,11 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 				goto end_lock;
 			}
 
+			if (sofia_early_offer_pending(tech_pvt)) {
+				status = sofia_join_early_offer(tech_pvt);
+				goto end_lock;
+			}
+
 			/* dialplan-mode early-offer: the no-SDP INVITE was deferred (CF_3PCC is set only by
 			   the no-SDP early-offer defer, which distinguishes this from a normal SDP INVITE
 			   that also carries TFLAG_LATE_NEGOTIATION under inbound-late-negotiation) and the
@@ -3172,6 +3209,7 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 					if ((status = sofia_early_offer_gen_sdp(tech_pvt)) != SWITCH_STATUS_SUCCESS) {
 						goto end_lock;
 					}
+					sofia_set_flag_locked(tech_pvt, TFLAG_EARLY_OFFER_SENT);
 				} else {
 					if (sofia_test_flag(tech_pvt, TFLAG_LATE_NEGOTIATION) ||
 						switch_core_media_codec_chosen(tech_pvt->session, SWITCH_MEDIA_TYPE_AUDIO) != SWITCH_STATUS_SUCCESS) {

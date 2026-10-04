@@ -13,4 +13,6 @@ export FST_DELAYED_OFFER_ONLY
 rc=0
 ./sipp-based-tests delayed_offer_media_request_during_ack_wait || rc=1
 ./sipp-based-tests delayed_offer_duplicate_answer_during_ack_wait || rc=1
+./sipp-based-tests early_offer_answer_and_media_during_prack_wait || rc=1
+./sipp-based-tests ring_ready_early_offer_answer_during_prack_wait || rc=1
 exit $rc
