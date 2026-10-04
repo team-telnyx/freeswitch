@@ -627,6 +627,30 @@
       </condition>
     </extension>
 
+    <extension name="delayed_offer_ring_hook_pre_answer_park">
+      <condition field="destination_number" expression="^3434343436$">
+        <action application="set" data="ring_ready_early_media=true"/>
+        <action application="set" data="execute_on_ring=pre_answer"/>
+        <action application="park"/>
+      </condition>
+    </extension>
+
+    <extension name="delayed_offer_pre_answer_hook_log_park">
+      <condition field="destination_number" expression="^3434343438$">
+        <action application="set" data="execute_on_pre_answer=log INFO pre-answer-hook-${uuid}"/>
+        <action application="ring_ready"/>
+        <action application="park"/>
+      </condition>
+    </extension>
+
+    <extension name="delayed_offer_pre_answer_hook_answer_park">
+      <condition field="destination_number" expression="^3434343437$">
+        <action application="set" data="execute_on_pre_answer=answer"/>
+        <action application="ring_ready"/>
+        <action application="park"/>
+      </condition>
+    </extension>
+
     <extension name="delayed_offer_ring_ready_early_media_park">
       <condition field="destination_number" expression="^3434343435$">
         <action application="set" data="ring_ready_early_media=true"/>

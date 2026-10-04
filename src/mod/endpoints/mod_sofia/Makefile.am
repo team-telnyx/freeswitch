@@ -51,6 +51,10 @@ TESTS = test/test_sofia_funcs.sh test/test_nuafail test/test_string_stream_mem_l
 TESTS += test/test_t38_session_refresh.sh
 TESTS += test/test_delayed_offer_media_race.sh
 
+# Both SIPp suites start FreeSWITCH with test/conf-sipp and SIPp on port 5062: never run them at the same time.
+TEST_EXTENSIONS = .sh
+test/test_delayed_offer_media_race.log: test/test_t38_session_refresh.log
+
 if ISMAC
 mod_sofia_la_LDFLAGS += -framework CoreFoundation -framework SystemConfiguration
 test_test_sofia_funcs_LDFLAGS += -framework CoreFoundation -framework SystemConfiguration

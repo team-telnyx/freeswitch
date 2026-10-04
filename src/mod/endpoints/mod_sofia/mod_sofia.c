@@ -943,6 +943,17 @@ static switch_bool_t sofia_early_offer_pending(private_object_t *tech_pvt)
 static switch_status_t sofia_join_early_offer(private_object_t *tech_pvt)
 {
 	switch_channel_t *channel = tech_pvt->channel;
+	switch_bool_t completer;
+
+	switch_mutex_lock(tech_pvt->flag_mutex);
+	completer = sofia_test_flag(tech_pvt, TFLAG_EARLY_OFFER_COMPLETING) &&
+		switch_thread_equal(tech_pvt->early_offer_completer, switch_thread_self());
+	switch_mutex_unlock(tech_pvt->flag_mutex);
+
+	if (completer) {
+		/* A pre-answer hook of the PRACK completing this offer: media is already up. */
+		return (switch_channel_ready(channel) && sofia_test_flag(tech_pvt, TFLAG_SDP)) ? SWITCH_STATUS_SUCCESS : SWITCH_STATUS_FALSE;
+	}
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(tech_pvt->session), SWITCH_LOG_DEBUG,
 					  "%s early-offer: waiting for the PRACK answer\n", switch_channel_get_name(channel));
@@ -1965,6 +1976,9 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 	case SWITCH_MESSAGE_INDICATE_CLEAR_PROGRESS:
 		if (!switch_channel_test_flag(channel, CF_ANSWERED)) {
 			sofia_clear_flag(tech_pvt, TFLAG_EARLY_MEDIA);
+			if (!sofia_test_flag(tech_pvt, TFLAG_3PCC_EARLY_OFFER)) {
+				sofia_clear_flag(tech_pvt, TFLAG_EARLY_OFFER_SENT);
+			}
 		}
 		goto end;
 	case SWITCH_MESSAGE_INDICATE_ANSWER:
@@ -3108,7 +3122,11 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 
 
 				switch_safe_free(extra_header);
+				/* The ring hooks may pre-answer, which can wait for the PRACK to the offer just sent;
+				   its handler needs sofia_mutex. */
+				switch_mutex_unlock(tech_pvt->sofia_mutex);
 				switch_channel_mark_ring_ready(channel);
+				switch_mutex_lock(tech_pvt->sofia_mutex);
 			}
 		}
 		break;

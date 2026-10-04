@@ -93,6 +93,13 @@ switch_status_t sofia_media_activate_rtp_unlocked(private_object_t *tech_pvt)
 
 switch_status_t sofia_media_tech_media(private_object_t *tech_pvt, const char *r_sdp, switch_sdp_type_t type)
 {
+	return sofia_media_tech_media_ex(tech_pvt, r_sdp, type, SWITCH_TRUE);
+}
+
+/* With mark_pre_answered off the caller marks the channel pre-answered itself, which runs the pre-answer
+   hooks, once it has recorded that the offer/answer is complete. */
+switch_status_t sofia_media_tech_media_ex(private_object_t *tech_pvt, const char *r_sdp, switch_sdp_type_t type, switch_bool_t mark_pre_answered)
+{
 	switch_assert(tech_pvt != NULL);
 	switch_assert(r_sdp != NULL);
 
@@ -109,7 +116,9 @@ switch_status_t sofia_media_tech_media(private_object_t *tech_pvt, const char *r
 		}
 		switch_channel_set_variable(tech_pvt->channel, SWITCH_ENDPOINT_DISPOSITION_VARIABLE, "EARLY MEDIA");
 		sofia_set_flag_locked(tech_pvt, TFLAG_EARLY_MEDIA);
-		switch_channel_mark_pre_answered(tech_pvt->channel);
+		if (mark_pre_answered) {
+			switch_channel_mark_pre_answered(tech_pvt->channel);
+		}
 		return SWITCH_STATUS_SUCCESS;
 	}
 

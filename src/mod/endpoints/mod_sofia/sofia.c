@@ -2771,7 +2771,7 @@ void sofia_event_callback(nua_event_t event,
 							!strcasecmp(sip->sip_content_type->c_type, "application/sdp")) {
 							const char *r_sdp = sip->sip_payload->pl_data;
 							switch_core_media_set_sdp_codec_string(session, r_sdp, SDP_ANSWER);
-							if (sofia_media_tech_media(tech_pvt, r_sdp, SDP_ANSWER) != SWITCH_STATUS_SUCCESS) {
+							if (sofia_media_tech_media_ex(tech_pvt, r_sdp, SDP_ANSWER, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
 								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
 												  "early-offer: failed to negotiate the PRACK answer SDP\n");
 								switch_channel_set_variable(channel, SWITCH_ENDPOINT_DISPOSITION_VARIABLE, "CODEC NEGOTIATION ERROR");
@@ -2785,6 +2785,20 @@ void sofia_event_callback(nua_event_t event,
 								   ACK -- the 200 OK carried no offer, so an ACK body is not a valid
 								   answer and must not re-negotiate the codec. */
 								sofia_set_flag_locked(tech_pvt, TFLAG_SDP);
+								/* Run the pre-answer hooks before other threads waiting on the early offer go
+								   on, so an answer cannot overtake them; a hook re-entering on this thread is
+								   recognised as the completer and does not wait for itself. */
+								if (!switch_channel_down_nosig(channel)) {
+									switch_mutex_lock(tech_pvt->flag_mutex);
+									tech_pvt->early_offer_completer = switch_thread_self();
+									sofia_set_flag(tech_pvt, TFLAG_EARLY_OFFER_COMPLETING);
+									switch_mutex_unlock(tech_pvt->flag_mutex);
+									switch_channel_mark_pre_answered(channel);
+								}
+								switch_mutex_lock(tech_pvt->flag_mutex);
+								sofia_clear_flag(tech_pvt, TFLAG_EARLY_OFFER_COMPLETING);
+								sofia_clear_flag(tech_pvt, TFLAG_3PCC_EARLY_OFFER);
+								switch_mutex_unlock(tech_pvt->flag_mutex);
 							}
 						} else {
 							/* We offered in the 183 but the PRACK has no SDP answer -- protocol error. */

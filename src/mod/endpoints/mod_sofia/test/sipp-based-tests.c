@@ -334,16 +334,22 @@ static struct {
 	const char *needle;
 	int joins;
 	switch_time_t last_join;
-} join_watch = { PTHREAD_MUTEX_INITIALIZER, "", NULL, 0, 0 };
+	int hook_runs;
+} join_watch = { PTHREAD_MUTEX_INITIALIZER, "", NULL, 0, 0, 0 };
 
 static switch_status_t join_watch_logger(const switch_log_node_t *node, switch_log_level_t level)
 {
 	if (node->data && node->userdata) {
 		pthread_mutex_lock(&join_watch.mutex);
-		if (!zstr(join_watch.uuid) && join_watch.needle && strstr(node->data, join_watch.needle) &&
-			!strcmp(node->userdata, join_watch.uuid)) {
-			join_watch.joins++;
-			join_watch.last_join = node->timestamp;
+		if (!zstr(join_watch.uuid) && !strcmp(node->userdata, join_watch.uuid)) {
+			if (join_watch.needle && strstr(node->data, join_watch.needle)) {
+				join_watch.joins++;
+				join_watch.last_join = node->timestamp;
+			}
+			if (strstr(node->file, "mod_dptools.c") && strstr(node->data, "pre-answer-hook-") &&
+				strstr(node->data, join_watch.uuid)) {
+				join_watch.hook_runs++;
+			}
 		}
 		pthread_mutex_unlock(&join_watch.mutex);
 	}
@@ -364,6 +370,7 @@ typedef struct {
 	switch_time_t answered_at;
 	int joins;
 	switch_time_t last_join;
+	int hook_runs;
 	api_call_t answer;
 	api_call_t record;
 	api_call_t extra;
@@ -465,6 +472,7 @@ static void early_offer_prack_race(const char *ip, const char *number, switch_bo
 	join_watch.needle = "early-offer: waiting for the PRACK answer";
 	join_watch.joins = 0;
 	join_watch.last_join = 0;
+	join_watch.hook_runs = 0;
 	pthread_mutex_unlock(&join_watch.mutex);
 	switch_log_bind_logger(join_watch_logger, SWITCH_LOG_DEBUG, SWITCH_FALSE);
 
@@ -484,6 +492,69 @@ static void early_offer_prack_race(const char *ip, const char *number, switch_bo
 	pthread_mutex_lock(&join_watch.mutex);
 	r->joins = join_watch.joins;
 	r->last_join = join_watch.last_join;
+	r->hook_runs = join_watch.hook_runs;
+	join_watch.uuid[0] = '\0';
+	pthread_mutex_unlock(&join_watch.mutex);
+	r->answered_at = switch_channel_get_timetable(channel) ? switch_channel_get_timetable(channel)->answered : 0;
+	r->up = switch_channel_ready(channel) && switch_channel_test_flag(channel, CF_ANSWERED);
+	r->media = switch_core_media_ready(session, SWITCH_MEDIA_TYPE_AUDIO);
+
+	switch_channel_hangup(channel, SWITCH_CAUSE_NORMAL_CLEARING);
+	r->sipp_ok = wait_t38_sipp(&sipp_pid, &sipp_status, 10000) == 1 && WIFEXITED(sipp_status) && WEXITSTATUS(sipp_status) == 0;
+
+ end:
+	stop_t38_sipp(&sipp_pid);
+	if (session) {
+		if (!switch_channel_down_nosig(channel)) {
+			switch_channel_hangup(channel, SWITCH_CAUSE_NORMAL_CLEARING);
+		}
+		switch_core_session_rwunlock(session);
+	}
+}
+
+/* Offer in a reliable 183 sent by `first` (uuid_ring_ready or uuid_record), PRACK held 600 ms, with the
+   dialplan's execute_on_* hook re-entering the endpoint; then, if `answer`, uuid_answer. */
+static void early_offer_hook_race(const char *ip, const char *number, const char *first, switch_bool_t answer, ack_race_t *r)
+{
+	switch_core_session_t *session = NULL;
+	switch_channel_t *channel = NULL;
+	char uuid[100] = "";
+	pid_t sipp_pid = -1;
+	int sipp_status = 0;
+	int loop_count = 300;
+
+	if (start_delayed_offer_sipp(ip, number, "sipp-scenarios/uac_early_offer_slow_prack.xml", &sipp_pid) != 0) {
+		return;
+	}
+	r->sipp_started = 1;
+
+	if (!(session = delayed_offer_wait_parked(uuid))) {
+		goto end;
+	}
+	r->parked = 1;
+	channel = switch_core_session_get_channel(session);
+	pthread_mutex_lock(&join_watch.mutex);
+	switch_set_string(join_watch.uuid, uuid);
+	join_watch.needle = "early-offer: waiting for the PRACK answer";
+	join_watch.joins = 0;
+	join_watch.last_join = 0;
+	pthread_mutex_unlock(&join_watch.mutex);
+	switch_log_bind_logger(join_watch_logger, SWITCH_LOG_DEBUG, SWITCH_FALSE);
+
+	api_call_start(&r->extra, first, !strcmp(first, "uuid_record") ? "%s start /tmp/early_offer_hook.wav" : "%s", uuid);
+	api_call_join(&r->extra);
+	if (answer) {
+		api_call_start(&r->answer, "uuid_answer", "%s", uuid);
+		api_call_join(&r->answer);
+	}
+	while (loop_count-- && switch_channel_ready(channel) && !switch_channel_test_flag(channel, CF_ANSWERED)) {
+		switch_sleep(10 * 1000);
+	}
+
+	switch_sleep(200 * 1000);
+	switch_log_unbind_logger(join_watch_logger);
+	pthread_mutex_lock(&join_watch.mutex);
+	r->joins = join_watch.joins;
 	join_watch.uuid[0] = '\0';
 	pthread_mutex_unlock(&join_watch.mutex);
 	r->answered_at = switch_channel_get_timetable(channel) ? switch_channel_get_timetable(channel)->answered : 0;
@@ -809,6 +880,53 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 			fst_xcheck(ack_race_joined(&r, 2), "answer and record did not reach the endpoint while the PRACK was pending");
 			fst_xcheck(api_call_ok(&r.answer) && r.answer.elapsed_ms < 3000, "uuid_answer did not complete when the PRACK arrived");
 			fst_xcheck(api_call_ok(&r.record) && r.record.elapsed_ms < 3000, "uuid_record did not complete when the PRACK arrived");
+			fst_xcheck(r.up && r.media, "call not up with media after the PRACK");
+			fst_xcheck(r.sipp_ok, "SIPp early-offer scenario failed; inspect uac_early_offer_slow_prack_*_errors.log");
+			ack_race_free(&r);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(ring_hook_pre_answer_during_prack_wait)
+		{
+			ack_race_t r = { 0 };
+
+			/* uuid_ring_ready sends the promoted 183; its execute_on_ring pre_answer waits for the PRACK. */
+			early_offer_hook_race(switch_core_get_variable("local_ip_v4"), "3434343436", "uuid_ring_ready", SWITCH_TRUE, &r);
+			fst_xcheck(r.sipp_started && r.parked, "SIPp call did not reach park");
+			fst_xcheck(r.joins >= 1, "the ring hook's pre_answer did not wait for the PRACK");
+			fst_xcheck(api_call_ok(&r.extra) && r.extra.elapsed_ms < 3000, "uuid_ring_ready did not complete when the PRACK arrived");
+			fst_xcheck(api_call_ok(&r.answer) && r.answer.elapsed_ms < 3000, "uuid_answer failed");
+			fst_xcheck(r.up && r.media, "call not up with media");
+			fst_xcheck(r.sipp_ok, "SIPp early-offer scenario failed; inspect uac_early_offer_slow_prack_*_errors.log");
+			ack_race_free(&r);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(pre_answer_hook_answers_on_prack)
+		{
+			ack_race_t r = { 0 };
+
+			/* uuid_record sends the 183; the PRACK's execute_on_pre_answer answers the call. Nothing else answers it. */
+			early_offer_hook_race(switch_core_get_variable("local_ip_v4"), "3434343437", "uuid_record", SWITCH_FALSE, &r);
+			fst_xcheck(r.sipp_started && r.parked, "SIPp call did not reach park");
+			fst_xcheck(api_call_ok(&r.extra) && r.extra.elapsed_ms < 3000, "uuid_record did not complete when the PRACK arrived");
+			fst_xcheck(r.up && r.media && r.answered_at, "the pre-answer hook did not answer the call after the PRACK");
+			fst_xcheck(r.sipp_ok, "SIPp early-offer scenario failed; inspect uac_early_offer_slow_prack_*_errors.log");
+			ack_race_free(&r);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(pre_answer_hook_runs_once_with_answer_waiting_on_prack)
+		{
+			ack_race_t r = { 0 };
+
+			/* uuid_record sends the 183, uuid_answer waits for the PRACK, the PRACK fires an execute_on_pre_answer
+			   hook: the answer must not overtake it, and it must run exactly once. */
+			early_offer_prack_race(switch_core_get_variable("local_ip_v4"), "3434343438", SWITCH_FALSE, &r);
+			fst_xcheck(r.sipp_started && r.parked, "SIPp call did not reach park");
+			fst_xcheck(ack_race_joined(&r, 2), "answer and record did not reach the endpoint while the PRACK was pending");
+			fst_xcheck(r.hook_runs == 1, "the pre-answer hook did not run exactly once");
+			fst_xcheck(api_call_ok(&r.answer) && r.answer.elapsed_ms < 3000, "uuid_answer did not complete when the PRACK arrived");
 			fst_xcheck(r.up && r.media, "call not up with media after the PRACK");
 			fst_xcheck(r.sipp_ok, "SIPp early-offer scenario failed; inspect uac_early_offer_slow_prack_*_errors.log");
 			ack_race_free(&r);
