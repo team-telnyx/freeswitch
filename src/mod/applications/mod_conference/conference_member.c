@@ -1805,12 +1805,6 @@ int conference_member_setup_media(conference_member_t *member, conference_obj_t 
 
 	switch_mutex_lock(member->audio_out_mutex);
 
-	/* Held across the destroy/re-init below. This runs on the input thread while
-	 * conference_function() can be in switch_core_session_read_frame() on the same
-	 * session; switch_core_codec_destroy() zeroes the codec without taking
-	 * codec_read_mutex, which read_frame() holds over every codec access. */
-	switch_core_session_lock_codec_read(member->session);
-
 	switch_core_session_get_read_impl(member->session, &read_impl);
 
 	if (switch_core_codec_ready(&member->read_codec)) {
@@ -1904,7 +1898,6 @@ int conference_member_setup_media(conference_member_t *member, conference_obj_t 
 		goto codec_done1;
 	}
 
-	switch_core_session_unlock_codec_read(member->session);
 	switch_mutex_unlock(member->audio_out_mutex);
 
 	return 0;
@@ -1915,7 +1908,6 @@ int conference_member_setup_media(conference_member_t *member, conference_obj_t 
 	switch_core_codec_destroy(&member->write_codec);
  done:
 
-	switch_core_session_unlock_codec_read(member->session);
 	switch_mutex_unlock(member->audio_out_mutex);
 
 	return -1;
