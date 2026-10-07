@@ -1,4 +1,12 @@
 EXTRA_DIST =
+EXTRA_DIST += src/include/private/switch_dtls_ready.h \
+	tests/dtls_ready/ready_shim.c tests/dtls_ready/test_ready.py tests/dtls_ready/README.md
+
+.PHONY: check-dtls-ready
+check-dtls-ready:
+	CC="$(CC)" OPENSSL_CFLAGS="$(openssl_CFLAGS)" OPENSSL_LIBS="$(openssl_LIBS)" \
+		python3 $(srcdir)/tests/dtls_ready/test_ready.py
+
 SUBDIRS = . src build tests/unit tests/unit_cpp
 AUTOMAKE_OPTIONS = foreign subdir-objects
 NAME = freeswitch
