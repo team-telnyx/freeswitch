@@ -4375,6 +4375,10 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 
  end:
 
+	if (type == SWITCH_MEDIA_TYPE_AUDIO && switch_test_flag((&engine->read_frame), SFF_CNG)) {
+		engine->vbr_ptime.last_ts = 0;
+	}
+
 	if (smh->read_mutex[type]) {
 		switch_mutex_unlock(smh->read_mutex[type]);
 	}
