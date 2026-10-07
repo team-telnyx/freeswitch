@@ -35,6 +35,10 @@
  */
 #include <switch.h>
 #include <switch_version.h>
+/* Optional build-provided overrides of the version macros above (not part of the source tree) */
+#ifdef SWITCH_VERSION_LOCAL_H
+#include <switch_version_local.h>
+#endif
 
 const char *switch_version_major_str = SWITCH_VERSION_MAJOR;
 const char *switch_version_minor_str = SWITCH_VERSION_MINOR;
