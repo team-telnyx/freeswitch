@@ -22,6 +22,7 @@ noinst_PROGRAMS += test_record_rate_boundary
 
 # Regression: an inferred VBR ptime is only adopted when the codec can load it.
 noinst_PROGRAMS += switch_vbr_ptime
+noinst_PROGRAMS += switch_vbr_ptime_rtp
 # switch_mod_lumenvox is intentionally NOT built/run in CI yet: LumenVox servers
 # are not reachable from CI, so the ASR tests cannot run there. Re-enable by
 # appending switch_mod_lumenvox to the line above. See TELCORE-249.

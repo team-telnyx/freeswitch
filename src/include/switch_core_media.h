@@ -237,6 +237,13 @@ typedef struct switch_fork_state_s {
 	uint32_t		duration;
 } switch_fork_state_t;
 
+typedef struct switch_vbr_ptime_state_s {
+	uint32_t last_ts;
+	uint16_t last_seq;
+	uint32_t last_codec_ms;
+	uint32_t mismatch_count;
+} switch_vbr_ptime_state_t;
+
 
 SWITCH_DECLARE(switch_status_t) switch_media_handle_create(switch_media_handle_t **smhp, switch_core_session_t *session, switch_core_media_params_t *params);
 SWITCH_DECLARE(void) switch_media_handle_destroy(switch_core_session_t *session);
@@ -341,6 +348,33 @@ SWITCH_DECLARE(void) switch_core_media_merge_sdp_codec_string(switch_core_sessio
 							  		
 
 SWITCH_DECLARE(void) switch_core_media_reset_autofix(switch_core_session_t *session, switch_media_type_t type);
+/*!
+  \brief Feed one received audio frame to the VBR ptime inference
+  \param session the session to log against (may be NULL)
+  \param state the inference state, zeroed to start over
+  \param ts the frame's RTP timestamp
+  \param seq the frame's RTP sequence number
+  \param samples_per_second the codec clock rate
+  \param cur_ms the ptime currently in use
+  \return the inferred ptime once consecutive frames agree on one other than cur_ms, otherwise 0
+*/
+SWITCH_DECLARE(uint32_t) switch_core_media_vbr_ptime_observe(switch_core_session_t *session, switch_vbr_ptime_state_t *state,
+															 uint32_t ts, uint16_t seq, uint32_t samples_per_second, uint32_t cur_ms);
+/*!
+  \brief Adopt an inferred VBR ptime if the running codec can load it
+  \param session the session to log against and flag for a conference media reset (may be NULL)
+  \param codec_mutex the lock codec replacement takes; only tried, never waited for
+  \param codec the running read codec
+  \param pmap the payload map the codec was set from
+  \param codec_ms the inferred ptime
+  \param reset_codec set to request a codec reset when adopted
+  \param codec_generation the codec generation codec replacement advances under codec_mutex (NULL to skip the check)
+  \param observed_generation the generation the inference was built on
+  \return SWITCH_TRUE if pmap now carries codec_ms and a reset is pending
+*/
+SWITCH_DECLARE(switch_bool_t) switch_core_media_vbr_ptime_adopt(switch_core_session_t *session, switch_mutex_t *codec_mutex, switch_codec_t *codec,
+																payload_map_t *pmap, uint32_t codec_ms, uint8_t *reset_codec,
+																volatile switch_atomic_t *codec_generation, uint32_t observed_generation);
 SWITCH_DECLARE(void) switch_core_media_check_outgoing_proxy(switch_core_session_t *session, switch_core_session_t *o_session);
 SWITCH_DECLARE(switch_status_t) switch_core_media_codec_chosen(switch_core_session_t *session, switch_media_type_t media);
 SWITCH_DECLARE (void) switch_core_media_recover_session(switch_core_session_t *session, const char* force_local_ip, const char* force_advertized_ip, switch_bool_t change_port);
