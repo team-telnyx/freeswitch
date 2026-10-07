@@ -51,6 +51,7 @@
 #include <switch_jitterbuffer.h>
 #include <switch_estimators.h>
 #include "private/switch_rtp_pvt.h"
+#include "private/switch_dtls_ready.h"
 
 #define DEBUG_RTP 0
 //#define DEBUG_TS_ROLLOVER
@@ -321,6 +322,7 @@ typedef struct switch_dtls_s {
 	switch_sockaddr_t *remote_addr;
 	switch_sockaddr_t *handshake_peer_addr;
 	uint8_t handshake_peer_set;
+	switch_dtls_ready_t ready_receive;
 	char *rsa;
 	char *pvt;
 	char *ca;
@@ -6190,7 +6192,16 @@ static int do_dtls(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 		}
 	}
 
-	if (dtls->bytes > 0 && dtls->data) {
+	if (dtls->state == DS_READY) {
+		/* Keep the existing association and output path for a lost server final flight. */
+		if ((dtls->type & DTLS_TYPE_SERVER) && dtls->bytes > 0 && dtls->data &&
+			switch_dtls_ready_receive(&dtls->ready_receive, dtls->ssl, dtls->read_bio, dtls->write_bio,
+				dtls->data, dtls->bytes, (uint64_t)switch_mono_micro_time_now()) < 0) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
+				"%s Disabling post-handshake DTLS receive processing (SSL error %d); retaining SRTP state\n",
+				rtp_type(rtp_session), dtls->ready_receive.ssl_error);
+		}
+	} else if (dtls->bytes > 0 && dtls->data) {
 		ret = BIO_write(dtls->read_bio, dtls->data, (int)dtls->bytes);
 		if (ret <= 0) {
 			ret = SSL_get_error(dtls->ssl, ret);
