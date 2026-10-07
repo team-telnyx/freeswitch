@@ -297,9 +297,9 @@ static switch_status_t switch_amr_init(switch_codec_t *codec, switch_codec_flag_
 	switch_codec_fmtp_t codec_fmtp;
 	amr_codec_settings_t amr_codec_settings = { 0 };
 	int encoding, decoding;
-	int x, i, argc, fmtptmp_pos;
+	int x, i, argc, fmtptmp_pos = 0;
 	char *argv[10];
-	char fmtptmp[128];
+	char fmtptmp[128] = "";
 	switch_core_session_t *session = codec->session;
 	char *fmtp_dup = NULL;
 
@@ -424,7 +424,9 @@ static switch_status_t switch_amr_init(switch_codec_t *codec, switch_codec_flag_
 					}
 				}
 
-				fmtptmp_pos = switch_snprintf(fmtptmp, sizeof(fmtptmp), "mode-set=%s", modes);
+				if (j) {
+					fmtptmp_pos = switch_snprintf(fmtptmp, sizeof(fmtptmp), "mode-set=%s", modes);
+				}
 			}
 		}
 
@@ -435,11 +437,12 @@ static switch_status_t switch_amr_init(switch_codec_t *codec, switch_codec_flag_
 
 
 		if (!globals.volte) {
-			switch_snprintf(fmtptmp + fmtptmp_pos, sizeof(fmtptmp) - fmtptmp_pos, ";octet-align=%d", switch_test_flag(context, AMR_OPT_OCTET_ALIGN) ? 1 : 0);
+			fmtptmp_pos += switch_snprintf(fmtptmp + fmtptmp_pos, sizeof(fmtptmp) - fmtptmp_pos, "%soctet-align=%d", fmtptmp_pos ? ";" : "",
+										   switch_test_flag(context, AMR_OPT_OCTET_ALIGN) ? 1 : 0);
 		} else {
 			/* some UEs reject the call with 488 if mode-change-capability is not 2 */
-			switch_snprintf(fmtptmp + fmtptmp_pos, sizeof(fmtptmp) - fmtptmp_pos, ";octet-align=%d;max-red=0;mode-change-capability=2",
-							switch_test_flag(context, AMR_OPT_OCTET_ALIGN) ? 1 : 0);
+			fmtptmp_pos += switch_snprintf(fmtptmp + fmtptmp_pos, sizeof(fmtptmp) - fmtptmp_pos, "%soctet-align=%d;max-red=0;mode-change-capability=2",
+										   fmtptmp_pos ? ";" : "", switch_test_flag(context, AMR_OPT_OCTET_ALIGN) ? 1 : 0);
 		}
 
 		if (!zstr(globals.fmtp_extra)) {

@@ -276,6 +276,61 @@ static switch_status_t amr_reload_module(void)
 	return switch_loadable_module_load_module(SWITCH_GLOBAL_dirs.mod_dir, "mod_amr", SWITCH_TRUE, &err);
 }
 
+static char *amr_test_settings;
+
+static switch_xml_t amr_settings_config(const char *section, const char *tag_name, const char *key_name, const char *key_value,
+										switch_event_t *params, void *user_data)
+{
+	if (!amr_test_settings || zstr(section) || strcmp(section, "configuration") || zstr(key_value) || strcmp(key_value, "amr.conf")) {
+		return NULL;
+	}
+
+	return switch_xml_parse_str_dup(amr_test_settings);
+}
+
+static switch_status_t amr_load_settings(switch_memory_pool_t *pool, int volte, const char *mode_set, const char *fmtp_extra)
+{
+	switch_status_t status;
+
+	amr_test_settings = switch_core_sprintf(pool,
+		"<document type=\"freeswitch/xml\">"
+		"<section name=\"configuration\">"
+		"<configuration name=\"amr.conf\"><settings>"
+		"<param name=\"default-bitrate\" value=\"7\"/>"
+		"<param name=\"adjust-bitrate\" value=\"1\"/>"
+		"<param name=\"volte\" value=\"%d\"/>"
+		"%s%s%s%s%s%s"
+		"</settings></configuration>"
+		"</section>"
+		"</document>", volte,
+		mode_set ? "<param name=\"mode-set\" value=\"" : "", mode_set ? mode_set : "", mode_set ? "\"/>" : "",
+		fmtp_extra ? "<param name=\"fmtp-extra\" value=\"" : "", fmtp_extra ? fmtp_extra : "", fmtp_extra ? "\"/>" : "");
+
+	switch_xml_bind_search_function(amr_settings_config, switch_xml_parse_section_string("configuration"), NULL);
+	status = amr_reload_module();
+	switch_xml_unbind_search_function_ptr(amr_settings_config);
+	amr_test_settings = NULL;
+
+	return status;
+}
+
+static const char *amr_fmtp_out(switch_memory_pool_t *pool, const char *fmtp)
+{
+	switch_codec_t codec = { 0 };
+	switch_codec_settings_t codec_settings = {{ 0 }};
+	const char *fmtp_out;
+
+	if (switch_core_codec_init(&codec, "AMR", "mod_amr", fmtp, 8000, 20, 1,
+							   SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, &codec_settings, pool) != SWITCH_STATUS_SUCCESS) {
+		return "(codec init failed)";
+	}
+
+	fmtp_out = switch_core_strdup(pool, codec.fmtp_out ? codec.fmtp_out : "(null)");
+	switch_core_codec_destroy(&codec);
+
+	return fmtp_out;
+}
+
 FST_CORE_BEGIN(".")
 {
 	FST_SUITE_BEGIN(test_amr)
@@ -452,7 +507,61 @@ FST_TEST_BEGIN(amr_decode_octet_aligned_mode_7)
 			switch_core_codec_destroy(&read_codec);
 		}
 
-		FST_TEST_END()	}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amr_answer_fmtp)
+		{
+			static const struct {
+				const char *offered;
+				const char *configured;
+				const char *mode_set;
+			} modes[] = {
+				{ NULL, NULL, NULL },
+				{ "0,2,7", NULL, "mode-set=0,2,7" },
+				{ NULL, "0,2,7", "mode-set=0,2,7" },
+				{ "0,2,7", "4,7", "mode-set=0,2,7" }
+			};
+			static const char *extras[] = { NULL, "mode-change-period=2" };
+			const char *empty_fmtp[] = { NULL, "" };
+			int m, volte, octet_align, e, f;
+
+			for (e = 0; e < 2; e++) {
+				for (volte = 0; volte < 2; volte++) {
+					for (m = 0; m < (int) (sizeof(modes) / sizeof(modes[0])); m++) {
+						if (amr_load_settings(fst_pool, volte, modes[m].configured, extras[e]) != SWITCH_STATUS_SUCCESS) {
+							fst_fail("mod_amr reloads with the test settings");
+							continue;
+						}
+
+						for (octet_align = 0; octet_align < 2; octet_align++) {
+							const char *offer = modes[m].offered ?
+								switch_core_sprintf(fst_pool, "octet-align=%d; mode-set=%s", octet_align, modes[m].offered) :
+								switch_core_sprintf(fst_pool, "octet-align=%d", octet_align);
+							const char *expected = switch_core_sprintf(fst_pool, "%s%soctet-align=%d%s%s%s",
+								modes[m].mode_set ? modes[m].mode_set : "", modes[m].mode_set ? ";" : "", octet_align,
+								volte ? ";max-red=0;mode-change-capability=2" : "",
+								extras[e] ? "; " : "", extras[e] ? extras[e] : "");
+
+							fst_check_string_equals(amr_fmtp_out(fst_pool, offer), expected);
+						}
+
+						if (!modes[m].offered && !modes[m].configured) {
+							for (f = 0; f < 2; f++) {
+								const char *expected = switch_core_sprintf(fst_pool, "octet-align=0%s%s%s",
+									volte ? ";max-red=0;mode-change-capability=2" : "",
+									extras[e] ? "; " : "", extras[e] ? extras[e] : "");
+
+								fst_check_string_equals(amr_fmtp_out(fst_pool, empty_fmtp[f]), expected);
+							}
+						}
+					}
+				}
+			}
+
+			fst_check(amr_reload_module() == SWITCH_STATUS_SUCCESS);
+		}
+		FST_TEST_END()
+	}
 	FST_SUITE_END()
 }
 FST_CORE_END()
