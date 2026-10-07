@@ -58,7 +58,7 @@ python3 tests/dtls_ready/test_ready.py
 Without `SRTP_LIBS` that one test is explicitly skipped; all DTLS tests still
 run. No exporter/key bytes are printed.
 
-## Production policy and integration
+## Receive policy and integration
 
 The server READY receive branch runs after existing peer/ICE admission checks.
 It accepts packets up to 4096 bytes and eight records, extracts exactly one
@@ -69,8 +69,8 @@ calls over that association's lifetime. Invalid/replayed input does not spend
 the response budget, but does spend the rate slot if it reaches OpenSSL.
 
 `SSL_OP_NO_RENEGOTIATION` is set before post-handshake reads. Libraries without
-that option retain the previous no-processing behavior; this fix targets the
-deployed OpenSSL 3.0.20 (also tested with 3.6.4).
+that option retain the previous no-processing behavior. The helper has been
+tested with OpenSSL 3.0.20 and 3.6.4.
 
 WANT_READ/WANT_WRITE are nonfatal. The existing packet-preserving output drain
 runs afterward, including when SSL_read returns WANT_READ while emitting a
@@ -80,7 +80,8 @@ recreates SSL state, installs keys, changes ICE nomination or changes a peer
 tuple. Each `switch_dtls_t` owns its own rate/budget state.
 
 These are library/helper regression tests, not a full patched-service or
-browser/ICE/TURN test. A staged-build DEV run should repeat the loss-relay PCAP
-test and verify real mux/non-mux routing before deployment. Retransmitted DTLS
+browser/ICE/TURN test. Integration validation with a patched FreeSWITCH build
+should repeat the loss-relay packet-capture test and verify bidirectional
+SRTP/SRTCP with muxed and separate RTCP before deployment. Retransmitted DTLS
 record sequence numbers change; compare Finished content and key continuity,
 not byte-identical UDP datagrams.
