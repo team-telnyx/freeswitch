@@ -3577,15 +3577,15 @@ static uint32_t rebase_raw_write_ts(switch_rtp_t *rtp_session, uint32_t src_ts, 
 
 		if (elapsed_usec > 0) {
 			int64_t elapsed = (int64_t) elapsed_usec * rate / 1000000;
-			int64_t tolerance = elapsed / 100;
+			int64_t tolerance = rate / 5;
 
-			if (tolerance > rate / 10) {
-				tolerance = rate / 10;
-			}
 			if (tolerance < (int64_t) rtp_session->samples_per_interval * 3) {
 				tolerance = (int64_t) rtp_session->samples_per_interval * 3;
 			}
-			if (delta - elapsed <= tolerance && elapsed - delta <= tolerance) {
+			/* A late packet after the pause only makes elapsed larger, so there is no
+			 * upper bound on elapsed. The tolerance covers the packet before the pause
+			 * arriving late, which makes elapsed shorter than the source gap. */
+			if (delta <= elapsed + tolerance) {
 				return out;
 			}
 		}

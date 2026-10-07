@@ -634,6 +634,68 @@ FST_TEARDOWN_END()
 	}
 	FST_TEST_END()
 
+	FST_TEST_BEGIN(test_raw_write_ts_real_pause_with_jitter_is_kept)
+	{
+		switch_memory_pool_t *test_pool = NULL;
+		switch_rtp_t *raw_rtp = NULL;
+		switch_port_t sink_port = 0;
+		uint32_t out = 0, last, src;
+		switch_time_t sent_at, before_anchor;
+		uint32_t step, gap;
+		int sink_fd;
+
+		fst_requires(switch_core_new_memory_pool(&test_pool) == SWITCH_STATUS_SUCCESS);
+		sink_fd = make_udp_sink(&sink_port);
+		fst_requires(sink_fd >= 0);
+		raw_rtp = new_raw_write_rtp(test_pool, sink_port, SWITCH_TRUE);
+		fst_requires(raw_rtp);
+
+		/* The packet after the pause arrives 1 s late: the source gap is 1 s
+		 * shorter than the elapsed time. */
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, 1000, &out));
+		fst_check(out == 1000);
+		sent_at = switch_time_ref();
+		switch_yield(3500000);
+		step = (uint32_t) ((switch_time_ref() - sent_at) * 16000 / 1000000);
+		fst_requires(step > 48000);
+		src = 1000 + step - 16000;
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, src, &out));
+		fst_check(out == src);
+		last = out;
+
+		/* The packet before the pause arrived 150 ms late: the source gap is
+		 * 150 ms longer than the elapsed time. */
+		sent_at = switch_time_ref();
+		switch_yield(2500000);
+		step = (uint32_t) ((switch_time_ref() - sent_at) * 16000 / 1000000);
+		fst_requires(step > 32000);
+		src += step + 2400;
+		before_anchor = switch_time_ref();
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, src, &out));
+		fst_check(out == src);
+		last = out;
+
+		/* A source gap 10 s longer than the elapsed time is not a pause. A stall
+		 * adds elapsed time, so the rejection is only asserted when the elapsed
+		 * time, bounded from before the anchor write to after this write, is
+		 * still too short to accept the gap; otherwise the case is inconclusive. */
+		sent_at = switch_time_ref();
+		switch_yield(2500000);
+		step = (uint32_t) ((switch_time_ref() - sent_at) * 16000 / 1000000);
+		fst_requires(step > 32000);
+		gap = step + 160000;
+		src += gap;
+		fst_requires(raw_write_ts(raw_rtp, sink_fd, src, &out));
+		if (gap > (uint32_t) ((switch_time_ref() - before_anchor) * 16000 / 1000000) + 3200) {
+			fst_check(out == last + 320);
+		}
+
+		switch_rtp_destroy(&raw_rtp);
+		close(sink_fd);
+		switch_core_destroy_memory_pool(&test_pool);
+	}
+	FST_TEST_END()
+
 	FST_TEST_BEGIN(test_raw_write_ts_two_second_boundary_and_wrap)
 	{
 		switch_memory_pool_t *test_pool = NULL;
