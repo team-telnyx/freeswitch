@@ -41,6 +41,7 @@ typedef struct {
 	int sent;
 	int last_read_seq;
 	int plc_frames;
+	int cng_frames;
 	int alive;
 } vbr_call_t;
 
@@ -172,6 +173,9 @@ static int vbr_read(vbr_call_t *c)
 	if (frame && switch_test_flag(frame, SFF_PLC)) {
 		c->plc_frames++;
 	}
+	if (frame && switch_test_flag(frame, SFF_CNG)) {
+		c->cng_frames++;
+	}
 
 	if (!frame || switch_test_flag(frame, SFF_CNG) || switch_test_flag(frame, SFF_PLC) || !frame->datalen) {
 		return -1;
@@ -240,6 +244,13 @@ static int vbr_finish(vbr_call_t *c, uint8_t pt, uint32_t step_ms, uint32_t len)
 	vbr_read(c);
 
 	return seen;
+}
+
+/* After an event that empties the jitter buffer (codec rebuild, mute, underrun), put three packets in flight again
+ * before reading, as at the start of the call. */
+static void vbr_reprime(vbr_call_t *c)
+{
+	c->sent = 0;
 }
 
 /* Send packets until one real frame goes through the read path. Returns the number of packets sent, 0 if none got
@@ -363,6 +374,7 @@ FST_CORE_DB_BEGIN("./conf_vbr")
 			fst_check(switch_core_media_negotiate_sdp(c.session, vbr_sdp(c.session, OPUS_MEDIA(111)), &p, SDP_OFFER) == 1);
 			codec = switch_core_session_get_read_codec(c.session);
 			fst_check(codec && switch_core_codec_ready(codec) && codec->private_info != before);
+			vbr_reprime(&c);
 
 			/* the first frame through the read path after the rebuild must not complete the old count */
 			fst_check(vbr_send_until_read(&c, 111, 40, 240, 20) > 0);
@@ -399,6 +411,7 @@ FST_CORE_DB_BEGIN("./conf_vbr")
 			fst_check(switch_core_media_receive_message(c.session, &msg) == SWITCH_STATUS_SUCCESS);
 			msg.numeric_arg = 0;
 			fst_check(switch_core_media_receive_message(c.session, &msg) == SWITCH_STATUS_SUCCESS);
+			vbr_reprime(&c);
 
 			/* the first frame through the read path after the mute must not complete the old count */
 			fst_check(vbr_send_until_read(&c, 116, 40, 240, 20) > 0);
@@ -407,6 +420,43 @@ FST_CORE_DB_BEGIN("./conf_vbr")
 			fst_check(vbr_ptime(&c) == 20);
 
 			for (i = 0; i < 7 && c.alive; i++) {
+				fst_check(vbr_send_until_read(&c, 116, 40, 240, 20) > 0);
+			}
+			vbr_read(&c);
+			fst_check(c.alive);
+			fst_check(vbr_ptime(&c) == 40);
+			vbr_end(&c);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(opus_cng_frame_restarts_the_count)
+		{
+			vbr_call_t c;
+			int i, cng_before;
+
+			fst_requires(vbr_start(&c, "opus", OPUS_MEDIA(116), 48000, NULL) == SWITCH_STATUS_SUCCESS);
+			vbr_run(&c, 116, 30, 20, 120);
+			/* eight 40 ms packets; read until the sixth has gone through (count five), leaving two in the buffer */
+			vbr_run(&c, 116, 8, 40, 240);
+			vbr_read(&c);
+			fst_check(c.last_read_seq == (int) (uint16_t) (c.seq - 2));
+
+			/* with fewer than three frames the jitter buffer hands out comfort noise */
+			cng_before = c.cng_frames;
+			for (i = 0; i < 3 && c.cng_frames == cng_before; i++) {
+				vbr_read(&c);
+			}
+			fst_check(c.cng_frames > cng_before);
+			fst_check(c.alive && vbr_ptime(&c) == 20);
+
+			/* the first frame after the comfort noise (the buffer drops what it held, so the old code divides the
+			 * sequence gap out and keeps counting) must not complete the old count */
+			fst_check(vbr_send_until_read(&c, 116, 40, 240, 20) > 0);
+			vbr_read(&c);
+			fst_check(c.alive);
+			fst_check(vbr_ptime(&c) == 20);
+
+			for (i = 0; i < 8 && c.alive; i++) {
 				fst_check(vbr_send_until_read(&c, 116, 40, 240, 20) > 0);
 			}
 			vbr_read(&c);
