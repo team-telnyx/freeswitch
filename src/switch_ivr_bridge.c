@@ -2232,6 +2232,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_multi_threaded_bridge(switch_core_ses
 
 			switch_channel_clear_flag_recursive(caller_channel, CF_BRIDGE_ORIGINATOR);
 
+			switch_channel_set_variable(peer_channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, "true");
 			switch_channel_stop_broadcast(peer_channel);
 
 
