@@ -752,6 +752,51 @@ SWITCH_DECLARE(switch_status_t) switch_core_codec_init_with_bitrate(switch_codec
 	return SWITCH_STATUS_NOTIMPL;
 }
 
+SWITCH_DECLARE(switch_bool_t) switch_core_codec_ptime_supported(const switch_codec_t *codec, const char *codec_name, const char *modname,
+																 const char *fmtp, uint32_t rate, int ms, int channels, uint32_t bitrate)
+{
+	const switch_codec_implementation_t *running, *iptr;
+	switch_codec_interface_t *codec_interface;
+	int g722;
+
+	if (!codec || zstr(codec_name) || ms <= 0) {
+		return SWITCH_FALSE;
+	}
+
+	running = codec->implementation;
+	codec_interface = codec->codec_interface;
+
+	if (!running || !codec_interface || zstr(running->iananame)) {
+		return SWITCH_FALSE;
+	}
+
+	if (strchr(codec_name, '.') || !strncasecmp(codec_name, "PROXY", 5) || strcasecmp(codec_name, running->iananame)) {
+		return SWITCH_FALSE;
+	}
+
+	if (!zstr(modname) && (zstr(codec_interface->modname) || strcasecmp(modname, codec_interface->modname))) {
+		return SWITCH_FALSE;
+	}
+
+	g722 = !strcasecmp(codec_name, "g722");
+
+	if (rate && rate != (g722 ? running->samples_per_second : running->actual_samples_per_second)) {
+		return SWITCH_FALSE;
+	}
+
+	for (iptr = codec_interface->implementations; iptr; iptr = iptr->next) {
+		uint32_t crate = g722 ? iptr->samples_per_second : iptr->actual_samples_per_second;
+		if ((!rate || rate == crate) && (!bitrate || bitrate == (uint32_t)iptr->bits_per_second) &&
+			(ms == (int)(iptr->microseconds_per_packet / 1000)) && (!channels || channels == iptr->number_of_channels)) {
+			if (!iptr->matches_fmtp || SWITCH_STATUS_SUCCESS == iptr->matches_fmtp(iptr->fmtp, fmtp)) {
+				return SWITCH_TRUE;
+			}
+		}
+	}
+
+	return SWITCH_FALSE;
+}
+
 SWITCH_DECLARE(switch_status_t) switch_core_codec_encode(switch_codec_t *codec,
 														 switch_codec_t *other_codec,
 														 void *decoded_data,

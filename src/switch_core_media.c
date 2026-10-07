@@ -4187,19 +4187,32 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 							}
 
 							if (codec_ms != engine->cur_payload_map->codec_ms) {
-								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-												  "[VBR]: Packet size change detected. Remote PTIME changed from [%d] to [%d]\n",
-												  (int) engine->cur_payload_map->codec_ms,
-												  (int) codec_ms
-												  );
-			 					engine->cur_payload_map->codec_ms = codec_ms;
-								engine->reset_codec = 2;
-								if (switch_core_codec_ready(&engine->read_codec)) {
-									switch_set_flag(&engine->read_codec, SWITCH_CODEC_FLAG_RESET_PENDING);
+								payload_map_t *pmap = engine->cur_payload_map;
+								switch_bool_t adopted = SWITCH_FALSE;
+
+								if (switch_mutex_trylock(session->codec_read_mutex) == SWITCH_STATUS_SUCCESS) {
+									if (switch_core_codec_ready(&engine->read_codec) &&
+										switch_core_codec_ptime_supported(&engine->read_codec, pmap->iananame, pmap->modname, pmap->rm_fmtp,
+																		  (uint32_t) pmap->rm_rate, (int) codec_ms, pmap->channels, pmap->bitrate)) {
+										switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+														  "[VBR]: Packet size change detected. Remote PTIME changed from [%d] to [%d]\n",
+														  (int) pmap->codec_ms,
+														  (int) codec_ms
+														  );
+										pmap->codec_ms = codec_ms;
+										engine->reset_codec = 2;
+										switch_set_flag(&engine->read_codec, SWITCH_CODEC_FLAG_RESET_PENDING);
+
+										if (switch_channel_test_flag(session->channel, CF_CONFERENCE)) {
+											switch_channel_set_flag(session->channel, CF_CONFERENCE_RESET_MEDIA);
+										}
+										adopted = SWITCH_TRUE;
+									}
+									switch_mutex_unlock(session->codec_read_mutex);
 								}
 
-								if (switch_channel_test_flag(session->channel, CF_CONFERENCE)) {
-									switch_channel_set_flag(session->channel, CF_CONFERENCE_RESET_MEDIA);
+								if (!adopted) {
+									engine->mismatch_count = 0;
 								}
 							}
 						}
