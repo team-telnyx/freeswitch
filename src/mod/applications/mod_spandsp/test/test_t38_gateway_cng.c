@@ -130,6 +130,7 @@ static uint16_t mon_seq;
 
 static event_t events[MAX_EVENTS];
 static int n_events;
+static int next_event;		/* first event not sent yet */
 static int burst_onset_ms[MAX_BURSTS];
 static int n_bursts;
 
@@ -270,12 +271,18 @@ static void fax_send(const event_t *ev)
 	}
 }
 
+/* Keeps the events not sent yet in time order, also for the attempts added while the call runs. */
 static void add_event(int ms, int kind, int arg)
 {
+	int i;
+
 	if (n_events < MAX_EVENTS) {
-		events[n_events].ms = ms;
-		events[n_events].kind = kind;
-		events[n_events].arg = arg;
+		for (i = n_events; i > next_event && events[i - 1].ms > ms; --i) {
+			events[i] = events[i - 1];
+		}
+		events[i].ms = ms;
+		events[i].kind = kind;
+		events[i].arg = arg;
 		++n_events;
 	}
 }
@@ -382,6 +389,7 @@ static void reset_state(void)
 	fax_seq = 0;
 	mon_seq = 0;
 	n_events = 0;
+	next_event = 0;
 	n_bursts = 0;
 	dcs_in_ms = -1;
 	dcs_out_ms = -1;
@@ -399,7 +407,6 @@ static int run_script(int dis_start_ms)
 	fsk_rx_state_t *out_fsk = NULL;
 	int16_t in[SAMPLES_PER_TICK];
 	int16_t out[SAMPLES_PER_TICK];
-	int next_event = 0;
 	int next_burst = 0;
 	int start_ms = -LEAD_IN_MS;
 	int len;
