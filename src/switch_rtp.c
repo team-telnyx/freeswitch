@@ -441,6 +441,11 @@ struct switch_rtp {
 	uint32_t max_next_write_samplecount;
 	uint32_t queue_delay;
 	switch_time_t last_write_timestamp;
+	uint32_t raw_ts_rebase_offset;
+	uint32_t raw_ts_anchor_ts;
+	switch_time_t raw_ts_anchor_time;
+	uint8_t raw_ts_anchor_valid;
+	uint32_t raw_ts_rate;
 	uint32_t flags[SWITCH_RTP_FLAG_INVALID];
 	switch_memory_pool_t *pool;
 	switch_sockaddr_t *from_addr, *rtp_from_addr, *rtcp_from_addr, *bundle_internal_addr, *bundle_external_addr;
@@ -3548,12 +3553,56 @@ SWITCH_DECLARE(void) switch_rtp_init(switch_memory_pool_t *pool)
 	global_init = 1;
 }
 
-static uint8_t get_next_write_ts(switch_rtp_t *rtp_session, uint32_t timestamp)
+static uint32_t raw_ts_offset(switch_rtp_t *rtp_session, uint32_t rate)
+{
+	return rtp_session->raw_ts_rate == rate ? rtp_session->raw_ts_rebase_offset : 0;
+}
+
+static uint32_t rebase_raw_write_ts(switch_rtp_t *rtp_session, uint32_t src_ts, uint32_t rate, uint32_t *offset)
+{
+	uint8_t anchor_valid = rtp_session->raw_ts_rate == rate && rtp_session->raw_ts_anchor_valid;
+	uint32_t out = src_ts + raw_ts_offset(rtp_session, rate);
+	uint32_t ref = anchor_valid ? rtp_session->raw_ts_anchor_ts : rtp_session->last_write_ts;
+	int64_t delta = (int32_t) (out - ref);
+	int64_t limit = (int64_t) rate * 2;
+
+	*offset = raw_ts_offset(rtp_session, rate);
+
+	if (delta >= -limit && delta <= limit) {
+		return out;
+	}
+
+	if (delta > 0 && anchor_valid) {
+		switch_time_t elapsed_usec = switch_time_ref() - rtp_session->raw_ts_anchor_time;
+
+		if (elapsed_usec > 0) {
+			int64_t elapsed = (int64_t) elapsed_usec * rate / 1000000;
+			int64_t tolerance = rate / 5;
+
+			if (tolerance < (int64_t) rtp_session->samples_per_interval * 3) {
+				tolerance = (int64_t) rtp_session->samples_per_interval * 3;
+			}
+			/* A late packet after the pause only makes elapsed larger, so there is no
+			 * upper bound on elapsed. The tolerance covers the packet before the pause
+			 * arriving late, which makes elapsed shorter than the source gap. */
+			if (delta <= elapsed + tolerance) {
+				return out;
+			}
+		}
+	}
+
+	out = ref + rtp_session->samples_per_interval;
+	*offset = out - src_ts;
+
+	return out;
+}
+
+static uint8_t get_next_write_ts(switch_rtp_t *rtp_session, uint32_t timestamp, switch_bool_t timestamp_given)
 {
 	uint8_t m = 0, changed = 0;
 
 	if (!(rtp_session->rtp_bugs & RTP_BUG_SEND_LINEAR_TIMESTAMPS)) {
-		if (timestamp) {
+		if (timestamp_given) {
 			rtp_session->ts = (uint32_t) timestamp;
 			changed++;
 		} else if (switch_rtp_test_flag(rtp_session, SWITCH_RTP_FLAG_USE_TIMER)) {
@@ -4277,7 +4326,7 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 		data[0] = 65;
 		rtp_session->cn++;
 
-		get_next_write_ts(rtp_session, 0);
+		get_next_write_ts(rtp_session, 0, SWITCH_FALSE);
 		rtp_session->send_msg.header.ts = htonl(rtp_session->ts);
 
 		switch_rtp_write_manual(rtp_session, (void *) data, 2, 0, rtp_session->cng_pt, ntohl(rtp_session->send_msg.header.ts), &frame_flags);
@@ -11774,6 +11823,10 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 	switch_size_t bytes;
 	uint8_t send = 1;
 	uint32_t this_ts = 0;
+	uint32_t raw_ts_rebase_offset = 0;
+	uint32_t raw_ts_rate = 0;
+	uint8_t raw_ts_rebase = 0;
+	switch_bool_t timestamp_given = SWITCH_FALSE;
 	int ret;
 	switch_time_t now;
 	uint8_t m = 0;
@@ -11789,7 +11842,9 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 	}
 
 	WRITE_INC(rtp_session);
-	
+
+	raw_ts_rate = rtp_session->samples_per_second;
+
 	if (rtp_session->flags[SWITCH_RTP_FLAG_USE_TIMER]) {
 		//switch_core_timer_sync(&rtp_session->write_timer);
 	}
@@ -11801,7 +11856,15 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 		bytes = datalen;
 
 		m = (uint8_t) send_msg->header.m;
-		if (!(rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS)) {
+		if (!(rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS) &&
+			rtp_session->flags[SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP] && !rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
+			if (flags && (*flags & SFF_RFC2833)) {
+				send_msg->header.ts = htonl(ntohl(send_msg->header.ts) + raw_ts_offset(rtp_session, raw_ts_rate));
+			} else {
+				send_msg->header.ts = htonl(rebase_raw_write_ts(rtp_session, ntohl(send_msg->header.ts), raw_ts_rate, &raw_ts_rebase_offset));
+				raw_ts_rebase = 1;
+			}
+		} else if (!(rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS)) {
 			{
 				uint32_t ts_delta;
 				this_ts = ntohl(send_msg->header.ts);
@@ -11856,7 +11919,18 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 		send_msg = &rtp_session->send_msg;
 		send_msg->header.pt = payload;
 
-		m = get_next_write_ts(rtp_session, timestamp);
+		timestamp_given = timestamp != 0;
+
+		if (timestamp && rtp_session->flags[SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP] && rtp_session->flags[SWITCH_RTP_FLAG_RAW_WRITE] &&
+			!(rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS) && !rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
+			if (*flags & SFF_RFC2833) {
+				timestamp += raw_ts_offset(rtp_session, raw_ts_rate);
+			} else {
+				timestamp = rebase_raw_write_ts(rtp_session, timestamp, raw_ts_rate, &raw_ts_rebase_offset);
+				raw_ts_rebase = 1;
+			}
+		}
+		m = get_next_write_ts(rtp_session, timestamp, timestamp_given);
 #if DEBUG_RTP
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "RTP: common_write: %s [!send_msg] next ts: %u %p/%p\n", rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName", rtp_session->ts, (void*)rtp_session->session, (void*)rtp_session);
 #endif
@@ -12381,6 +12455,22 @@ fork_done:
 
 		rtp_session->last_write_ts = this_ts;
 		rtp_session->flags[SWITCH_RTP_FLAG_RESET] = 0;
+
+		if (rtp_session->flags[SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP] && rtp_session->raw_ts_rate != raw_ts_rate) {
+			rtp_session->raw_ts_rebase_offset = 0;
+			rtp_session->raw_ts_anchor_valid = 0;
+			rtp_session->raw_ts_rate = raw_ts_rate;
+		}
+
+		if (raw_ts_rebase) {
+			rtp_session->raw_ts_rebase_offset = raw_ts_rebase_offset;
+		}
+
+		if (rtp_session->flags[SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP] && !rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] && !(flags && (*flags & SFF_RFC2833))) {
+			rtp_session->raw_ts_anchor_ts = this_ts;
+			rtp_session->raw_ts_anchor_time = switch_time_ref();
+			rtp_session->raw_ts_anchor_valid = 1;
+		}
 
 		if (rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS) {
 			normalised_ts_commit(rtp_session, this_ts);

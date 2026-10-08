@@ -11792,6 +11792,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 	if ((!val && !switch_media_handle_test_media_flag(smh, SCMF_REWRITE_TIMESTAMPS)) || (val && switch_false(val))) {
 		flags[SWITCH_RTP_FLAG_RAW_WRITE]++;
 	}
+
+	val = switch_channel_get_variable(session->channel, "rtp_rebase_timestamps_on_jump");
+	if ((!val && switch_media_handle_test_media_flag(smh, SCMF_REBASE_TIMESTAMPS_ON_JUMP)) || (val && switch_true(val))) {
+		flags[SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP]++;
+	}
 	
 	// Deprecated channel variable. please use rtp_use_ms_per_packet
 	if (((val = switch_channel_get_variable(session->channel, "rtp_genesys_dtmf")) && switch_true(val))) {
@@ -12839,6 +12844,13 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 			if (switch_true(switch_channel_get_variable(session->channel, "rtp_use_bundle")) && v_engine->rtcp_mux > 0 && a_engine->rtp_session) {
 				v_engine->rtp_session = a_engine->rtp_session;
 				v_engine->bundled_with_audio = 1;
+
+				/* Video on the audio session would move the audio timestamp mapping: keep it off there */
+				if (switch_rtp_test_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP)) {
+					switch_rtp_clear_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP);
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+									  "rtp_rebase_timestamps_on_jump disabled: video shares the audio RTP session (rtp_use_bundle)\n");
+				}
 			} else {
 				v_engine->rtp_session = switch_rtp_new(a_engine->local_sdp_ip,
 														 v_engine->local_sdp_port,
