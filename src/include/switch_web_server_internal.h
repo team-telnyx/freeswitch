@@ -2,8 +2,9 @@
  * Internal interface between the mod_web_server listener and the route
  * registry that lives in libfreeswitch (src/switch_web_server.cpp).
  *
- * Do not include this from anywhere except mod_web_server itself or unit
- * tests for the registry. Public consumers use <switch_web_server.h>.
+ * Do not include this from anywhere except mod_web_server itself, the
+ * module loader, or unit tests for the registry. Public consumers use
+ * <switch_web_server.h>.
  *
  * The registry sits in libfreeswitch because APR loads modules with
  * RTLD_LOCAL: a registry inside a module would not be visible to
@@ -14,6 +15,21 @@
 #define SWITCH_WEB_SERVER_INTERNAL_H
 
 #include "switch_web_server.h"
+
+SWITCH_BEGIN_EXTERN_C
+
+/*
+ * For the module loader, to undo a LOAD that failed. Take a mark before
+ * calling LOAD; on failure, unregister_module_since() removes only the routes
+ * registered under module_name after that mark, so routes a live module of
+ * the same name registered earlier survive. It drains like
+ * switch_web_server_unregister_module(), and returns at once if no route is
+ * newer than the mark.
+ */
+SWITCH_DECLARE(uint64_t) switch_web_server_registration_mark(void);
+SWITCH_DECLARE(void) switch_web_server_unregister_module_since(const char *module_name, uint64_t mark);
+
+SWITCH_END_EXTERN_C
 
 #ifdef __cplusplus
 
