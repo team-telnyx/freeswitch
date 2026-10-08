@@ -14887,6 +14887,8 @@ static switch_status_t switch_rtp_internal_add_remote_candidate(switch_rtp_t *rt
 	ice->ice_params->cand_idx[ice->proto]++;
 	ice->ice_params->cands[idx][ice->proto].con_addr = switch_core_strdup(rtp_session->pool, cand->ip);
 	ice->ice_params->cands[idx][ice->proto].con_port = (switch_port_t)cand->port;
+	ice->ice_params->cands[idx][ice->proto].component_id = cand->component_id;
+	ice->ice_params->cands[idx][ice->proto].ready = 0;
 	ice->ice_params->cands[idx][ice->proto].priority = cand->priority;
 
 	if (cand->foundation[0]) {
@@ -15290,6 +15292,10 @@ SWITCH_DECLARE(int) switch_rtp_merge_remote_ice_candidates_into_engine(switch_rt
 				if (e->component_id == comp_id &&
 				    e->con_addr && addr && !strcmp(e->con_addr, addr) &&
 				    e->con_port == port) {
+					if (!e->ready) {
+						e->ready = 1;
+						added++;
+					}
 					goto next_merge_cand;
 				}
 			}
