@@ -1145,7 +1145,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_wait_for_answer(switch_core_session_t
 		}
 
 		if (switch_channel_media_ready(caller_channel)) {
-			status = switch_core_session_read_frame(session, &read_frame, SWITCH_IO_FLAG_NONE, 0);
+			status = switch_core_session_read_frame(session, &read_frame, SWITCH_IO_FLAG_BOUNDED_READ, 0);
 			if (!SWITCH_READ_ACCEPTABLE(status)) {
 				break;
 			}
@@ -2029,7 +2029,7 @@ static void *SWITCH_THREAD_FUNC early_thread_run(switch_thread_t *thread, void *
 						switch_core_session_set_read_codec(session, NULL);
 						switch_core_session_set_read_codec(session, &read_codecs[i]);
 					}
-					status = switch_core_session_read_frame(session, &read_frame, SWITCH_IO_FLAG_NONE, 0);
+					status = switch_core_session_read_frame(session, &read_frame, SWITCH_IO_FLAG_BOUNDED_READ, 0);
 					if (SWITCH_READ_ACCEPTABLE(status) && !switch_test_flag(read_frame, SFF_CNG)) {
 						data = (int16_t *) read_frame->data;
 						if (datalen < read_frame->datalen) {
@@ -2042,7 +2042,7 @@ static void *SWITCH_THREAD_FUNC early_thread_run(switch_thread_t *thread, void *
 						}
 					}
 				} else {
-					status = switch_core_session_read_frame(session, &read_frame, SWITCH_IO_FLAG_NONE, 0);
+					status = switch_core_session_read_frame(session, &read_frame, SWITCH_IO_FLAG_BOUNDED_READ, 0);
 					if (SWITCH_READ_ACCEPTABLE(status) && !switch_test_flag(read_frame, SFF_CNG)) {
 						datalen = read_frame->datalen;
 					}
@@ -3636,7 +3636,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 					}
 
 					if (switch_channel_media_ready(caller_channel)) {
-						tstatus = switch_core_session_read_frame(oglobals.session, &read_frame, SWITCH_IO_FLAG_NONE, 0);
+						tstatus = switch_core_session_read_frame(oglobals.session, &read_frame, SWITCH_IO_FLAG_BOUNDED_READ, 0);
 						if (!SWITCH_READ_ACCEPTABLE(tstatus)) {
 							if (soft_holding) {
 								switch_channel_set_flag(caller_channel, CF_XFER_ZOMBIE);
