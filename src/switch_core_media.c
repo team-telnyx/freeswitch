@@ -652,6 +652,9 @@ static switch_bool_t scm_should_use_m_port(switch_core_session_t *session, switc
 {
 	if (!session || !engine) return SWITCH_TRUE;
 
+	/* SDP candidate selection is not permission to bypass a pending restart nomination. */
+	if (engine->rtp_session && switch_rtp_pvt_ice_restart_pending(engine->rtp_session)) return SWITCH_FALSE;
+
 	if (trickle_accept_enabled(session)) {
 		if (engine->ice_in.is_chosen[0]) {
 			/* Never let trickle placeholder 0.0.0.0:9 or :::9 overwrite */
@@ -6084,22 +6087,16 @@ static void clear_ice(switch_core_session_t *session, switch_media_type_t type)
 
 	engine = &smh->engines[type];
 
-	engine->ice_in.chosen[0] = 0;
-	engine->ice_in.chosen[1] = 0;
-	engine->ice_in.is_chosen[0] = 0;
-	engine->ice_in.is_chosen[1] = 0;
-	engine->ice_in.cand_idx[0] = 0;
-	engine->ice_in.cand_idx[1] = 0;
 	engine->ice_restart_remote_ufrag = engine->ice_in.ufrag;
 	engine->ice_restart_remote_pwd = engine->ice_in.pwd;
-	memset(&engine->ice_in, 0, sizeof(engine->ice_in));
 	engine->remote_rtcp_port = 0;
 
 	if (engine->rtp_session) {
 		engine->ice_restart_pending = type == SWITCH_MEDIA_TYPE_AUDIO ||
 			(type == SWITCH_MEDIA_TYPE_VIDEO && !engine->bundled_with_audio);
-		switch_rtp_reset(engine->rtp_session);
+		switch_rtp_pvt_reset_ice(engine->rtp_session, &engine->ice_in);
 	} else {
+		memset(&engine->ice_in, 0, sizeof(engine->ice_in));
 		engine->ice_restart_pending = 0;
 	}
 
@@ -7172,10 +7169,15 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 	if (engine->new_ice && (type != SWITCH_MEDIA_TYPE_VIDEO || video_topology_lock_held) &&
 		switch_core_media_engine_owns_rtp(engine)) {
 		if (switch_rtp_ready(engine->rtp_session) && engine->ice_in.cands[engine->ice_in.chosen[0]][0].ready) {
+			switch_core_media_ice_type_t ice_type = switch_determine_ice_type(engine, smh->session);
+			switch_bool_t restart_nomination = engine->ice_restart_pending && check_ice_dtls_state == DS_READY &&
+				engine->rtcp_mux > 0 && (ice_type & ICE_VANILLA) && !(ice_type & (ICE_LITE | ICE_LITE_INBOUND)) &&
+				switch_channel_var_true(smh->session->channel, "rtp_ice_prflx_bootstrap");
+
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_INFO, "RE-Activating %s ICE\n", type2str(type));
 
-			/* Update RTP session remote address when trickle ICE chooses a candidate */
-			if (trickle_on) {
+			/* A pending (including expired) READY-DTLS restart owns retargeting. */
+			if (trickle_on && !restart_nomination && !switch_rtp_pvt_ice_restart_pending(engine->rtp_session)) {
 				const char *err = NULL;
 				switch_port_t rtcp_port = engine->ice_in.cands[engine->ice_in.chosen[1]][1].con_port;
 
@@ -7199,6 +7201,8 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 				gen_ice(smh->session, type, NULL, 0);
 			}
 
+			/* The first SDP candidate must carry restart intent before installing the new credentials. */
+			switch_rtp_prepare_ice_restart(engine->rtp_session, IPR_RTP, engine->ice_restart_pending ? SWITCH_TRUE : SWITCH_FALSE);
 			switch_rtp_activate_ice(engine->rtp_session,
 									engine->ice_in.ufrag,
 									engine->ice_out.ufrag,

@@ -11,6 +11,9 @@ noinst_PROGRAMS += switch_hold switch_sip switch_mod_telnyx switch_mod_gstt swit
 # appending switch_mod_lumenvox to the line above. See TELCORE-249.
 
 if HAVE_SOFIA_SIP
+switch_stun_SOURCES = switch_stun.c
+switch_stun_CFLAGS = $(AM_CFLAGS) $(SOFIA_SIP_CFLAGS) -DSWITCH_STUN_HAVE_SOFIA
+switch_stun_LDADD = $(switch_builddir)/libfreeswitch.la $(SOFIA_SIP_LIBS)
 noinst_PROGRAMS += switch_sdp
 switch_sdp_SOURCES = switch_sdp.c
 switch_sdp_CFLAGS  = $(AM_CFLAGS) $(SOFIA_SIP_CFLAGS)

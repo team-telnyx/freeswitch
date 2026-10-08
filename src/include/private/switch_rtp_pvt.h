@@ -5,7 +5,8 @@ typedef enum {
 	SWITCH_RTP_ICE_CONTROLLING_FAILOVER_IDLE = 0,
 	SWITCH_RTP_ICE_CONTROLLING_FAILOVER_PROBING,
 	SWITCH_RTP_ICE_CONTROLLING_FAILOVER_NOMINATING,
-	SWITCH_RTP_ICE_CONTROLLING_STARTUP_NOMINATING
+	SWITCH_RTP_ICE_CONTROLLING_STARTUP_NOMINATING,
+	SWITCH_RTP_ICE_CONTROLLING_RESTART_NOMINATING
 } switch_rtp_ice_controlling_failover_state_t;
 
 typedef enum {
@@ -79,7 +80,9 @@ typedef struct {
 		uint32_t prflx_bootstrap_ms;
 		int prflx_bootstrap_idx;
 		switch_time_t prflx_bootstrap_us;
+		switch_time_t restart_started_us;
 		uint8_t restart_pending;
+		uint8_t generation_invalidated;
 		uint8_t restart_provisional;
 		switch_time_t restart_provisional_us;
 } switch_rtp_ice_t;
@@ -102,12 +105,15 @@ typedef struct {
 	switch_core_media_ice_type_t ice_type;
 	switch_bool_t ice_ready;
 	switch_bool_t ice_rready;
+	switch_rtp_ice_controlling_failover_state_t nomination_state;
 	switch_bool_t rtp_chosen;
 	switch_bool_t rtcp_chosen;
 	dtls_state_t dtls_state;
 	const void *dtls_context;
 	const void *dtls_ssl;
 	const void *socket;
+	switch_port_t ice_remote_port;
+	switch_port_t dtls_remote_port;
 } switch_rtp_pvt_transport_snapshot_t;
 
 SWITCH_DECLARE(void) switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *data, switch_size_t len);
@@ -116,6 +122,9 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_handle_ice_from(switch_rtp_t *rtp
 SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_get_ice_state(switch_rtp_t *rtp_session, ice_proto_t proto,
 	char *ice_user, switch_size_t ice_user_len, char *local_pwd, switch_size_t local_pwd_len,
 	char *remote_pwd, switch_size_t remote_pwd_len, switch_bool_t *has_addr);
+SWITCH_DECLARE(void) switch_rtp_pvt_reset_ice(switch_rtp_t *rtp_session, ice_t *shared_params);
+SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_ice_restart_pending(switch_rtp_t *rtp_session);
+
 SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_get_transport_snapshot(switch_rtp_t *rtp_session,
 	ice_proto_t proto, switch_rtp_pvt_transport_snapshot_t *snapshot);
 SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_should_preserve_active_dtls_tuple(switch_sockaddr_t *current_addr,
