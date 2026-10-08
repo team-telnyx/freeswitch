@@ -80,6 +80,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 	 * mutex pointer included, without holding codec_read_mutex, so re-reading
 	 * session->read_codec->mutex to unlock can yield NULL. */
 	switch_mutex_t *read_codec_mutex = NULL;
+	switch_time_t short_since = 0;
 
 	switch_assert(session != NULL);
 
@@ -1021,6 +1022,17 @@ cnt_with_cng:
 					status = SWITCH_STATUS_GENERR;
 					break;
 				}
+			} else if ((flags & SWITCH_IO_FLAG_BOUNDED_READ)) {
+				switch_time_t now = switch_mono_micro_time_now();
+
+				if (!short_since) {
+					short_since = now;
+				} else if (now < short_since || now - short_since >= session->read_impl.microseconds_per_packet) {
+					*frame = &runtime.dummy_cng_frame;
+					status = SWITCH_STATUS_SUCCESS;
+					goto even_more_done;
+				}
+				goto top;
 			} else {
 				goto top;
 			}
