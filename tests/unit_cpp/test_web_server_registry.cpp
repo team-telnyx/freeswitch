@@ -728,6 +728,91 @@ static void test_drain_waits_for_inflight()
 	         (int)internal::LookupOutcome::NotFound);
 }
 
+/* unregister_module_since() is how the loader undoes a failed LOAD whose
+ * name a live module may share: only routes newer than the mark go, and the
+ * live module's slot stays usable. */
+static void test_unregister_since_mark_keeps_older_routes()
+{
+	std::cout << "[test] unregister_module_since removes only routes newer than the mark\n";
+	wipe();
+	switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/old", SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	auto m = switch_web_server_registration_mark();
+
+	/* Nothing newer: nothing removed, and no wait even with a ticket held. */
+	{
+		auto held = internal::lookup(SWITCH_WEB_METHOD_GET, "/old");
+		CHECK_EQ((int)held.outcome, (int)internal::LookupOutcome::Hit);
+		switch_web_server_unregister_module_since("modA", m);
+	}
+	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/old").outcome, (int)internal::LookupOutcome::Hit);
+
+	switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/new", SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	switch_web_server_register_prefix("modA", SWITCH_WEB_METHOD_GET, "/newPre/", SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	switch_web_server_unregister_module_since("modA", m);
+
+	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/old").outcome,      (int)internal::LookupOutcome::Hit);
+	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/new").outcome,      (int)internal::LookupOutcome::NotFound);
+	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/newPre/x").outcome, (int)internal::LookupOutcome::NotFound);
+
+	/* The slot was not left draining: the owner can still register. */
+	CHECK_EQ((int)switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/again", SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_SUCCESS);
+}
+
+/* An in-place update after the mark swapped in the newer caller's handler,
+ * so it counts as newer. */
+static void test_unregister_since_mark_counts_updates()
+{
+	std::cout << "[test] unregister_module_since treats an in-place update as newer\n";
+	wipe();
+	switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/upd", SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	auto m = switch_web_server_registration_mark();
+	switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/upd", SWITCH_WEB_DISPATCH_POOL, dummy_handler, NULL);
+	switch_web_server_unregister_module_since("modA", m);
+	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/upd").outcome, (int)internal::LookupOutcome::NotFound);
+}
+
+/* Removed handlers may be in flight; the call must not return under them. */
+static void test_unregister_since_mark_waits_for_inflight()
+{
+	std::cout << "[test] unregister_module_since blocks until a removed route's ticket drops\n";
+	wipe();
+	switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/stay", SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	auto m = switch_web_server_registration_mark();
+	switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/go", SWITCH_WEB_DISPATCH_POOL, dummy_handler, NULL);
+
+	auto held = internal::lookup(SWITCH_WEB_METHOD_GET, "/go");
+	CHECK_EQ((int)held.outcome, (int)internal::LookupOutcome::Hit);
+
+	std::atomic<bool> returned{false};
+	std::thread sweeper([&] {
+		switch_web_server_unregister_module_since("modA", m);
+		returned.store(true);
+	});
+
+	wait_until_unrouted("/go");
+	CHECK(returned.load() == false);
+
+	{ auto drop = std::move(held); }
+	sweeper.join();
+	CHECK(returned.load() == true);
+	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/stay").outcome, (int)internal::LookupOutcome::Hit);
+}
+
+/* All of the module's routes newer than the mark: same as a full sweep,
+ * and the slot is retired so the name starts clean. */
+static void test_unregister_since_mark_retires_new_slot()
+{
+	std::cout << "[test] unregister_module_since retires a slot it emptied\n";
+	wipe();
+	auto m = switch_web_server_registration_mark();
+	switch_web_server_register("modC", SWITCH_WEB_METHOD_GET, "/c", SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	switch_web_server_unregister_module_since("modC", m);
+	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/c").outcome, (int)internal::LookupOutcome::NotFound);
+	CHECK_EQ((int)switch_web_server_register("modC", SWITCH_WEB_METHOD_GET, "/c", SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_SUCCESS);
+}
+
 /* A registration landing mid-drain must not get a fresh slot: new lookups
  * would count against it while the drain watched the old one, and
  * unregister_module() would return with a handler still in flight. */
@@ -1210,6 +1295,10 @@ int main()
 	test_register_without_listener();
 	test_drain_waits_for_inflight();
 	test_register_during_drain_is_refused();
+	test_unregister_since_mark_keeps_older_routes();
+	test_unregister_since_mark_counts_updates();
+	test_unregister_since_mark_waits_for_inflight();
+	test_unregister_since_mark_retires_new_slot();
 	test_drain_under_concurrency();
 	test_overlapping_drains();
 	test_invalid_method_rejected();

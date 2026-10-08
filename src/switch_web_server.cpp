@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cctype>
 #include <cstring>
+#include <cstdint>
 #include <cstdio>
 #include <map>
 #include <memory>
@@ -43,6 +44,7 @@ struct Entry {
 	void                        *user_data;
 	std::string                  raw;
 	std::shared_ptr<ModuleSlot>  slot;        /* shared with other routes from the same module */
+	std::uint64_t                seq = 0;     /* registry-wide registration order; see mark() */
 };
 
 struct PatternToken {
@@ -361,7 +363,7 @@ public:
 				/* Same module re-registering the identical pattern (same raw,
 				   same method): update handler/mode in place. */
 				if (p.module == module && p.raw == path && p.method == method) {
-					p.mode = mode; p.handler = handler; p.user_data = user_data;
+					p.mode = mode; p.handler = handler; p.user_data = user_data; p.seq = ++seq_;
 					return SWITCH_STATUS_SUCCESS;
 				}
 				/* Otherwise the match-sets intersect under overlapping methods:
@@ -371,6 +373,7 @@ public:
 			PatternEntry e;
 			e.module = module; e.method = method; e.mode = mode;
 			e.handler = handler; e.user_data = user_data; e.raw = path; e.slot = slot;
+			e.seq = ++seq_;
 			e.tokens = std::move(cand_tokens);
 			patterns_.push_back(std::move(e));
 			return SWITCH_STATUS_SUCCESS;
@@ -380,12 +383,12 @@ public:
 		for (auto &existing : bucket) {
 			if (!methods_overlap(existing.method, method)) continue;
 			if (existing.module == module && existing.method == method) {
-				existing.mode = mode; existing.handler = handler; existing.user_data = user_data;
+				existing.mode = mode; existing.handler = handler; existing.user_data = user_data; existing.seq = ++seq_;
 				return SWITCH_STATUS_SUCCESS;
 			}
 			return SWITCH_STATUS_FALSE;
 		}
-		bucket.push_back({module, method, mode, handler, user_data, path, slot});
+		bucket.push_back({module, method, mode, handler, user_data, path, slot, ++seq_});
 		return SWITCH_STATUS_SUCCESS;
 	}
 
@@ -412,14 +415,14 @@ public:
 			if (!prefixes_overlap(existing.raw, prefix)) continue;
 			/* Same module re-registering the identical prefix: update in place. */
 			if (existing.module == module && existing.raw == prefix && existing.method == method) {
-				existing.mode = mode; existing.handler = handler; existing.user_data = user_data;
+				existing.mode = mode; existing.handler = handler; existing.user_data = user_data; existing.seq = ++seq_;
 				return SWITCH_STATUS_SUCCESS;
 			}
 			/* Overlapping prefixes (one segment-contains the other) under
 			   overlapping methods: reject so lookup order cannot decide. */
 			return SWITCH_STATUS_FALSE;
 		}
-		prefixes_.push_back({module, method, mode, handler, user_data, prefix, slot});
+		prefixes_.push_back({module, method, mode, handler, user_data, prefix, slot, ++seq_});
 		return SWITCH_STATUS_SUCCESS;
 	}
 
@@ -472,44 +475,75 @@ public:
 		return false;
 	}
 
+	/* The registration counter's current value. A route registered after
+	   this call has a seq above it — including a re-registration that
+	   updated a route in place, since that swapped in the new caller's
+	   handler. */
+	std::uint64_t mark() const
+	{
+		std::shared_lock<std::shared_mutex> lock(mu_);
+		return seq_;
+	}
+
 	/* Remove every route registered by `module`, then block until every
 	   in-flight handler invocation for that module has returned. The slot
 	   is retired from the index but lives on via shared_ptrs held by
 	   in-flight tickets; the last ticket release destroys it. */
+	std::size_t remove_module(const std::string &module)
+	{
+		return remove_routes(module, 0);
+	}
+
+	/* remove_module() limited to the routes `module` registered after
+	   `after` (a mark()). The loader uses it to undo a failed LOAD: the name
+	   that LOAD used may also belong to a live module, whose earlier routes
+	   are not the failed LOAD's to remove.
+
+	   Removes nothing and returns at once if no route is newer than `after`.
+	   If older routes remain, the slot stays theirs: it is not marked
+	   draining or retired, and this only waits for the slot's in-flight
+	   count to reach zero — the removed handlers are among those it counts,
+	   along with the remaining routes' own. */
 	/* Loops because two concurrent unregister_module() calls for the same
 	   module share one slot: whichever finishes first erases it, the module
 	   can then be re-registered, and the loser would otherwise return without
 	   draining the NEW slot — with a handler of that module in flight. Going
 	   round again re-marks whatever slot is current and drains that too. */
-	std::size_t remove_module(const std::string &module)
+	std::size_t remove_routes(const std::string &module, std::uint64_t after)
 	{
 		std::size_t n = 0;
 		for (;;) {
 		std::shared_ptr<ModuleSlot> slot;
+		bool retire = true;
 		{
 			std::unique_lock<std::shared_mutex> lock(mu_);
+			auto doomed = [&](const Entry &e) { return e.module == module && e.seq > after; };
+			std::size_t removed = 0;
 
 			for (auto it = exact_.begin(); it != exact_.end(); ) {
 				auto &bucket = it->second;
 				auto before = bucket.size();
-				bucket.erase(std::remove_if(bucket.begin(), bucket.end(),
-				                            [&](const Entry &e) { return e.module == module; }),
-				             bucket.end());
-				n += before - bucket.size();
+				bucket.erase(std::remove_if(bucket.begin(), bucket.end(), doomed), bucket.end());
+				removed += before - bucket.size();
 				if (bucket.empty()) it = exact_.erase(it); else ++it;
 			}
 
 			auto pbefore = patterns_.size();
-			patterns_.erase(std::remove_if(patterns_.begin(), patterns_.end(),
-			                               [&](const PatternEntry &p) { return p.module == module; }),
-			                patterns_.end());
-			n += pbefore - patterns_.size();
+			patterns_.erase(std::remove_if(patterns_.begin(), patterns_.end(), doomed), patterns_.end());
+			removed += pbefore - patterns_.size();
 
 			auto rbefore = prefixes_.size();
-			prefixes_.erase(std::remove_if(prefixes_.begin(), prefixes_.end(),
-			                               [&](const Entry &e) { return e.module == module; }),
-			                prefixes_.end());
-			n += rbefore - prefixes_.size();
+			prefixes_.erase(std::remove_if(prefixes_.begin(), prefixes_.end(), doomed), prefixes_.end());
+			removed += rbefore - prefixes_.size();
+
+			n += removed;
+
+			if (after) {
+				if (!removed) {
+					return n;
+				}
+				retire = !module_has_routes_locked(module);
+			}
 
 			auto sit = module_slots_.find(module);
 			if (sit != module_slots_.end()) {
@@ -520,7 +554,9 @@ public:
 				   unregister_module() could return with a handler from that
 				   module still running. Leaving the slot in the index and
 				   refusing registrations against it closes that. */
-				slot->draining.store(true, std::memory_order_release);
+				if (retire) {
+					slot->draining.store(true, std::memory_order_release);
+				}
 			}
 		}
 
@@ -551,6 +587,10 @@ public:
 				}
 			}
 
+		}
+
+		if (!retire) {
+			return n;               /* the remaining routes' owner keeps the slot */
 		}
 
 		/* Drained. Drop the slot so a later re-register starts clean. */
@@ -704,6 +744,16 @@ private:
 		       it->second->draining.load(std::memory_order_acquire);
 	}
 
+	/* mu_ must be held by the caller. */
+	bool module_has_routes_locked(const std::string &module) const {
+		auto mine = [&](const Entry &e) { return e.module == module; };
+		for (const auto &kv : exact_) {
+			if (std::any_of(kv.second.begin(), kv.second.end(), mine)) return true;
+		}
+		return std::any_of(patterns_.begin(), patterns_.end(), mine) ||
+		       std::any_of(prefixes_.begin(), prefixes_.end(), mine);
+	}
+
 	/* mu_ must be held in unique mode by the caller. */
 	std::shared_ptr<ModuleSlot> slot_for_locked(const std::string &module) {
 		auto it = module_slots_.find(module);
@@ -718,6 +768,7 @@ private:
 	std::vector<PatternEntry>                                       patterns_;
 	std::vector<Entry>                                              prefixes_;
 	std::unordered_map<std::string, std::shared_ptr<ModuleSlot>>    module_slots_;
+	std::uint64_t                                                   seq_ = 0;   /* guarded by mu_ */
 };
 
 std::atomic<bool> g_listener_present{false};
@@ -1047,6 +1098,17 @@ SWITCH_DECLARE(void) switch_web_server_unregister_module(const char *module_name
 {
 	if (!module_name) return;
 	Registry::instance().remove_module(module_name);
+}
+
+SWITCH_DECLARE(uint64_t) switch_web_server_registration_mark(void)
+{
+	return Registry::instance().mark();
+}
+
+SWITCH_DECLARE(void) switch_web_server_unregister_module_since(const char *module_name, uint64_t mark)
+{
+	if (!module_name) return;
+	Registry::instance().remove_routes(module_name, mark);
 }
 
 SWITCH_DECLARE(switch_bool_t) switch_web_server_available(void)

@@ -41,7 +41,7 @@
 #include <fspr_env.h>
 
 /* for the unload backstop that sweeps this module's HTTP routes */
-#include <switch_web_server.h>
+#include <switch_web_server_internal.h>
 
 /* for fspr file and directory handling */
 #include <fspr_file_io.h>
@@ -83,6 +83,9 @@ struct switch_loadable_module {
 
 struct switch_loadable_module_container {
 	switch_hash_t *module_hash;
+	/* Modules removed from module_hash whose do_shutdown() has not returned.
+	   A load of the same name is refused until it does. Guarded by mutex. */
+	switch_hash_t *unloading_hash;
 	switch_hash_t *endpoint_hash;
 	switch_hash_t *codec_hash;
 	switch_hash_t *dialplan_hash;
@@ -1639,15 +1642,17 @@ static switch_status_t switch_loadable_module_unprocess(switch_loadable_module_t
 /* Routes are keyed by the modname a module passed to
    create_module_interface(). `filename` also covers a LOAD that registered
    before creating its interface, since by convention the two are the same
-   string. Each sweep is a no-op for a name with no routes. `modname` lives in
-   the module's pool, so call this before destroying it. */
-static void sweep_failed_load_routes(const char *modname, const char *filename)
+   string. Either name can also be a live module's, so only routes registered
+   after `mark` (taken just before LOAD ran) are removed; the live module's
+   earlier routes stay. Each sweep is a no-op for a name with no such routes.
+   `modname` lives in the module's pool, so call this before destroying it. */
+static void sweep_failed_load_routes(const char *modname, const char *filename, uint64_t mark)
 {
 	if (modname) {
-		switch_web_server_unregister_module(modname);
+		switch_web_server_unregister_module_since(modname, mark);
 	}
 	if (filename && (!modname || strcmp(modname, filename))) {
-		switch_web_server_unregister_module(filename);
+		switch_web_server_unregister_module_since(filename, mark);
 	}
 }
 
@@ -1668,6 +1673,7 @@ static switch_status_t switch_loadable_module_load_file(char *path, char *filena
 	switch_bool_t load_global = global;
 	const char *loaded_modname = NULL;
 	switch_bool_t load_ran = SWITCH_FALSE;
+	uint64_t routes_mark = 0;
 
 	switch_assert(path != NULL);
 
@@ -1737,6 +1743,7 @@ static switch_status_t switch_loadable_module_load_file(char *path, char *filena
 			break;
 		}
 
+		routes_mark = switch_web_server_registration_mark();
 		status = load_func_ptr(&module_interface, pool);
 		load_ran = SWITCH_TRUE;
 		if (module_interface) {
@@ -1773,7 +1780,7 @@ static switch_status_t switch_loadable_module_load_file(char *path, char *filena
 		   the step that failed. Sweep them before dlclose(), or the next request
 		   to such a route jumps into unmapped text. */
 		if (load_ran) {
-			sweep_failed_load_routes(loaded_modname, filename);
+			sweep_failed_load_routes(loaded_modname, filename, routes_mark);
 		}
 
 		if (dso) {
@@ -1820,6 +1827,7 @@ static switch_status_t switch_loadable_module_load_module_ex(const char *dir, co
 	char *file, *dot;
 	switch_loadable_module_t *new_module = NULL;
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
+	switch_bool_t loaded, unloading;
 
 #ifdef WIN32
 	const char *ext = ".dll";
@@ -1852,9 +1860,22 @@ static switch_status_t switch_loadable_module_load_module_ex(const char *dir, co
 	}
 
 
-	if (switch_core_hash_find_locked(loadable_modules.module_hash, file, loadable_modules.mutex)) {
+	switch_mutex_lock(loadable_modules.mutex);
+	loaded = switch_core_hash_find(loadable_modules.module_hash, file) != NULL;
+	/* The old instance's SHUTDOWN, route sweeps and dlclose() are still
+	   running. A new instance would register under the same name, where those
+	   sweeps would remove its routes, and on the same .so it would share
+	   globals with a SHUTDOWN in progress. */
+	unloading = switch_core_hash_find(loadable_modules.unloading_hash, file) != NULL;
+	switch_mutex_unlock(loadable_modules.mutex);
+
+	if (loaded) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Module %s Already Loaded!\n", file);
 		*err = "Module already loaded";
+		status = SWITCH_STATUS_FALSE;
+	} else if (unloading) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Module %s is still unloading!\n", file);
+		*err = "Module is still unloading";
 		status = SWITCH_STATUS_FALSE;
 	} else if ((status = switch_loadable_module_load_file(path, file, global, &new_module)) == SWITCH_STATUS_SUCCESS) {
 		new_module->type = type;
@@ -1937,12 +1958,16 @@ SWITCH_DECLARE(switch_status_t) switch_loadable_module_unload_module(const char 
 		} else {
 			/* Prevent anything from using the module while it's shutting down */
 			switch_core_hash_delete(loadable_modules.module_hash, fname);
+			switch_core_hash_insert(loadable_modules.unloading_hash, fname, module);
 			switch_mutex_unlock(loadable_modules.mutex);
-			if ((status = do_shutdown(module, SWITCH_TRUE, SWITCH_TRUE, !force, err)) != SWITCH_STATUS_SUCCESS) {
+			status = do_shutdown(module, SWITCH_TRUE, SWITCH_TRUE, !force, err);
+			switch_mutex_lock(loadable_modules.mutex);
+			switch_core_hash_delete(loadable_modules.unloading_hash, fname);
+			if (status != SWITCH_STATUS_SUCCESS) {
 				/* Something went wrong in the module's shutdown function, add it again */
-				switch_core_hash_insert_locked(loadable_modules.module_hash, fname, module, loadable_modules.mutex);
+				switch_core_hash_insert(loadable_modules.module_hash, fname, module);
 			}
-			goto end;
+			goto unlock;
 		}
 	} else {
 		*err = "No such module!";
@@ -1950,7 +1975,6 @@ SWITCH_DECLARE(switch_status_t) switch_loadable_module_unload_module(const char 
 	}
 unlock:
 	switch_mutex_unlock(loadable_modules.mutex);
-  end:
 	if (force) {
 		switch_yield(1000000);
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "PHEW!\n");
@@ -2029,6 +2053,7 @@ SWITCH_DECLARE(switch_status_t) switch_loadable_module_build_dynamic(char *filen
 	switch_memory_pool_t *pool;
 	const char *loaded_modname = NULL;
 	switch_bool_t load_ran = SWITCH_FALSE;
+	uint64_t routes_mark = 0;
 
 
 	if (switch_core_new_memory_pool(&pool) != SWITCH_STATUS_SUCCESS) {
@@ -2052,6 +2077,7 @@ SWITCH_DECLARE(switch_status_t) switch_loadable_module_build_dynamic(char *filen
 			break;
 		}
 
+		routes_mark = switch_web_server_registration_mark();
 		status = load_func_ptr(&module_interface, pool);
 		load_ran = SWITCH_TRUE;
 		if (module_interface) {
@@ -2079,7 +2105,7 @@ SWITCH_DECLARE(switch_status_t) switch_loadable_module_build_dynamic(char *filen
 		/* Built in, so no dlclose() — but the pool that user_data likely
 		   points into is destroyed just below. */
 		if (load_ran) {
-			sweep_failed_load_routes(loaded_modname, filename);
+			sweep_failed_load_routes(loaded_modname, filename, routes_mark);
 		}
 		switch_core_destroy_memory_pool(&pool);
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CONSOLE, "Error Loading module %s\n**%s**\n", filename, err);
@@ -2159,6 +2185,7 @@ SWITCH_DECLARE(switch_status_t) switch_loadable_module_init(switch_bool_t autolo
 #endif
 
 	switch_core_hash_init(&loadable_modules.module_hash);
+	switch_core_hash_init(&loadable_modules.unloading_hash);
 	switch_core_hash_init_nocase(&loadable_modules.endpoint_hash);
 	switch_core_hash_init_nocase(&loadable_modules.codec_hash);
 	switch_core_hash_init_nocase(&loadable_modules.timer_hash);
@@ -2527,6 +2554,7 @@ SWITCH_DECLARE(void) switch_loadable_module_shutdown(void)
 	}
 
 	switch_core_hash_destroy(&loadable_modules.module_hash);
+	switch_core_hash_destroy(&loadable_modules.unloading_hash);
 	switch_core_hash_destroy(&loadable_modules.endpoint_hash);
 	switch_core_hash_destroy(&loadable_modules.codec_hash);
 	switch_core_hash_destroy(&loadable_modules.timer_hash);

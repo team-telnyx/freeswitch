@@ -18,6 +18,7 @@ switch_console
 switch_core
 switch_core_codec
 switch_core_db
+switch_loadable_module_web_routes
 switch_core_file
 switch_core_session
 switch_core_video
