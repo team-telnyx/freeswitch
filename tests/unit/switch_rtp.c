@@ -282,6 +282,139 @@ static switch_bool_t raw_write_ts(switch_rtp_t *raw_rtp, int sink_fd, uint32_t s
 	return recv_rtp_ts(sink_fd, out_ts, 1000);
 }
 
+static switch_bool_t recv_rtp_hdr(int fd, switch_payload_t pt, uint32_t *ts, uint16_t *seq, uint8_t *m, int timeout_ms)
+{
+	fd_set read_fds;
+	struct timeval timeout;
+	uint8_t packet[SWITCH_RTP_MAX_PACKET_LEN];
+	ssize_t bytes;
+
+	FD_ZERO(&read_fds);
+	FD_SET(fd, &read_fds);
+	timeout.tv_sec = timeout_ms / 1000;
+	timeout.tv_usec = (timeout_ms % 1000) * 1000;
+	if (select(fd + 1, &read_fds, NULL, NULL, &timeout) != 1) return SWITCH_FALSE;
+
+	bytes = recvfrom(fd, packet, sizeof(packet), 0, NULL, NULL);
+	if (bytes < SWITCH_RTP_HEADER_LEN) return SWITCH_FALSE;
+	if ((packet[1] & 0x7f) != pt) return recv_rtp_hdr(fd, pt, ts, seq, m, timeout_ms);
+
+	*m = (packet[1] & 0x80) ? 1 : 0;
+	*seq = (uint16_t)(((uint16_t)packet[2] << 8) | packet[3]);
+	*ts = ((uint32_t)packet[4] << 24) | ((uint32_t)packet[5] << 16) | ((uint32_t)packet[6] << 8) | packet[7];
+	return SWITCH_TRUE;
+}
+
+static switch_bool_t payload_write_hdr(switch_rtp_t *raw_rtp, int sink_fd, uint32_t src_ts, switch_bool_t event,
+									   uint32_t *out_ts, uint16_t *out_seq, uint8_t *out_m)
+{
+	uint8_t data[4] = { 0xaa, 0, 0, 0 };
+	switch_frame_t frame = { 0 };
+
+	if (event) {
+		data[0] = 1;
+		data[1] = 10;
+	}
+	frame.data = data;
+	frame.datalen = event ? 4 : 1;
+	frame.payload = TEST_PT;
+	frame.timestamp = src_ts;
+	if (event) {
+		frame.flags = SFF_RFC2833;
+	}
+
+	if (switch_rtp_write_frame(raw_rtp, &frame) <= 0) return SWITCH_FALSE;
+
+	return recv_rtp_hdr(sink_fd, event ? 101 : TEST_PT, out_ts, out_seq, out_m, 1000);
+}
+
+static switch_bool_t run_mapped_zero_case(int which, const char **why)
+{
+	static const uint32_t jump_in[] = { 0xfffffec0, 100000, 100320, 100640 };
+	static const uint32_t jump_out[] = { 0xfffffec0, 0, 320, 640 };
+	static const uint32_t cross_in[] = { 0xfffffd80, 100000, 100320, 100640, 100960 };
+	static const uint32_t cross_out[] = { 0xfffffd80, 0xfffffec0, 0, 320, 640 };
+	static const uint32_t off_in[] = { 0xfffffec0, 100000, 100320 };
+	const uint32_t *in = NULL, *expect = NULL;
+	switch_memory_pool_t *test_pool = NULL;
+	switch_rtp_t *raw_rtp = NULL;
+	switch_port_t sink_port = 0;
+	uint32_t out = 0;
+	uint16_t seq = 0, prev_seq = 0;
+	uint8_t m = 0;
+	int sink_fd = -1, n = 0, i;
+	switch_bool_t ok = SWITCH_FALSE;
+
+	*why = "setup";
+	if (switch_core_new_memory_pool(&test_pool) != SWITCH_STATUS_SUCCESS) goto end;
+	if ((sink_fd = make_udp_sink(&sink_port)) < 0) goto end;
+	if (!(raw_rtp = new_raw_write_rtp(test_pool, sink_port, which == 3 ? SWITCH_FALSE : SWITCH_TRUE))) goto end;
+	switch_rtp_set_telephony_event(raw_rtp, 101);
+
+	switch (which) {
+	case 0:
+		*why = "jump mapped to zero";
+		in = jump_in;
+		expect = jump_out;
+		n = 4;
+		break;
+	case 1:
+	case 2:
+		*why = which == 1 ? "existing offset crossing zero" : "event mapped to zero";
+		in = cross_in;
+		expect = cross_out;
+		n = which == 1 ? 5 : 2;
+		break;
+	case 3:
+		*why = "rebase off";
+		in = off_in;
+		expect = off_in;
+		n = 3;
+		break;
+	case 4:
+		*why = "absent timestamp";
+		in = cross_in;
+		expect = cross_out;
+		n = 2;
+		break;
+	}
+
+	for (i = 0; i < n; i++) {
+		if (!payload_write_hdr(raw_rtp, sink_fd, in[i], SWITCH_FALSE, &out, &seq, &m)) goto end;
+		if (out != expect[i]) goto end;
+		if (i && seq != (uint16_t)(prev_seq + 1)) goto end;
+		if (which == 1 && i == 2 && m) goto end;
+		prev_seq = seq;
+	}
+
+	if (which == 2) {
+		for (i = 0; i < 3; i++) {
+			if (!payload_write_hdr(raw_rtp, sink_fd, 100320, SWITCH_TRUE, &out, &seq, &m)) goto end;
+			if (out != 0 || seq != (uint16_t)(prev_seq + 1)) goto end;
+			prev_seq = seq;
+		}
+		if (!payload_write_hdr(raw_rtp, sink_fd, 100640, SWITCH_FALSE, &out, &seq, &m)) goto end;
+		if (out != 320 || seq != (uint16_t)(prev_seq + 1)) goto end;
+		prev_seq = seq;
+		if (!payload_write_hdr(raw_rtp, sink_fd, 100960, SWITCH_FALSE, &out, &seq, &m)) goto end;
+		if (out != 640 || seq != (uint16_t)(prev_seq + 1)) goto end;
+	}
+
+	if (which == 4) {
+		if (!payload_write_hdr(raw_rtp, sink_fd, 0, SWITCH_FALSE, &out, &seq, &m)) goto end;
+		if (out == 0 || out == (uint32_t) (0xfffffec0 - 100000) || seq != (uint16_t)(prev_seq + 1)) goto end;
+	}
+
+	ok = SWITCH_TRUE;
+	*why = NULL;
+
+ end:
+	if (raw_rtp) switch_rtp_destroy(&raw_rtp);
+	if (sink_fd >= 0) close(sink_fd);
+	if (test_pool) switch_core_destroy_memory_pool(&test_pool);
+	return ok;
+}
+
 static void show_event(switch_event_t *event) {
 	char *str;
 	/*print the event*/
@@ -792,6 +925,20 @@ FST_TEARDOWN_END()
 		switch_rtp_destroy(&raw_rtp);
 		close(sink_fd);
 		switch_core_destroy_memory_pool(&test_pool);
+	}
+	FST_TEST_END()
+
+	FST_TEST_BEGIN(test_raw_write_ts_payload_frame_mapped_to_zero_is_kept)
+	{
+		const char *why = NULL;
+		switch_bool_t ok;
+		int i;
+
+		for (i = 0; i < 5; i++) {
+			why = NULL;
+			ok = run_mapped_zero_case(i, &why);
+			fst_xcheck(ok, why ? why : "mapped zero case");
+		}
 	}
 	FST_TEST_END()
 

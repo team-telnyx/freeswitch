@@ -3597,12 +3597,12 @@ static uint32_t rebase_raw_write_ts(switch_rtp_t *rtp_session, uint32_t src_ts, 
 	return out;
 }
 
-static uint8_t get_next_write_ts(switch_rtp_t *rtp_session, uint32_t timestamp)
+static uint8_t get_next_write_ts(switch_rtp_t *rtp_session, uint32_t timestamp, switch_bool_t timestamp_given)
 {
 	uint8_t m = 0, changed = 0;
 
 	if (!(rtp_session->rtp_bugs & RTP_BUG_SEND_LINEAR_TIMESTAMPS)) {
-		if (timestamp) {
+		if (timestamp_given) {
 			rtp_session->ts = (uint32_t) timestamp;
 			changed++;
 		} else if (switch_rtp_test_flag(rtp_session, SWITCH_RTP_FLAG_USE_TIMER)) {
@@ -4326,7 +4326,7 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 		data[0] = 65;
 		rtp_session->cn++;
 
-		get_next_write_ts(rtp_session, 0);
+		get_next_write_ts(rtp_session, 0, SWITCH_FALSE);
 		rtp_session->send_msg.header.ts = htonl(rtp_session->ts);
 
 		switch_rtp_write_manual(rtp_session, (void *) data, 2, 0, rtp_session->cng_pt, ntohl(rtp_session->send_msg.header.ts), &frame_flags);
@@ -11826,6 +11826,7 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 	uint32_t raw_ts_rebase_offset = 0;
 	uint32_t raw_ts_rate = 0;
 	uint8_t raw_ts_rebase = 0;
+	switch_bool_t timestamp_given = SWITCH_FALSE;
 	int ret;
 	switch_time_t now;
 	uint8_t m = 0;
@@ -11918,6 +11919,8 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 		send_msg = &rtp_session->send_msg;
 		send_msg->header.pt = payload;
 
+		timestamp_given = timestamp != 0;
+
 		if (timestamp && rtp_session->flags[SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP] && rtp_session->flags[SWITCH_RTP_FLAG_RAW_WRITE] &&
 			!(rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS) && !rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
 			if (*flags & SFF_RFC2833) {
@@ -11927,7 +11930,7 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 				raw_ts_rebase = 1;
 			}
 		}
-		m = get_next_write_ts(rtp_session, timestamp);
+		m = get_next_write_ts(rtp_session, timestamp, timestamp_given);
 #if DEBUG_RTP
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "RTP: common_write: %s [!send_msg] next ts: %u %p/%p\n", rtp_session->session ? switch_channel_get_name(switch_core_session_get_channel(rtp_session->session)) : "NoName", rtp_session->ts, (void*)rtp_session->session, (void*)rtp_session);
 #endif
