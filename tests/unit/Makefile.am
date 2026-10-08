@@ -13,6 +13,9 @@ noinst_PROGRAMS += test_record_write_error_grace
 # may have zeroed.
 noinst_PROGRAMS += test_read_frame_codec_teardown
 
+# Regression: a bounded read must not wait for a full frame of tiny payloads.
+noinst_PROGRAMS += test_read_frame_accumulation
+
 # Regression: a transfer landing in the state-machine handoff window must
 # still be routed. See switch_channel_inc_transfer_generation().
 noinst_PROGRAMS += test_transfer_handoff_window
