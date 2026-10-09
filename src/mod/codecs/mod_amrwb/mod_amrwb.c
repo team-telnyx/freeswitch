@@ -142,7 +142,8 @@ struct amrwb_context {
 	uint32_t concealed;
 	struct amrwb_framing {
 		switch_byte_t octet_align;
-		uint16_t modes;
+		uint16_t answer_modes;
+		uint16_t enc_modes;
 		switch_byte_t neighbor;
 		uint32_t period;
 	} framing;
@@ -484,13 +485,37 @@ static switch_status_t amrwb_parse_fmtp_cb(const char *fmtp, switch_codec_fmtp_t
 	return SWITCH_STATUS_FALSE;
 }
 
-/* fmtp parameters the running codec depends on (octet-align after force-oa/force-be) */
+/* answered and encoded mode-sets for an offered one (0: none offered):
+ * mirror the offer, else answer the configured mode-set (default-bitrate with
+ * mode-set-overwrite-with-default-bitrate or nothing configured) and encode within
+ * both, else within the offer */
+static void amrwb_mode_sets(uint16_t offered, uint16_t *answer_modes, uint16_t *enc_modes)
+{
+	if (offered && !globals.mode_set_overwrite) {
+		*answer_modes = *enc_modes = offered;
+		return;
+	}
+
+	*answer_modes = globals.context.enc_modes;
+	if (!*answer_modes || (globals.mode_set_overwrite && globals.mode_set_overwrite_with_default_bitrate)) {
+		*answer_modes = (uint16_t) (1 << globals.default_bitrate);
+	}
+
+	*enc_modes = *answer_modes;
+	if (offered) {
+		*enc_modes = (offered & *answer_modes) ? (offered & *answer_modes) : offered;
+	}
+}
+
+/* what the running codec does with an fmtp: octet-align after force-oa/force-be,
+ * answered and encoded mode-sets, mode-change-neighbor, mode-change-period (0 below 2) */
 static void amrwb_fmtp_framing(const char *fmtp, struct amrwb_framing *framing)
 {
 	char *argv[SWITCH_AMRWB_MAX_FMTP_PARAMS], *m_argv[SWITCH_AMRWB_MAX_FMTP_PARAMS];
 	char *fmtp_dup;
 	int argc, m_argc, x, y, mode;
 	switch_bool_t octet_align_given = SWITCH_FALSE;
+	uint16_t offered = 0;
 
 	memset(framing, 0, sizeof(*framing));
 
@@ -515,7 +540,7 @@ static void amrwb_fmtp_framing(const char *fmtp, struct amrwb_framing *framing)
 				m_argc = switch_separate_string(arg, ',', m_argv, (sizeof(m_argv) / sizeof(m_argv[0])));
 				for (y = 0; y < m_argc; y++) {
 					if ((mode = amrwb_parse_mode(m_argv[y])) >= 0) {
-						framing->modes |= (1 << mode);
+						offered |= (1 << mode);
 					}
 				}
 			}
@@ -526,6 +551,10 @@ static void amrwb_fmtp_framing(const char *fmtp, struct amrwb_framing *framing)
 	if (!octet_align_given) {
 		framing->octet_align = (globals.force_oa && !globals.force_be) ? 1 : 0;
 	}
+	if (framing->period < 2) {
+		framing->period = 0;
+	}
+	amrwb_mode_sets(offered, &framing->answer_modes, &framing->enc_modes);
 }
 
 static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_flag_t flags, const switch_codec_settings_t *codec_settings)
@@ -546,6 +575,7 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 	char *fmtp_dup = NULL;
 	switch_core_session_t *session = codec->session;
 	switch_bool_t octet_align_given = SWITCH_FALSE;
+	uint16_t answer_modes;
 
 	encoding = (flags & SWITCH_CODEC_FLAG_ENCODE);
 	decoding = (flags & SWITCH_CODEC_FLAG_DECODE);
@@ -649,52 +679,16 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 			switch_clear_flag(context, AMRWB_OPT_OCTET_ALIGN);
 		}
 
-		if (context->enc_modes && !globals.mode_set_overwrite) {
+		amrwb_mode_sets(context->enc_modes, &answer_modes, &context->enc_modes);
 
-			/* If inbound fmtp has mode-set and XML overwrite is not set, then mirror these mode-set */
-
-			/* choose the highest mode (bitrate) for high audio quality. */
-			for (i = SWITCH_AMRWB_MODES-2; i > -1; i--) {
-				if (context->enc_modes & (1 << i)) {
-					context->enc_mode = (switch_byte_t) i;
-					break;
-				}
+		fmtptmp_pos = switch_snprintf(fmtptmp, sizeof(fmtptmp), "mode-set=");
+		for (i = 0; SWITCH_AMRWB_MODES-1 > i; ++i) {
+			if (answer_modes & (1 << i)) {
+				fmtptmp_pos += switch_snprintf(fmtptmp + fmtptmp_pos, sizeof(fmtptmp) - fmtptmp_pos, fmtptmp_pos > strlen("mode-set=") ? ",%d" : "%d", i);
 			}
-
-			/* re-create mode-set */
-			fmtptmp_pos = switch_snprintf(fmtptmp, sizeof(fmtptmp), "mode-set=");
-
-			for (i = 0; SWITCH_AMRWB_MODES-1 > i; ++i) {
-				if (context->enc_modes & (1 << i)) {
-					fmtptmp_pos += switch_snprintf(fmtptmp + fmtptmp_pos, sizeof(fmtptmp) - fmtptmp_pos, fmtptmp_pos > strlen("mode-set=") ? ",%d" : "%d", i);
-				}
-			}
-
-		} else {
-
-			/* no mode-set in the fmtp, or mode-set-overwrite: answer the configured mode-set,
-			 * default-bitrate with mode-set-overwrite-with-default-bitrate or nothing configured */
-			uint16_t answer_modes = globals.context.enc_modes;
-			uint16_t offered_modes = context->enc_modes;
-
-			if (!answer_modes || (globals.mode_set_overwrite && globals.mode_set_overwrite_with_default_bitrate)) {
-				answer_modes = (uint16_t) (1 << globals.default_bitrate);
-			}
-
-			/* encode within both mode-sets, else within the offered one */
-			context->enc_modes = answer_modes;
-			if (offered_modes) {
-				context->enc_modes = (offered_modes & answer_modes) ? (offered_modes & answer_modes) : offered_modes;
-			}
-
-			fmtptmp_pos = switch_snprintf(fmtptmp, sizeof(fmtptmp), "mode-set=");
-			for (i = 0; SWITCH_AMRWB_MODES-1 > i; ++i) {
-				if (answer_modes & (1 << i)) {
-					fmtptmp_pos += switch_snprintf(fmtptmp + fmtptmp_pos, sizeof(fmtptmp) - fmtptmp_pos, fmtptmp_pos > strlen("mode-set=") ? ",%d" : "%d", i);
-				}
-				if (context->enc_modes & (1 << i)) {
-					context->enc_mode = (switch_byte_t) i;
-				}
+			/* the highest mode we may encode */
+			if (context->enc_modes & (1 << i)) {
+				context->enc_mode = (switch_byte_t) i;
 			}
 		}
 
@@ -986,7 +980,9 @@ static switch_status_t switch_amrwb_control(switch_codec_t *codec,
 
 				amrwb_fmtp_framing((const char *) cmd_arg, &framing);
 				*rtype = SCCT_STRING;
-				*ret_data = (void *) (memcmp(&framing, &context->framing, sizeof(framing)) ? "true" : "false");
+				*ret_data = (void *) ((framing.octet_align != context->framing.octet_align || framing.answer_modes != context->framing.answer_modes ||
+									   framing.enc_modes != context->framing.enc_modes || framing.neighbor != context->framing.neighbor ||
+									   framing.period != context->framing.period) ? "true" : "false");
 			}
 		}
 		break;
