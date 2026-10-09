@@ -204,6 +204,20 @@ static void amrwb_cmr_session_end(switch_core_session_t *session, switch_codec_t
 	switch_core_session_rwunlock(session);
 }
 
+/* amrwb_show contains text */
+static switch_bool_t amrwb_show_has(const char *text)
+{
+	switch_stream_handle_t stream = { 0 };
+	switch_bool_t found;
+
+	SWITCH_STANDARD_STREAM(stream);
+	switch_api_execute("amrwb_show", "", NULL, &stream);
+	found = (stream.data && strstr((char *) stream.data, text)) ? SWITCH_TRUE : SWITCH_FALSE;
+	switch_safe_free(stream.data);
+
+	return found;
+}
+
 static const char *amrwb_conf_settings;
 
 static switch_xml_t amrwb_conf_lookup(const char *section, const char *tag_name, const char *key_name, const char *key_value, switch_event_t *params, void *user_data)
@@ -1327,6 +1341,14 @@ FST_CORE_BEGIN(".")
 			UNPROTECT_INTERFACE(codec_interface);
 			fst_check(offers > 0 && configured == offers);
 			fst_requires(amrwb_reload(NULL) == SWITCH_STATUS_SUCCESS);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amrwb_reload_keeps_the_configured_mode_set)
+		{
+			fst_requires(amrwb_reload(NULL) == SWITCH_STATUS_SUCCESS);
+			fst_requires(amrwb_reload(NULL) == SWITCH_STATUS_SUCCESS);
+			fst_check(amrwb_show_has("modes: [0,1,2],"));
 		}
 		FST_TEST_END()
 
