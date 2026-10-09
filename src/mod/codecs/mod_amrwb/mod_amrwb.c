@@ -372,7 +372,7 @@ static switch_bool_t switch_amrwb_info(switch_codec_t *codec, unsigned char *enc
 		not_last_frame = (tocs[0] >> 7) & 1;
 		q = (tocs[0] >> 2) & 1;
 		ft = tocs[0] >> 3;
-		ft &= ~(1 << 5); /* Frame Type */
+		ft &= 0x0f; /* Frame Type, without F */
 	} else {
 		/* BE */
 		memcpy(shift_tocs, encoded_buf, 2);
@@ -381,7 +381,7 @@ static switch_bool_t switch_amrwb_info(switch_codec_t *codec, unsigned char *enc
 		not_last_frame = (shift_tocs[0] >> 7) & 1;
 		q = (shift_tocs[0] >> 2) & 1;
 		ft = shift_tocs[0] >> 3;
-		ft &= ~(1 << 5); /* Frame Type */
+		ft &= 0x0f; /* Frame Type, without F */
 		index = (shift_tocs[0] >> 3) & 0x0f;
 		if (invalid_frame_type) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(codec->session), SWITCH_LOG_ERROR, "AMRWB decoder (BE): Invalid TOC 0x%x\n", index);
