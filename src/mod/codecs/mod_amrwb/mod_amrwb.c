@@ -34,32 +34,39 @@
  * mod_amrwb.c -- GSM-AMRWB Codec Module
  *
  *
- * XML Parameters
+ * XML Parameters (on/off values: true, on, yes, 1)
  *
  * default-bitrate
- *		Mode 0-8 offered and answered when mode-set is not configured, or with mode-set-overwrite and mode-set-overwrite-with-default-bitrate.
+ *		Mode 0-8, default 8. Offered and answered when mode-set is not configured, or with
+ *		mode-set-overwrite and mode-set-overwrite-with-default-bitrate.
+ *		A single mode leaves nothing for CMR or adjust-bitrate to change.
  * volte
  *		If set, configures codec for use on cellular networks.
  * adjust-bitrate
  *		Vary bitrate according to feedback from RTCP, within the negotiated mode-set.
  * force-oa
- *		Octet aligned when the fmtp does not state octet-align.
+ *		Octet aligned when the fmtp does not state octet-align. The answer then differs
+ *		from an offer that meant bandwidth efficient (RFC 4867 8.3.1): interop only.
  * force-be
  *		Bandwidth efficient when the fmtp does not state octet-align (the RFC 4867 default).
+ *		Wins over force-oa.
  * mode-set-overwrite
- *		Answer the configured mode-set instead of the offered one. Encode within both, else within the offered one.
+ *		Answer our mode-set instead of the offered one (deviates from RFC 4867 8.3.1).
+ *		Which one: see mode-set-overwrite-with-default-bitrate.
+ *		Encode within the offered and answered sets, else within the offered one.
  * mode-set-overwrite-with-default-bitrate
- *		If mode-set-overwrite is on, then use default-bitrate mode instead of mode-set.
+ *		Default on: mode-set-overwrite offers and answers default-bitrate.
+ *		Off: it offers and answers mode-set.
  * invite-prefer-oa
- *		When answering a call, if AMR-WB is offered in 2 modes (octet aligned and bandwidth efficient), select octet aligned.
+ *		No effect for AMR-WB: the core selects AMR-WB with matches_fmtp only.
  * invite-prefer-be
- *		When answering a call, if AMR-WB is offered in 2 modes (octet aligned and bandwidth efficient), select bandwidth efficient.
+ *		No effect for AMR-WB: the core selects AMR-WB with matches_fmtp only.
  * mode-set
  *		Modes 0-8 offered, and answered to an offer without mode-set or with mode-set-overwrite.
  * debug
- *		If on, print extra codec info (CMR, ToC, last frame flag) at the FS's DEBUG level.
+ *		Log CMR, ToC and frame flag of every payload at DEBUG, malformed ones at ERROR.
  * silence-supp-off
- *		If true, then SDP has 'silenceSupp:off - - - -' to turn silence suppression off (no CNG).
+ *		SDP 'silenceSupp:off - - - -', suppress_cng on the session, no SID frames relayed.
  * fmtp-extra
  *		Append any extra info to fmtp entry for AMR-WB.
  *
@@ -553,7 +560,6 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 		 * or the actual bitrate  which is set with FMTP param "mode-set". */
 		/* https://tools.ietf.org/html/rfc4867 */
 
-		/* set the default mode just in case there's no "mode-set" FMTP param */
 		context->enc_mode = globals.default_bitrate;
 
 		/* octet-align = 0  - per RFC - if there's no `octet-align` FMTP value then BE is employed */
@@ -1106,7 +1112,6 @@ static char *generate_fmtp(switch_memory_pool_t *pool , int octet_align)
 	snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf), "octet-align=%d; ", octet_align);
 
 #ifndef AMRWB_PASSTHROUGH
-	// ENGDESK-15706
 	if (globals.context.enc_modes && !(globals.mode_set_overwrite && globals.mode_set_overwrite_with_default_bitrate)) {
 			for (i = 0; SWITCH_AMRWB_MODES-1 > i; ++i) {
 				if (globals.context.enc_modes & (1 << i)) {
