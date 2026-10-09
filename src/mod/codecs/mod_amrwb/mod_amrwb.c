@@ -1181,7 +1181,10 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_amrwb_load)
 				if (!strcasecmp(var, "mode-set")) {
 					int y, m_argc;
 					char *m_argv[SWITCH_AMRWB_MAX_FMTP_PARAMS];
-					m_argc = switch_separate_string(val, ',', m_argv, (sizeof(m_argv) / sizeof(m_argv[0])));
+					/* split a copy: val belongs to the shared XML tree */
+					char *modes = switch_core_strdup(pool, val);
+
+					m_argc = switch_separate_string(modes, ',', m_argv, (sizeof(m_argv) / sizeof(m_argv[0])));
 					for (y = 0; y < m_argc; y++) {
 						int mode = amrwb_parse_mode(m_argv[y]);
 
