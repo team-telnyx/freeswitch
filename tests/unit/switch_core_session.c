@@ -31,6 +31,52 @@
 #include <switch.h>
 #include <test/switch_test.h>
 
+/* Counts BLIND_TRANSFER_RESPONSE messages delivered to the parked peer. */
+static switch_atomic_t blind_transfer_response_count;
+static int blind_transfer_response_numeric_arg = -1;
+
+static switch_status_t blind_transfer_response_hook(switch_core_session_t *session, switch_core_session_message_t *msg)
+{
+	if (msg->message_id == SWITCH_MESSAGE_INDICATE_BLIND_TRANSFER_RESPONSE) {
+		switch_atomic_inc(&blind_transfer_response_count);
+		blind_transfer_response_numeric_arg = msg->numeric_arg;
+	}
+	return SWITCH_STATUS_SUCCESS;
+}
+
+/* A null-endpoint session stands in for the parked transferor (the REFER sender). */
+static switch_core_session_t *start_peer(void)
+{
+	switch_core_session_t *peer_session = NULL;
+	switch_call_cause_t cause = SWITCH_CAUSE_NONE;
+
+	if (switch_ivr_originate(NULL, &peer_session, &cause, "null/+15553334444",
+							 0, NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) != SWITCH_STATUS_SUCCESS) {
+		return NULL;
+	}
+	switch_atomic_set(&blind_transfer_response_count, 0);
+	blind_transfer_response_numeric_arg = -1;
+	switch_core_event_hook_add_receive_message(peer_session, blind_transfer_response_hook);
+	return peer_session;
+}
+
+/* Waits up to about 5 s for the first response to reach the peer. */
+static void wait_for_response(void)
+{
+	int i;
+
+	for (i = 0; i < 500 && switch_atomic_read(&blind_transfer_response_count) == 0; ++i) {
+		switch_yield(10000);
+	}
+}
+
+/* Removes the hook and ends the peer. */
+static void stop_peer(switch_core_session_t *peer_session)
+{
+	switch_core_event_hook_remove_receive_message(peer_session, blind_transfer_response_hook);
+	switch_channel_hangup(switch_core_session_get_channel(peer_session), SWITCH_CAUSE_NORMAL_CLEARING);
+	switch_core_session_rwunlock(peer_session);
+}
 
 FST_CORE_BEGIN("./conf")
 {
@@ -241,6 +287,53 @@ FST_CORE_BEGIN("./conf")
 			fst_check_string_equals(switch_str_nil(switch_channel_get_variable(fst_channel, "parse_event_test2")), "2");
 
 			switch_event_destroy(&event);
+		}
+		FST_SESSION_END()
+
+		/* The flag-holding leg hangs up mid-transfer: the parked peer gets one failure response. */
+		FST_SESSION_BEGIN(blind_transfer_response_on_hangup)
+		{
+			switch_core_session_t *peer_session = start_peer();
+
+			fst_requires(peer_session);
+			/* Set the flag as the REFER handler does: a state flag that becomes a
+			   channel flag at the next state change, here the change to CS_HANGUP. */
+			switch_channel_set_state_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER);
+			switch_channel_set_variable(fst_channel, "blind_transfer_uuid", switch_core_session_get_uuid(peer_session));
+
+			switch_channel_hangup(fst_channel, SWITCH_CAUSE_NORMAL_CLEARING);
+			wait_for_response();
+
+			fst_xcheck(switch_atomic_read(&blind_transfer_response_count) == 1, "one failure response delivered to the peer on hangup");
+			fst_xcheck(blind_transfer_response_numeric_arg == 0, "failure response carries numeric_arg=0");
+			fst_xcheck(!switch_channel_test_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER), "flag cleared after the response");
+			stop_peer(peer_session);
+		}
+		FST_SESSION_END()
+
+		/* After an explicit ack, hangup must not send a second response. */
+		FST_SESSION_BEGIN(blind_transfer_ack_suppresses_hangup_producer)
+		{
+			switch_core_session_t *peer_session = start_peer();
+			int i;
+
+			fst_requires(peer_session);
+			switch_channel_set_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER);
+			switch_channel_set_variable(fst_channel, "blind_transfer_uuid", switch_core_session_get_uuid(peer_session));
+
+			fst_check(switch_ivr_blind_transfer_ack(fst_session, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS);
+			wait_for_response();
+			fst_xcheck(switch_atomic_read(&blind_transfer_response_count) == 1, "one success response delivered to the peer");
+			fst_xcheck(blind_transfer_response_numeric_arg == 1, "success response carries numeric_arg=1");
+			fst_xcheck(!switch_channel_test_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER), "flag cleared by the explicit ack");
+
+			switch_channel_hangup(fst_channel, SWITCH_CAUSE_NORMAL_CLEARING);
+			for (i = 0; i < 500 && switch_channel_get_state(fst_channel) != CS_DESTROY; ++i) {
+				switch_yield(10000);
+			}
+			switch_yield(100000);
+			fst_xcheck(switch_atomic_read(&blind_transfer_response_count) == 1, "no second response after the explicit ack");
+			stop_peer(peer_session);
 		}
 		FST_SESSION_END()
 	}
