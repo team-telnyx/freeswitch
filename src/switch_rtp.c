@@ -432,6 +432,11 @@ struct switch_rtp {
 	uint32_t ts;
 	//uint32_t last_clock_ts;
 	uint32_t last_write_ts;
+	uint32_t raw_ts_offset;		/* added to forwarded audio ts after generated frames */
+	uint8_t raw_ts_forwarded;
+	uint8_t raw_ts_generated;
+	uint32_t raw_ts_anchor;		/* last forwarded audio ts sent */
+	switch_time_t raw_ts_anchor_time;
 	uint32_t last_read_ts;
 	uint32_t prev_read_ts;
 	uint32_t last_cng_ts;
@@ -3546,6 +3551,53 @@ SWITCH_DECLARE(void) switch_rtp_init(switch_memory_pool_t *pool)
 	switch_mutex_init(&g_trickle_eoc_mutex, SWITCH_MUTEX_NESTED, pool);
 	switch_rtp_dtls_init();
 	global_init = 1;
+}
+
+/* RAW_WRITE audio: generated frames (ts 0) follow the time since the last forwarded frame (whole
+ * intervals, rounded down, at least one past the last ts sent); forwarded frames after them never go
+ * backwards. 0 means "no timestamp" further down: a result of 0 is sent as 0xffffffff and what follows
+ * is shifted by -1. */
+static uint32_t raw_write_audio_ts(switch_rtp_t *rtp_session, uint32_t ts)
+{
+	switch_time_t now = switch_mono_micro_time_now();
+	uint32_t out;
+
+	if (!ts) {
+		uint32_t elapsed;
+
+		if (!rtp_session->raw_ts_forwarded) {
+			return 0;
+		}
+		rtp_session->raw_ts_generated = 1;
+		elapsed = (uint32_t) ((uint64_t) (now - rtp_session->raw_ts_anchor_time) * rtp_session->samples_per_second / 1000000);
+		out = rtp_session->raw_ts_anchor + elapsed / rtp_session->samples_per_interval * rtp_session->samples_per_interval;
+		if ((int32_t) (out - rtp_session->last_write_ts) < (int32_t) rtp_session->samples_per_interval) {
+			out = rtp_session->last_write_ts + rtp_session->samples_per_interval;
+		}
+		if (!out) {
+			rtp_session->raw_ts_offset--;
+			rtp_session->raw_ts_anchor--;
+			out = 0xffffffff;
+		}
+		return out;
+	}
+
+	if (rtp_session->raw_ts_generated) {
+		if ((int32_t) (ts + rtp_session->raw_ts_offset - rtp_session->last_write_ts) <= 0) {
+			rtp_session->raw_ts_offset = rtp_session->last_write_ts + rtp_session->samples_per_interval - ts;
+		}
+		rtp_session->raw_ts_generated = 0;
+	}
+	rtp_session->raw_ts_forwarded = 1;
+	out = ts + rtp_session->raw_ts_offset;
+	if (!out) {
+		rtp_session->raw_ts_offset--;
+		out = 0xffffffff;
+	}
+	rtp_session->raw_ts_anchor = out;
+	rtp_session->raw_ts_anchor_time = now;
+
+	return out;
 }
 
 static uint8_t get_next_write_ts(switch_rtp_t *rtp_session, uint32_t timestamp)
@@ -12769,6 +12821,9 @@ SWITCH_DECLARE(int) switch_rtp_write_frame(switch_rtp_t *rtp_session, switch_fra
 		data = frame->data;
 		len = frame->datalen;
 		ts = rtp_session->flags[SWITCH_RTP_FLAG_RAW_WRITE] ? (uint32_t) frame->timestamp : 0;
+		if (rtp_session->flags[SWITCH_RTP_FLAG_RAW_WRITE] && !rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
+			ts = raw_write_audio_ts(rtp_session, ts);
+		}
 	}
 
 	/*
