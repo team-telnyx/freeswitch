@@ -903,7 +903,7 @@ static switch_status_t switch_amrwb_decode(switch_codec_t *codec,
 
 	amrwb_set_cmr(codec, context, buf[0] >> 4);
 
-	/* Q=0: decoded as a lost frame (the decoder has no SPEECH_BAD/SID_BAD input) */
+	/* Q=0: bfi, decoded as NO_DATA (opencore has no SPEECH_BAD/SID_BAD input) */
 	D_IF_decode(context->decoder_state, tmp, (int16_t *) decoded_data, frame_type <= SWITCH_AMRWB_SID_FRAME_TYPE && !(tmp[0] & 0x04));
 	*decoded_data_len = codec->implementation->decoded_bytes_per_packet;
 
