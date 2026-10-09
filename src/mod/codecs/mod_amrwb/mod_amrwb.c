@@ -1213,8 +1213,11 @@ static void mod_amrwb_configuration_snprintf(void) {
 SWITCH_STANDARD_API(mod_amrwb_show)
 {
 	if (stream && stream->write_function) {
+		/* AMRWB_CONFIGURATION is shared */
+		switch_mutex_lock(global_lock);
 		mod_amrwb_configuration_snprintf();
 		stream->write_function(stream, "%s", AMRWB_CONFIGURATION);
+		switch_mutex_unlock(global_lock);
 	}
 	return SWITCH_STATUS_SUCCESS;
 }
