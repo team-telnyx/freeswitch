@@ -476,7 +476,7 @@ static void amrwb_fmtp_framing(const char *fmtp, struct amrwb_framing *framing)
 			} else if (!strcasecmp(data, "mode-change-neighbor")) {
 				framing->neighbor = atoi(arg) ? 1 : 0;
 			} else if (!strcasecmp(data, "mode-change-period")) {
-				framing->period = atoi(arg);
+				framing->period = atoi(arg) > 0 ? (uint32_t) atoi(arg) : 0;
 			} else if (!strcasecmp(data, "mode-set")) {
 				m_argc = switch_separate_string(arg, ',', m_argv, (sizeof(m_argv) / sizeof(m_argv[0])));
 				for (y = 0; y < m_argc; y++) {
@@ -571,7 +571,9 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 							switch_set_flag(context, AMRWB_OPT_INTERLEAVING);
 						}
 					} else if (!strcasecmp(data, "mode-change-period")) {
-						context->change_period = atoi(arg);
+						int period = atoi(arg);
+
+						context->change_period = period > 0 ? (uint32_t) period : 0;
 					} else if (!strcasecmp(data, "ptime")) {
 						context->ptime = (switch_byte_t) atoi(arg);
 					} else if (!strcasecmp(data, "channels")) {
