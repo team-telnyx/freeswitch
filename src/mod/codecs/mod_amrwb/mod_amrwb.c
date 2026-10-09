@@ -329,12 +329,30 @@ static switch_bool_t switch_amrwb_pack_oa(unsigned char *shift_buf, int n)
 	return SWITCH_TRUE;
 }
 
-static int switch_amrwb_relay_sid(switch_codec_t *other_codec, void *decoded_data, uint32_t decoded_data_len, switch_byte_t *encoded_data, switch_byte_t mode)
+/* SID frames not wanted toward this codec's peer: silence-supp-off, or suppress_cng on its session */
+static switch_bool_t amrwb_sid_suppressed(switch_codec_t *codec)
+{
+	switch_media_handle_t *smh;
+
+	if (globals.silence_supp_off) {
+		return SWITCH_TRUE;
+	}
+	if (!codec->session) {
+		return SWITCH_FALSE;
+	}
+	if (switch_channel_var_true(switch_core_session_get_channel(codec->session), "suppress_cng")) {
+		return SWITCH_TRUE;
+	}
+
+	return ((smh = switch_core_session_get_media_handle(codec->session)) && switch_media_handle_test_media_flag(smh, SCMF_SUPPRESS_CNG)) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
+static int switch_amrwb_relay_sid(switch_codec_t *codec, switch_codec_t *other_codec, void *decoded_data, uint32_t decoded_data_len, switch_byte_t *encoded_data, switch_byte_t mode)
 {
 	struct amrwb_context *other_context;
+	switch_byte_t sid[SWITCH_AMRWB_SID_FRAME_SIZE];
 	int size = 0;
 
-	/* silence-supp-off: no SID toward the peer */
 	if (globals.silence_supp_off) {
 		return 0;
 	}
@@ -360,14 +378,21 @@ static int switch_amrwb_relay_sid(switch_codec_t *other_codec, void *decoded_dat
 		goto done;
 	}
 
-	encoded_data[0] = 0xf0;
-	memcpy(encoded_data + 1, other_context->decoded_sid, SWITCH_AMRWB_SID_FRAME_SIZE);
-	/* mode indication: last 4 bits, the mode this encoder sends */
-	encoded_data[SWITCH_AMRWB_SID_FRAME_SIZE] = (encoded_data[SWITCH_AMRWB_SID_FRAME_SIZE] & 0xf0) | (mode & 0x0f);
+	memcpy(sid, other_context->decoded_sid, SWITCH_AMRWB_SID_FRAME_SIZE);
 	size = SWITCH_AMRWB_SID_FRAME_SIZE;
 
 done:
 	switch_mutex_unlock(other_context->decoded_sid_mutex);
+
+	if (!size || amrwb_sid_suppressed(codec)) {
+		return 0;
+	}
+
+	encoded_data[0] = 0xf0;
+	memcpy(encoded_data + 1, sid, SWITCH_AMRWB_SID_FRAME_SIZE);
+	/* mode indication: last 4 bits, the mode this encoder sends */
+	encoded_data[SWITCH_AMRWB_SID_FRAME_SIZE] = (encoded_data[SWITCH_AMRWB_SID_FRAME_SIZE] & 0xf0) | (mode & 0x0f);
+
 	return size;
 }
 
@@ -811,7 +836,7 @@ static switch_status_t switch_amrwb_encode(switch_codec_t *codec,
 		return SWITCH_STATUS_FALSE;
 	}
 
-	relayed_size = switch_amrwb_relay_sid(other_codec, decoded_data, decoded_data_len, encoded_data, mode);
+	relayed_size = switch_amrwb_relay_sid(codec, other_codec, decoded_data, decoded_data_len, encoded_data, mode);
 	if (relayed_size) {
 		n = relayed_size;
 	}
