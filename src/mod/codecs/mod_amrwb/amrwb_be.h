@@ -38,7 +38,6 @@
 
 /* Bandwidth Efficient AMR-WB */
 extern switch_bool_t switch_amrwb_pack_be(unsigned char *shift_buf, int n);
-extern switch_bool_t switch_amrwb_unpack_be(unsigned char *encoded_buf, uint8_t *tmp, int encoded_len);
 
 #endif
 
