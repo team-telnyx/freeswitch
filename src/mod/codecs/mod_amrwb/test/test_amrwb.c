@@ -1204,6 +1204,26 @@ FST_CORE_BEGIN(".")
 		}
 		FST_TEST_END()
 
+		/* a mode-change-period below 1 does not restrict mode changes */
+		FST_TEST_BEGIN(amrwb_ignores_invalid_mode_change_period)
+		{
+			switch_codec_t codec = { 0 };
+			static const unsigned char cmr0_oa[] = { 0x00, 0x7c };
+			unsigned char out[SWITCH_RECOMMENDED_BUFFER_SIZE];
+			uint32_t out_len = sizeof(out), rate = 16000;
+			unsigned int flag = 0;
+			int ft;
+
+			fst_requires(amrwb_init(&codec, "mode-set=0,1,2;mode-change-period=-1;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			ft = amrwb_encoded_ft(&codec, SWITCH_TRUE);
+			fst_check_int_equals(ft, 2);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr0_oa, sizeof(cmr0_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			ft = amrwb_encoded_ft(&codec, SWITCH_TRUE);
+			fst_check_int_equals(ft, 0);
+			switch_core_codec_destroy(&codec);
+		}
+		FST_TEST_END()
+
 		FST_TEST_BEGIN(amrwb_encoder_mode_matches_answered_mode_set)
 		{
 			switch_codec_t codec = { 0 };
