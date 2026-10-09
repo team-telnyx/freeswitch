@@ -1228,33 +1228,36 @@ FST_TEARDOWN_END()
 			switch_call_cause_t cause;
 			switch_rtp_flag_t flags[SWITCH_RTP_FLAG_INVALID] = { 0 };
 			reset_reader_test_t ctx = { 0 };
-			switch_thread_t *sender, *reader, *resetter;
+			switch_thread_t *sender = NULL, *reader = NULL, *resetter = NULL;
 			switch_threadattr_t *attr;
 			switch_status_t thread_status;
 			switch_rtcp_frame_t report;
 			switch_time_t deadline;
 			const char *err = NULL;
-			int observed = 0, completed;
+			int observed = 0, completed = 0, started = 0;
 			void (*old_alarm_handler)(int);
 
 			/* The watchdog also bounds cleanup if a regression strands a thread. */
 			old_alarm_handler = signal(SIGALRM, SIG_DFL);
+			if (!fst_check(old_alarm_handler != SIG_ERR)) goto reset_reader_cleanup;
 			alarm(10);
-			fst_requires(switch_ivr_originate(NULL, &session, &cause, "null/+15553334444", 2,
-				NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) == SWITCH_STATUS_SUCCESS);
+			if (!fst_check(switch_ivr_originate(NULL, &session, &cause, "null/+15553334444", 2,
+				NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) == SWITCH_STATUS_SUCCESS)) goto reset_reader_cleanup;
 			pool = switch_core_session_get_pool(session);
 			switch_core_memory_pool_set_data(pool, "__session", session);
 			flags[SWITCH_RTP_FLAG_RTCP_MUX] = 1;
 			flags[SWITCH_RTP_FLAG_DATAWAIT] = 1;
 			ctx.rtp = switch_rtp_new(rx_host, 26300, rx_host, 26302, TEST_PT, 160, 20000, flags, NULL, &err, pool);
-			fst_requires(ctx.rtp != NULL);
-			fst_requires(switch_rtp_activate_rtcp(ctx.rtp, 100, 26302, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS);
-			fst_requires(switch_socket_create(&ctx.sender, AF_INET, SOCK_DGRAM, 0, pool) == SWITCH_STATUS_SUCCESS);
-			fst_requires(switch_sockaddr_info_get(&ctx.target, rx_host, SWITCH_UNSPEC, 26300, 0, pool) == SWITCH_STATUS_SUCCESS);
-			fst_requires(switch_threadattr_create(&attr, pool) == SWITCH_STATUS_SUCCESS);
+			if (!fst_check(ctx.rtp != NULL)) goto reset_reader_cleanup;
+			if (!fst_check(switch_rtp_activate_rtcp(ctx.rtp, 100, 26302, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS)) goto reset_reader_cleanup;
+			if (!fst_check(switch_socket_create(&ctx.sender, AF_INET, SOCK_DGRAM, 0, pool) == SWITCH_STATUS_SUCCESS)) goto reset_reader_cleanup;
+			if (!fst_check(switch_sockaddr_info_get(&ctx.target, rx_host, SWITCH_UNSPEC, 26300, 0, pool) == SWITCH_STATUS_SUCCESS)) goto reset_reader_cleanup;
+			if (!fst_check(switch_threadattr_create(&attr, pool) == SWITCH_STATUS_SUCCESS)) goto reset_reader_cleanup;
 			switch_atomic_set(&ctx.running, 1);
-			fst_requires(switch_thread_create(&sender, attr, send_control_only, &ctx, pool) == SWITCH_STATUS_SUCCESS);
-			fst_requires(switch_thread_create(&reader, attr, read_control_only, &ctx, pool) == SWITCH_STATUS_SUCCESS);
+			if (!fst_check(switch_thread_create(&sender, attr, send_control_only, &ctx, pool) == SWITCH_STATUS_SUCCESS)) goto reset_reader_cleanup;
+			started |= 1;
+			if (!fst_check(switch_thread_create(&reader, attr, read_control_only, &ctx, pool) == SWITCH_STATUS_SUCCESS)) goto reset_reader_cleanup;
+			started |= 2;
 			deadline = switch_micro_time_now() + 1000000;
 			do {
 				memset(&report, 0, sizeof(report));
@@ -1263,22 +1266,29 @@ FST_TEARDOWN_END()
 			} while (!observed && switch_micro_time_now() < deadline);
 			fst_check(observed);
 			fst_check(!switch_atomic_read(&ctx.reader_done));
-			fst_requires(switch_thread_create(&resetter, attr, reset_during_control, &ctx, pool) == SWITCH_STATUS_SUCCESS);
+			if (!fst_check(switch_thread_create(&resetter, attr, reset_during_control, &ctx, pool) == SWITCH_STATUS_SUCCESS)) goto reset_reader_cleanup;
+			started |= 4;
 			deadline = switch_micro_time_now() + 500000;
 			while (!switch_atomic_read(&ctx.reset_done) && switch_micro_time_now() < deadline) switch_sleep(1000);
 			completed = switch_atomic_read(&ctx.reset_done);
+			reset_reader_cleanup:
+			/* Workers must release stack-owned ctx before any assertion exit or resource teardown. */
 			switch_atomic_set(&ctx.running, 0);
-			switch_thread_join(&thread_status, sender);
-			switch_rtp_kill_socket(ctx.rtp);
-			switch_thread_join(&thread_status, reader);
-			switch_thread_join(&thread_status, resetter);
-			fst_check(completed);
-			switch_socket_close(ctx.sender);
-			switch_rtp_destroy(&ctx.rtp);
-			switch_channel_hangup(switch_core_session_get_channel(session), SWITCH_CAUSE_NORMAL_CLEARING);
-			switch_core_session_rwunlock(session);
-			alarm(0);
-			signal(SIGALRM, old_alarm_handler);
+			if (ctx.rtp) switch_rtp_kill_socket(ctx.rtp);
+			if ((started & 1) && !fst_check(switch_thread_join(&thread_status, sender) == SWITCH_STATUS_SUCCESS)) abort();
+			if ((started & 2) && !fst_check(switch_thread_join(&thread_status, reader) == SWITCH_STATUS_SUCCESS)) abort();
+			if ((started & 4) && !fst_check(switch_thread_join(&thread_status, resetter) == SWITCH_STATUS_SUCCESS)) abort();
+			if (started & 4) fst_check(completed);
+			if (ctx.sender) switch_socket_close(ctx.sender);
+			if (ctx.rtp) switch_rtp_destroy(&ctx.rtp);
+			if (session) {
+				switch_channel_hangup(switch_core_session_get_channel(session), SWITCH_CAUSE_NORMAL_CLEARING);
+				switch_core_session_rwunlock(session);
+			}
+			if (old_alarm_handler != SIG_ERR) {
+				alarm(0);
+				signal(SIGALRM, old_alarm_handler);
+			}
 		}
 		FST_SESSION_END()
 		FST_SESSION_BEGIN(test_ready_dtls_restart_nominates_observed_tuple)
