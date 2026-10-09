@@ -1340,6 +1340,37 @@ FST_CORE_BEGIN(".")
 		}
 		FST_TEST_END()
 
+		/* suppress_cng on the encoder's session: no SID frames toward that peer */
+		FST_TEST_BEGIN(amrwb_suppress_cng_session_does_not_relay_sid)
+		{
+			switch_core_session_t *session;
+			switch_codec_t writer = { 0 }, reader = { 0 }, source = { 0 };
+			static const unsigned char sid_oa[] = { 0xf0, 0x4c, 0xe3, 0xdf, 0x3d, 0xe0, 0x02 };
+			unsigned char decoded[SWITCH_RECOMMENDED_BUFFER_SIZE], encoded[SWITCH_RECOMMENDED_BUFFER_SIZE] = { 0 };
+			uint32_t decoded_len, encoded_len, rate = 16000;
+			unsigned int flag = 0;
+
+			fst_requires((session = amrwb_cmr_session(&reader, &writer, fst_pool)));
+			fst_requires(amrwb_init(&source, "mode-set=0,1,2;octet-align=1", SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+
+			decoded_len = sizeof(decoded);
+			fst_requires(switch_core_codec_decode(&source, NULL, (void *) sid_oa, sizeof(sid_oa), 16000, decoded, &decoded_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			encoded_len = sizeof(encoded);
+			fst_requires(switch_core_codec_encode(&writer, &source, decoded, decoded_len, 16000, encoded, &encoded_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals((encoded[1] >> 3) & 0x0f, 9);
+
+			switch_channel_set_variable(switch_core_session_get_channel(session), "suppress_cng", "true");
+			decoded_len = sizeof(decoded);
+			fst_requires(switch_core_codec_decode(&source, NULL, (void *) sid_oa, sizeof(sid_oa), 16000, decoded, &decoded_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			encoded_len = sizeof(encoded);
+			fst_requires(switch_core_codec_encode(&writer, &source, decoded, decoded_len, 16000, encoded, &encoded_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals((encoded[1] >> 3) & 0x0f, 2);
+
+			switch_core_codec_destroy(&source);
+			amrwb_cmr_session_end(session, &reader, &writer);
+		}
+		FST_TEST_END()
+
 		FST_TEST_BEGIN(amrwb_encoder_mode_matches_answered_mode_set)
 		{
 			switch_codec_t codec = { 0 };
