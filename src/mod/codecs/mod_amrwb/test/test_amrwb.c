@@ -1352,6 +1352,17 @@ FST_CORE_BEGIN(".")
 		}
 		FST_TEST_END()
 
+		FST_TEST_BEGIN(amrwb_boolean_params_accept_true_and_on)
+		{
+			fst_requires(amrwb_reload("<param name=\"mode-set-overwrite\" value=\"true\"/>"
+									  "<param name=\"mode-set-overwrite-with-default-bitrate\" value=\"false\"/>"
+									  "<param name=\"debug\" value=\"on\"/>") == SWITCH_STATUS_SUCCESS);
+			fst_check(amrwb_show_has("mode-set-overwrite: 1, mode-set-overwrite-with-default-bitrate: 0,"));
+			fst_check(amrwb_show_has("debug: 1,"));
+			fst_requires(amrwb_reload(NULL) == SWITCH_STATUS_SUCCESS);
+		}
+		FST_TEST_END()
+
 	}
 	FST_SUITE_END()
 }
