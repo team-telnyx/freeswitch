@@ -19,11 +19,14 @@ apt-get install libopencore-amrwb-dev libopencore-amrwb0 libopencore-amrwb0-dbg 
 
 This was tested on Debian 8.
 
-2. copy files dec_if.h and enc_if.h in the directory with the sourcecode  (mod_amrwb). 
+2.  make, make install 
 
-cp /usr/include/opencore-amrwb/dec_if.h  .
-cp /usr/include/vo-amrwbenc/enc_if.h .
+The headers are taken from the system include path (opencore-amrwb/dec_if.h,
+vo-amrwbenc/enc_if.h). The configuration parameters (amrwb.conf) are described at
+the top of mod_amrwb.c.
 
-3.  make, make install 
+The module is not built by default: enable codecs/mod_amrwb in modules.conf. Without
+the libraries above it builds as a passthrough codec (AMRWB_PASSTHROUGH): it can be
+negotiated and relayed between legs, but not transcoded.
 
 

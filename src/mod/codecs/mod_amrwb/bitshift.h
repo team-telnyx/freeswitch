@@ -40,7 +40,7 @@
 /*
  * LEFT shift of an entire array of N bits, with N included between 0 and 8
  */
-extern int switch_amr_array_lshift(uint8_t lshift, uint8_t *buf, int a_len);
+extern int amrwb_array_lshift(uint8_t lshift, uint8_t *buf, int a_len);
 
 #endif
 
