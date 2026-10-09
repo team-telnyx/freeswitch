@@ -218,6 +218,16 @@ static switch_bool_t amrwb_show_has(const char *text)
 	return found;
 }
 
+/* the codec's answer to "fmtp_changes_framing", NULL if none */
+static const char *amrwb_changes_framing(switch_codec_t *codec, const char *fmtp)
+{
+	switch_codec_control_type_t rtype = SCCT_NONE;
+	void *ret = NULL;
+
+	switch_core_codec_control(codec, SCC_CODEC_SPECIFIC, SCCT_STRING, (void *) "fmtp_changes_framing", SCCT_STRING, (void *) fmtp, &rtype, &ret);
+	return rtype == SCCT_STRING ? (const char *) ret : NULL;
+}
+
 static const char *amrwb_conf_settings;
 
 static switch_xml_t amrwb_conf_lookup(const char *section, const char *tag_name, const char *key_name, const char *key_value, switch_event_t *params, void *user_data)
@@ -1124,6 +1134,34 @@ FST_CORE_BEGIN(".")
 			fst_check_int_equals(ft, 0);
 
 			amrwb_cmr_session_end(session, &reader, &writer);
+		}
+		FST_TEST_END()
+
+		/* re-INVITE: a changed octet-align, mode-set or mode-change parameter needs a new codec */
+		FST_TEST_BEGIN(amrwb_reports_fmtp_framing_changes)
+		{
+			switch_codec_t codec = { 0 };
+			const char *r;
+
+			fst_requires(amrwb_init(&codec, "mode-set=0,1,2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			r = amrwb_changes_framing(&codec, "mode-set=0,1,2;octet-align=1");
+			fst_check(r && !strcmp(r, "false"));
+			r = amrwb_changes_framing(&codec, "octet-align=1; mode-set=2,1,0");
+			fst_check(r && !strcmp(r, "false"));
+			/* not stated: force-oa=1 in the test configuration */
+			r = amrwb_changes_framing(&codec, "mode-set=0,1,2");
+			fst_check(r && !strcmp(r, "false"));
+			r = amrwb_changes_framing(&codec, "mode-set=0,1,2;octet-align=0");
+			fst_check(r && !strcmp(r, "true"));
+			r = amrwb_changes_framing(&codec, "mode-set=0,1;octet-align=1");
+			fst_check(r && !strcmp(r, "true"));
+			r = amrwb_changes_framing(&codec, "octet-align=1");
+			fst_check(r && !strcmp(r, "true"));
+			r = amrwb_changes_framing(&codec, "mode-set=0,1,2;octet-align=1;mode-change-period=2");
+			fst_check(r && !strcmp(r, "true"));
+			r = amrwb_changes_framing(&codec, "mode-set=0,1,2;octet-align=1;mode-change-neighbor=1");
+			fst_check(r && !strcmp(r, "true"));
+			switch_core_codec_destroy(&codec);
 		}
 		FST_TEST_END()
 

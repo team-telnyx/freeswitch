@@ -133,6 +133,12 @@ struct amrwb_context {
 	switch_byte_t cur_mode;
 	uint32_t frames;
 	uint32_t concealed;
+	struct amrwb_framing {
+		switch_byte_t octet_align;
+		uint16_t modes;
+		switch_byte_t neighbor;
+		uint32_t period;
+	} framing;
 };
 
 #define SWITCH_AMRWB_DEFAULT_BITRATE AMRWB_BITRATE_24K
@@ -445,6 +451,49 @@ static switch_status_t amrwb_parse_fmtp_cb(const char *fmtp, switch_codec_fmtp_t
 	return SWITCH_STATUS_FALSE;
 }
 
+/* fmtp parameters the running codec depends on (octet-align after force-oa/force-be) */
+static void amrwb_fmtp_framing(const char *fmtp, struct amrwb_framing *framing)
+{
+	char *argv[SWITCH_AMRWB_MAX_FMTP_PARAMS], *m_argv[SWITCH_AMRWB_MAX_FMTP_PARAMS];
+	char *fmtp_dup;
+	int argc, m_argc, x, y, mode;
+	switch_bool_t octet_align_given = SWITCH_FALSE;
+
+	memset(framing, 0, sizeof(*framing));
+
+	if (!zstr(fmtp) && (fmtp_dup = strdup(fmtp))) {
+		argc = switch_separate_string(fmtp_dup, ';', argv, (sizeof(argv) / sizeof(argv[0])));
+		for (x = 0; x < argc; x++) {
+			char *data = argv[x], *arg;
+
+			while (*data == ' ') data++;
+			if (!(arg = strchr(data, '='))) continue;
+			*arg++ = '\0';
+			while (*arg == ' ') arg++;
+			if (!strcasecmp(data, "octet-align")) {
+				octet_align_given = SWITCH_TRUE;
+				framing->octet_align = switch_true(arg) ? 1 : 0;
+			} else if (!strcasecmp(data, "mode-change-neighbor")) {
+				framing->neighbor = atoi(arg) ? 1 : 0;
+			} else if (!strcasecmp(data, "mode-change-period")) {
+				framing->period = atoi(arg);
+			} else if (!strcasecmp(data, "mode-set")) {
+				m_argc = switch_separate_string(arg, ',', m_argv, (sizeof(m_argv) / sizeof(m_argv[0])));
+				for (y = 0; y < m_argc; y++) {
+					if ((mode = amrwb_parse_mode(m_argv[y])) >= 0) {
+						framing->modes |= (1 << mode);
+					}
+				}
+			}
+		}
+		free(fmtp_dup);
+	}
+
+	if (!octet_align_given) {
+		framing->octet_align = (globals.force_oa && !globals.force_be) ? 1 : 0;
+	}
+}
+
 static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_flag_t flags, const switch_codec_settings_t *codec_settings)
 {
 #ifdef AMRWB_PASSTHROUGH
@@ -655,6 +704,7 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 		switch_mutex_init(&context->decoded_sid_mutex, SWITCH_MUTEX_UNNESTED, codec->memory_pool);
 
 		context->cmr = SWITCH_AMRWB_CMR_NONE;
+		amrwb_fmtp_framing(codec->fmtp_in, &context->framing);
 		context->cur_mode = SWITCH_AMRWB_CMR_NONE;
 		codec->private_info = context;
 
@@ -887,6 +937,19 @@ static switch_status_t switch_amrwb_control(switch_codec_t *codec,
 		{
 			int32_t level = *((uint32_t *) cmd_data);
 			context->debug = level;
+		}
+		break;
+	case SCC_CODEC_SPECIFIC:
+		{
+			const char *command = (const char *) cmd_data;
+
+			if (!zstr(command) && !strcasecmp(command, "fmtp_changes_framing") && rtype && ret_data) {
+				struct amrwb_framing framing;
+
+				amrwb_fmtp_framing((const char *) cmd_arg, &framing);
+				*rtype = SCCT_STRING;
+				*ret_data = (void *) (memcmp(&framing, &context->framing, sizeof(framing)) ? "true" : "false");
+			}
 		}
 		break;
 	case SCC_AUDIO_ADJUST_BITRATE:
