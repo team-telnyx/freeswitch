@@ -375,8 +375,11 @@ static void send_display(switch_core_session_t *session, switch_core_session_t *
 /* no generated fill this long after the last forwarded frame: 3 SID intervals */
 #define NATIVE_DTX_FILL_HOLDOFF_MS 480
 
-/* Passthrough pair whose codec carries its own silence descriptors.
- * Compares copies of the implementations: the live codecs may be destroyed by a re-INVITE meanwhile. */
+/* Passthrough pair whose codec carries its own silence descriptors to leg B unchanged.
+ * Compares copies of the implementations: the live codecs may be destroyed by a re-INVITE meanwhile.
+ * A media bug that touches the decoded audio on either leg (anything but a native tap) makes the core decode and
+ * re-encode it, and the encoder does not produce silence descriptors: fill is needed then. Leg A's read path does
+ * not check leg B's bugs when leg A has only native taps, so both legs are checked here. */
 static switch_bool_t native_dtx_passthrough(switch_core_session_t *session_a, switch_core_session_t *session_b)
 {
 	switch_codec_t *read_codec = switch_core_session_get_read_codec(session_a);
@@ -385,7 +388,8 @@ static switch_bool_t native_dtx_passthrough(switch_core_session_t *session_a, sw
 	return (read_codec && switch_test_flag(read_codec, SWITCH_CODEC_FLAG_NATIVE_DTX) &&
 			switch_core_session_get_real_read_impl(session_a, &read_impl) == SWITCH_STATUS_SUCCESS &&
 			switch_core_session_get_write_impl(session_b, &write_impl) == SWITCH_STATUS_SUCCESS &&
-			read_impl.codec_id == write_impl.codec_id) ? SWITCH_TRUE : SWITCH_FALSE;
+			read_impl.codec_id == write_impl.codec_id &&
+			switch_core_media_bug_tap_only(session_a) && switch_core_media_bug_tap_only(session_b)) ? SWITCH_TRUE : SWITCH_FALSE;
 }
 
 static switch_bool_t is_silence_frame(switch_frame_t *frame, int silence_threshold, switch_codec_implementation_t *codec_impl)

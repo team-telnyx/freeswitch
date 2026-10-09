@@ -18,13 +18,20 @@ static uint32_t frame_count(switch_core_session_t *session, const char *var)
 	return count ? (uint32_t) atoi(count) : 0;
 }
 
-/* media bug that changes the audio it replaces */
+static switch_atomic_t tap_native_read_calls, write_replace_calls;
+
+/* media bug that changes the audio it replaces; counts native taps and write replacements */
 static switch_bool_t replace_audio_bug(switch_media_bug_t *bug, void *user_data, switch_abc_type_t type)
 {
 	switch_frame_t *frame = NULL;
 	uint32_t i;
 
+	if (type == SWITCH_ABC_TYPE_TAP_NATIVE_READ) {
+		switch_atomic_inc(&tap_native_read_calls);
+		return SWITCH_TRUE;
+	}
 	if (type == SWITCH_ABC_TYPE_WRITE_REPLACE) {
+		switch_atomic_inc(&write_replace_calls);
 		frame = switch_core_media_bug_get_write_replace_frame(bug);
 	} else if (type == SWITCH_ABC_TYPE_READ_REPLACE) {
 		frame = switch_core_media_bug_get_read_replace_frame(bug);
@@ -84,6 +91,8 @@ static switch_bool_t measure_bridge_bugs(const char *codec_vars_a, const char *c
 			switch_media_bug_t *bug = NULL;
 			switch_core_media_bug_add(b, "bridge_dtx_test", NULL, replace_audio_bug, NULL, 0, bug_flags_b, &bug);
 		}
+		switch_atomic_set(&tap_native_read_calls, 0);
+		switch_atomic_set(&write_replace_calls, 0);
 		read_start = frame_count(a, "null_read_count");
 		write_start = frame_count(b, "null_write_count");
 		switch_yield(MEASURE_MS * 1000);
@@ -196,6 +205,35 @@ FST_SUITE_BEGIN(switch_ivr_bridge_dtx)
 		fst_requires(measure_bridge_bugs("null_codec=AMR-WB,rate=16000", "null_codec=AMR-WB,rate=16000", DTX_PERIOD, SMBF_READ_REPLACE, 0,
 										 &read_from_a, &written_to_b));
 		fst_requires(read_from_a >= DTX_PERIOD * 2);
+		fst_xcheck(written_to_b * 4 >= read_from_a * 3, "generated fill keeps leg B continuous");
+	}
+	FST_TEST_END()
+
+	/* a native tap on leg A leaves the frames untouched: still only the forwarded frames, no fill */
+	FST_TEST_BEGIN(test_native_dtx_with_native_tap_forwards_frames_without_fill)
+	{
+		uint32_t read_from_a, written_to_b;
+
+		fst_requires(measure_bridge_bugs("null_codec=AMR-WB,rate=16000", "null_codec=AMR-WB,rate=16000", DTX_PERIOD, SMBF_TAP_NATIVE_READ, 0,
+										 &read_from_a, &written_to_b));
+		fst_requires(read_from_a >= DTX_PERIOD * 2);
+		fst_xcheck(switch_atomic_read(&tap_native_read_calls) > 0, "the native tap on leg A runs");
+		fst_check(written_to_b > 0);
+		fst_xcheck(written_to_b * DTX_PERIOD <= read_from_a * 2, "only the forwarded frames reach leg B, no generated fill");
+	}
+	FST_TEST_END()
+
+	/* native tap on leg A (its read path stays tap-only and skips the partner-bug check) and a write-replace bug on
+	 * leg B that changes the audio: B re-encodes, SIDs become speech frames, fill is kept */
+	FST_TEST_BEGIN(test_native_dtx_with_native_tap_and_write_replace_bug_keeps_generated_fill)
+	{
+		uint32_t read_from_a, written_to_b;
+
+		fst_requires(measure_bridge_bugs("null_codec=AMR-WB,rate=16000", "null_codec=AMR-WB,rate=16000", DTX_PERIOD, SMBF_TAP_NATIVE_READ,
+										 SMBF_WRITE_REPLACE, &read_from_a, &written_to_b));
+		fst_requires(read_from_a >= DTX_PERIOD * 2);
+		fst_xcheck(switch_atomic_read(&tap_native_read_calls) > 0, "the native tap on leg A runs");
+		fst_xcheck(switch_atomic_read(&write_replace_calls) > 0, "the write-replace bug on leg B runs");
 		fst_xcheck(written_to_b * 4 >= read_from_a * 3, "generated fill keeps leg B continuous");
 	}
 	FST_TEST_END()
