@@ -32,7 +32,7 @@
 #include <test/switch_test.h>
 
 /*
- * TELCORE-501: hangup-path producer for blind-transfer confirmation.
+ * Hangup-path producer for blind-transfer confirmation.
  *
  * When confirm_blind_transfer=true and the transferred (flag-holding) leg is
  * torn down before the transfer completes, switch_core_session_hangup_state()
@@ -302,8 +302,10 @@ FST_CORE_BEGIN("./conf")
 			blind_transfer_response_numeric_arg = -1;
 			fst_check(switch_core_event_hook_add_receive_message(peer_session, blind_transfer_response_hook) == SWITCH_STATUS_SUCCESS);
 
-			/* fst_session is the transferred (flag-holding) leg. */
-			switch_channel_set_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER);
+			/* fst_session is the transferred (flag-holding) leg. Set the flag the
+			   way the REFER handler does, as a state flag that becomes a channel
+			   flag at the next state change; here that is the change to CS_HANGUP. */
+			switch_channel_set_state_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER);
 			switch_channel_set_variable(fst_channel, "blind_transfer_uuid", peer_uuid);
 
 			/* Tear down the flag-holding leg; the hangup state on its session
@@ -332,8 +334,8 @@ FST_CORE_BEGIN("./conf")
 		/*
 		 * blind_transfer_ack_suppresses_hangup_producer: a prior
 		 * switch_ivr_blind_transfer_ack(SWITCH_TRUE) (e.g. from the
-		 * blind_transfer_ack dialplan app or the success producer at
-		 * switch_core_session.c:970-985) test-and-clears the flag, so a later
+		 * blind_transfer_ack dialplan app or the success producer in
+		 * switch_core_session.c) test-and-clears the flag, so a later
 		 * hangup must NOT re-deliver the message. Locks in test-and-clear
 		 * suppression against a double-fire from the teardown producer.
 		 */
