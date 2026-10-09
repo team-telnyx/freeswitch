@@ -70,7 +70,7 @@ extern switch_bool_t switch_amrwb_pack_be(unsigned char *shift_buf, int n)
 	 +-+-+-+-+-+-+
 	|F|  FT   |Q|
 	+-+-+-+-+-+-+
-	F = 0 , FT = XXXX , Q = 1
+	F = 0 , FT = XXXX , Q from the frame's ToC
 	eg: Frame Types (FT): ftp://www.3gpp.org/tsg_sa/TSG_SA/TSGS_04/Docs/PDF/SP-99253.pdf - table 1a
 	*/
 
