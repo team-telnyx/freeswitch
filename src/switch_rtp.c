@@ -301,6 +301,7 @@ static void switch_rtp_dtls_init(void);
 static void switch_rtp_dtls_destroy(void);
 
 #define MAX_DTLS_MTU 4096
+#define MAX_DTLS_FLIGHT_PACKETS 32
 
 typedef struct switch_dtls_s {
 	/* DTLS */
@@ -327,6 +328,34 @@ typedef struct switch_dtls_s {
 	char *pem;
 	struct switch_rtp *rtp_session;
 	int mtu;
+	switch_rtp_pvt_dtls_identity_t association_identity;
+	switch_rtp_pvt_dtls_identity_t restart_prepared_identity;
+	switch_time_t association_started_us;
+	switch_time_t restart_deadline_us;
+	switch_time_t restart_prepared_deadline_us;
+	uint32_t setup_timeout_ms;
+	switch_sockaddr_t *restart_old_peer_addr;
+	char *restart_expected_remote_ufrag;
+	char *restart_expected_local_ufrag;
+	char *restart_expected_local_pwd;
+	char *restart_expected_remote_pwd;
+	char *restart_active_ice_user;
+	char *restart_active_local_pwd;
+	char *restart_active_remote_pwd;
+	uint8_t preserve_restart_prepared;
+	uint8_t preserve_restart_pending;
+	uint8_t preserve_restart_migrated;
+	uint8_t restart_tuple_authoritative;
+	switch_size_t last_flight_len;
+	switch_time_t last_flight_sent_us;
+	uint16_t last_flight_packet_count;
+	uint8_t last_flight_capture_failed;
+	unsigned char *last_peer_packet;
+	uint16_t last_peer_packet_len;
+	uint16_t last_peer_packet_capacity;
+	unsigned char *last_flight_packets[MAX_DTLS_FLIGHT_PACKETS];
+	uint16_t last_flight_packet_sizes[MAX_DTLS_FLIGHT_PACKETS];
+	uint16_t last_flight_packet_capacities[MAX_DTLS_FLIGHT_PACKETS];
 } switch_dtls_t;
 
 typedef int (*dtls_state_handler_t)(switch_rtp_t *, switch_dtls_t *);
@@ -336,6 +365,7 @@ static int dtls_state_handshake(switch_rtp_t *rtp_session, switch_dtls_t *dtls);
 static int dtls_state_ready(switch_rtp_t *rtp_session, switch_dtls_t *dtls);
 static int dtls_state_setup(switch_rtp_t *rtp_session, switch_dtls_t *dtls);
 static int dtls_state_fail(switch_rtp_t *rtp_session, switch_dtls_t *dtls);
+static void dtls_preserved_restart_fail(switch_rtp_t *rtp_session, switch_dtls_t *dtls);
 
 dtls_state_handler_t dtls_states[DS_INVALID] = {NULL, dtls_state_handshake, dtls_state_setup, dtls_state_ready, dtls_state_fail};
 
@@ -446,6 +476,7 @@ struct switch_rtp {
 	switch_dtls_t *dtls;
 	switch_dtls_t *rtcp_dtls;
 	switch_time_t dtls_checks_started;
+	uint32_t dtls_destroy_count;
 	rtp_hdr_t last_rtp_hdr;
 
 	uint16_t seq;
@@ -523,6 +554,11 @@ struct switch_rtp {
 	uint32_t mid_rewrite_drop_total;
 	switch_payload_t bundle_audio_pt;  /* local egress audio PT, immune to video set_default_payload on shared BUNDLE session */
 	switch_mutex_t *ice_mutex;
+	switch_rtp_pvt_lock_test_hook_t pvt_write_locked_hook;
+	switch_rtp_pvt_lock_test_hook_t pvt_rtcp_stun_dispatch_hook;
+	switch_rtp_pvt_lock_test_hook_t pvt_dtls_destination_update_hook;
+	switch_rtp_pvt_lock_test_hook_t pvt_rtcp_dtls_post_process_hook;
+	void *pvt_lock_test_hook_data;
 	switch_mutex_t *sock_mutex;
 	switch_timer_t timer;
 	switch_timer_t write_timer;
@@ -1771,7 +1807,11 @@ static switch_status_t ice_send_controlling_check(switch_rtp_t *rtp_session, swi
 		transaction_id[12] = '\0';
 		ice->controlling_failover_local_port = switch_sockaddr_get_port(local_addr);
 		ice->controlling_failover_local_family = switch_sockaddr_get_family(local_addr);
-		ice->controlling_failover_socket = sock_output;
+		ice->controlling_failover_socket = ice == &rtp_session->rtcp_ice && rtp_session->rtcp_sock_input ?
+			rtp_session->rtcp_sock_input : rtp_session->sock_input;
+		if (!ice->controlling_failover_socket) {
+			ice->controlling_failover_socket = sock_output;
+		}
 	}
 
 	switch_mutex_lock(rtp_session->ice_mutex);
@@ -1801,6 +1841,7 @@ static switch_bool_t ice_controlling_startup_ready(switch_rtp_t *rtp_session, sw
 
 static void ice_controlling_failover_tick(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, switch_time_t now)
 {
+	switch_dtls_t *dtls;
 	uint32_t failover_ms;
 	uint64_t selected_age_ms;
 	uint64_t candidate_age_ms;
@@ -1829,6 +1870,45 @@ static void ice_controlling_failover_tick(switch_rtp_t *rtp_session, switch_rtp_
 			ice->controlling_failover_started_us, ice->controlling_failover_sent_us,
 			ice->controlling_failover_attempts, now);
 		if (timer_action == SWITCH_RTP_ICE_CONTROLLING_TIMER_EXPIRE) {
+			ice_controlling_failover_reset(ice, SWITCH_TRUE);
+			return;
+		}
+		if (timer_action == SWITCH_RTP_ICE_CONTROLLING_TIMER_RETRANSMIT &&
+			ice_send_controlling_check(rtp_session, ice, ice->controlling_failover_idx, SWITCH_TRUE,
+				ice->controlling_failover_nomination_id, SWITCH_FALSE) == SWITCH_STATUS_SUCCESS) {
+			ice->controlling_failover_sent_us = now;
+			ice->controlling_failover_attempts++;
+		}
+		return;
+	}
+
+	dtls = rtp_session ? rtp_session->dtls : NULL;
+	if (ice && dtls && dtls->preserve_restart_pending &&
+		(!dtls->restart_deadline_us || now >= dtls->restart_deadline_us)) {
+		dtls_preserved_restart_fail(rtp_session, dtls);
+		if (ice->controlling_failover_state != SWITCH_RTP_ICE_CONTROLLING_FAILOVER_IDLE) {
+			ice_controlling_failover_reset(ice, SWITCH_TRUE);
+		}
+		return;
+	}
+	if (ice && dtls && dtls->preserve_restart_pending &&
+		ice->controlling_failover_state == SWITCH_RTP_ICE_CONTROLLING_FAILOVER_NOMINATING) {
+		local_addr = rtp_session->local_addr;
+		local_socket = rtp_session->sock_output;
+		if (!dtls->restart_deadline_us || now >= dtls->restart_deadline_us ||
+			!local_addr || !local_socket || ice->controlling_failover_socket != local_socket ||
+			ice->controlling_failover_local_port != switch_sockaddr_get_port(local_addr) ||
+			ice->controlling_failover_local_family != switch_sockaddr_get_family(local_addr)) {
+			dtls_preserved_restart_fail(rtp_session, dtls);
+			ice_controlling_failover_reset(ice, SWITCH_TRUE);
+			return;
+		}
+
+		timer_action = switch_rtp_pvt_controlling_failover_timer_action(ice->controlling_failover_state,
+			ice->controlling_failover_started_us, ice->controlling_failover_sent_us,
+			ice->controlling_failover_attempts, now);
+		if (timer_action == SWITCH_RTP_ICE_CONTROLLING_TIMER_EXPIRE) {
+			dtls_preserved_restart_fail(rtp_session, dtls);
 			ice_controlling_failover_reset(ice, SWITCH_TRUE);
 			return;
 		}
@@ -2109,6 +2189,72 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_get_ice_state(switch_rtp_t *rtp_s
 	return SWITCH_STATUS_SUCCESS;
 }
 
+SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_get_controlling_nomination_id(switch_rtp_t *rtp_session,
+	ice_proto_t proto, char *transaction_id, switch_size_t transaction_id_len)
+{
+	switch_rtp_ice_t *ice;
+
+	if (!rtp_session || (proto != IPR_RTP && proto != IPR_RTCP) ||
+		!transaction_id || transaction_id_len < 13) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	switch_mutex_lock(rtp_session->ice_mutex);
+	ice = proto == IPR_RTP ? &rtp_session->ice : &rtp_session->rtcp_ice;
+	if (ice->controlling_failover_state != SWITCH_RTP_ICE_CONTROLLING_FAILOVER_NOMINATING ||
+		!ice->controlling_failover_nomination_id[0]) {
+		switch_mutex_unlock(rtp_session->ice_mutex);
+		return SWITCH_STATUS_FALSE;
+	}
+	memcpy(transaction_id, ice->controlling_failover_nomination_id, 12);
+	transaction_id[12] = '\0';
+	switch_mutex_unlock(rtp_session->ice_mutex);
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_ice_timer_tick(switch_rtp_t *rtp_session,
+	ice_proto_t proto, switch_time_t now)
+{
+	switch_rtp_ice_t *ice;
+
+	if (!rtp_session || (proto != IPR_RTP && proto != IPR_RTCP) || !now) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	switch_mutex_lock(rtp_session->ice_mutex);
+	ice = proto == IPR_RTP ? &rtp_session->ice : &rtp_session->rtcp_ice;
+	ice_controlling_failover_tick(rtp_session, ice, now);
+	switch_mutex_unlock(rtp_session->ice_mutex);
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_send_ice_check(switch_rtp_t *rtp_session,
+	ice_proto_t proto, char *transaction_id, switch_size_t transaction_id_len)
+{
+	switch_rtp_ice_t *ice;
+	switch_status_t status;
+
+	if (!rtp_session || (proto != IPR_RTP && proto != IPR_RTCP) ||
+		!transaction_id || transaction_id_len < 13) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	switch_mutex_lock(rtp_session->ice_mutex);
+	ice = proto == IPR_RTP ? &rtp_session->ice : &rtp_session->rtcp_ice;
+	status = ice_out(rtp_session, ice, SWITCH_TRUE);
+	if (status == SWITCH_STATUS_SUCCESS && ice->last_sent_id[0]) {
+		memcpy(transaction_id, ice->last_sent_id, 12);
+		transaction_id[12] = '\0';
+	} else {
+		status = SWITCH_STATUS_FALSE;
+	}
+	switch_mutex_unlock(rtp_session->ice_mutex);
+
+	return status;
+}
+
 SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_get_transport_snapshot(switch_rtp_t *rtp_session,
 	ice_proto_t proto, switch_rtp_pvt_transport_snapshot_t *snapshot)
 {
@@ -2125,6 +2271,12 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_get_transport_snapshot(switch_rtp
 	snapshot->ice_type = ice->type;
 	snapshot->ice_ready = ice->ready ? SWITCH_TRUE : SWITCH_FALSE;
 	snapshot->ice_rready = ice->rready ? SWITCH_TRUE : SWITCH_FALSE;
+	snapshot->ice_selected_pair_last_response_us = ice->selected_pair_last_response_us;
+	snapshot->ice_remote_port = ice->addr ? switch_sockaddr_get_port(ice->addr) : 0;
+	snapshot->rtp_remote_port = rtp_session->remote_addr ? switch_sockaddr_get_port(rtp_session->remote_addr) : 0;
+	snapshot->rtcp_remote_port = rtp_session->rtcp_remote_addr ?
+		switch_sockaddr_get_port(rtp_session->rtcp_remote_addr) : 0;
+	snapshot->rtp_remote_addr = rtp_session->remote_addr;
 	if (ice->ice_params) {
 		snapshot->rtp_chosen = ice->ice_params->is_chosen[IPR_RTP] ? SWITCH_TRUE : SWITCH_FALSE;
 		snapshot->rtcp_chosen = ice->ice_params->is_chosen[IPR_RTCP] ? SWITCH_TRUE : SWITCH_FALSE;
@@ -2135,10 +2287,509 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_get_transport_snapshot(switch_rtp
 		snapshot->dtls_state = dtls->state;
 		snapshot->dtls_context = dtls;
 		snapshot->dtls_ssl = dtls->ssl;
+		snapshot->dtls_read_bio = dtls->read_bio;
+		snapshot->dtls_write_bio = dtls->write_bio;
+		snapshot->dtls_restart_pending = dtls->preserve_restart_pending ? SWITCH_TRUE : SWITCH_FALSE;
+		snapshot->dtls_restart_migrated = dtls->preserve_restart_migrated ? SWITCH_TRUE : SWITCH_FALSE;
+		snapshot->dtls_tuple_authoritative = dtls->restart_tuple_authoritative ? SWITCH_TRUE : SWITCH_FALSE;
+		snapshot->dtls_association_started_us = dtls->association_started_us;
+		snapshot->dtls_restart_deadline_us = dtls->restart_deadline_us;
+		snapshot->dtls_remote_port = dtls->remote_addr ? switch_sockaddr_get_port(dtls->remote_addr) : 0;
+		snapshot->dtls_remote_addr = dtls->remote_addr;
 	}
+	snapshot->dtls_destroy_count = rtp_session->dtls_destroy_count;
+	snapshot->srtp_send_ready = rtp_session->send_ctx[rtp_session->srtp_idx_rtp] ? SWITCH_TRUE : SWITCH_FALSE;
+	snapshot->srtp_recv_ready = rtp_session->recv_ctx[rtp_session->srtp_idx_rtp] ? SWITCH_TRUE : SWITCH_FALSE;
 	snapshot->socket = proto == IPR_RTP ?
 		(const void *)rtp_session->sock_input : (const void *)rtp_session->rtcp_sock_input;
 	switch_mutex_unlock(rtp_session->ice_mutex);
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_read_lock_held(switch_rtp_t *rtp_session)
+{
+	if (!rtp_session || !rtp_session->read_mutex) {
+		return SWITCH_FALSE;
+	}
+	if (switch_mutex_trylock(rtp_session->read_mutex) == SWITCH_STATUS_SUCCESS) {
+		switch_mutex_unlock(rtp_session->read_mutex);
+		return SWITCH_FALSE;
+	}
+
+	return SWITCH_TRUE;
+}
+
+SWITCH_DECLARE(void) switch_rtp_pvt_set_lock_test_hooks(switch_rtp_t *rtp_session,
+	switch_rtp_pvt_lock_test_hook_t write_locked_hook,
+	switch_rtp_pvt_lock_test_hook_t rtcp_stun_dispatch_hook,
+	switch_rtp_pvt_lock_test_hook_t dtls_destination_update_hook,
+	switch_rtp_pvt_lock_test_hook_t rtcp_dtls_post_process_hook, void *data)
+{
+	if (!rtp_session) {
+		return;
+	}
+
+	rtp_session->pvt_write_locked_hook = write_locked_hook;
+	rtp_session->pvt_rtcp_stun_dispatch_hook = rtcp_stun_dispatch_hook;
+	rtp_session->pvt_dtls_destination_update_hook = dtls_destination_update_hook;
+	rtp_session->pvt_rtcp_dtls_post_process_hook = rtcp_dtls_post_process_hook;
+	rtp_session->pvt_lock_test_hook_data = data;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_mark_ice_candidate_nominated(
+	switch_rtp_t *rtp_session, ice_proto_t proto, const char *host, switch_port_t port)
+{
+	switch_rtp_ice_t *ice;
+	switch_status_t status = SWITCH_STATUS_FALSE;
+	int i;
+
+	if (!rtp_session || zstr(host) || !port || (proto != IPR_RTP && proto != IPR_RTCP)) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	ice = proto == IPR_RTP ? &rtp_session->ice : &rtp_session->rtcp_ice;
+	switch_mutex_lock(rtp_session->ice_mutex);
+	if (!ice->ice_params) {
+		goto done;
+	}
+
+	for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; ++i) {
+		icand_t *candidate = &ice->ice_params->cands[i][ice->proto];
+
+		if (ice_candidate_matches_addr(candidate, host, port)) {
+			candidate->ready = 1;
+			candidate->use_candidate = 1;
+			ice->ready = 1;
+			ice->rready = 1;
+			ice->cand_responsive = 1;
+			status = SWITCH_STATUS_SUCCESS;
+			break;
+		}
+	}
+
+ done:
+	switch_mutex_unlock(rtp_session->ice_mutex);
+	return status;
+}
+
+#ifdef ENABLE_SRTP
+static switch_status_t srtp_round_trip_one(srtp_ctx_t *send_ctx, srtp_ctx_t *recv_ctx,
+	uint16_t sequence, uint32_t ssrc)
+{
+	uint8_t packet[128] = { 0x80, 0x00 };
+	uint8_t original[32];
+	int packet_len = 13;
+	int original_len = packet_len;
+
+	packet[2] = (uint8_t)(sequence >> 8);
+	packet[3] = (uint8_t)sequence;
+	packet[8] = (uint8_t)(ssrc >> 24);
+	packet[9] = (uint8_t)(ssrc >> 16);
+	packet[10] = (uint8_t)(ssrc >> 8);
+	packet[11] = (uint8_t)ssrc;
+	packet[12] = 0x5a;
+	memcpy(original, packet, (switch_size_t)original_len);
+	if (srtp_protect(send_ctx, packet, &packet_len) != srtp_err_status_ok ||
+		srtp_unprotect(recv_ctx, packet, &packet_len) != srtp_err_status_ok ||
+		packet_len != original_len || memcmp(packet, original, (switch_size_t)original_len)) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	return SWITCH_STATUS_SUCCESS;
+}
+#endif
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_srtp_round_trip(switch_rtp_t *left, switch_rtp_t *right)
+{
+#ifdef ENABLE_SRTP
+	switch_rtp_t *first;
+	switch_rtp_t *second;
+	switch_status_t status;
+
+	if (!left || !right || left == right) {
+		return SWITCH_STATUS_FALSE;
+	}
+	first = (uintptr_t)left < (uintptr_t)right ? left : right;
+	second = (uintptr_t)left < (uintptr_t)right ? right : left;
+	switch_mutex_lock(first->ice_mutex);
+	switch_mutex_lock(second->ice_mutex);
+	if (!left->send_ctx[left->srtp_idx_rtp] || !left->recv_ctx[left->srtp_idx_rtp] ||
+		!right->send_ctx[right->srtp_idx_rtp] || !right->recv_ctx[right->srtp_idx_rtp]) {
+		status = SWITCH_STATUS_FALSE;
+	} else if (srtp_round_trip_one(left->send_ctx[left->srtp_idx_rtp],
+		right->recv_ctx[right->srtp_idx_rtp], 1, 0x11223344) != SWITCH_STATUS_SUCCESS ||
+		srtp_round_trip_one(right->send_ctx[right->srtp_idx_rtp],
+		left->recv_ctx[left->srtp_idx_rtp], 1, 0x55667788) != SWITCH_STATUS_SUCCESS) {
+		status = SWITCH_STATUS_FALSE;
+	} else {
+		status = SWITCH_STATUS_SUCCESS;
+	}
+	switch_mutex_unlock(second->ice_mutex);
+	switch_mutex_unlock(first->ice_mutex);
+	return status;
+#else
+	(void)left;
+	(void)right;
+	return SWITCH_STATUS_NOTIMPL;
+#endif
+}
+
+static switch_bool_t dtls_identity_compatible(const switch_rtp_pvt_dtls_identity_t *left,
+	const switch_rtp_pvt_dtls_identity_t *right)
+{
+	uint8_t i;
+
+	if (!left || !right || !left->valid || !right->valid ||
+		left->rtcp_mux != right->rtcp_mux || left->bundled != right->bundled ||
+		left->owns_rtp != right->owns_rtp || left->tls_id_present != right->tls_id_present ||
+		left->media_type != right->media_type || left->component != right->component ||
+		left->remote_fingerprint_count != right->remote_fingerprint_count ||
+		left->local_role != right->local_role ||
+		strcasecmp(left->local_algorithm, right->local_algorithm) ||
+		strcasecmp(left->local_value, right->local_value) ||
+		strcmp(left->bundle_group, right->bundle_group) ||
+		strcmp(left->bundle_tag, right->bundle_tag) ||
+		strcmp(left->mid, right->mid)) {
+		return SWITCH_FALSE;
+	}
+
+	if (left->tls_id_present && strcmp(left->tls_id, right->tls_id)) {
+		return SWITCH_FALSE;
+	}
+
+	for (i = 0; i < left->remote_fingerprint_count; ++i) {
+		if (strcasecmp(left->remote_fingerprints[i].algorithm, right->remote_fingerprints[i].algorithm) ||
+			strcasecmp(left->remote_fingerprints[i].value, right->remote_fingerprints[i].value)) {
+			return SWITCH_FALSE;
+		}
+	}
+
+	return SWITCH_TRUE;
+}
+
+static switch_bool_t dtls_identity_equal(const switch_rtp_pvt_dtls_identity_t *left,
+	const switch_rtp_pvt_dtls_identity_t *right)
+{
+	return left && right && left->valid && right->valid &&
+		dtls_identity_compatible(left, right) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
+static void dtls_restart_preparation_clear(switch_dtls_t *dtls)
+{
+	if (!dtls) {
+		return;
+	}
+
+	memset(&dtls->restart_prepared_identity, 0, sizeof(dtls->restart_prepared_identity));
+	dtls->restart_prepared_deadline_us = 0;
+	dtls->restart_expected_remote_ufrag = NULL;
+	dtls->restart_expected_local_ufrag = NULL;
+	dtls->restart_expected_local_pwd = NULL;
+	dtls->restart_expected_remote_pwd = NULL;
+	dtls->preserve_restart_prepared = 0;
+}
+
+static void dtls_restart_handshake_clear(switch_dtls_t *dtls)
+{
+	if (!dtls) {
+		return;
+	}
+
+	dtls->preserve_restart_pending = 0;
+	dtls->preserve_restart_migrated = 0;
+	dtls->restart_old_peer_addr = NULL;
+	dtls->restart_deadline_us = 0;
+	dtls_restart_preparation_clear(dtls);
+}
+
+static void dtls_restart_migration_clear(switch_dtls_t *dtls)
+{
+	if (!dtls) {
+		return;
+	}
+
+	dtls_restart_handshake_clear(dtls);
+	dtls->restart_active_ice_user = NULL;
+	dtls->restart_active_local_pwd = NULL;
+	dtls->restart_active_remote_pwd = NULL;
+	dtls->restart_tuple_authoritative = 0;
+}
+
+static switch_bool_t dtls_lifetime_lock(switch_rtp_t *rtp_session)
+{
+	if (!rtp_session || !rtp_session->write_mutex || !rtp_session->ice_mutex) {
+		return SWITCH_FALSE;
+	}
+
+	/* Serialize DTLS lifetime through the established write -> ICE lock order. */
+	WRITE_INC(rtp_session);
+	if (rtp_session->pvt_write_locked_hook) {
+		rtp_session->pvt_write_locked_hook(rtp_session->pvt_lock_test_hook_data);
+	}
+	switch_mutex_lock(rtp_session->ice_mutex);
+	return SWITCH_TRUE;
+}
+
+static void dtls_lifetime_unlock(switch_rtp_t *rtp_session)
+{
+	switch_mutex_unlock(rtp_session->ice_mutex);
+	WRITE_DEC(rtp_session);
+}
+
+SWITCH_DECLARE(void) switch_rtp_pvt_set_dtls_association_identity(switch_rtp_t *rtp_session,
+	dtls_type_t type, const switch_rtp_pvt_dtls_identity_t *identity)
+{
+	switch_dtls_t *dtls;
+
+	if (!rtp_session || !identity) {
+		return;
+	}
+
+	if (!dtls_lifetime_lock(rtp_session)) {
+		return;
+	}
+	if (!rtp_session->ready || rtp_session->flags[SWITCH_RTP_FLAG_SHUTDOWN]) {
+		dtls_lifetime_unlock(rtp_session);
+		return;
+	}
+	dtls = type & DTLS_TYPE_RTP ? rtp_session->dtls : rtp_session->rtcp_dtls;
+	if (dtls) {
+		dtls->association_identity = *identity;
+		if (!dtls->association_started_us) {
+			dtls->association_started_us = switch_micro_time_now();
+		}
+		dtls_restart_migration_clear(dtls);
+	}
+	dtls_lifetime_unlock(rtp_session);
+}
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_get_dtls_association_identity(switch_rtp_t *rtp_session,
+	dtls_type_t type, switch_rtp_pvt_dtls_identity_t *identity)
+{
+	switch_dtls_t *dtls;
+
+	if (!rtp_session || !identity) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	if (!dtls_lifetime_lock(rtp_session)) {
+		return SWITCH_STATUS_FALSE;
+	}
+	if (!rtp_session->ready || rtp_session->flags[SWITCH_RTP_FLAG_SHUTDOWN]) {
+		dtls_lifetime_unlock(rtp_session);
+		return SWITCH_STATUS_FALSE;
+	}
+	dtls = (type & DTLS_TYPE_RTCP) && !(type & DTLS_TYPE_RTP) ?
+		rtp_session->rtcp_dtls : rtp_session->dtls;
+	if (!dtls || !dtls->association_identity.valid) {
+		dtls_lifetime_unlock(rtp_session);
+		return SWITCH_STATUS_FALSE;
+	}
+	*identity = dtls->association_identity;
+	dtls_lifetime_unlock(rtp_session);
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_dtls_association_identity_matches(switch_rtp_t *rtp_session,
+	const switch_rtp_pvt_dtls_identity_t *identity)
+{
+	switch_bool_t matches = SWITCH_FALSE;
+
+	if (!rtp_session || !identity) {
+		return SWITCH_FALSE;
+	}
+	if (!dtls_lifetime_lock(rtp_session)) {
+		return SWITCH_FALSE;
+	}
+	if (!rtp_session->ready || rtp_session->flags[SWITCH_RTP_FLAG_SHUTDOWN]) {
+		dtls_lifetime_unlock(rtp_session);
+		return SWITCH_FALSE;
+	}
+	if (rtp_session->dtls) {
+		matches = dtls_identity_equal(&rtp_session->dtls->association_identity, identity);
+		if (!matches) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+				"DTLS ICE-restart identity mismatch: current(valid=%d bundle=%s tag=%s mid=%s role=%d) "
+				"offered(valid=%d bundle=%s tag=%s mid=%s role=%d)\n",
+				rtp_session->dtls->association_identity.valid,
+				rtp_session->dtls->association_identity.bundle_group,
+				rtp_session->dtls->association_identity.bundle_tag,
+				rtp_session->dtls->association_identity.mid,
+				rtp_session->dtls->association_identity.local_role,
+				identity->valid, identity->bundle_group, identity->bundle_tag, identity->mid,
+				identity->local_role);
+		}
+	}
+	dtls_lifetime_unlock(rtp_session);
+	return matches;
+}
+
+SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_dtls_association_identity_compatible(switch_rtp_t *rtp_session,
+	const switch_rtp_pvt_dtls_identity_t *identity)
+{
+	switch_bool_t compatible = SWITCH_FALSE;
+
+	if (!rtp_session || !identity) {
+		return SWITCH_FALSE;
+	}
+	if (!dtls_lifetime_lock(rtp_session)) {
+		return SWITCH_FALSE;
+	}
+	if (!rtp_session->ready || rtp_session->flags[SWITCH_RTP_FLAG_SHUTDOWN]) {
+		dtls_lifetime_unlock(rtp_session);
+		return SWITCH_FALSE;
+	}
+	if (rtp_session->dtls) {
+		compatible = dtls_identity_compatible(&rtp_session->dtls->association_identity, identity);
+	}
+	dtls_lifetime_unlock(rtp_session);
+	return compatible;
+}
+
+SWITCH_DECLARE(switch_rtp_pvt_dtls_restart_result_t) switch_rtp_pvt_prepare_dtls_ice_restart(switch_rtp_t *rtp_session,
+	const switch_rtp_pvt_dtls_identity_t *identity, uint32_t setup_timeout_ms,
+	switch_core_media_ice_type_t ice_type, const char *remote_ufrag, const char *local_ufrag,
+	const char *local_pwd, const char *remote_pwd)
+{
+	switch_dtls_t *dtls;
+	switch_time_t now;
+	switch_time_t started;
+	switch_time_t deadline;
+	uint32_t effective_timeout_ms;
+
+	if (!rtp_session || !identity || !setup_timeout_ms || !(ice_type & ICE_VANILLA) ||
+		(ice_type & (ICE_LITE | ICE_LITE_INBOUND)) ||
+		zstr(remote_ufrag) || zstr(local_ufrag) || zstr(local_pwd) || zstr(remote_pwd)) {
+		return SWITCH_RTP_PVT_DTLS_RESTART_RESET;
+	}
+
+	now = switch_micro_time_now();
+	if (!dtls_lifetime_lock(rtp_session)) {
+		return SWITCH_RTP_PVT_DTLS_RESTART_RESET;
+	}
+	if (!rtp_session->ready || rtp_session->flags[SWITCH_RTP_FLAG_SHUTDOWN]) {
+		dtls_lifetime_unlock(rtp_session);
+		return SWITCH_RTP_PVT_DTLS_RESTART_RESET;
+	}
+	dtls = rtp_session->dtls;
+	if (!dtls || rtp_session->rtcp_dtls != dtls || dtls->preserve_restart_pending ||
+		(dtls->state != DS_SETUP && dtls->state != DS_HANDSHAKE) ||
+		(dtls->state == DS_SETUP &&
+		 (dtls->last_flight_capture_failed || !dtls->last_flight_packet_count)) ||
+		!rtp_session->ice.addr || !rtp_session->remote_addr ||
+		!identity->rtcp_mux || !identity->owns_rtp || identity->component != 1 ||
+		!dtls_identity_equal(&dtls->association_identity, identity)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+			"DTLS ICE-restart preparation rejected: dtls=%d mux_shared=%d pending=%d state=%d "
+			"ice_addr=%d remote_addr=%d rtcp_mux=%d bundle=%d owns_rtp=%d component=%u identity=%d\n",
+			dtls ? 1 : 0, dtls && rtp_session->rtcp_dtls == dtls ? 1 : 0,
+			dtls ? dtls->preserve_restart_pending : 0, dtls ? dtls->state : DS_OFF,
+			rtp_session->ice.addr ? 1 : 0, rtp_session->remote_addr ? 1 : 0,
+			identity->rtcp_mux, identity->bundled, identity->owns_rtp, identity->component,
+			dtls ? dtls_identity_equal(&dtls->association_identity, identity) : 0);
+		dtls_lifetime_unlock(rtp_session);
+		return SWITCH_RTP_PVT_DTLS_RESTART_RESET;
+	}
+
+	effective_timeout_ms = dtls->setup_timeout_ms && dtls->setup_timeout_ms < setup_timeout_ms ?
+		dtls->setup_timeout_ms : setup_timeout_ms;
+	started = rtp_session->dtls_checks_started ?
+		rtp_session->dtls_checks_started : dtls->association_started_us;
+	deadline = started + (switch_time_t)effective_timeout_ms * 1000;
+	if (!started || deadline <= started || now >= deadline) {
+		dtls_preserved_restart_fail(rtp_session, dtls);
+		dtls_lifetime_unlock(rtp_session);
+		return SWITCH_RTP_PVT_DTLS_RESTART_EXPIRED;
+	}
+
+	dtls->restart_prepared_identity = *identity;
+	dtls->restart_prepared_deadline_us = deadline;
+	dtls->restart_expected_remote_ufrag = switch_core_strdup(rtp_session->pool, remote_ufrag);
+	dtls->restart_expected_local_ufrag = switch_core_strdup(rtp_session->pool, local_ufrag);
+	dtls->restart_expected_local_pwd = switch_core_strdup(rtp_session->pool, local_pwd);
+	dtls->restart_expected_remote_pwd = switch_core_strdup(rtp_session->pool, remote_pwd);
+	dtls->preserve_restart_prepared = 1;
+	dtls_lifetime_unlock(rtp_session);
+
+	return SWITCH_RTP_PVT_DTLS_RESTART_PRESERVE;
+}
+
+SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_dtls_ice_restart_transport_authoritative(switch_rtp_t *rtp_session)
+{
+	switch_bool_t pending = SWITCH_FALSE;
+
+	if (!rtp_session) {
+		return SWITCH_FALSE;
+	}
+	if (!dtls_lifetime_lock(rtp_session)) {
+		return SWITCH_FALSE;
+	}
+	if (!rtp_session->ready || rtp_session->flags[SWITCH_RTP_FLAG_SHUTDOWN]) {
+		dtls_lifetime_unlock(rtp_session);
+		return SWITCH_FALSE;
+	}
+	if (rtp_session->dtls && (rtp_session->dtls->preserve_restart_pending ||
+		rtp_session->dtls->preserve_restart_migrated ||
+		rtp_session->dtls->restart_tuple_authoritative)) {
+		pending = SWITCH_TRUE;
+	}
+	dtls_lifetime_unlock(rtp_session);
+	return pending;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_set_remote_sdp_address(switch_rtp_t *rtp_session,
+	const char *host, switch_port_t port, switch_port_t remote_rtcp_port,
+	switch_bool_t change_adv_addr, const char **err)
+{
+	switch_status_t status;
+
+	if (!rtp_session || zstr(host) || !port || !err) {
+		return SWITCH_STATUS_FALSE;
+	}
+	if (!dtls_lifetime_lock(rtp_session)) {
+		return SWITCH_STATUS_FALSE;
+	}
+	if (!rtp_session->ready || rtp_session->flags[SWITCH_RTP_FLAG_SHUTDOWN]) {
+		dtls_lifetime_unlock(rtp_session);
+		return SWITCH_STATUS_FALSE;
+	}
+	if (rtp_session->dtls && (rtp_session->dtls->preserve_restart_pending ||
+		rtp_session->dtls->preserve_restart_migrated ||
+		rtp_session->dtls->restart_tuple_authoritative)) {
+		*err = "Authenticated ICE nomination owns remote address";
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+			"Deferring SDP remote address %s:%u while authenticated ICE-restart tuple is authoritative\n",
+			host, (unsigned)port);
+		dtls_lifetime_unlock(rtp_session);
+		return SWITCH_STATUS_SUCCESS;
+	}
+	status = switch_rtp_set_remote_address(rtp_session, host, port, remote_rtcp_port,
+		change_adv_addr, err);
+	dtls_lifetime_unlock(rtp_session);
+	return status;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_expire_prepared_dtls_ice_restart(switch_rtp_t *rtp_session)
+{
+	if (!rtp_session) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	if (!dtls_lifetime_lock(rtp_session)) {
+		return SWITCH_STATUS_FALSE;
+	}
+	if (!rtp_session->ready || rtp_session->flags[SWITCH_RTP_FLAG_SHUTDOWN]) {
+		dtls_lifetime_unlock(rtp_session);
+		return SWITCH_STATUS_FALSE;
+	}
+	if (!rtp_session->dtls || !rtp_session->dtls->preserve_restart_prepared) {
+		dtls_lifetime_unlock(rtp_session);
+		return SWITCH_STATUS_FALSE;
+	}
+	rtp_session->dtls->restart_prepared_deadline_us = switch_micro_time_now() - 1;
+	dtls_lifetime_unlock(rtp_session);
 
 	return SWITCH_STATUS_SUCCESS;
 }
@@ -2457,6 +3108,77 @@ static void ice_controlling_startup_commit(switch_rtp_t *rtp_session, switch_rtp
 	ice_controlling_failover_reset(ice, SWITCH_TRUE);
 }
 
+static switch_bool_t dtls_preserved_restart_commit(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
+	switch_dtls_t *dtls, int candidate_idx, switch_sockaddr_t *from_addr, switch_time_t now)
+{
+	icand_t *candidate;
+	switch_sockaddr_t *remote_addr = NULL;
+	switch_sockaddr_t *dtls_addr = NULL;
+	int i;
+
+	if (!rtp_session || !ice || !dtls || !dtls->preserve_restart_pending ||
+		!dtls->restart_deadline_us || now >= dtls->restart_deadline_us ||
+		zstr(dtls->restart_active_ice_user) || zstr(dtls->restart_active_local_pwd) ||
+		zstr(dtls->restart_active_remote_pwd) ||
+		strcmp(dtls->restart_active_ice_user, ice->ice_user ? ice->ice_user : "") ||
+		strcmp(dtls->restart_active_local_pwd, ice->pass ? ice->pass : "") ||
+		strcmp(dtls->restart_active_remote_pwd, ice->rpass ? ice->rpass : "") ||
+		!ice->ice_params || candidate_idx < 0 ||
+		candidate_idx >= ice->ice_params->cand_idx[ice->proto] || !from_addr) {
+		return SWITCH_FALSE;
+	}
+
+	candidate = &ice->ice_params->cands[candidate_idx][ice->proto];
+	if (zstr(candidate->con_addr) || !candidate->con_port ||
+		switch_sockaddr_info_get(&remote_addr, candidate->con_addr, SWITCH_UNSPEC,
+			candidate->con_port, 0, rtp_session->pool) != SWITCH_STATUS_SUCCESS || !remote_addr ||
+		!switch_cmp_addr(remote_addr, from_addr, SWITCH_FALSE) ||
+		switch_sockaddr_info_get(&dtls_addr, candidate->con_addr, SWITCH_UNSPEC,
+			candidate->con_port, 0, rtp_session->pool) != SWITCH_STATUS_SUCCESS || !dtls_addr) {
+		return SWITCH_FALSE;
+	}
+
+	for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; ++i) {
+		ice->ice_params->cands[i][ice->proto].use_candidate = 0;
+	}
+	candidate->use_candidate = 1;
+	candidate->responsive = 1;
+	ice->ice_params->chosen[ice->proto] = candidate_idx;
+	ice->ice_params->is_chosen[ice->proto] = 1;
+
+	rtp_session->remote_addr = remote_addr;
+	rtp_session->remote_port = candidate->con_port;
+	rtp_session->eff_remote_host_str = switch_core_strdup(rtp_session->pool, candidate->con_addr);
+	rtp_session->eff_remote_port = candidate->con_port;
+	if (rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX]) {
+		rtp_session->rtcp_remote_addr = remote_addr;
+		rtp_session->remote_rtcp_port = candidate->con_port;
+	}
+	ice->addr = remote_addr;
+	ice->ready = 1;
+	ice->rready = 1;
+	ice->cand_responsive = 1;
+	ice->initializing = 0;
+	ice->missed_count = 0;
+	ice->last_ok = now;
+	if (!ice->first_responsive_us) {
+		ice->first_responsive_us = now;
+	}
+
+	dtls->remote_addr = dtls_addr;
+	dtls->handshake_peer_addr = dtls_addr;
+	dtls->handshake_peer_set = 1;
+	dtls->preserve_restart_pending = 0;
+	dtls->preserve_restart_migrated = 1;
+	dtls->restart_tuple_authoritative = 1;
+
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE,
+		"ICE restart preserved in-progress DTLS association and migrated output to %s:%u\n",
+		candidate->con_addr, candidate->con_port);
+
+	return SWITCH_TRUE;
+}
+
 static switch_bool_t ice_controlling_failover_handle_response(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 	switch_sockaddr_t *from_addr, int candidate_idx, const char *transaction_id,
 	switch_bool_t authenticated_response, switch_socket_t *local_socket, switch_port_t local_port,
@@ -2480,6 +3202,37 @@ static switch_bool_t ice_controlling_failover_handle_response(switch_rtp_t *rtp_
 		return SWITCH_TRUE;
 	}
 
+	if (ice && rtp_session->dtls && rtp_session->dtls->preserve_restart_pending &&
+		ice->controlling_failover_state == SWITCH_RTP_ICE_CONTROLLING_FAILOVER_NOMINATING) {
+		switch_dtls_t *dtls = rtp_session->dtls;
+		switch_bool_t response_matches;
+		switch_bool_t committed;
+
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+			"ICE controlling restart response candidate=%d authenticated=%d id_match=%d socket_match=%d "
+			"local_port=%u/%u family=%d/%d\n",
+			candidate_idx, authenticated_response,
+			transaction_id && !memcmp(transaction_id, ice->controlling_failover_nomination_id, 12),
+			local_socket == ice->controlling_failover_socket,
+			(unsigned)local_port, (unsigned)ice->controlling_failover_local_port,
+			local_family, ice->controlling_failover_local_family);
+		response_matches = switch_rtp_pvt_controlling_failover_response_matches(ice,
+			SWITCH_RTP_ICE_CONTROLLING_FAILOVER_NOMINATING, candidate_idx, transaction_id,
+			authenticated_response, local_socket, local_port, local_family);
+		if (!response_matches) {
+			return SWITCH_TRUE;
+		}
+		committed = dtls_preserved_restart_commit(rtp_session, ice, dtls,
+			candidate_idx, from_addr, now);
+		if (committed) {
+			ice_controlling_failover_reset(ice, SWITCH_TRUE);
+		} else if (!dtls->restart_deadline_us || now >= dtls->restart_deadline_us) {
+			dtls_preserved_restart_fail(rtp_session, dtls);
+			ice_controlling_failover_reset(ice, SWITCH_TRUE);
+		}
+		return SWITCH_TRUE;
+	}
+
 	current_tuple = ice->addr && switch_cmp_addr(from_addr, ice->addr, SWITCH_FALSE) ? SWITCH_TRUE : SWITCH_FALSE;
 	/* A selected pair is live only after an authenticated response matches a
 	 * check that we sent to that pair.  RTP or an unauthenticated STUN packet
@@ -2488,6 +3241,23 @@ static switch_bool_t ice_controlling_failover_handle_response(switch_rtp_t *rtp_
 	if (current_tuple && authenticated_response && ice_selected_pair_response_matches(ice, transaction_id,
 		from_addr, local_socket, local_port, local_family, SWITCH_FALSE, NULL)) {
 		ice->selected_pair_last_response_us = now;
+		if (rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX]) {
+			rtp_session->ice.rready = 1;
+			rtp_session->rtcp_ice.rready = 1;
+		} else {
+			ice->rready = 1;
+		}
+		ice->cand_responsive = 1;
+		ice->initializing = 0;
+		ice->missed_count = 0;
+		ice->last_ok = now;
+		if (!ice->first_responsive_us) {
+			ice->first_responsive_us = now;
+		}
+		if (ice->ice_params && candidate_idx >= 0 &&
+			candidate_idx < ice->ice_params->cand_idx[ice->proto]) {
+			ice->ice_params->cands[candidate_idx][ice->proto].responsive = 1;
+		}
 		ice_controlling_failover_reset(ice, SWITCH_TRUE);
 		return SWITCH_FALSE;
 	}
@@ -2540,7 +3310,16 @@ static switch_bool_t ice_controlling_failover_handle_response(switch_rtp_t *rtp_
 		/* handle_ice acquired the nested write mutex before ice_mutex.  The
 		 * destination update re-enters write_mutex and therefore preserves the
 		 * established write -> ICE lock order. */
-		ice_controlling_failover_commit(rtp_session, ice, candidate_idx, now);
+		if (rtp_session->dtls && rtp_session->dtls->preserve_restart_pending) {
+			if (!dtls_preserved_restart_commit(rtp_session, ice, rtp_session->dtls,
+				candidate_idx, from_addr, now)) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
+					"ICE controlling restart nomination response failed preserved DTLS commit\n");
+			}
+			ice_controlling_failover_reset(ice, SWITCH_TRUE);
+		} else {
+			ice_controlling_failover_commit(rtp_session, ice, candidate_idx, now);
+		}
 	}
 
 	return SWITCH_TRUE;
@@ -2574,6 +3353,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 	int got_fingerprint = 0;
 	int got_ice_controlled = 0;
 	int got_ice_controlling = 0;
+	int invalid_ice_role = 0;
 	uint32_t prflx_bootstrap_ms = 0;
 	uint32_t stun_packet_len = 0;
 	uint16_t raw_packet_type = 0;
@@ -2583,6 +3363,8 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 	switch_bool_t trusted_use_candidate = SWITCH_FALSE;
 	switch_bool_t authenticated_vanilla_use_candidate = SWITCH_FALSE;
 	switch_bool_t authenticated_current_request = SWITCH_FALSE;
+	switch_bool_t authenticated_current_response = SWITCH_FALSE;
+	switch_bool_t authoritative_dtls_tuple = SWITCH_FALSE;
 	switch_bool_t controlling_startup_request = SWITCH_FALSE;
 	switch_bool_t direct_username_match = SWITCH_FALSE;
 	switch_bool_t recovering = SWITCH_FALSE;
@@ -2592,6 +3374,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 	int role_conflict_487 = 0;
 	switch_bool_t role_conflict_sent_controlling = SWITCH_FALSE;
 	switch_bool_t role_conflict_was_promoted = SWITCH_FALSE;
+	switch_bool_t restart_response_sent_controlling = SWITCH_FALSE;
 
 	if (is_rtcp) {
 		from_addr = rtp_session->rtcp_from_addr;
@@ -2606,7 +3389,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 		response_local_family = switch_sockaddr_get_family(response_local_addr);
 	}
 
-	if (!switch_rtp_ready(rtp_session) || zstr(ice->user_ice) || zstr(ice->ice_user)) {
+	if (!switch_rtp_ready(rtp_session)) {
 		return;
 	}
 
@@ -2615,7 +3398,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 
 	switch_mutex_lock(rtp_session->ice_mutex);
 
-	if (!switch_rtp_ready(rtp_session)) {
+	if (!switch_rtp_ready(rtp_session) || zstr(ice->user_ice) || zstr(ice->ice_user)) {
 		goto end;
 	}
 
@@ -2695,10 +3478,18 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 			got_fingerprint = 1;
 			break;
 		case SWITCH_STUN_ATTR_CONTROLLED:
-			got_ice_controlled = 1;
+			if (attr->length == 8) {
+				got_ice_controlled = 1;
+			} else {
+				invalid_ice_role = 1;
+			}
 			break;
 		case SWITCH_STUN_ATTR_CONTROLLING:
-			got_ice_controlling = 1;
+			if (attr->length == 8) {
+				got_ice_controlling = 1;
+			} else {
+				invalid_ice_role = 1;
+			}
 			break;
 		case SWITCH_STUN_ATTR_ERROR_CODE:
 			{
@@ -2758,6 +3549,10 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 		xlen += 4 + switch_stun_attribute_padded_length(attr);
 	} while (xlen <= packet->header.length);
 
+	if (invalid_ice_role) {
+		goto end;
+	}
+
 	if ((raw_packet_type == SWITCH_STUN_BINDING_RESPONSE ||
 		raw_packet_type == SWITCH_STUN_BINDING_ERROR_RESPONSE) && ice->ice_params) {
 		for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; ++i) {
@@ -2816,6 +3611,25 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 	}
 	authenticated_current_request = raw_packet_type == SWITCH_STUN_BINDING_REQUEST && direct_username_match &&
 		got_message_integrity && got_fingerprint && stun_auth_valid ? SWITCH_TRUE : SWITCH_FALSE;
+	authenticated_current_response = raw_packet_type == SWITCH_STUN_BINDING_RESPONSE &&
+		stun_response_auth_valid && got_message_integrity && got_fingerprint ? SWITCH_TRUE : SWITCH_FALSE;
+	authoritative_dtls_tuple = !is_rtcp && rtp_session->dtls &&
+		(rtp_session->dtls->preserve_restart_migrated ||
+		 rtp_session->dtls->restart_tuple_authoritative) ? SWITCH_TRUE : SWITCH_FALSE;
+	if (authoritative_dtls_tuple &&
+		((raw_packet_type == SWITCH_STUN_BINDING_REQUEST && !authenticated_current_request) ||
+		 (raw_packet_type == SWITCH_STUN_BINDING_RESPONSE && !authenticated_current_response) ||
+		 (raw_packet_type != SWITCH_STUN_BINDING_REQUEST &&
+		  raw_packet_type != SWITCH_STUN_BINDING_RESPONSE))) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
+			"ICE restart ignoring stale or non-request STUN traffic after authenticated tuple migration from %s:%d\n",
+			from_host, from_port);
+		goto end;
+	}
+	if (!is_rtcp && rtp_session->dtls && rtp_session->dtls->preserve_restart_pending &&
+		authenticated_current_request) {
+		ok = 1;
+	}
 	controlling_startup_request = provisional_ice && authenticated_current_request && pri &&
 		got_ice_controlled && !got_ice_controlling &&
 		rtp_session->elapsed_stun <= prflx_bootstrap_ms && ice_controlling_startup_ready(rtp_session, ice) ?
@@ -2834,10 +3648,38 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 		if (!ok) ok = !memcmp(packet->header.id, ice->last_sent_id, 12);
 
 		if (packet->header.type == SWITCH_STUN_BINDING_RESPONSE) {
+			if (!is_rtcp && rtp_session->dtls && rtp_session->dtls->preserve_restart_pending) {
+				switch_bool_t committed = SWITCH_FALSE;
+
+				if (ice_controlling_failover_handle_response(rtp_session, ice, from_addr,
+					response_candidate_idx, packet->header.id, authenticated_current_response,
+					response_local_socket, response_local_port, response_local_family, packet_now)) {
+					goto end;
+				}
+
+				if (response_candidate_idx > -1 && authenticated_current_response &&
+					ice_selected_pair_response_matches(ice, packet->header.id, from_addr,
+						response_local_socket, response_local_port, response_local_family,
+						SWITCH_TRUE, &restart_response_sent_controlling) &&
+					restart_response_sent_controlling) {
+					committed = dtls_preserved_restart_commit(rtp_session, ice, rtp_session->dtls,
+						response_candidate_idx, from_addr, packet_now);
+				}
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
+					"ICE restart preserving in-progress DTLS tuple, %s STUN response from %s:%d\n",
+					committed ? "committed authenticated nomination" : "ignored non-nominating or unmatched",
+					from_host, from_port);
+				goto end;
+			}
 			if (ice_controlling_failover_handle_response(rtp_session, ice, from_addr, response_candidate_idx,
-				packet->header.id, (stun_response_auth_valid && got_message_integrity && got_fingerprint) ?
-					SWITCH_TRUE : SWITCH_FALSE, response_local_socket, response_local_port,
+				packet->header.id, authenticated_current_response, response_local_socket, response_local_port,
 				response_local_family, packet_now)) {
+				goto end;
+			}
+			if (authoritative_dtls_tuple) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
+					"ICE restart ignoring unmatched or non-nominating STUN response while tuple is authoritative from %s:%d\n",
+					from_host, from_port);
 				goto end;
 			}
 
@@ -2883,7 +3725,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 							}
 
 							ice->missed_count = 0;
-							ice->rready = 1;
+						ice->rready = 1;
 
 							ice->ice_params->chosen[ice->proto] = i;
 
@@ -2907,7 +3749,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 							if (!ice->first_responsive_us) {
 								ice->first_responsive_us = switch_micro_time_now();
 							}
-							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "Chosen %s ICE candidate %s:%d is responsive (is_relay: %d)\n", rtp_type(rtp_session), ice->ice_params->cands[i][ice->proto].con_addr, ice->ice_params->cands[i][ice->proto].con_port, is_relay);
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "Chosen %s ICE candidate %s:%d is responsive (is_relay: %d)\n", rtp_type(rtp_session), ice->ice_params->cands[i][ice->proto].con_addr, ice->ice_params->cands[i][ice->proto].con_port, is_relay);
 						}
 					}
 				}
@@ -2963,6 +3805,14 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 					}
 					for (i = 0; i < icep[j]->ice_params->cand_idx[icep[j]->proto]; i++) {
 						if (icep[j]->ice_params &&  icep[j]->ice_params->cands[i][icep[j]->proto].priority == *pri) {
+							if (j == IPR_RTP && rtp_session->dtls &&
+								(rtp_session->dtls->preserve_restart_pending ||
+								 rtp_session->dtls->preserve_restart_migrated)) {
+								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
+									"ICE restart preserving in-progress DTLS tuple, ignoring missed-candidate fallback from %s:%d\n",
+								from_host, from_port);
+								continue;
+							}
 							if (j == IPR_RTP && switch_rtp_pvt_should_guard_recovery_dtls_tuple(icep[j]->addr, from_addr,
 								rtp_session->dtls ? rtp_session->dtls->state : DS_OFF, SWITCH_FALSE, recovering,
 								nomination_proof == SWITCH_RTP_RECOVERY_NOMINATION_AUTHENTICATED_CURRENT ? nomination_proof :
@@ -3080,6 +3930,11 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 			switch_bool_t guard_recovery_dtls_tuple = SWITCH_FALSE;
 			switch_bool_t guard_recovery_nomination = SWITCH_FALSE;
 			switch_dtls_t *dtls = is_rtcp ? rtp_session->rtcp_dtls : rtp_session->dtls;
+			switch_bool_t preserved_restart_active = !is_rtcp && dtls &&
+				(dtls->preserve_restart_pending || dtls->preserve_restart_migrated) ?
+				SWITCH_TRUE : SWITCH_FALSE;
+			switch_bool_t valid_preserved_request_role = (ice->type & ICE_CONTROLLED) &&
+				got_ice_controlling && !got_ice_controlled ? SWITCH_TRUE : SWITCH_FALSE;
 
 			if (is_rtcp) {
 				sock_output = rtp_session->rtcp_sock_output;
@@ -3112,7 +3967,8 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 			guard_recovery_nomination = switch_rtp_pvt_should_guard_recovery_dtls_tuple(ice->addr, from_addr,
 				dtls ? dtls->state : DS_OFF, is_rtcp ? SWITCH_TRUE : SWITCH_FALSE, recovering, nomination_proof);
 
-			if (got_use_candidate && !provisional_ice && !guard_recovery_nomination) {
+			if (got_use_candidate && !provisional_ice &&
+				(!guard_recovery_nomination || preserved_restart_active)) {
 				uint32_t mid_call_failover_ms = 0;
 				uint32_t nomination_age_ms = 0;
 				uint32_t nomination_fresh_ms = 0;
@@ -3124,10 +3980,10 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 				switch_bool_t media_unhealthy = SWITCH_FALSE;
 				switch_bool_t defer_to_prflx_bootstrap = SWITCH_FALSE;
 				switch_bool_t preserve_dtls_tuple = SWITCH_FALSE;
+				switch_bool_t preserved_restart_commit = SWITCH_FALSE;
 				const char *active_host = NULL;
 				switch_port_t active_port = 0;
 				char active_buf[80] = "";
-				switch_dtls_t *dtls = is_rtcp ? rtp_session->rtcp_dtls : rtp_session->dtls;
 				int peer_candidate_idx = -1;
 
 				if (ice->addr) {
@@ -3135,7 +3991,6 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 					active_port = switch_sockaddr_get_port(ice->addr);
 				}
 
-				ice->rready = 1;
 				for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; ++i) {
 					if (ice_candidate_matches_addr(&ice->ice_params->cands[i][ice->proto], from_host, from_port)) {
 						peer_candidate = SWITCH_TRUE;
@@ -3145,12 +4000,34 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 							ice->ice_params->cands[i][ice->proto].con_addr, ice->ice_params->cands[i][ice->proto].con_port);
 					}
 				}
+				if (!is_rtcp && peer_candidate_idx < 0 && dtls && dtls->preserve_restart_pending &&
+					authenticated_vanilla_use_candidate && direct_username_match &&
+					valid_preserved_request_role && pri) {
+					peer_candidate_idx = ice_note_authenticated_prflx_candidate(rtp_session, ice,
+						from_host, from_port, ntohl(*pri), authenticated_current_request, SWITCH_FALSE);
+					if (peer_candidate_idx > -1) {
+						peer_candidate = SWITCH_TRUE;
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+							"ICE restart learned authenticated nominated peer-reflexive tuple %s:%d idx:%d\n",
+							from_host, from_port, peer_candidate_idx);
+					}
+				}
 
 				dtls_ready = dtls && dtls->state >= DS_READY && ice->ready;
+				if (!is_rtcp && peer_candidate_idx > -1 && dtls &&
+					dtls->preserve_restart_pending &&
+					authenticated_vanilla_use_candidate && direct_username_match &&
+					valid_preserved_request_role) {
+					preserved_restart_commit = dtls_preserved_restart_commit(rtp_session, ice, dtls,
+						peer_candidate_idx, from_addr, now);
+				}
+				if (!preserved_restart_active || preserved_restart_commit) {
+					ice->rready = 1;
+				}
 				preserve_dtls_tuple = peer_candidate && active_host && !switch_cmp_addr(from_addr, ice->addr, SWITCH_FALSE) &&
 					ice_should_preserve_active_dtls_tuple(rtp_session, ice, dtls, is_rtcp) ? SWITCH_TRUE : SWITCH_FALSE;
 
-				if (peer_candidate_idx > -1 && !preserve_dtls_tuple) {
+				if (!preserved_restart_active && peer_candidate_idx > -1 && !preserve_dtls_tuple && !preserved_restart_commit) {
 					for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; ++i) {
 						ice->ice_params->cands[i][ice->proto].use_candidate = 0;
 					}
@@ -3160,7 +4037,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 				}
 
 				/* Peer nominated after we self-promoted: yield, peer wins. */
-				if (ice->promoted_to_controlling) {
+				if (!preserved_restart_active && ice->promoted_to_controlling) {
 					ice->type |= ICE_CONTROLLED;
 					ice->promoted_to_controlling = 0;
 					ice->nomination_fallback_enabled = 0;
@@ -3193,7 +4070,15 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 					got_message_integrity && got_fingerprint &&
 					(!ice->prflx_bootstrap_require_use_candidate || got_use_candidate) ? SWITCH_TRUE : SWITCH_FALSE;
 				if (ice->addr && !switch_cmp_addr(from_addr, ice->addr, SWITCH_TRUE)) {
-					if (dtls_ready) {
+					if (preserved_restart_commit) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
+							"ICE restart nomination committed preserved in-progress DTLS tuple to %s:%d\n",
+							from_host, from_port);
+					} else if (preserved_restart_active) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
+							"ICE restart preserving in-progress DTLS tuple, ignoring unverified nomination from %s:%d\n",
+							from_host, from_port);
+					} else if (dtls_ready) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), allow_mid_call_failover ? SWITCH_LOG_DEBUG : SWITCH_LOG_DEBUG5,
 							"USE-CANDIDATE: DTLS already READY, %s %s nomination from %s:%d (elapsed_stun=%u, elapsed_media=%u, mid_call_failover_ms=%u, controlled=%d, known_candidate=%d, fresh_nomination=%d, nomination_age_ms=%u, media_unhealthy=%d, nominated_media_recent=%d, trusted_use=%d, vanilla_auth_use=%d, rtcp_mux=%d)\n",
 							allow_mid_call_failover ? "accepted" : "ignoring", rtp_type(rtp_session), from_host, from_port, rtp_session->elapsed_stun, rtp_session->elapsed_media, mid_call_failover_ms,
@@ -3310,8 +4195,9 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 				}
 			}
 
-			if (!controlling_startup_request && prflx_bootstrap_ms > 0 && pri && cur_idx < 0 && rtp_session->elapsed_stun <= prflx_bootstrap_ms && ice->initializing && !ice->cand_responsive && !cmp && ok && !guard_recovery_dtls_tuple &&
-				(!dtls || dtls->state < DS_READY || restart_prflx_allowed) && stun_auth_valid &&
+			if (!preserved_restart_active && !controlling_startup_request && prflx_bootstrap_ms > 0 && pri && rtp_session->elapsed_stun <= prflx_bootstrap_ms && ice->initializing && !ice->cand_responsive && !cmp && ok && !guard_recovery_dtls_tuple &&
+				(!dtls || dtls->state < DS_READY || restart_prflx_allowed) && authenticated_current_request &&
+				(ice->type & ICE_CONTROLLED) && valid_preserved_request_role &&
 				(!ice->prflx_bootstrap_require_use_candidate || got_use_candidate) &&
 				(!ice->prflx_bootstrap_us || prflx_age_ms <= prflx_bootstrap_ms)) {
 				int prflx_family = AF_UNSPEC;
@@ -3324,8 +4210,9 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
 							"ICE peer-reflexive bootstrap: failed to resolve learned tuple %s:%d\n", from_host, from_port);
 					} else {
-						prflx_idx = switch_rtp_add_prflx_candidate(rtp_session, ice, from_host, from_port,
-							prflx_priority, got_use_candidate ? SWITCH_TRUE : SWITCH_FALSE, SWITCH_TRUE);
+						prflx_idx = cur_idx > -1 ? cur_idx :
+							switch_rtp_add_prflx_candidate(rtp_session, ice, from_host, from_port,
+								prflx_priority, got_use_candidate ? SWITCH_TRUE : SWITCH_FALSE, SWITCH_TRUE);
 					}
 				}
 
@@ -3372,7 +4259,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 				}
 			}
 
-			if (!guard_recovery_dtls_tuple && !provisional_ice && ice->initializing && !cmp && !rtp_session->ice.dtls_handshake) {
+			if (!preserved_restart_active && !guard_recovery_dtls_tuple && !provisional_ice && ice->initializing && !cmp && !rtp_session->ice.dtls_handshake) {
 				if (!rtp_session->adj_window && (!ice->ready || !ice->rready || (!rtp_session->dtls || rtp_session->dtls->state != DS_READY))) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "%s %s %s ICE set ADJUST window to 10 seconds on binding request from %s:%d (is_relay: %d, is_responsivie: %d, use_candidate: %d) Current cand: %s:%d typ: %s\n",
 									switch_channel_get_name(channel), rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp", from_host, from_port, is_relay, is_responsive, use_candidate,
@@ -3416,7 +4303,12 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 
 			dtls_ready = dtls && dtls->state >= DS_READY && ice->ready;
 
-			if (!provisional_ice && cmp) {
+			if (preserved_restart_active) {
+					do_adj = 0;
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
+						"ICE restart preserving in-progress DTLS tuple, suppressing pre-nomination auto-adjust from %s:%d\n",
+						from_host, from_port);
+				} else if (!provisional_ice && cmp) {
 				ice->last_ok = now;
 			} else if (!provisional_ice && !do_adj && !is_rtcp && rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX] && dtls_ready && (ice->type & ICE_CONTROLLED) && got_use_candidate && use_candidate) {
 				mid_call_failover_ms = ice_mid_call_failover_ms(rtp_session, ice);
@@ -3617,14 +4509,21 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_handle_ice_from(switch_rtp_t *rtp
 	switch_sockaddr_t *from_addr = NULL;
 	switch_sockaddr_t *saved_addr;
 	switch_sockaddr_t **active_addr;
+	switch_status_t status = SWITCH_STATUS_FALSE;
 
 	if (!rtp_session || (proto != IPR_RTP && proto != IPR_RTCP) || zstr(host) || !port || !data || !len) {
 		return SWITCH_STATUS_FALSE;
 	}
 
+	READ_INC(rtp_session);
+	WRITE_INC(rtp_session);
+	if (!switch_rtp_ready(rtp_session)) {
+		goto end;
+	}
+
 	if (switch_sockaddr_info_get(&from_addr, host, SWITCH_UNSPEC, port, 0, rtp_session->pool) != SWITCH_STATUS_SUCCESS ||
 		!from_addr) {
-		return SWITCH_STATUS_FALSE;
+		goto end;
 	}
 
 	if (proto == IPR_RTP) {
@@ -3639,8 +4538,12 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_handle_ice_from(switch_rtp_t *rtp
 	*active_addr = from_addr;
 	switch_rtp_pvt_handle_ice(rtp_session, ice, data, len);
 	*active_addr = saved_addr;
+	status = SWITCH_STATUS_SUCCESS;
 
-	return SWITCH_STATUS_SUCCESS;
+ end:
+	WRITE_DEC(rtp_session);
+	READ_DEC(rtp_session);
+	return status;
 }
 
 #ifdef ENABLE_SRTP
@@ -5923,7 +6826,127 @@ static const char *dtls_state_names(dtls_state_t s)
 	return dtls_state_names_t[s];
 }
 
+static switch_bool_t dtls_capture_flight_packet(switch_rtp_t *rtp_session, switch_dtls_t *dtls,
+	const void *packet, switch_size_t packet_len, switch_bool_t first_packet)
+{
+	uint16_t packet_idx;
+
+	if (!rtp_session || !dtls || !packet || !packet_len || packet_len > UINT16_MAX) {
+		return SWITCH_FALSE;
+	}
+	if (first_packet) {
+		dtls->last_flight_len = 0;
+		dtls->last_flight_packet_count = 0;
+		dtls->last_flight_capture_failed = 0;
+	}
+	if (dtls->last_flight_packet_count >= MAX_DTLS_FLIGHT_PACKETS) {
+		dtls->last_flight_len = 0;
+		dtls->last_flight_packet_count = 0;
+		dtls->last_flight_capture_failed = 1;
+		return SWITCH_FALSE;
+	}
+
+	packet_idx = dtls->last_flight_packet_count;
+	if (dtls->last_flight_packet_capacities[packet_idx] < packet_len) {
+		dtls->last_flight_packets[packet_idx] = switch_core_alloc(rtp_session->pool, packet_len);
+		dtls->last_flight_packet_capacities[packet_idx] = (uint16_t)packet_len;
+	}
+	if (!dtls->last_flight_packets[packet_idx]) {
+		dtls->last_flight_len = 0;
+		dtls->last_flight_packet_count = 0;
+		dtls->last_flight_capture_failed = 1;
+		return SWITCH_FALSE;
+	}
+	memcpy(dtls->last_flight_packets[packet_idx], packet, packet_len);
+	dtls->last_flight_packet_sizes[packet_idx] = (uint16_t)packet_len;
+	dtls->last_flight_packet_count++;
+	dtls->last_flight_len += packet_len;
+	dtls->last_flight_sent_us = switch_micro_time_now();
+	return SWITCH_TRUE;
+}
+
+static switch_bool_t dtls_capture_peer_packet(switch_rtp_t *rtp_session, switch_dtls_t *dtls,
+	const void *packet, switch_size_t packet_len)
+{
+	if (!rtp_session || !dtls || !packet || !packet_len || packet_len > UINT16_MAX) {
+		return SWITCH_FALSE;
+	}
+	if (dtls->last_peer_packet_capacity < packet_len) {
+		dtls->last_peer_packet = switch_core_alloc(rtp_session->pool, packet_len);
+		dtls->last_peer_packet_capacity = (uint16_t)packet_len;
+	}
+	if (!dtls->last_peer_packet) {
+		dtls->last_peer_packet_len = 0;
+		return SWITCH_FALSE;
+	}
+	memcpy(dtls->last_peer_packet, packet, packet_len);
+	dtls->last_peer_packet_len = (uint16_t)packet_len;
+
+	return SWITCH_TRUE;
+}
+
+static switch_bool_t dtls_peer_packet_is_duplicate(switch_dtls_t *dtls,
+	const void *packet, switch_size_t packet_len)
+{
+	return dtls && packet && packet_len && packet_len == dtls->last_peer_packet_len &&
+		dtls->last_peer_packet && !memcmp(dtls->last_peer_packet, packet, packet_len) ?
+		SWITCH_TRUE : SWITCH_FALSE;
+}
+
+static int dtls_replay_last_flight(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
+{
+	switch_size_t offset = 0;
+	switch_size_t bytes;
+	switch_status_t status;
+	uint16_t i;
+
+	if (!rtp_session || !dtls || !dtls->last_flight_len ||
+		!dtls->last_flight_packet_count || !dtls->sock_output || !dtls->remote_addr) {
+		return -1;
+	}
+
+	for (i = 0; i < dtls->last_flight_packet_count; ++i) {
+		bytes = dtls->last_flight_packet_sizes[i];
+		if (!bytes || !dtls->last_flight_packets[i] || offset + bytes > dtls->last_flight_len) {
+			return -1;
+		}
+		status = switch_socket_sendto(dtls->sock_output, dtls->remote_addr, 0,
+			(const char *)dtls->last_flight_packets[i], &bytes);
+		if (status != SWITCH_STATUS_SUCCESS || bytes != dtls->last_flight_packet_sizes[i]) {
+			return -1;
+		}
+		offset += bytes;
+	}
+
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+		"Replayed preserved %s DTLS flight (%u packets, %lu bytes) on nominated ICE tuple\n",
+		rtp_type(rtp_session), (unsigned)dtls->last_flight_packet_count,
+		(unsigned long)dtls->last_flight_len);
+	dtls->last_flight_sent_us = switch_micro_time_now();
+	return 0;
+}
+
 #define dtls_set_state(_dtls, _state) switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_INFO, "Changing %s DTLS state from %s to %s\n", rtp_type(rtp_session), dtls_state_names(_dtls->state), dtls_state_names(_state)); _dtls->new_state = 1; _dtls->last_state = _dtls->state; _dtls->state = _state
+
+static void dtls_preserved_restart_fail(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
+{
+	switch_bool_t active_ready_restart;
+
+	if (!rtp_session || !dtls) {
+		return;
+	}
+	active_ready_restart = dtls->state >= DS_READY &&
+		(dtls->preserve_restart_pending || dtls->preserve_restart_migrated) ? SWITCH_TRUE : SWITCH_FALSE;
+	if (dtls->state >= DS_READY) {
+		dtls_restart_handshake_clear(dtls);
+		if (active_ready_restart) {
+			dtls->restart_tuple_authoritative = 1;
+		}
+		return;
+	}
+	dtls_set_state(dtls, DS_FAIL);
+	dtls_state_fail(rtp_session, dtls);
+}
 
 #define cr_keylen 16
 #define cr_saltlen 14
@@ -5955,7 +6978,7 @@ static int dtls_state_setup(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 	if (!r) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR, "%s Fingerprint Verification Failed!\n", rtp_type(rtp_session));
 		dtls_set_state(dtls, DS_FAIL);
-		return -1;
+		return dtls_state_fail(rtp_session, dtls);
 	} else {
 		unsigned char *local_key, *remote_key, *local_salt, *remote_salt;
 
@@ -5965,7 +6988,7 @@ static int dtls_state_setup(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 		if (!SSL_export_keying_material(dtls->ssl, raw_key_data, sizeof(raw_key_data), "EXTRACTOR-dtls_srtp", 19, NULL, 0, 0)) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR, "%s Key material export failure\n", rtp_type(rtp_session));
 			dtls_set_state(dtls, DS_FAIL);
-			return -1;
+			return dtls_state_fail(rtp_session, dtls);
 		}
 #else
 		return -1;
@@ -6001,6 +7024,7 @@ static int dtls_state_setup(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 		}
 	}
 
+	dtls_restart_handshake_clear(dtls);
 	dtls_set_state(dtls, DS_READY);
 
 	return 0;
@@ -6010,6 +7034,7 @@ static int dtls_state_ready(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 {
 
 	if (dtls->new_state) {
+		dtls_restart_handshake_clear(dtls);
 		if (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
 			switch_core_session_t *other_session;
 
@@ -6025,6 +7050,7 @@ static int dtls_state_ready(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 
 static int dtls_state_fail(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 {
+	dtls_restart_migration_clear(dtls);
 	if (rtp_session->session) {
 		switch_channel_t *channel = switch_core_session_get_channel(rtp_session->session);
 		switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
@@ -6049,7 +7075,7 @@ static int dtls_state_handshake(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 		default:
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "%s Handshake failure %d. This may happen when you use legacy DTLS v1.0 (legacyDTLS channel var is set) but endpoint requires DTLS v1.2.\n", rtp_type(rtp_session), ret);
 			dtls_set_state(dtls, DS_FAIL);
-			return -1;
+			return dtls_state_fail(rtp_session, dtls);
 		}
 	}
 
@@ -6080,9 +7106,71 @@ static void free_dtls(switch_dtls_t **dtlsp)
 	}
 }
 
+/* Reorder ICE under write, then revalidate before publishing the tuple. */
+static switch_bool_t dtls_update_nominated_destination(switch_rtp_t *rtp_session,
+	switch_dtls_t *dtls, const char *host, switch_port_t port)
+{
+	switch_bool_t nominated = SWITCH_FALSE;
+	switch_bool_t updated = SWITCH_FALSE;
+	const char *current_host;
+	char current_host_buf[80] = "";
+	switch_port_t current_port;
+	int ci;
+
+	if (!rtp_session || !dtls || zstr(host) || !port) {
+		return SWITCH_FALSE;
+	}
+
+	if (rtp_session->pvt_dtls_destination_update_hook) {
+		rtp_session->pvt_dtls_destination_update_hook(rtp_session->pvt_lock_test_hook_data);
+	}
+
+	switch_mutex_unlock(rtp_session->ice_mutex);
+	WRITE_INC(rtp_session);
+	switch_mutex_lock(rtp_session->ice_mutex);
+
+	if (!switch_rtp_ready(rtp_session) || rtp_session->flags[SWITCH_RTP_FLAG_SHUTDOWN] ||
+		(dtls != rtp_session->dtls && dtls != rtp_session->rtcp_dtls) ||
+		!rtp_session->ice.ice_params) {
+		goto done;
+	}
+
+	for (ci = 0; ci < rtp_session->ice.ice_params->cand_idx[rtp_session->ice.proto]; ++ci) {
+		icand_t *candidate = &rtp_session->ice.ice_params->cands[ci][rtp_session->ice.proto];
+
+		if (candidate->use_candidate && ice_candidate_matches_addr(candidate, host, port)) {
+			nominated = SWITCH_TRUE;
+			break;
+		}
+	}
+
+	if (!nominated) {
+		goto done;
+	}
+
+	current_host = switch_get_addr(current_host_buf, sizeof(current_host_buf), rtp_session->ice.addr);
+	current_port = rtp_session->ice.addr ? switch_sockaddr_get_port(rtp_session->ice.addr) : 0;
+	if (!rtp_session->ice.addr || zstr(current_host) || strcmp(current_host, host) || current_port != port) {
+		switch_rtp_change_ice_dest(rtp_session, &rtp_session->ice, host, port);
+	}
+	if (dtls->remote_addr &&
+		switch_sockaddr_info_get(&dtls->remote_addr, host, SWITCH_UNSPEC, port, 0,
+			rtp_session->pool) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
+			"DTLS: failed to resolve nominated addr %s:%d\n", host, port);
+		goto done;
+	}
+	updated = SWITCH_TRUE;
+
+ done:
+	WRITE_DEC(rtp_session);
+	return updated;
+}
+
 static int do_dtls(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 {
 	int r = 0, ret = 0, len;
+	int capture_started = 0;
 	switch_size_t bytes;
 	unsigned char buf[MAX_DTLS_MTU] = "";
 	uint8_t is_ice = rtp_session->ice.ice_user ? 1 : 0;
@@ -6090,8 +7178,19 @@ static int do_dtls(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 	int pending;
 	switch_channel_t *channel = NULL;
 	switch_bool_t is_rtcp = SWITCH_FALSE;
+	switch_time_t now = switch_micro_time_now();
 
-	if (!dtls->bytes && !ready) {
+	if (dtls->state < DS_READY &&
+		(dtls->preserve_restart_pending || dtls->preserve_restart_migrated) &&
+		(!dtls->restart_deadline_us || now >= dtls->restart_deadline_us)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR,
+			"%s DTLS association expired during ICE-restart tuple migration; failing closed\n",
+			rtp_type(rtp_session));
+		dtls_set_state(dtls, DS_FAIL);
+		return dtls_state_fail(rtp_session, dtls);
+	}
+
+	if (!dtls->bytes && !ready && !dtls->preserve_restart_migrated) {
 		return 0;
 	}
 
@@ -6099,7 +7198,8 @@ static int do_dtls(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 		return 0;
 	}
 
-	if (is_ice && !(rtp_session->ice.type & ICE_LITE) && !rtp_session->ice.cand_responsive) {
+	if (is_ice && !(rtp_session->ice.type & ICE_LITE) && !rtp_session->ice.cand_responsive &&
+		!dtls->preserve_restart_migrated) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG6, "Got DTLS packet but candidate is not responsive\n");
 
 		return 0;
@@ -6111,7 +7211,7 @@ static int do_dtls(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 
 	is_rtcp = (dtls == rtp_session->rtcp_dtls && rtp_session->dtls != rtp_session->rtcp_dtls) ? SWITCH_TRUE : SWITCH_FALSE;
 
-	if (is_ice && !switch_cmp_addr(rtp_session->from_addr, rtp_session->ice.addr, SWITCH_FALSE)) {
+	if (dtls->bytes && is_ice && !switch_cmp_addr(rtp_session->from_addr, rtp_session->ice.addr, SWITCH_FALSE)) {
 		char tmp_buf1[80] = "";
 		char tmp_buf2[80] = "";
 		const char *host_from = switch_get_addr(tmp_buf1, sizeof(tmp_buf1), rtp_session->from_addr);
@@ -6119,6 +7219,27 @@ static int do_dtls(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 		switch_port_t from_port = switch_sockaddr_get_port(rtp_session->from_addr);
 		switch_bool_t guard_recovery_dtls_tuple = SWITCH_FALSE;
 		int nominated = 0;
+
+		if (dtls->preserve_restart_pending) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
+				"DTLS packet from %s:%u rejected before authenticated ICE-restart nomination\n",
+				host_from, from_port);
+			return 0;
+		}
+
+		if (dtls->preserve_restart_migrated) {
+			if (dtls->restart_old_peer_addr && dtls->restart_deadline_us && now < dtls->restart_deadline_us &&
+				switch_cmp_addr(rtp_session->from_addr, dtls->restart_old_peer_addr, SWITCH_FALSE)) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
+					"Accepting bounded old-tuple DTLS input from %s:%u after ICE-restart migration\n",
+					host_from, from_port);
+				goto dtls_input_accepted;
+			}
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
+				"DTLS packet from non-current tuple %s:%u rejected after ICE-restart migration\n",
+				host_from, from_port);
+			return 0;
+		}
 
 		/* Accept DTLS from a USE-CANDIDATE nominated address (e.g. relay). */
 		if (zstr(host_from)) {
@@ -6164,18 +7285,42 @@ static int do_dtls(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
 				"DTLS READY + ICE settled, ignoring nomination from [%s:%d] (current [%s]).\n",
 				host_from, from_port, host_ice_cur_addr);
+			return 0;
 		} else {
-			/* Nominated addr - accept and update ice dest (pre-READY or ICE restarting). */
+			/* Nominated addr - accept and update ICE under write -> ICE order. */
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
 				"DTLS from nominated addr [%s:%d], switching from [%s]. Accepted.\n",
 				host_from, from_port, host_ice_cur_addr);
-			switch_rtp_change_ice_dest(rtp_session, &rtp_session->ice, host_from, from_port);
-			if (dtls->remote_addr) {
-				if (switch_sockaddr_info_get(&dtls->remote_addr, host_from, SWITCH_UNSPEC, from_port, 0, rtp_session->pool) != SWITCH_STATUS_SUCCESS) {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "DTLS: failed to resolve nominated addr %s:%d\n", host_from, from_port);
-				}
+			if (!dtls_update_nominated_destination(rtp_session, dtls, host_from, from_port)) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5,
+					"DTLS nominated tuple %s:%u changed while reordering destination locks; ignored\n",
+					host_from, from_port);
+				return 0;
 			}
 		}
+	}
+
+ dtls_input_accepted:
+	if (dtls->preserve_restart_migrated && dtls->state < DS_READY &&
+		dtls_peer_packet_is_duplicate(dtls, dtls->data, dtls->bytes)) {
+		if (dtls_replay_last_flight(rtp_session, dtls) != 0) {
+			dtls_set_state(dtls, DS_FAIL);
+			return dtls_state_fail(rtp_session, dtls);
+		}
+		return 0;
+	}
+
+	if (dtls->preserve_restart_migrated && dtls->state == DS_SETUP &&
+		dtls->bytes > 0 && dtls->data) {
+		if (!dtls->last_flight_packet_count || !dtls->last_flight_len) {
+			dtls_set_state(dtls, DS_FAIL);
+			return dtls_state_fail(rtp_session, dtls);
+		}
+		if (dtls_replay_last_flight(rtp_session, dtls) != 0) {
+			dtls_set_state(dtls, DS_FAIL);
+			return dtls_state_fail(rtp_session, dtls);
+		}
+		return 0;
 	}
 
 	if (is_ice && dtls->bytes > 0 && dtls->data && dtls->state > DS_OFF && dtls->state < DS_READY && !dtls->handshake_peer_set) {
@@ -6200,6 +7345,20 @@ static int do_dtls(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 		}
 	}
 
+	if (!dtls->bytes && dtls->state > DS_OFF && dtls->state < DS_READY) {
+		ret = DTLSv1_handle_timeout(dtls->ssl);
+		if (ret < 0) {
+			dtls_set_state(dtls, DS_FAIL);
+			return dtls_state_fail(rtp_session, dtls);
+		}
+		if (!ret && dtls->preserve_restart_migrated && dtls->last_flight_packet_count &&
+			dtls->last_flight_sent_us && now >= dtls->last_flight_sent_us + 1000000 &&
+			dtls_replay_last_flight(rtp_session, dtls) != 0) {
+			dtls_set_state(dtls, DS_FAIL);
+			return dtls_state_fail(rtp_session, dtls);
+		}
+	}
+
 	if (dtls_states[dtls->state]) {
 		r = dtls_states[dtls->state](rtp_session, dtls);
 	}
@@ -6209,6 +7368,12 @@ static int do_dtls(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 
 		len = BIO_read(dtls->write_bio, buf, pending);
 		if (len > 0) {
+			if (!dtls_capture_flight_packet(rtp_session, dtls, buf, (switch_size_t)len,
+				capture_started ? SWITCH_FALSE : SWITCH_TRUE)) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
+					"Failed to retain %s DTLS flight for retransmission\n", rtp_type(rtp_session));
+			}
+			capture_started = 1;
 			bytes = len;
 			ret = switch_socket_sendto(dtls->sock_output, dtls->remote_addr, 0, (void *)buf, &bytes);
 
@@ -6217,13 +7382,193 @@ static int do_dtls(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 			} else if (bytes != len) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR, "%s DTLS packet write err: written %d bytes instead of %d\n", rtp_type(rtp_session), (int)bytes, len);
 			}
+			if (ret == SWITCH_STATUS_SUCCESS && bytes == (switch_size_t)len) {
+				dtls->last_flight_sent_us = now;
+			}
 		} else {
 			ret = SSL_get_error(dtls->ssl, len);
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR, "%s DTLS packet encode err: SSL err %d\n", rtp_type(rtp_session), ret);
 		}
 	}
+	if (capture_started && dtls->bytes > 0 &&
+		!dtls_capture_peer_packet(rtp_session, dtls, dtls->data, dtls->bytes)) {
+		dtls_set_state(dtls, DS_FAIL);
+		return dtls_state_fail(rtp_session, dtls);
+	}
 
 	return r;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_dtls_input_from(switch_rtp_t *rtp_session,
+	dtls_type_t type, const char *host, switch_port_t port, const void *input, switch_size_t input_len)
+{
+	switch_dtls_t *dtls;
+	switch_sockaddr_t *from_addr = NULL;
+	switch_sockaddr_t *saved_from_addr;
+	int state_result;
+
+	if (!rtp_session || zstr(host) || !port || !input || !input_len || !switch_rtp_ready(rtp_session) ||
+		switch_sockaddr_info_get(&from_addr, host, SWITCH_UNSPEC, port, 0, rtp_session->pool) !=
+			SWITCH_STATUS_SUCCESS || !from_addr) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	READ_INC(rtp_session);
+	WRITE_INC(rtp_session);
+	switch_mutex_lock(rtp_session->ice_mutex);
+	if (!switch_rtp_ready(rtp_session)) {
+		switch_mutex_unlock(rtp_session->ice_mutex);
+		WRITE_DEC(rtp_session);
+		READ_DEC(rtp_session);
+		return SWITCH_STATUS_FALSE;
+	}
+	dtls = (type & DTLS_TYPE_RTCP) && !(type & DTLS_TYPE_RTP) ?
+		rtp_session->rtcp_dtls : rtp_session->dtls;
+	if (!dtls) {
+		switch_mutex_unlock(rtp_session->ice_mutex);
+		WRITE_DEC(rtp_session);
+		READ_DEC(rtp_session);
+		return SWITCH_STATUS_FALSE;
+	}
+	saved_from_addr = rtp_session->from_addr;
+	rtp_session->from_addr = from_addr;
+	dtls->bytes = input_len;
+	dtls->data = (void *)input;
+	state_result = do_dtls(rtp_session, dtls);
+	dtls->bytes = 0;
+	dtls->data = NULL;
+	rtp_session->from_addr = saved_from_addr;
+	switch_mutex_unlock(rtp_session->ice_mutex);
+	WRITE_DEC(rtp_session);
+	READ_DEC(rtp_session);
+
+	return state_result < 0 ? SWITCH_STATUS_FALSE : SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_dtls_timer_tick(switch_rtp_t *rtp_session, dtls_type_t type)
+{
+	switch_dtls_t *dtls;
+	int state_result;
+
+	if (!rtp_session || !switch_rtp_ready(rtp_session)) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	READ_INC(rtp_session);
+	WRITE_INC(rtp_session);
+	switch_mutex_lock(rtp_session->ice_mutex);
+	dtls = (type & DTLS_TYPE_RTCP) && !(type & DTLS_TYPE_RTP) ?
+		rtp_session->rtcp_dtls : rtp_session->dtls;
+	if (!switch_rtp_ready(rtp_session) || !dtls) {
+		switch_mutex_unlock(rtp_session->ice_mutex);
+		WRITE_DEC(rtp_session);
+		READ_DEC(rtp_session);
+		return SWITCH_STATUS_FALSE;
+	}
+	dtls->bytes = 0;
+	dtls->data = NULL;
+	state_result = do_dtls(rtp_session, dtls);
+	switch_mutex_unlock(rtp_session->ice_mutex);
+	WRITE_DEC(rtp_session);
+	READ_DEC(rtp_session);
+
+	return state_result < 0 ? SWITCH_STATUS_FALSE : SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_dtls_step(switch_rtp_t *rtp_session, dtls_type_t type,
+	const void *input, switch_size_t input_len, void *output, switch_size_t output_capacity,
+	switch_size_t *output_len)
+{
+	switch_dtls_t *dtls;
+	switch_size_t total = 0;
+	switch_time_t now;
+	int pending;
+	int len;
+	int state_result = 0;
+	int capture_started = 0;
+	uint16_t replay_idx;
+	switch_size_t replay_bytes;
+
+	if (!rtp_session || !output_len || (input_len && !input) || (output_capacity && !output)) {
+		return SWITCH_STATUS_FALSE;
+	}
+	*output_len = 0;
+	now = switch_micro_time_now();
+
+	READ_INC(rtp_session);
+	WRITE_INC(rtp_session);
+	if (!switch_rtp_ready(rtp_session)) {
+		WRITE_DEC(rtp_session);
+		READ_DEC(rtp_session);
+		return SWITCH_STATUS_FALSE;
+	}
+
+	switch_mutex_lock(rtp_session->ice_mutex);
+	dtls = type & DTLS_TYPE_RTP ? rtp_session->dtls : rtp_session->rtcp_dtls;
+	if (!dtls) {
+		switch_mutex_unlock(rtp_session->ice_mutex);
+		WRITE_DEC(rtp_session);
+		READ_DEC(rtp_session);
+		return SWITCH_STATUS_FALSE;
+	}
+	if (dtls->state < DS_READY &&
+		(dtls->preserve_restart_pending || dtls->preserve_restart_migrated) &&
+		(!dtls->restart_deadline_us || now >= dtls->restart_deadline_us)) {
+		dtls_set_state(dtls, DS_FAIL);
+		state_result = dtls_state_fail(rtp_session, dtls);
+	} else if (dtls->preserve_restart_migrated && dtls->state == DS_SETUP && input_len) {
+		if (!dtls->last_flight_len || !dtls->last_flight_packet_count) {
+			dtls_set_state(dtls, DS_FAIL);
+			state_result = dtls_state_fail(rtp_session, dtls);
+		} else if (dtls->last_flight_len > output_capacity) {
+			state_result = -1;
+		} else {
+			for (replay_idx = 0; replay_idx < dtls->last_flight_packet_count; ++replay_idx) {
+				replay_bytes = dtls->last_flight_packet_sizes[replay_idx];
+				if (!replay_bytes || !dtls->last_flight_packets[replay_idx] ||
+					total + replay_bytes > output_capacity) {
+					state_result = -1;
+					break;
+				}
+				memcpy((unsigned char *)output + total,
+					dtls->last_flight_packets[replay_idx], replay_bytes);
+				total += replay_bytes;
+			}
+		}
+	} else if (input_len && BIO_write(dtls->read_bio, input, (int)input_len) != (int)input_len) {
+		state_result = -1;
+	} else if (dtls_states[dtls->state]) {
+		state_result = dtls_states[dtls->state](rtp_session, dtls);
+	}
+
+	while (state_result >= 0 && (pending = BIO_ctrl_pending(dtls->filter_bio)) > 0) {
+		if (total + (switch_size_t)pending > output_capacity) {
+			state_result = -1;
+			break;
+		}
+		len = BIO_read(dtls->write_bio, (unsigned char *)output + total, pending);
+		if (len <= 0) {
+			state_result = -1;
+			break;
+		}
+		if (!dtls_capture_flight_packet(rtp_session, dtls, (unsigned char *)output + total,
+			(switch_size_t)len, capture_started ? SWITCH_FALSE : SWITCH_TRUE)) {
+			state_result = -1;
+			break;
+		}
+		capture_started = 1;
+		total += (switch_size_t)len;
+	}
+	if (state_result >= 0 && capture_started && input_len &&
+		!dtls_capture_peer_packet(rtp_session, dtls, input, input_len)) {
+		state_result = -1;
+	}
+	*output_len = total;
+	switch_mutex_unlock(rtp_session->ice_mutex);
+	WRITE_DEC(rtp_session);
+	READ_DEC(rtp_session);
+
+	return state_result < 0 ? SWITCH_STATUS_FALSE : SWITCH_STATUS_SUCCESS;
 }
 
 #if VERIFY
@@ -6548,6 +7893,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_del_dtls(switch_rtp_t *rtp_session, d
 		}
 
 		if (rtp_session->dtls) {
+			rtp_session->dtls_destroy_count++;
 			free_dtls(&rtp_session->dtls);
 		}
 
@@ -6566,6 +7912,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_del_dtls(switch_rtp_t *rtp_session, d
 	}
 
 	if ((type & DTLS_TYPE_RTCP) && rtp_session->rtcp_dtls) {
+		rtp_session->dtls_destroy_count++;
 		free_dtls(&rtp_session->rtcp_dtls);
 	}
 
@@ -6664,6 +8011,8 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_add_dtls(switch_rtp_t *rtp_session, d
 	dtls = switch_core_alloc(rtp_session->pool, sizeof(*dtls));
 	dtls->handshake_peer_addr = NULL;
 	dtls->handshake_peer_set = 0;
+	dtls->association_started_us = switch_micro_time_now();
+	dtls->setup_timeout_ms = 30000;
 
 	dtls->pem = switch_core_sprintf(rtp_session->pool, "%s%s%s.pem", SWITCH_GLOBAL_dirs.certs_dir, SWITCH_PATH_SEPARATOR, DTLS_SRTP_FNAME);
 
@@ -6809,6 +8158,14 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_add_dtls(switch_rtp_t *rtp_session, d
 
 	if (rtp_session->session) {
 		switch_channel_t *channel = switch_core_session_get_channel(rtp_session->session);
+		int setup_timeout_ms = 0;
+
+		if ((var = switch_channel_get_variable(channel, "media_dtls_setup_timeout"))) {
+			setup_timeout_ms = atoi(var);
+			if (setup_timeout_ms > 0) {
+				dtls->setup_timeout_ms = (uint32_t)setup_timeout_ms;
+			}
+		}
 		if ((var = switch_channel_get_variable(channel, "rtp_dtls_mtu"))) {
 			int mtu = atoi(var);
 
@@ -8027,9 +9384,17 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice(switch_rtp_t *rtp_sessio
 	icand_t *candidate = NULL;
 	switch_bool_t explicit_restart = SWITCH_FALSE;
 	switch_bool_t generation_changed = SWITCH_FALSE;
+	switch_bool_t preserve_dtls_restart = SWITCH_FALSE;
+	switch_bool_t preserve_ice_tuple = SWITCH_FALSE;
+	switch_sockaddr_t *preserved_addr = NULL;
 
-
-	switch_mutex_lock(rtp_session->ice_mutex);
+	if (!rtp_session || !dtls_lifetime_lock(rtp_session)) {
+		return SWITCH_STATUS_FALSE;
+	}
+	if (!rtp_session->ready || rtp_session->flags[SWITCH_RTP_FLAG_SHUTDOWN]) {
+		dtls_lifetime_unlock(rtp_session);
+		return SWITCH_STATUS_FALSE;
+	}
 
 	if (proto == IPR_RTP) {
 		ice = &rtp_session->ice;
@@ -8040,10 +9405,17 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice(switch_rtp_t *rtp_sessio
 	}
 
 	explicit_restart = ice->restart_pending ? SWITCH_TRUE : SWITCH_FALSE;
-	ice->restart_pending = 0;
-	ice->restart_provisional = 0;
-	ice->restart_provisional_us = 0;
-
+	if (proto == IPR_RTP && explicit_restart && rtp_session->dtls &&
+		!rtp_session->dtls->preserve_restart_prepared &&
+		(rtp_session->dtls->preserve_restart_pending || rtp_session->dtls->preserve_restart_migrated)) {
+		rtp_session->dtls->preserve_restart_pending = 0;
+		rtp_session->dtls->preserve_restart_migrated = 0;
+		rtp_session->dtls->restart_deadline_us = 0;
+		rtp_session->dtls->restart_old_peer_addr = NULL;
+		rtp_session->dtls->restart_active_ice_user = NULL;
+		rtp_session->dtls->restart_active_local_pwd = NULL;
+		rtp_session->dtls->restart_active_remote_pwd = NULL;
+	}
 	/* VANILLA ICE requires all four creds to sign outbound STUN; refuse and log
 	   loudly rather than emit USERNAME with NULL/empty values. */
 	if ((type & ICE_VANILLA) &&
@@ -8056,7 +9428,14 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice(switch_rtp_t *rtp_sessio
 			zstr(rlogin) ? "EMPTY" : "set",
 			zstr(password) ? "EMPTY" : "set",
 			zstr(rpassword) ? "EMPTY" : "set");
-		switch_mutex_unlock(rtp_session->ice_mutex);
+		if (proto == IPR_RTP) {
+			if (rtp_session->dtls && rtp_session->dtls->preserve_restart_prepared) {
+				dtls_preserved_restart_fail(rtp_session, rtp_session->dtls);
+			} else {
+				dtls_restart_preparation_clear(rtp_session->dtls);
+			}
+		}
+		dtls_lifetime_unlock(rtp_session);
 		return SWITCH_STATUS_FALSE;
 	}
 
@@ -8066,22 +9445,66 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice(switch_rtp_t *rtp_sessio
 		switch_snprintf(ice_user, sizeof(ice_user), "%s:%s", login, rlogin);
 		switch_snprintf(user_ice, sizeof(user_ice), "%s:%s", rlogin, login);
 		switch_snprintf(luser_ice, sizeof(luser_ice), "%s%s", rlogin, login);
-		ice->ready = ice->rready = 0;
-		ice->remote_eoc_received = 0;
-		ice->cand_responsive = 0;
 	} else {
 		switch_snprintf(ice_user, sizeof(ice_user), "%s%s", login, rlogin);
 		switch_snprintf(user_ice, sizeof(user_ice), "%s%s", rlogin, login);
 		switch_snprintf(luser_ice, sizeof(luser_ice), "");
-		ice->ready = ice->rready = 1;
-		ice->remote_eoc_received = 0;
-		ice->cand_responsive = 0;
 	}
 	if (explicit_restart && !zstr(ice->ice_user) &&
 		(strcmp(ice->ice_user, ice_user) || strcmp(ice->pass ? ice->pass : "", password ? password : "") ||
 		 strcmp(ice->rpass ? ice->rpass : "", rpassword ? rpassword : ""))) {
 		generation_changed = SWITCH_TRUE;
 	}
+	if (proto == IPR_RTP && rtp_session->dtls && rtp_session->dtls->preserve_restart_prepared) {
+		switch_dtls_t *dtls = rtp_session->dtls;
+		switch_time_t now = switch_micro_time_now();
+
+		if (dtls->restart_prepared_deadline_us <= now) {
+			dtls_preserved_restart_fail(rtp_session, dtls);
+			dtls_lifetime_unlock(rtp_session);
+			return SWITCH_STATUS_TIMEOUT;
+		}
+
+		if (explicit_restart && generation_changed && (type & ICE_VANILLA) &&
+			!(type & (ICE_LITE | ICE_LITE_INBOUND)) &&
+			(dtls->state == DS_SETUP || dtls->state == DS_HANDSHAKE) &&
+			dtls_identity_equal(&dtls->association_identity, &dtls->restart_prepared_identity) &&
+			!strcmp(dtls->restart_expected_remote_ufrag, login) &&
+			!strcmp(dtls->restart_expected_local_ufrag, rlogin) &&
+			!strcmp(dtls->restart_expected_local_pwd, password) &&
+			!strcmp(dtls->restart_expected_remote_pwd, rpassword)) {
+			preserve_dtls_restart = SWITCH_TRUE;
+			preserved_addr = ice->addr;
+		} else {
+			dtls_preserved_restart_fail(rtp_session, dtls);
+			dtls_lifetime_unlock(rtp_session);
+			return SWITCH_STATUS_FALSE;
+		}
+	}
+	if (proto == IPR_RTP && explicit_restart && rtp_session->dtls &&
+		rtp_session->dtls->restart_tuple_authoritative) {
+		preserve_ice_tuple = SWITCH_TRUE;
+		preserved_addr = ice->addr;
+	}
+	if (preserve_dtls_restart && (!ice_params || ice_params->chosen[proto] < 0 ||
+		ice_params->chosen[proto] >= ice_params->cand_idx[proto] ||
+		!ice_params->cands[ice_params->chosen[proto]][proto].ready ||
+		zstr(ice_params->cands[ice_params->chosen[proto]][proto].con_addr) ||
+		!ice_params->cands[ice_params->chosen[proto]][proto].con_port)) {
+		dtls_preserved_restart_fail(rtp_session, rtp_session->dtls);
+		dtls_lifetime_unlock(rtp_session);
+		return SWITCH_STATUS_FALSE;
+	}
+	ice->restart_pending = 0;
+	ice->restart_provisional = 0;
+	ice->restart_provisional_us = 0;
+	if ((type & ICE_VANILLA)) {
+		ice->ready = ice->rready = 0;
+	} else {
+		ice->ready = ice->rready = 1;
+	}
+	ice->remote_eoc_received = 0;
+	ice->cand_responsive = 0;
 	ice->first_responsive_us = 0;
 	ice->promoted_to_controlling = 0;
 	ice->nomination_fallback_cached = 0;
@@ -8140,14 +9563,24 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice(switch_rtp_t *rtp_sessio
 				ice->addr = NULL;
 				provisional = 1;
 			} else {
-				switch_mutex_unlock(rtp_session->ice_mutex);
+				if (proto == IPR_RTP) {
+					dtls_restart_preparation_clear(rtp_session->dtls);
+				}
+				dtls_lifetime_unlock(rtp_session);
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR, "Cannot activate ICE with an unready remote candidate\n");
 				return SWITCH_STATUS_FALSE;
 			}
-		} else if (!host || !port || switch_sockaddr_info_get(&ice->addr, host, SWITCH_UNSPEC, port, 0, rtp_session->pool) != SWITCH_STATUS_SUCCESS || !ice->addr) {
-			switch_mutex_unlock(rtp_session->ice_mutex);
+		} else if (!host || !port || (!(preserve_dtls_restart || preserve_ice_tuple) &&
+			(switch_sockaddr_info_get(&ice->addr, host, SWITCH_UNSPEC, port, 0, rtp_session->pool) != SWITCH_STATUS_SUCCESS || !ice->addr))) {
+			if (proto == IPR_RTP) {
+				dtls_restart_preparation_clear(rtp_session->dtls);
+			}
+			dtls_lifetime_unlock(rtp_session);
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR, "Error setting remote host!\n");
 			return SWITCH_STATUS_FALSE;
+		}
+		if (preserve_dtls_restart || preserve_ice_tuple) {
+			ice->addr = preserved_addr;
 		}
 	} else {
 		if (proto == IPR_RTP) {
@@ -8187,7 +9620,38 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice(switch_rtp_t *rtp_sessio
 		switch_rtp_break(rtp_session);
 	}
 
-	switch_mutex_unlock(rtp_session->ice_mutex);
+	if (preserve_dtls_restart) {
+		switch_dtls_t *dtls = rtp_session->dtls;
+		int candidate_idx = ice->ice_params ? ice->ice_params->chosen[ice->proto] : -1;
+
+		dtls->restart_old_peer_addr = dtls->handshake_peer_set ? dtls->handshake_peer_addr : preserved_addr;
+		dtls->restart_deadline_us = dtls->restart_prepared_deadline_us;
+		dtls->restart_active_ice_user = ice->ice_user;
+		dtls->restart_active_local_pwd = ice->pass;
+		dtls->restart_active_remote_pwd = ice->rpass;
+		dtls->preserve_restart_pending = 1;
+		dtls->preserve_restart_migrated = 0;
+		dtls_restart_preparation_clear(dtls);
+
+		if (!(ice->type & ICE_CONTROLLED)) {
+			if (candidate_idx < 0 || ice_send_controlling_check(rtp_session, ice, candidate_idx,
+				SWITCH_TRUE, ice->controlling_failover_nomination_id, SWITCH_TRUE) != SWITCH_STATUS_SUCCESS) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR,
+					"ICE controlling restart could not send nomination; failing preserved DTLS association closed\n");
+				dtls_preserved_restart_fail(rtp_session, dtls);
+				dtls_lifetime_unlock(rtp_session);
+				return SWITCH_STATUS_FALSE;
+			} else {
+				ice->controlling_failover_state = SWITCH_RTP_ICE_CONTROLLING_FAILOVER_NOMINATING;
+				ice->controlling_failover_idx = candidate_idx;
+				ice->controlling_failover_started_us = switch_micro_time_now();
+				ice->controlling_failover_sent_us = ice->controlling_failover_started_us;
+				ice->controlling_failover_attempts = 1;
+			}
+		}
+	}
+
+	dtls_lifetime_unlock(rtp_session);
 
 	return SWITCH_STATUS_SUCCESS;
 }
@@ -8426,10 +9890,12 @@ SWITCH_DECLARE(void) switch_rtp_destroy(switch_rtp_t **rtp_session)
 	}
 
 	if ((*rtp_session)->dtls) {
+		(*rtp_session)->dtls_destroy_count++;
 		free_dtls(&(*rtp_session)->dtls);
 	}
 
 	if ((*rtp_session)->rtcp_dtls) {
+		(*rtp_session)->dtls_destroy_count++;
 		free_dtls(&(*rtp_session)->rtcp_dtls);
 	}
 
@@ -10852,6 +12318,9 @@ static switch_status_t process_rtcp_packet(switch_rtp_t *rtp_session, switch_siz
 static switch_status_t read_rtcp_packet(switch_rtp_t *rtp_session, switch_size_t *bytes, switch_frame_flag_t *flags)
 {
 	switch_status_t status = SWITCH_STATUS_FALSE;
+	switch_dtls_t *rtcp_dtls = NULL;
+	switch_bool_t rtcp_dtls_input = SWITCH_FALSE;
+	char *b;
 
 	if (!rtp_session->flags[SWITCH_RTP_FLAG_ENABLE_RTCP]) {
 		return SWITCH_STATUS_FALSE;
@@ -10865,30 +12334,38 @@ static switch_status_t read_rtcp_packet(switch_rtp_t *rtp_session, switch_size_t
 		!= SWITCH_STATUS_SUCCESS) {
 		*bytes = 0;
 	}
+	b = (char *) rtp_session->rtcp_recv_msg_p;
+	if (*bytes && (*b == 0 || *b == 1)) {
+		if (rtp_session->pvt_rtcp_stun_dispatch_hook) {
+			rtp_session->pvt_rtcp_stun_dispatch_hook(rtp_session->pvt_lock_test_hook_data);
+		}
+		switch_rtp_pvt_handle_ice(rtp_session, &rtp_session->rtcp_ice,
+			(void *) rtp_session->rtcp_recv_msg_p, *bytes);
+		*bytes = 0;
+	}
 
 	switch_mutex_lock(rtp_session->ice_mutex);
 	if (rtp_session->rtcp_dtls) {
-		char *b = (char *) rtp_session->rtcp_recv_msg_p;
-
-		if (*b == 0 || *b == 1) {
-			if (rtp_session->rtcp_ice.ice_user) {
-				switch_rtp_pvt_handle_ice(rtp_session, &rtp_session->rtcp_ice, (void *) rtp_session->rtcp_recv_msg_p, *bytes);
-			}
-			*bytes = 0;
-		}
-
+		rtcp_dtls = rtp_session->rtcp_dtls;
 		if (*bytes && (*b >= 20) && (*b <= 64)) {
-			rtp_session->rtcp_dtls->bytes = *bytes;
-			rtp_session->rtcp_dtls->data = (void *) rtp_session->rtcp_recv_msg_p;
+			rtcp_dtls_input = SWITCH_TRUE;
+			rtcp_dtls->bytes = *bytes;
+			rtcp_dtls->data = (void *) rtp_session->rtcp_recv_msg_p;
 		} else {
-			rtp_session->rtcp_dtls->bytes = 0;
-			rtp_session->rtcp_dtls->data = NULL;
+			rtcp_dtls->bytes = 0;
+			rtcp_dtls->data = NULL;
 		}
 
-		do_dtls(rtp_session, rtp_session->rtcp_dtls);
+		do_dtls(rtp_session, rtcp_dtls);
+		if (rtp_session->pvt_rtcp_dtls_post_process_hook) {
+			rtp_session->pvt_rtcp_dtls_post_process_hook(rtp_session->pvt_lock_test_hook_data);
+		}
 
-
-		if (rtp_session->rtcp_dtls->bytes) {
+		if (rtp_session->rtcp_dtls != rtcp_dtls) {
+			if (rtcp_dtls_input) {
+				*bytes = 0;
+			}
+		} else if (rtcp_dtls->bytes) {
 			*bytes = 0;
 		}
 	}
