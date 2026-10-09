@@ -166,6 +166,14 @@ const int switch_amrwb_frame_bits[] = {132, 177, 253, 285, 317, 365, 397, 461, 4
 
 #define invalid_frame_type (index >= SWITCH_AMRWB_MODES && index != 0xe && index != 0xf) /* include SPEECH_LOST and NO_DATA*/
 
+/* fmtp key: drop spaces before "=" */
+static void amrwb_trim_key(char *key)
+{
+	size_t len = strlen(key);
+
+	while (len && key[len - 1] == ' ') key[--len] = '\0';
+}
+
 /* mode-set entry: a speech mode 0-8, else -1 */
 static int amrwb_parse_mode(const char *str)
 {
@@ -433,6 +441,7 @@ static switch_status_t amrwb_parse_fmtp_cb(const char *fmtp, switch_codec_fmtp_t
 
 			if ((arg = strchr(data, '='))) {
 				*arg++ = '\0';
+				amrwb_trim_key(data);
 
 				if (!strcasecmp(data, "octet-align")) {
 					oa = switch_true(arg);
@@ -469,6 +478,7 @@ static void amrwb_fmtp_framing(const char *fmtp, struct amrwb_framing *framing)
 			while (*data == ' ') data++;
 			if (!(arg = strchr(data, '='))) continue;
 			*arg++ = '\0';
+			amrwb_trim_key(data);
 			while (*arg == ' ') arg++;
 			if (!strcasecmp(data, "octet-align")) {
 				octet_align_given = SWITCH_TRUE;
@@ -548,6 +558,7 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 
 				if ((arg = strchr(data, '='))) {
 					*arg++ = '\0';
+					amrwb_trim_key(data);
 					while (*arg == ' ') arg++;
 					if (!strcasecmp(data, "octet-align")) {
 						octet_align_given = SWITCH_TRUE;
@@ -1009,6 +1020,7 @@ static int extract_octet_align(const char *fmtp)
 		arg = strchr(data, '=');
 		if (arg) {
 			*arg++ = '\0';
+			amrwb_trim_key(data);
 			while (*arg == ' ') arg++;
 			if (!strcasecmp(data, "octet-align")) {
 				oa = switch_true(arg);
@@ -1038,6 +1050,7 @@ static switch_bool_t has_unsupported_option(const char *fmtp)
 		while (*data == ' ') data++;
 		if (!(arg = strchr(data, '='))) continue;
 		*arg++ = '\0';
+		amrwb_trim_key(data);
 		while (*arg == ' ') arg++;
 		if (!strcasecmp(data, "crc") || !strcasecmp(data, "robust-sorting") || !strcasecmp(data, "interleaving")) {
 			unsupported = atoi(arg) != 0;
