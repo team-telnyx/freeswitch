@@ -1499,8 +1499,8 @@ FST_CORE_BEGIN(".")
 			switch_log_unbind_logger(amrwb_count_warnings);
 			switch_core_codec_destroy(&codec);
 
-			fst_check(amrwb_warning_lines >= 1);
-			fst_check(amrwb_warning_lines <= 2);
+			/* the 1st of 100 concealed payloads (next at the 251st) */
+			fst_check_int_equals(amrwb_warning_lines, 1);
 		}
 		FST_TEST_END()
 
