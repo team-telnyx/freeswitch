@@ -326,6 +326,11 @@ static int switch_amrwb_relay_sid(switch_codec_t *other_codec, void *decoded_dat
 	struct amrwb_context *other_context;
 	int size = 0;
 
+	/* silence-supp-off: no SID toward the peer */
+	if (globals.silence_supp_off) {
+		return 0;
+	}
+
 	if (!other_codec || !other_codec->implementation || !other_codec->implementation->iananame || !other_codec->implementation->modname ||
 		strcasecmp(other_codec->implementation->iananame, "AMR-WB") ||
 		strcmp(other_codec->implementation->modname, "mod_amrwb")) {
