@@ -3,22 +3,24 @@
 	<!--  AMRWB modes (supported bitrates):
 		mode 8 AMR-WB_23.85 23.85 Kbit/s
 		mode 7 AMR-WB_23.05 23.05 Kbit/s
-		mode 7 AMR-WB_19.85 19.85 Kbit/s
-		mode 6 AMR-WB_18.25 18.25 Kbit/s
-		mode 5 AMR-WB_15.85 15.85 Kbit/s
-		mode 4 AMR-WB_14.25 14.25 Kbit/s
-		mode 3 AMR-WB_12.65 12.65 Kbit/s
-		mode 2 AMR-WB_8.85 8.85 Kbit/s
-		mode 1 AMR-WB_6.60 6.60 Kbit/s
+		mode 6 AMR-WB_19.85 19.85 Kbit/s
+		mode 5 AMR-WB_18.25 18.25 Kbit/s
+		mode 4 AMR-WB_15.85 15.85 Kbit/s
+		mode 3 AMR-WB_14.25 14.25 Kbit/s
+		mode 2 AMR-WB_12.65 12.65 Kbit/s
+		mode 1 AMR-WB_8.85 8.85 Kbit/s
+		mode 0 AMR-WB_6.60 6.60 Kbit/s
 	-->
 	<param name="default-bitrate" value="8"/>
-	 <!-- Enable VoLTE specific FMTP -->
+	<!-- VoLTE: add max-red=0; mode-change-capability=2 to the fmtp -->
 	<param name="volte" value="1"/>
-	<!-- Enable automatic bitrate variation during the call based on RTCP feedback -->
+	<!-- Vary the bitrate within the mode-set on RTCP feedback (needs RTCP) -->
 	<param name="adjust-bitrate" value="0"/>
-	<!-- force OA when originating -->
+	<!-- octet-aligned when an offer does not state octet-align (interop only); an offer is
+	     taken to be the fmtp of an inbound leg, see mod_amrwb.c -->
 	<param name="force-oa" value="0"/>
-	<!-- don't mirror mode-set in SDP answer, but use our own (default-bitrate). -->
+	<!-- offer, and answer instead of the offered mode-set, our own: default-bitrate, or mode-set
+	     with mode-set-overwrite-with-default-bitrate=0 (deviates from RFC 4867 8.3.1) -->
 	<param name="mode-set-overwrite" value="0"/>
   </settings>
 </configuration>

@@ -37,9 +37,6 @@
 #include "bitshift.h"
 #include "amrwb_be.h"
 
-extern const int switch_amrwb_frame_sizes[];
-extern const int switch_amrwb_frame_bits[];
-
 /* Bandwidth Efficient AMR-WB */
 /* https://tools.ietf.org/html/rfc4867#page-17 */
 
@@ -71,7 +68,7 @@ extern switch_bool_t switch_amrwb_pack_be(unsigned char *shift_buf, int n)
 	|F|  FT   |Q|
 	+-+-+-+-+-+-+
 	F = 0 , FT = XXXX , Q from the frame's ToC
-	eg: Frame Types (FT): ftp://www.3gpp.org/tsg_sa/TSG_SA/TSGS_04/Docs/PDF/SP-99253.pdf - table 1a
+	eg: Frame Types (FT): 3GPP TS 26.201, table 1a
 	*/
 
 	ft = save_toc >> 3 ; /* drop Q, P1, P2  */
@@ -80,62 +77,23 @@ extern switch_bool_t switch_amrwb_pack_be(unsigned char *shift_buf, int n)
 	/* we only encode one frame, so bit 0 of TOC will be 0 */
 	shift_buf[0] |= (ft >> 1); /* first 3 bits of FT */
 
-	switch_amr_array_lshift(6, shift_buf+1, n);
+	amrwb_array_lshift(6, shift_buf+1, n);
 	/* Q from the frame's own ToC */
 	if (save_toc & (1 << 2)) {
 		shift_buf[1] |= 1 << 6;
 	} else {
 		shift_buf[1] &= ~(1 << 6);
 	}
+	/* the shift moved P1 to bit 7 and P2 to bit 6: last bit of FT in P1's place (Q is in P2's) */
 	if (( ft >> 0 ) & 1) {
-		/* set last bit of TOC instead of P2 */
 		shift_buf[1] |= 1 << 7;
 	} else {
-		/* reset last bit of TOC instead of P2 */
 		shift_buf[1] &= ~(1 << 7);
 	}
 
 	return SWITCH_TRUE;
 }
 
-extern switch_bool_t switch_amrwb_unpack_be(unsigned char *encoded_buf, uint8_t *tmp, int encoded_len)
-{
-	int framesz, index;
-	uint8_t shift_tocs[2] = {0x00, 0x00};
-	uint8_t *shift_buf;
-
-	if (!encoded_buf || !tmp || encoded_len < 2) {
-		return SWITCH_FALSE;
-	}
-
-	memcpy(shift_tocs, encoded_buf, 2);
-	/* shift for BE */
-	switch_amr_array_lshift(4, shift_tocs, 2);
-	/* This implementation decodes exactly one 20 ms frame per payload. */
-	if (shift_tocs[0] & 0x80) {
-		return SWITCH_FALSE;
-	}
-	shift_buf = encoded_buf + 1; /* skip CMR */
-	/* shift for BE */
-	switch_amr_array_lshift(2, shift_buf, encoded_len - 1);
-	/* get frame size */
-	index = ((shift_tocs[0] >> 3) & 0x0f);
-	if (index >= 10 && index != 0xe && index != 0xf) {
-
-		return SWITCH_FALSE;
-	}
-
-	framesz = switch_amrwb_frame_sizes[index];
-	if (encoded_len < (switch_amrwb_frame_bits[index] + 10 + 7) / 8) {
-		return SWITCH_FALSE;
-	}
-	tmp[0] = shift_tocs[0]; /* save TOC */
-	if (framesz) {
-		memcpy(&tmp[1], shift_buf, framesz);
-	}
-
-	return SWITCH_TRUE;
-}
 #endif
 
 /* For Emacs:
