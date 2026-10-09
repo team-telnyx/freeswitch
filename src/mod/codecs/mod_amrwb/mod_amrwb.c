@@ -1155,28 +1155,28 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_amrwb_load)
 				}
 				if (!strcasecmp(var, "volte")) {
 					/* ETSI TS 126 236 compatibility:  http://www.etsi.org/deliver/etsi_ts/126200_126299/126236/10.00.00_60/ts_126236v100000p.pdf */
-					globals.volte = (switch_byte_t) atoi(val);
+					globals.volte = (switch_byte_t) switch_true(val);
 				}
 				if (!strcasecmp(var, "adjust-bitrate")) {
-					globals.adjust_bitrate = (switch_byte_t) atoi(val);
+					globals.adjust_bitrate = (switch_byte_t) switch_true(val);
 				}
 				if (!strcasecmp(var, "force-oa")) {
-					globals.force_oa = (switch_byte_t) atoi(val);
+					globals.force_oa = (switch_byte_t) switch_true(val);
 				}
 				if (!strcasecmp(var, "force-be")) {
-					globals.force_be = (switch_byte_t) atoi(val);
+					globals.force_be = (switch_byte_t) switch_true(val);
 				}
 				if (!strcasecmp(var, "mode-set-overwrite")) {
-					globals.mode_set_overwrite = (switch_byte_t) atoi(val);
+					globals.mode_set_overwrite = (switch_byte_t) switch_true(val);
 				}
 				if (!strcasecmp(var, "mode-set-overwrite-with-default-bitrate")) {
-					globals.mode_set_overwrite_with_default_bitrate = (switch_byte_t) atoi(val);
+					globals.mode_set_overwrite_with_default_bitrate = (switch_byte_t) switch_true(val);
 				}
 				if (!strcasecmp(var, "invite-prefer-oa")) {
-					globals.invite_prefer_oa = (switch_byte_t) atoi(val);
+					globals.invite_prefer_oa = (switch_byte_t) switch_true(val);
 				}
 				if (!strcasecmp(var, "invite-prefer-be")) {
-					globals.invite_prefer_be = (switch_byte_t) atoi(val);
+					globals.invite_prefer_be = (switch_byte_t) switch_true(val);
 				}
 				if (!strcasecmp(var, "mode-set")) {
 					int y, m_argc;
@@ -1196,14 +1196,14 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_amrwb_load)
 					}
 				}
 				if (!strcasecmp(var, "debug")) {
-					global_debug = (switch_byte_t) atoi(val);
+					global_debug = (switch_byte_t) switch_true(val);
 				}
 				if (!strcasecmp(var, "fmtp-extra")) {
 					globals.fmtp_extra = switch_core_strdup(pool, val);
 					switch_assert(globals.fmtp_extra);
 				}
 				if (!strcasecmp(var, "silence-supp-off")) {
-					globals.silence_supp_off = (switch_byte_t) atoi(val);
+					globals.silence_supp_off = (switch_byte_t) switch_true(val);
 				}
 			}
 		}
