@@ -37,9 +37,11 @@
  * XML Parameters (on/off values: true, on, yes, 1)
  *
  * default-bitrate
- *		Mode 0-8, default 8. Offered and answered when mode-set is not configured, or with
- *		mode-set-overwrite and mode-set-overwrite-with-default-bitrate.
- *		A single mode leaves nothing for CMR or adjust-bitrate to change.
+ *		Mode 0-8, default 8. Without a configured mode-set: offered, and answered to an offer
+ *		without mode-set. With mode-set-overwrite and mode-set-overwrite-with-default-bitrate:
+ *		offered and answered to every offer.
+ *		Answered alone, it leaves CMR and adjust-bitrate nothing to change, unless the offered
+ *		mode-set does not include it (encoding then uses the offered modes).
  * volte
  *		If set, configures codec for use on cellular networks.
  * adjust-bitrate
@@ -48,8 +50,8 @@
  *		Octet aligned when the fmtp does not state octet-align. The answer then differs
  *		from an offer that meant bandwidth efficient (RFC 4867 8.3.1): interop only.
  * force-be
- *		Bandwidth efficient when the fmtp does not state octet-align (the RFC 4867 default).
- *		Wins over force-oa.
+ *		Bandwidth efficient when the fmtp does not state octet-align. That is already the
+ *		RFC 4867 default: its only effect is to cancel force-oa.
  * mode-set-overwrite
  *		Answer our mode-set instead of the offered one (deviates from RFC 4867 8.3.1).
  *		Which one: see mode-set-overwrite-with-default-bitrate.
@@ -62,11 +64,14 @@
  * invite-prefer-be
  *		No effect for AMR-WB: the core selects AMR-WB with matches_fmtp only.
  * mode-set
- *		Modes 0-8 offered, and answered to an offer without mode-set or with mode-set-overwrite.
+ *		Modes 0-8. Offered, and answered to an offer without mode-set; with mode-set-overwrite
+ *		answered to every offer. Not used when mode-set-overwrite and
+ *		mode-set-overwrite-with-default-bitrate are both on (default-bitrate instead).
  * debug
- *		Log CMR, ToC and frame flag of every payload at DEBUG, malformed ones at ERROR.
+ *		Log FT, Q, frame flag and sizes of every payload at DEBUG, some malformed ones at ERROR.
  * silence-supp-off
- *		SDP 'silenceSupp:off - - - -', suppress_cng on the session, no SID frames relayed.
+ *		suppress_cng on every session (SDP 'silenceSupp:off - - - -' in answers without CN)
+ *		and no SID frames relayed. suppress_cng set on a session alone also stops SID relay to it.
  * fmtp-extra
  *		Append any extra info to fmtp entry for AMR-WB.
  *
