@@ -1233,7 +1233,7 @@ FST_CORE_BEGIN(".")
 		}
 		FST_TEST_END()
 
-		/* spaces around "=" in fmtp parameters */
+		/* spaces around "=" and after values in fmtp parameters */
 		FST_TEST_BEGIN(amrwb_fmtp_keys_allow_spaces)
 		{
 			switch_codec_t codec = { 0 };
@@ -1251,11 +1251,19 @@ FST_CORE_BEGIN(".")
 			fst_check_int_equals(encoded_len, 33);
 			switch_core_codec_destroy(&codec);
 
+			encoded_len = sizeof(encoded);
+			fst_requires(amrwb_init(&codec, "octet-align=1 ;mode-set=2 ", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "mode-set=2;"));
+			fst_requires(switch_core_codec_encode(&codec, NULL, pcm, sizeof(pcm), 16000, encoded, &encoded_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(encoded_len, 34);
+			switch_core_codec_destroy(&codec);
+
 			fst_requires((codec_interface = switch_loadable_module_get_codec_interface("AMR-WB", "mod_amrwb")));
 			for (impl = codec_interface->implementations; impl; impl = impl->next) {
 				switch_bool_t oa_impl = strstr(impl->fmtp, "octet-align=1") ? SWITCH_TRUE : SWITCH_FALSE;
 
 				wrong += (impl->matches_fmtp("octet-align = 1", impl->fmtp) == SWITCH_STATUS_SUCCESS) != oa_impl;
+				wrong += (impl->matches_fmtp("octet-align=1 ; mode-set=2", impl->fmtp) == SWITCH_STATUS_SUCCESS) != oa_impl;
 			}
 			UNPROTECT_INTERFACE(codec_interface);
 			fst_check_int_equals(wrong, 0);
