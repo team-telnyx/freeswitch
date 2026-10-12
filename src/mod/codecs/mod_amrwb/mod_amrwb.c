@@ -40,12 +40,15 @@
  * a mode-set without a mode 0-8, are not matched; other entries of a mode-set are dropped. Answers
  * always state octet-align, return crc and robust-sorting as offered (0), and leave out other
  * offered parameters. A codec runs on the implementation of the format it uses, so the core
- * transcodes between legs whose formats differ.
+ * transcodes between legs whose formats differ. Legs on the same
+ * implementation are not transcoded: their payloads pass as they are, also in modes outside the other
+ * leg's mode-set and with SID frames to a leg with silence-supp-off.
  *
  * A payload may carry up to 12 frames (240 ms, the maxptime TS 26.114 offers; RFC 4867 sets no
  * limit, more are concealed); they are decoded one after the other,
  * except frames at RTP timestamps the previous payload already covered (the last frame of a
- * payload always is): a sender cannot make the codec produce more audio than time passes.
+ * payload always is): a sender cannot make the codec produce more audio than its RTP timestamps
+ * advance.
  * Encoding sends one frame (20 ms) per payload, from the first 20 ms of its input (less is
  * padded with silence), and never a mode request (CMR 15). The encoder makes no SID frames (no DTX); a SID decoded alone in a payload is
  * relayed by the encoder of the other leg while the audio passes unmodified (see silence-supp-off).

@@ -16,8 +16,8 @@
 	<param name="volte" value="1"/>
 	<!-- Vary the bitrate within the mode-set on RTCP feedback (needs RTCP) -->
 	<param name="adjust-bitrate" value="0"/>
-	<!-- octet-aligned when an offer does not state octet-align (interop only); an offer is
-	     taken to be the fmtp of an inbound leg, see mod_amrwb.c -->
+	<!-- octet-aligned when an offer does not state octet-align (interop only); an answer that
+	     leaves it out gets the one we offered, see mod_amrwb.c -->
 	<param name="force-oa" value="0"/>
 	<!-- offer, and answer instead of the offered mode-set, our own: default-bitrate, or mode-set
 	     with mode-set-overwrite-with-default-bitrate=0 (deviates from RFC 4867 8.3.1) -->
