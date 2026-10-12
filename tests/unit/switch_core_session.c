@@ -30,6 +30,7 @@
  */
 #include <switch.h>
 #include <test/switch_test.h>
+#include "private/switch_core_pvt.h"
 
 /* the null endpoint's read_frame, replaced for a read that returns one large frame first */
 static switch_io_read_frame_t null_read_frame = NULL;
@@ -46,7 +47,7 @@ static switch_status_t large_frame_read(switch_core_session_t *session, switch_f
 	return null_read_frame(session, frame, flags, stream_id);
 }
 
-#define PRIVQ_MAX_SEEN 32
+#define PRIVQ_MAX_SEEN 128
 
 static char *privq_media_cmds[] = { "playback", "speak", "say" };
 static switch_mutex_t *privq_mutex = NULL;
@@ -157,6 +158,79 @@ static void privq_reached(const char *test)
 {
 	fprintf(stderr, "privq: %s reached the media flush\n", test);
 	fflush(stderr);
+}
+
+static switch_io_routines_t privq_io_routines = { 0 };
+static switch_state_handler_table_t privq_state_handlers = { 0 };
+
+/* A session without its own thread or channel driver, so only the test pops its private queues. */
+static switch_core_session_t *privq_session_new(switch_memory_pool_t *pool)
+{
+	switch_loadable_module_interface_t *module_interface = switch_loadable_module_create_module_interface(pool, "privq_test");
+	switch_endpoint_interface_t *endpoint_interface = switch_loadable_module_create_interface(module_interface, SWITCH_ENDPOINT_INTERFACE);
+
+	endpoint_interface->interface_name = "privq_test";
+	endpoint_interface->io_routines = &privq_io_routines;
+	endpoint_interface->state_handler = &privq_state_handlers;
+	return switch_core_session_request_uuid(endpoint_interface, SWITCH_CALL_DIRECTION_OUTBOUND, SOF_NO_LIMITS, NULL, NULL);
+}
+
+static void privq_session_free(switch_core_session_t **session)
+{
+	switch_event_t *event = NULL;
+
+	switch_channel_clear_flag(switch_core_session_get_channel(*session), CF_EVENT_LOCK);
+	switch_channel_clear_flag(switch_core_session_get_channel(*session), CF_EVENT_LOCK_PRI);
+	while (switch_core_session_dequeue_private_event(*session, &event) == SWITCH_STATUS_SUCCESS) {
+		switch_event_destroy(&event);
+	}
+	switch_core_session_destroy(session);
+}
+
+/* Queues a named command and returns the event object now owned by the queue, NULL if it wasn't queued. */
+static switch_event_t *privq_push(switch_core_session_t *session, const char *app_name, const char *app_arg, switch_bool_t priority)
+{
+	switch_event_t *event = NULL, *queued;
+
+	if (switch_event_create(&event, SWITCH_EVENT_COMMAND) != SWITCH_STATUS_SUCCESS) {
+		return NULL;
+	}
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "call-command", "execute");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-name", app_name);
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-arg", app_arg);
+	queued = event;
+	if (switch_core_session_queue_private_event(session, &event, priority) != SWITCH_STATUS_SUCCESS) {
+		if (event) {
+			switch_event_destroy(&event);
+		}
+		return NULL;
+	}
+	return queued;
+}
+
+/* Pops the next private command and checks it is the expected object; the event is destroyed either way. */
+static switch_bool_t privq_pop_is(switch_core_session_t *session, switch_event_t *expected, const char *app_arg)
+{
+	switch_event_t *event = NULL;
+	switch_bool_t ok;
+
+	if (switch_core_session_dequeue_private_event(session, &event) != SWITCH_STATUS_SUCCESS) {
+		return SWITCH_FALSE;
+	}
+	ok = (event == expected && !strcmp(switch_str_nil(switch_event_get_header(event, "execute-app-arg")), app_arg)) ? SWITCH_TRUE : SWITCH_FALSE;
+	switch_event_destroy(&event);
+	return ok;
+}
+
+static switch_bool_t privq_empty(switch_core_session_t *session)
+{
+	switch_event_t *event = NULL;
+
+	if (switch_core_session_dequeue_private_event(session, &event) == SWITCH_STATUS_SUCCESS) {
+		switch_event_destroy(&event);
+		return SWITCH_FALSE;
+	}
+	return SWITCH_TRUE;
 }
 
 
@@ -541,6 +615,153 @@ FST_CORE_BEGIN("./conf")
 			switch_channel_clear_flag(fst_channel, CF_EVENT_LOCK_PRI);
 		}
 		FST_SESSION_END()
+
+		FST_TEST_BEGIN(private_media_flush_keeps_queues_and_survivors)
+		{
+			switch_core_session_t *session;
+			switch_queue_t *queue, *queue_pri;
+			switch_event_t *p1, *n1, *n3, *n5;
+			uint32_t removed;
+
+			session = privq_session_new(fst_pool);
+			fst_requires(session);
+			queue = session->private_event_queue;
+			queue_pri = session->private_event_queue_pri;
+			fst_check(privq_start(session, fst_pool) == SWITCH_STATUS_SUCCESS);
+
+			p1 = privq_push(session, "set", "p1", SWITCH_TRUE);
+			fst_check(privq_push(session, "say", "p2", SWITCH_TRUE) != NULL);
+			n1 = privq_push(session, "set", "n1", SWITCH_FALSE);
+			fst_check(privq_push(session, "playback", "n2", SWITCH_FALSE) != NULL);
+			n3 = privq_push(session, "answer", "n3", SWITCH_FALSE);
+			fst_check(privq_push(session, "speak", "n4", SWITCH_FALSE) != NULL);
+			n5 = privq_push(session, "set", "n5", SWITCH_FALSE);
+			fst_check(p1 && n1 && n3 && n5);
+
+			removed = switch_core_session_flush_and_publish_private_media_events(session, privq_media_cmds, 3);
+			fst_check(removed == 3);
+			fst_check(session->private_event_queue == queue);
+			fst_check(session->private_event_queue_pri == queue_pri);
+			fst_check(privq_pop_is(session, p1, "p1"));
+			fst_check(privq_pop_is(session, n1, "n1"));
+			fst_check(privq_pop_is(session, n3, "n3"));
+			fst_check(privq_pop_is(session, n5, "n5"));
+			fst_check(privq_empty(session));
+
+			fst_check(privq_wait(3) == 3);
+			fst_check(privq_seen_times("p2") == 1);
+			fst_check(privq_seen_times("n2") == 1);
+			fst_check(privq_seen_times("n4") == 1);
+
+			privq_stop();
+			privq_session_free(&session);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(private_media_flush_full_and_wrapped_queue)
+		{
+			switch_core_session_t *session;
+			switch_event_t *ev[407];
+			char args[407][16];
+			uint32_t removed;
+			int i;
+
+			session = privq_session_new(fst_pool);
+			fst_requires(session);
+			fst_check(privq_start(session, fst_pool) == SWITCH_STATUS_SUCCESS);
+
+			/* consume part of the ring, then fill it so the stored items wrap around its end */
+			for (i = 0; i < 200; i++) {
+				switch_snprintf(args[i], sizeof(args[i]), "w%d", i);
+				ev[i] = privq_push(session, "set", args[i], SWITCH_FALSE);
+				fst_check(ev[i] != NULL);
+			}
+			for (i = 0; i < 150; i++) {
+				fst_check(privq_pop_is(session, ev[i], args[i]));
+			}
+			for (i = 200; i < 406; i++) {
+				switch_snprintf(args[i], sizeof(args[i]), "f%d", i);
+				ev[i] = privq_push(session, (i % 2) ? "playback" : "set", args[i], SWITCH_FALSE);
+				fst_check(ev[i] != NULL);
+			}
+			fst_check(privq_push(session, "set", "overflow", SWITCH_FALSE) == NULL);
+
+			removed = switch_core_session_flush_and_publish_private_media_events(session, privq_media_cmds, 3);
+			fst_check(removed == 103);
+
+			switch_snprintf(args[406], sizeof(args[406]), "after");
+			ev[406] = privq_push(session, "set", args[406], SWITCH_FALSE);
+			fst_check(ev[406] != NULL);
+
+			for (i = 150; i < 406; i++) {
+				if (i < 200 || !(i % 2)) {
+					fst_check(privq_pop_is(session, ev[i], args[i]));
+				}
+			}
+			fst_check(privq_pop_is(session, ev[406], args[406]));
+			fst_check(privq_empty(session));
+
+			fst_check(privq_wait(103) == 103);
+			fst_check(privq_seen_times("f201") == 1);
+			fst_check(privq_seen_times("f405") == 1);
+
+			privq_stop();
+			privq_session_free(&session);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(private_media_flush_empty_all_and_no_match)
+		{
+			switch_core_session_t *session;
+			switch_channel_t *channel;
+			switch_event_t *ev[10];
+			char args[10][16];
+			uint32_t removed = 0;
+			int i;
+
+			session = privq_session_new(fst_pool);
+			fst_requires(session);
+			channel = switch_core_session_get_channel(session);
+			fst_check(privq_start(session, fst_pool) == SWITCH_STATUS_SUCCESS);
+
+			fst_check(switch_core_session_flush_and_publish_private_media_events(session, privq_media_cmds, 3) == 0);
+
+			for (i = 0; i < 10; i++) {
+				switch_snprintf(args[i], sizeof(args[i]), "all%d", i);
+				fst_check(privq_push(session, privq_media_cmds[i % 3], args[i], (i % 2) ? SWITCH_TRUE : SWITCH_FALSE) != NULL);
+			}
+			fst_check(switch_core_session_flush_and_publish_private_media_events(session, privq_media_cmds, 3) == 10);
+			fst_check(privq_empty(session));
+
+			for (i = 0; i < 10; i++) {
+				switch_snprintf(args[i], sizeof(args[i]), "none%d", i);
+				ev[i] = privq_push(session, "set", args[i], SWITCH_FALSE);
+				fst_check(ev[i] != NULL);
+			}
+			switch_channel_set_flag(channel, CF_EVENT_LOCK);
+			switch_channel_set_flag(channel, CF_EVENT_LOCK_PRI);
+			for (i = 0; i < 1000; i++) {
+				removed += switch_core_session_flush_and_publish_private_media_events(session, privq_media_cmds, 3);
+			}
+			fst_check(removed == 0);
+			fst_check(switch_channel_test_flag(channel, CF_EVENT_LOCK));
+			fst_check(switch_channel_test_flag(channel, CF_EVENT_LOCK_PRI));
+			switch_channel_clear_flag(channel, CF_EVENT_LOCK);
+			switch_channel_clear_flag(channel, CF_EVENT_LOCK_PRI);
+
+			for (i = 0; i < 10; i++) {
+				fst_check(privq_pop_is(session, ev[i], args[i]));
+			}
+			fst_check(privq_empty(session));
+
+			fst_check(privq_wait(10) == 10);
+			fst_check(privq_seen_times("all0") == 1);
+			fst_check(privq_seen_times("all9") == 1);
+
+			privq_stop();
+			privq_session_free(&session);
+		}
+		FST_TEST_END()
 	}
 	FST_SUITE_END()
 }

@@ -403,6 +403,65 @@ fspr_status_t switch_apr_queue_trypop(switch_apr_queue_t *queue, void **data)
     return rv;
 }
 
+/**
+ * Removes every item for which match() returns non-zero, in queue order, into removed[]. The remaining items stay
+ * in the queue in their order. The queue object itself is never replaced. *nremoved always holds the number of
+ * items handed over, even when an error is returned after the removal.
+ */
+fspr_status_t switch_apr_queue_extract(switch_apr_queue_t *queue, int (*match)(void *item, void *match_data), void *match_data,
+                                       void **removed, unsigned int capacity, unsigned int *nremoved)
+{
+    fspr_status_t rv;
+    unsigned int i, n, kept = 0;
+
+    *nremoved = 0;
+
+    if (queue->terminated) {
+        return APR_EOF; /* no more elements ever again */
+    }
+
+    rv = fspr_thread_mutex_lock(queue->one_big_mutex);
+    if (rv != APR_SUCCESS) {
+        return rv;
+    }
+
+    n = queue->nelts;
+    if (n > capacity) {
+        fspr_thread_mutex_unlock(queue->one_big_mutex);
+        return APR_EINVAL;
+    }
+
+    for (i = 0; i < n; i++) {
+        void *item = queue->data[(queue->out + i) % queue->bounds];
+
+        if (match(item, match_data)) {
+            removed[(*nremoved)++] = item;
+        } else {
+            queue->data[(queue->out + kept) % queue->bounds] = item;
+            kept++;
+        }
+    }
+
+    for (i = kept; i < n; i++) {
+        queue->data[(queue->out + i) % queue->bounds] = NULL;
+    }
+
+    queue->nelts = kept;
+    queue->in = (queue->out + kept) % queue->bounds;
+
+    if (*nremoved && queue->full_waiters) {
+        Q_DBG("broadcast !full", queue);
+        rv = fspr_thread_cond_broadcast(queue->not_full);
+        if (rv != APR_SUCCESS) {
+            fspr_thread_mutex_unlock(queue->one_big_mutex);
+            return rv;
+        }
+    }
+
+    rv = fspr_thread_mutex_unlock(queue->one_big_mutex);
+    return rv;
+}
+
 fspr_status_t switch_apr_queue_interrupt_all(switch_apr_queue_t *queue)
 {
     fspr_status_t rv;
