@@ -6651,6 +6651,13 @@ SWITCH_DECLARE(int16_t) switch_core_media_validate_common_audio_sdp(switch_core_
 						}
 					}
 
+					/* AMR / AMR-WB on a dynamic payload type below 96, as negotiation matches it (by its fmtp) */
+					if (!match && map->rm_pt < 96 && !zstr(map->rm_encoding) && !strcasecmp(rm_encoding, imp->iananame) &&
+						(!strcasecmp(imp->iananame, "AMR") || !strcasecmp(imp->iananame, "AMR-WB")) &&
+						(remote_codec_rate == codec_rate || fmtp_remote_codec_rate == imp->actual_samples_per_second)) {
+						match = 1;
+					}
+
 					if (match && bit_rate && map_bit_rate &&
 							map_bit_rate != bit_rate && strcasecmp(map->rm_encoding, "ilbc") &&
 							strcasecmp(map->rm_encoding, "isac")) {
@@ -7024,6 +7031,34 @@ done:
 	}
 
 	return 0;
+}
+
+/*
+ * The octet-align our last SDP states for a payload type ("octet-align=0" / "octet-align=1"), NULL if it
+ * has no such a=fmtp line: what we offered on it, for an answer that leaves it out (AMR / AMR-WB)
+ */
+static const char *amr_offered_octet_align(switch_media_handle_t *smh, int pt)
+{
+	const char *sdp = smh->mparams->local_sdp_str, *line, *eol, *oa;
+	char key[32];
+	size_t klen;
+
+	if (zstr(sdp)) {
+		return NULL;
+	}
+	klen = switch_snprintf(key, sizeof(key), "a=fmtp:%d ", pt);
+	for (line = sdp; (line = strstr(line, key)); line += klen) {
+		if (line != sdp && line[-1] != '\n') {
+			continue;
+		}
+		eol = line + strcspn(line, "\r\n");
+		if (!(oa = switch_stristr("octet-align", line)) || oa > eol) {
+			return NULL;
+		}
+		for (oa += strlen("octet-align"); *oa == ' ' || *oa == '='; oa++);
+		return *oa == '1' ? "octet-align=1" : "octet-align=0";
+	}
+	return NULL;
 }
 
 //?
@@ -7886,27 +7921,22 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 				memset(&codec_fmtp, 0, sizeof(codec_fmtp));
 
 				/*
-				 * AMR / AMR-WB answer that leaves out octet-align: it is the one we offered on that payload
-				 * type (RFC 4867 8.3.1 wants it returned unmodified; many stacks drop the default). The codec
-				 * default for an fmtp without octet-align (bandwidth efficient, or octet aligned with the
-				 * codec's force-oa) is for offers.
+				 * AMR / AMR-WB answer to our offer that leaves out octet-align: it is the one we offered on that
+				 * payload type, as our last SDP states it (RFC 4867 8.3.1 wants it returned unmodified; many
+				 * stacks drop the default). The codec default for an fmtp without octet-align (bandwidth
+				 * efficient, or octet aligned with the codec's force-oa) is for offers. Early media answers to
+				 * our INVITE come here as SDP_OFFER: before the outbound leg is answered they are answers too.
 				 */
-				if (sdp_type == SDP_ANSWER && (!strcasecmp(map->rm_encoding, "AMR") || !strcasecmp(map->rm_encoding, "AMR-WB")) &&
+				if ((sdp_type == SDP_ANSWER ||
+					 (switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_OUTBOUND && !switch_channel_test_flag(session->channel, CF_ANSWERED))) &&
+					(!strcasecmp(map->rm_encoding, "AMR") || !strcasecmp(map->rm_encoding, "AMR-WB")) &&
 					(zstr(map->rm_fmtp) || !switch_stristr("octet-align", map->rm_fmtp))) {
-					int oi;
+					const char *offered = amr_offered_octet_align(smh, map->rm_pt);
 
-					for (oi = 0; oi < smh->mparams->num_codecs && oi < SWITCH_MAX_CODECS; oi++) {
-						const switch_codec_implementation_t *oimp = smh->codecs[oi];
-						const char *oa;
-
-						if (oimp && oimp->iananame && !strcasecmp(oimp->iananame, map->rm_encoding) && smh->ianacodes[oi] == map->rm_pt &&
-							oimp->fmtp && (oa = switch_stristr("octet-align", oimp->fmtp))) {
-							map->rm_fmtp = switch_core_session_sprintf(session, "%s%s%.*s", zstr(map->rm_fmtp) ? "" : map->rm_fmtp,
-																	   zstr(map->rm_fmtp) ? "" : "; ", (int) strcspn(oa, "; "), oa);
-							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s answer on payload type %d without octet-align: as offered, fmtp [%s]\n",
-											  map->rm_encoding, map->rm_pt, map->rm_fmtp);
-							break;
-						}
+					if (offered) {
+						map->rm_fmtp = switch_core_session_sprintf(session, "%s%s%s", zstr(map->rm_fmtp) ? "" : map->rm_fmtp, zstr(map->rm_fmtp) ? "" : "; ", offered);
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s answer on payload type %d without octet-align: as offered, fmtp [%s]\n",
+										  map->rm_encoding, map->rm_pt, map->rm_fmtp);
 					}
 				}
 
