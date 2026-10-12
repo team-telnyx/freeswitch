@@ -46,6 +46,119 @@ static switch_status_t large_frame_read(switch_core_session_t *session, switch_f
 	return null_read_frame(session, frame, flags, stream_id);
 }
 
+#define PRIVQ_MAX_SEEN 32
+
+static char *privq_media_cmds[] = { "playback", "speak", "say" };
+static switch_mutex_t *privq_mutex = NULL;
+static char privq_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1];
+static char privq_seen[PRIVQ_MAX_SEEN][64];
+static int privq_seen_count = 0;
+
+static void privq_on_interrupted(switch_event_t *event)
+{
+	const char *uuid = switch_event_get_header(event, "Unique-ID");
+	const char *arg = switch_event_get_header(event, "execute-app-arg");
+
+	if (!uuid || strcmp(uuid, privq_uuid)) {
+		return;
+	}
+
+	switch_mutex_lock(privq_mutex);
+	if (privq_seen_count < PRIVQ_MAX_SEEN) {
+		switch_snprintf(privq_seen[privq_seen_count], sizeof(privq_seen[0]), "%s", switch_str_nil(arg));
+	}
+	privq_seen_count++;
+	switch_mutex_unlock(privq_mutex);
+}
+
+static void privq_reset(void)
+{
+	switch_mutex_lock(privq_mutex);
+	privq_seen_count = 0;
+	switch_mutex_unlock(privq_mutex);
+}
+
+static switch_status_t privq_start(switch_core_session_t *session, switch_memory_pool_t *pool)
+{
+	if (switch_mutex_init(&privq_mutex, SWITCH_MUTEX_NESTED, pool) != SWITCH_STATUS_SUCCESS) {
+		return SWITCH_STATUS_FALSE;
+	}
+	switch_snprintf(privq_uuid, sizeof(privq_uuid), "%s", switch_core_session_get_uuid(session));
+	privq_seen_count = 0;
+	return switch_event_bind("privq_test", SWITCH_EVENT_COMMAND_INTERRUPTED, SWITCH_EVENT_SUBCLASS_ANY, privq_on_interrupted, NULL);
+}
+
+static void privq_stop(void)
+{
+	switch_event_unbind_callback(privq_on_interrupted);
+}
+
+/* waits up to 5 s for the interrupt events to be delivered, then a little longer to catch any extra ones */
+static int privq_wait(int want)
+{
+	int i, count = 0;
+
+	for (i = 0; i < 500; i++) {
+		switch_mutex_lock(privq_mutex);
+		count = privq_seen_count;
+		switch_mutex_unlock(privq_mutex);
+		if (count >= want) {
+			break;
+		}
+		switch_yield(10000);
+	}
+	switch_yield(100000);
+	switch_mutex_lock(privq_mutex);
+	count = privq_seen_count;
+	switch_mutex_unlock(privq_mutex);
+	return count;
+}
+
+static int privq_seen_times(const char *arg)
+{
+	int i, n = 0;
+
+	switch_mutex_lock(privq_mutex);
+	for (i = 0; i < privq_seen_count && i < PRIVQ_MAX_SEEN; i++) {
+		if (!strcmp(privq_seen[i], arg)) {
+			n++;
+		}
+	}
+	switch_mutex_unlock(privq_mutex);
+	return n;
+}
+
+static switch_status_t privq_queue(switch_core_session_t *session, const char *command, const char *app_name, const char *app_arg, switch_bool_t priority)
+{
+	switch_event_t *event = NULL;
+
+	if (switch_event_create(&event, SWITCH_EVENT_COMMAND) != SWITCH_STATUS_SUCCESS) {
+		return SWITCH_STATUS_FALSE;
+	}
+	if (command) {
+		switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "call-command", command);
+	}
+	if (app_name) {
+		switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-name", app_name);
+	}
+	if (app_arg) {
+		switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-arg", app_arg);
+	}
+	if (switch_core_session_queue_private_event(session, &event, priority) != SWITCH_STATUS_SUCCESS) {
+		if (event) {
+			switch_event_destroy(&event);
+		}
+		return SWITCH_STATUS_FALSE;
+	}
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static void privq_reached(const char *test)
+{
+	fprintf(stderr, "privq: %s reached the media flush\n", test);
+	fflush(stderr);
+}
+
 
 FST_CORE_BEGIN("./conf")
 {
@@ -319,6 +432,113 @@ FST_CORE_BEGIN("./conf")
 			switch_core_session_set_read_codec(fst_session, NULL);
 			switch_core_codec_destroy(&codec_48k);
 			switch_core_codec_destroy(&codec_8k);
+		}
+		FST_SESSION_END()
+
+		/*
+		 * The event locks keep the session thread from consuming the queued commands, so only the flushes below
+		 * touch them. The media flush ignores the locks.
+		 */
+		FST_SESSION_BEGIN(private_media_flush_keeps_headerless_priority_commands)
+		{
+			uint32_t removed, kept;
+
+			switch_channel_set_flag(fst_channel, CF_EVENT_LOCK_PRI);
+			switch_channel_set_flag(fst_channel, CF_EVENT_LOCK);
+			fst_requires(privq_start(fst_session, fst_pool) == SWITCH_STATUS_SUCCESS);
+
+			fst_check(privq_queue(fst_session, "hangup", NULL, "pri-hangup", SWITCH_TRUE) == SWITCH_STATUS_SUCCESS);
+			fst_check(privq_queue(fst_session, "nomedia", NULL, NULL, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS);
+			fst_check(privq_queue(fst_session, "execute", NULL, "pri-execute-no-name", SWITCH_TRUE) == SWITCH_STATUS_SUCCESS);
+			fst_check(privq_queue(fst_session, "execute", "", "pri-execute-empty-name", SWITCH_TRUE) == SWITCH_STATUS_SUCCESS);
+			fst_check(privq_queue(fst_session, "execute", "playback", "pri-playback", SWITCH_TRUE) == SWITCH_STATUS_SUCCESS);
+
+			privq_reached("priority");
+			removed = switch_core_session_flush_and_publish_private_media_events(fst_session, privq_media_cmds, 3);
+			fst_check(removed == 1);
+			fst_check(privq_wait(1) == 1);
+			fst_check(privq_seen_times("pri-playback") == 1);
+
+			privq_reset();
+			kept = switch_core_session_flush_and_publish_private_events(fst_session);
+			fst_check(kept == 4);
+			fst_check(privq_wait(4) == 4);
+			fst_check(privq_seen_times("pri-hangup") == 1);
+			fst_check(privq_seen_times("") == 1);
+			fst_check(privq_seen_times("pri-execute-no-name") == 1);
+			fst_check(privq_seen_times("pri-execute-empty-name") == 1);
+
+			privq_stop();
+			switch_channel_clear_flag(fst_channel, CF_EVENT_LOCK);
+			switch_channel_clear_flag(fst_channel, CF_EVENT_LOCK_PRI);
+		}
+		FST_SESSION_END()
+
+		FST_SESSION_BEGIN(private_media_flush_keeps_headerless_normal_commands)
+		{
+			uint32_t removed, kept;
+
+			switch_channel_set_flag(fst_channel, CF_EVENT_LOCK_PRI);
+			switch_channel_set_flag(fst_channel, CF_EVENT_LOCK);
+			fst_requires(privq_start(fst_session, fst_pool) == SWITCH_STATUS_SUCCESS);
+
+			fst_check(privq_queue(fst_session, "unicast", NULL, "norm-unicast", SWITCH_FALSE) == SWITCH_STATUS_SUCCESS);
+			fst_check(privq_queue(fst_session, "execute", "SPEAK", "norm-speak", SWITCH_FALSE) == SWITCH_STATUS_SUCCESS);
+			fst_check(privq_queue(fst_session, "xferext", NULL, "norm-xferext", SWITCH_FALSE) == SWITCH_STATUS_SUCCESS);
+			fst_check(privq_queue(fst_session, "execute", "set", "norm-set", SWITCH_FALSE) == SWITCH_STATUS_SUCCESS);
+			fst_check(privq_queue(fst_session, "hangup", NULL, "norm-hangup", SWITCH_FALSE) == SWITCH_STATUS_SUCCESS);
+			fst_check(privq_queue(fst_session, "execute", "Say", "norm-say", SWITCH_FALSE) == SWITCH_STATUS_SUCCESS);
+
+			privq_reached("normal");
+			removed = switch_core_session_flush_and_publish_private_media_events(fst_session, privq_media_cmds, 3);
+			fst_check(removed == 2);
+			fst_check(privq_wait(2) == 2);
+			fst_check(privq_seen_times("norm-speak") == 1);
+			fst_check(privq_seen_times("norm-say") == 1);
+
+			privq_reset();
+			kept = switch_core_session_flush_and_publish_private_events(fst_session);
+			fst_check(kept == 4);
+			fst_check(privq_wait(4) == 4);
+			fst_check(privq_seen_times("norm-unicast") == 1);
+			fst_check(privq_seen_times("norm-xferext") == 1);
+			fst_check(privq_seen_times("norm-set") == 1);
+			fst_check(privq_seen_times("norm-hangup") == 1);
+
+			privq_stop();
+			switch_channel_clear_flag(fst_channel, CF_EVENT_LOCK);
+			switch_channel_clear_flag(fst_channel, CF_EVENT_LOCK_PRI);
+		}
+		FST_SESSION_END()
+
+		FST_SESSION_BEGIN(private_media_flush_without_commands_keeps_everything)
+		{
+			uint32_t removed, kept;
+
+			switch_channel_set_flag(fst_channel, CF_EVENT_LOCK_PRI);
+			switch_channel_set_flag(fst_channel, CF_EVENT_LOCK);
+			fst_requires(privq_start(fst_session, fst_pool) == SWITCH_STATUS_SUCCESS);
+
+			fst_check(privq_queue(fst_session, "hangup", NULL, "ctl-hangup", SWITCH_TRUE) == SWITCH_STATUS_SUCCESS);
+			fst_check(privq_queue(fst_session, "execute", "playback", "ctl-pri-playback", SWITCH_TRUE) == SWITCH_STATUS_SUCCESS);
+			fst_check(privq_queue(fst_session, "nomedia", NULL, "ctl-nomedia", SWITCH_FALSE) == SWITCH_STATUS_SUCCESS);
+			fst_check(privq_queue(fst_session, "execute", "playback", "ctl-playback", SWITCH_FALSE) == SWITCH_STATUS_SUCCESS);
+
+			removed = switch_core_session_flush_and_publish_private_media_events(fst_session, privq_media_cmds, 0);
+			fst_check(removed == 0);
+			fst_check(privq_wait(1) == 0);
+
+			kept = switch_core_session_flush_and_publish_private_events(fst_session);
+			fst_check(kept == 4);
+			fst_check(privq_wait(4) == 4);
+			fst_check(privq_seen_times("ctl-hangup") == 1);
+			fst_check(privq_seen_times("ctl-pri-playback") == 1);
+			fst_check(privq_seen_times("ctl-nomedia") == 1);
+			fst_check(privq_seen_times("ctl-playback") == 1);
+
+			privq_stop();
+			switch_channel_clear_flag(fst_channel, CF_EVENT_LOCK);
+			switch_channel_clear_flag(fst_channel, CF_EVENT_LOCK_PRI);
 		}
 		FST_SESSION_END()
 	}

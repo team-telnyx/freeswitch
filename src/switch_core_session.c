@@ -1472,7 +1472,7 @@ SWITCH_DECLARE(uint32_t) switch_core_session_flush_and_publish_private_media_eve
 					switch_event_t *command_event = (switch_event_t *) pop;
 					const char *app_name = switch_event_get_header(command_event, "execute-app-name");
 
-					for(index = 0; index < cmdlen; ++index) {
+					for(index = 0; !zstr(app_name) && index < cmdlen; ++index) {
 						if (!strcasecmp(app_name, cmds[index])) {
 							matches = 1;
 							break;
@@ -1509,7 +1509,7 @@ SWITCH_DECLARE(uint32_t) switch_core_session_flush_and_publish_private_media_eve
 					switch_event_t *command_event = (switch_event_t *) pop;
 					const char *app_name = switch_event_get_header(command_event, "execute-app-name");
 
-					for(index = 0; index < cmdlen; ++index) {
+					for(index = 0; !zstr(app_name) && index < cmdlen; ++index) {
 						if (!strcasecmp(app_name, cmds[index])) {
 							matches = 1;
 							break;
