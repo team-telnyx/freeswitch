@@ -57,9 +57,12 @@
  * the session write codec; a request stays across a codec reset (switch_core_codec_reset), as does
  * the encoder's mode stepping. Undecodable payloads (also: more than 3 bytes after the frames,
  * unless RTP padding) are concealed as lost frames, their CMR ignored, with a WARNING at the 1st,
- * 251st, ... of them. A packet the jitter buffer lost (SFF_PLC; only with rtp_jitter_buffer_plc off,
- * else the core conceals) is decoded as a lost frame (SPEECH_LOST), whatever payload comes with it:
- * the decoder conceals and fades out.
+ * 251st, ... of them. A packet the jitter buffer lost (SFF_PLC; it reaches the codec only with a jitter
+ * buffer, rtp_jitter_buffer_plc=false and no cng_plc, else the core conceals) is decoded as a lost
+ * frame (SPEECH_LOST), whatever payload comes with it: the decoder conceals and fades out. Unlike
+ * mod_amr, a payload in the other format (e.g. right after a re-INVITE changed it) is not decoded as
+ * such: it is concealed. Built without opencore-amrwb / vo-amrwbenc (AMRWB_PASSTHROUGH), the module
+ * only relays payloads: one payload type is offered and amrwb.conf is not read.
  *
  * XML Parameters (on/off values: anything switch_true() accepts: true, on, yes, non-zero ...)
  *
@@ -1065,6 +1068,8 @@ static switch_status_t switch_amrwb_decode(switch_codec_t *codec,
 	uint32_t frame_bytes = codec->implementation->decoded_bytes_per_packet;
 	uint32_t room = *decoded_data_len < frame_bytes ? frame_bytes : *decoded_data_len;
 	uint32_t used = 0, next_ts = 0;
+	/* the frame a Q=0 frame is decoded as; the frame itself stays (a SID is relayed with its Q) */
+	uint8_t lost_frame[SWITCH_AMRWB_OUT_MAX_SIZE] = { SWITCH_AMRWB_SPEECH_LOST_TOC };
 	int n, f, skip = 0, frame_type;
 	switch_frame_t *frame = codec->cur_frame;
 
@@ -1134,9 +1139,10 @@ static switch_status_t switch_amrwb_decode(switch_codec_t *codec,
 
 	for (f = skip; f < n; f++) {
 		frame_type = (frames[f][0] >> 3) & 0x0f;
-		/* Q=0: bad frame (bfi), decoded like a lost frame (opencore has no SPEECH_BAD/SID_BAD input) */
-		D_IF_decode(context->decoder_state, frames[f], (int16_t *) ((uint8_t *) decoded_data + (f - skip) * frame_bytes),
-					frame_type <= SWITCH_AMRWB_SID_FRAME_TYPE && !(frames[f][0] & 0x04));
+		/* Q=0: bad frame, decoded as a lost one (opencore has no SPEECH_BAD/SID_BAD input): SPEECH_LOST, which
+		 * keeps the DTX state as it is (bfi would make it NO_DATA, which the decoder takes as DTX) */
+		D_IF_decode(context->decoder_state, (frame_type <= SWITCH_AMRWB_SID_FRAME_TYPE && !(frames[f][0] & 0x04)) ? lost_frame : frames[f],
+					(int16_t *) ((uint8_t *) decoded_data + (f - skip) * frame_bytes), 0);
 	}
 	*decoded_data_len = (n - skip) * frame_bytes;
 

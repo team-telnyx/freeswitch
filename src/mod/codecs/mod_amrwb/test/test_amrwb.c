@@ -216,6 +216,9 @@ static int amrwb_encoded_ft(switch_codec_t *codec, switch_bool_t octet_aligned)
 
 /* encodes one frame: fst_check_int_equals evaluates its arguments twice */
 #define amrwb_check_ft(codec, oa, expected) do { int ft_ = amrwb_encoded_ft((codec), (oa)); fst_check_int_equals(ft_, (expected)); } while (0)
+
+/* any value with side effects (a negotiation): fst_check_int_equals evaluates its arguments twice */
+#define amrwb_check_int(expr, expected) do { int v_ = (int) (expr); fst_check_int_equals(v_, (expected)); } while (0)
 struct amrwb_cmr_feeder {
 	switch_codec_t *reader;
 	int frames;
@@ -315,8 +318,12 @@ static switch_status_t amrwb_reload(const char *settings)
 	switch_xml_binding_t *binding = NULL;
 	const char *err = NULL;
 	switch_status_t status;
+	int i;
 
-	switch_loadable_module_unload_module(SWITCH_GLOBAL_dirs.mod_dir, "mod_amrwb", SWITCH_FALSE, &err);
+	/* codecs of sessions that just ended may still hold the module */
+	for (i = 0; i < 200 && switch_loadable_module_unload_module(SWITCH_GLOBAL_dirs.mod_dir, "mod_amrwb", SWITCH_FALSE, &err) != SWITCH_STATUS_SUCCESS; i++) {
+		switch_yield(10000);
+	}
 	if (settings) {
 		amrwb_conf_settings = settings;
 		switch_xml_bind_search_function_ret(amrwb_conf_lookup, SWITCH_XML_SECTION_CONFIG, NULL, &binding);
@@ -347,53 +354,14 @@ static switch_status_t amrwb_session_media(switch_core_session_t *session, const
 	return switch_core_media_prepare_codecs(session, SWITCH_FALSE);
 }
 
-/* a null-endpoint session that negotiated is not always destroyed on hangup here: its codecs go now,
- * they hold mod_amrwb, which later tests reload */
-static void amrwb_free_session_codecs(switch_core_session_t *session)
+/* the far end's answer on payload type pt (answer_fmtp: its fmtp, NULL none), negotiated as sdp_type (early media
+ * comes as SDP_OFFER); the octet-align the read codec runs, -1 if negotiation failed */
+static int amrwb_answer_on(switch_core_session_t *session, int pt, const char *answer_fmtp, switch_sdp_type_t sdp_type)
 {
-	switch_codec_t *codecs[4];
-	int c, d;
-
-	codecs[0] = switch_core_session_get_read_codec(session);
-	codecs[1] = switch_core_session_get_write_codec(session);
-	codecs[2] = switch_core_session_get_effective_read_codec(session);
-	codecs[3] = switch_core_session_get_effective_write_codec(session);
-	switch_core_session_unset_read_codec(session);
-	switch_core_session_unset_write_codec(session);
-	for (c = 0; c < 4; c++) {
-		for (d = 0; d < c && codecs[d] != codecs[c]; d++);
-		if (d == c && codecs[c] && switch_core_codec_ready(codecs[c])) {
-			switch_core_codec_destroy(codecs[c]);
-		}
-	}
-}
-
-/* our offer, then the far end's answer on our payload type of that framing (answer_fmtp: its fmtp, NULL none);
- * the octet-align the read codec runs, -1 if negotiation failed */
-static int amrwb_answer_framing(switch_core_session_t *session, switch_bool_t pick_oa, const char *answer_fmtp)
-{
-	const char *sdp, *p, *want = pick_oa ? "octet-align=1" : "octet-align=0";
 	char answer[512];
-	int pt = -1, framing;
 	uint8_t proceed = 0;
 	switch_codec_t *read_codec;
 
-	if (amrwb_session_media(session, NULL) != SWITCH_STATUS_SUCCESS) {
-		return -1;
-	}
-	switch_core_media_gen_local_sdp(session, SDP_OFFER, "127.0.0.1", 12345, NULL, 1);
-	if (!(sdp = switch_channel_get_variable(switch_core_session_get_channel(session), "rtp_local_sdp_str"))) {
-		return -1;
-	}
-	for (p = sdp; (p = strstr(p, "a=fmtp:")); p++) {
-		if (strstr(p, want) && strstr(p, want) < strstr(p, "\r\n")) {
-			pt = atoi(p + strlen("a=fmtp:"));
-			break;
-		}
-	}
-	if (pt < 0) {
-		return -1;
-	}
 	switch_snprintf(answer, sizeof(answer),
 		"v=0\r\n"
 		"o=- 2 1 IN IP4 198.51.100.2\r\n"
@@ -404,13 +372,43 @@ static int amrwb_answer_framing(switch_core_session_t *session, switch_bool_t pi
 		"a=rtpmap:%d AMR-WB/16000\r\n"
 		"%s"
 		"a=sendrecv\r\n", pt, pt, answer_fmtp ? switch_core_session_sprintf(session, "a=fmtp:%d %s\r\n", pt, answer_fmtp) : "");
-	if (switch_core_media_negotiate_sdp(session, answer, &proceed, SDP_ANSWER) != 1 ||
+	if (switch_core_media_negotiate_sdp(session, answer, &proceed, sdp_type) != 1 ||
 		!(read_codec = switch_core_session_get_read_codec(session)) || !switch_core_codec_ready(read_codec) || !read_codec->implementation) {
 		return -1;
 	}
-	framing = strstr(read_codec->implementation->fmtp, "octet-align=1") ? 1 : 0;
-	amrwb_free_session_codecs(session);
-	return framing;
+	return strstr(read_codec->implementation->fmtp, "octet-align=1") ? 1 : 0;
+}
+
+/* the payload type of our last SDP whose a=fmtp states want, -1 if none */
+static int amrwb_local_pt(switch_core_session_t *session, const char *want)
+{
+	const char *sdp, *p;
+
+	if (!(sdp = switch_channel_get_variable(switch_core_session_get_channel(session), "rtp_local_sdp_str"))) {
+		return -1;
+	}
+	for (p = sdp; (p = strstr(p, "a=fmtp:")); p++) {
+		if (strstr(p, want) && strstr(p, want) < strstr(p, "\r\n")) {
+			return atoi(p + strlen("a=fmtp:"));
+		}
+	}
+	return -1;
+}
+
+/* our offer, then the far end's answer on our payload type of that framing (answer_fmtp: its fmtp, NULL none);
+ * the octet-align the read codec runs, -1 if negotiation failed */
+static int amrwb_answer_framing(switch_core_session_t *session, switch_bool_t pick_oa, const char *answer_fmtp)
+{
+	int pt;
+
+	if (amrwb_session_media(session, NULL) != SWITCH_STATUS_SUCCESS) {
+		return -1;
+	}
+	switch_core_media_gen_local_sdp(session, SDP_OFFER, "127.0.0.1", 12345, NULL, 1);
+	if ((pt = amrwb_local_pt(session, pick_oa ? "octet-align=1" : "octet-align=0")) < 0) {
+		return -1;
+	}
+	return amrwb_answer_on(session, pt, answer_fmtp, SDP_ANSWER);
 }
 
 FST_CORE_BEGIN(".")
@@ -1786,13 +1784,68 @@ FST_CORE_BEGIN(".")
 		 * octet-align runs what we offered on its payload type (the core fills it in) */
 		FST_SESSION_BEGIN(amrwb_answer_on_our_bandwidth_efficient_type_stays_bandwidth_efficient)
 		{
-			fst_check_int_equals(amrwb_answer_framing(fst_session, SWITCH_FALSE, "mode-set=2"), 0);
+			amrwb_check_int(amrwb_answer_framing(fst_session, SWITCH_FALSE, "mode-set=2"), 0);
 		}
 		FST_SESSION_END()
 
 		FST_SESSION_BEGIN(amrwb_answer_on_our_octet_aligned_type_stays_octet_aligned)
 		{
-			fst_check_int_equals(amrwb_answer_framing(fst_session, SWITCH_TRUE, NULL), 1);
+			amrwb_check_int(amrwb_answer_framing(fst_session, SWITCH_TRUE, NULL), 1);
+		}
+		FST_SESSION_END()
+
+		/* without an fmtp too (force-oa would make it octet aligned) */
+		FST_SESSION_BEGIN(amrwb_answer_without_fmtp_on_our_bandwidth_efficient_type)
+		{
+			amrwb_check_int(amrwb_answer_framing(fst_session, SWITCH_FALSE, NULL), 0);
+		}
+		FST_SESSION_END()
+
+		/* an answer that states octet-align is followed, also against what we offered on its payload type */
+		FST_SESSION_BEGIN(amrwb_answer_stating_octet_align_is_followed)
+		{
+			amrwb_check_int(amrwb_answer_framing(fst_session, SWITCH_FALSE, "octet-align=1; mode-set=2"), 1);
+		}
+		FST_SESSION_END()
+
+		/* early media: a 18x answer to our INVITE is negotiated as SDP_OFFER; before the leg is answered it gets
+		 * the octet-align we offered too */
+		FST_SESSION_BEGIN(amrwb_early_media_answer_runs_the_offered_framing)
+		{
+			int pt;
+
+			fst_requires(switch_channel_direction(switch_core_session_get_channel(fst_session)) == SWITCH_CALL_DIRECTION_OUTBOUND);
+			/* the fst session is answered already: back to the early phase */
+			switch_channel_clear_flag(switch_core_session_get_channel(fst_session), CF_ANSWERED);
+			fst_requires(amrwb_session_media(fst_session, NULL) == SWITCH_STATUS_SUCCESS);
+			switch_core_media_gen_local_sdp(fst_session, SDP_OFFER, "127.0.0.1", 12345, NULL, 1);
+			fst_requires((pt = amrwb_local_pt(fst_session, "octet-align=0")) > 0);
+			amrwb_check_int(amrwb_answer_on(fst_session, pt, "mode-set=2", SDP_OFFER), 0);
+		}
+		FST_SESSION_END()
+
+		/* a re-INVITE we send on an established call (one payload type, the negotiated one): an answer without
+		 * octet-align keeps the framing we offered there, not the one of the implementation registered on that
+		 * payload type number; strict matching, so a wrong framing would re-create the codec */
+		FST_SESSION_BEGIN(amrwb_answer_to_our_reinvite_keeps_the_framing)
+		{
+			uint8_t p = 0;
+			switch_codec_t *read_codec;
+			const char *offer;
+
+			fst_requires(amrwb_session_media(fst_session, "true") == SWITCH_STATUS_SUCCESS);
+			/* the far end offered bandwidth efficient on payload type 100 (our octet-aligned implementation's
+			 * registered number), we answered */
+			offer = "v=0\r\no=- 1 1 IN IP4 198.51.100.1\r\ns=-\r\nt=0 0\r\nm=audio 56210 RTP/AVP 100\r\nc=IN IP4 198.51.100.1\r\n"
+				"a=rtpmap:100 AMR-WB/16000\r\na=fmtp:100 octet-align=0; mode-set=2\r\na=sendrecv\r\n";
+			fst_requires(switch_core_media_negotiate_sdp(fst_session, offer, &p, SDP_OFFER) == 1);
+			switch_core_media_gen_local_sdp(fst_session, SDP_ANSWER, "127.0.0.1", 12345, NULL, 1);
+			switch_channel_mark_answered(switch_core_session_get_channel(fst_session));
+			fst_requires((read_codec = switch_core_session_get_read_codec(fst_session)) && strstr(read_codec->implementation->fmtp, "octet-align=0"));
+			/* our re-INVITE, and its answer without octet-align */
+			switch_core_media_gen_local_sdp(fst_session, SDP_OFFER, "127.0.0.1", 12345, NULL, 1);
+			fst_requires(amrwb_local_pt(fst_session, "octet-align=0") == 100);
+			amrwb_check_int(amrwb_answer_on(fst_session, 100, "mode-set=2", SDP_ANSWER), 0);
 		}
 		FST_SESSION_END()
 
@@ -1823,7 +1876,6 @@ FST_CORE_BEGIN(".")
 					fst_check(read_codec->private_info == context);
 				}
 			}
-			amrwb_free_session_codecs(fst_session);
 		}
 		FST_SESSION_END()
 
