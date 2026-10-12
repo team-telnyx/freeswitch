@@ -2801,7 +2801,7 @@ SWITCH_DECLARE(int) switch_loadable_module_get_codecs_sorted(const switch_codec_
 
 	switch_mutex_lock(loadable_modules.mutex);
 
-	for (x = 0; x < preflen; x++) {
+	for (x = 0; x < preflen && i < arraylen; x++) {
 		char *name, buf[256], jbuf[256], *modname = NULL, *fmtp = NULL;
 		uint32_t interval = 0, rate = 0, bit = 0, channels = 1;
 
@@ -2855,8 +2855,10 @@ SWITCH_DECLARE(int) switch_loadable_module_get_codecs_sorted(const switch_codec_
 				if (imp->codec_type != SWITCH_CODEC_TYPE_VIDEO) {
 					uint32_t crate = !strcasecmp(imp->iananame, "g722") ? imp->samples_per_second : imp->actual_samples_per_second;
 					if (imp->matches_fmtp && strcasecmp(imp->iananame, "opus")) {
-						/* Add all codecs but OPUS that implement the fmtp matching */
-						array[i++] = imp;
+						/* Add all codecs but OPUS that implement the fmtp matching, as far as the array allows */
+						if (i < arraylen) {
+							array[i++] = imp;
+						}
 						continue;
 					}
 
@@ -2878,6 +2880,9 @@ SWITCH_DECLARE(int) switch_loadable_module_get_codecs_sorted(const switch_codec_
 					}
 				}
 
+				if (i >= arraylen) {
+					goto found;
+				}
 				if (!zstr(fmtp)) {
 					switch_set_string(fmtp_array[i], fmtp);
 				}
@@ -2911,7 +2916,9 @@ SWITCH_DECLARE(int) switch_loadable_module_get_codecs_sorted(const switch_codec_
 					continue;
 				}
 
-				array[i++] = imp;
+				if (i < arraylen) {
+					array[i++] = imp;
+				}
 				goto found;
 
 			}
@@ -2920,7 +2927,7 @@ SWITCH_DECLARE(int) switch_loadable_module_get_codecs_sorted(const switch_codec_
 
 			UNPROTECT_INTERFACE(codec_interface);
 
-			if (i > arraylen) {
+			if (i >= arraylen) {
 				break;
 			}
 

@@ -34,6 +34,50 @@
 
 #include <test/switch_test.h>
 
+/* a codec with fmtp matching and several implementations, as AMR and AMR-WB register */
+static switch_status_t fmtp_test_matches(const char *fmtp, const char *codec_fmtp)
+{
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static switch_status_t fmtp_test_init(switch_codec_t *codec, switch_codec_flag_t flags, const switch_codec_settings_t *codec_settings)
+{
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static switch_status_t fmtp_test_encode(switch_codec_t *codec, switch_codec_t *other_codec, void *decoded_data, uint32_t decoded_data_len,
+										uint32_t decoded_rate, void *encoded_data, uint32_t *encoded_data_len, uint32_t *encoded_rate, unsigned int *flag)
+{
+	return SWITCH_STATUS_FALSE;
+}
+
+static switch_status_t fmtp_test_decode(switch_codec_t *codec, switch_codec_t *other_codec, void *encoded_data, uint32_t encoded_data_len,
+										uint32_t encoded_rate, void *decoded_data, uint32_t *decoded_data_len, uint32_t *decoded_rate, unsigned int *flag)
+{
+	return SWITCH_STATUS_FALSE;
+}
+
+static switch_status_t fmtp_test_destroy(switch_codec_t *codec)
+{
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static switch_status_t fmtp_test_load(switch_loadable_module_interface_t **module_interface, switch_memory_pool_t *pool)
+{
+	switch_codec_interface_t *codec_interface;
+	int pt;
+
+	*module_interface = switch_loadable_module_create_module_interface(pool, "mod_fmtp_test");
+	SWITCH_ADD_CODEC(codec_interface, "FMTPTEST");
+	for (pt = 96; pt < 100; pt++) {
+		switch_core_codec_add_implementation(pool, codec_interface, SWITCH_CODEC_TYPE_AUDIO, pt, "FMTPTEST", NULL,
+											 8000, 8000, 12200, 20000, 160, 320, 0, 1, 1,
+											 fmtp_test_init, fmtp_test_encode, fmtp_test_decode, fmtp_test_destroy);
+		codec_interface->implementations->matches_fmtp = fmtp_test_matches;
+	}
+	return SWITCH_STATUS_SUCCESS;
+}
+
 FST_CORE_BEGIN("./conf")
 {
 	FST_SUITE_BEGIN(switch_core_codec)
@@ -349,6 +393,39 @@ FST_CORE_BEGIN("./conf")
 		}
 		FST_TEST_END()
 
+		/* the near-match lookups pass a one-slot array: a codec with fmtp matching and several
+		 * implementations must not be written past it */
+		FST_TEST_BEGIN(test_get_codecs_sorted_stays_in_the_array)
+		{
+			struct {
+				const switch_codec_implementation_t *search[1];
+				const switch_codec_implementation_t *guard[4];
+			} slots;
+			char fmtp[SWITCH_MAX_CODECS][MAX_FMTP_LEN] = { { 0 } };
+			char *prefs[2] = { "FMTPTEST", "FMTPTEST@20i" };
+			const switch_codec_implementation_t *all[SWITCH_MAX_CODECS] = { 0 };
+			const switch_codec_implementation_t *sentinel = (const switch_codec_implementation_t *) &slots;
+			int num, g;
+
+			fst_requires(switch_loadable_module_build_dynamic("mod_fmtp_test", fmtp_test_load, NULL, NULL, SWITCH_FALSE) == SWITCH_STATUS_SUCCESS);
+
+			for (g = 0; g < 4; g++) slots.guard[g] = sentinel;
+			slots.search[0] = NULL;
+			num = switch_loadable_module_get_codecs_sorted(slots.search, fmtp, 1, prefs, 1);
+			fst_check_int_equals(num, 1);
+			fst_check(slots.search[0] != NULL);
+			for (g = 0; g < 4; g++) fst_check(slots.guard[g] == sentinel);
+
+			/* two preferences, room for one */
+			num = switch_loadable_module_get_codecs_sorted(slots.search, fmtp, 1, prefs, 2);
+			fst_check_int_equals(num, 1);
+			for (g = 0; g < 4; g++) fst_check(slots.guard[g] == sentinel);
+
+			/* with room, every implementation */
+			num = switch_loadable_module_get_codecs_sorted(all, fmtp, SWITCH_MAX_CODECS, prefs, 1);
+			fst_check_int_equals(num, 4);
+		}
+		FST_TEST_END()
 	}
 	FST_SUITE_END()
 }
