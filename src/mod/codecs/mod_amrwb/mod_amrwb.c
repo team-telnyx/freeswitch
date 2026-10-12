@@ -57,9 +57,9 @@
  * the session write codec; a request stays across a codec reset (switch_core_codec_reset), as does
  * the encoder's mode stepping. Undecodable payloads (also: more than 3 bytes after the frames,
  * unless RTP padding) are concealed as lost frames, their CMR ignored, with a WARNING at the 1st,
- * 251st, ... of them. For a packet the jitter buffer lost (SFF_PLC) the payload is not used: the
- * first of consecutive losses repeats the last decoded frame (closer to the lost audio than
- * concealment by the decoder), the next ones are decoded as lost frames, which the decoder fades out.
+ * 251st, ... of them. A packet the jitter buffer lost (SFF_PLC; only with rtp_jitter_buffer_plc off,
+ * else the core conceals) is decoded as a lost frame (SPEECH_LOST), whatever payload comes with it:
+ * the decoder conceals and fades out.
  *
  * XML Parameters (on/off values: anything switch_true() accepts: true, on, yes, non-zero ...)
  *
@@ -77,11 +77,11 @@
  *		Default off. Vary bitrate according to feedback from RTCP, within the negotiated
  *		mode-set. Only with RTCP enabled.
  * force-oa
- *		Default off. Octet aligned when the far end's fmtp does not state octet-align, in offers
- *		and answers alike (RFC 4867: bandwidth efficient): for peers that leave it out but mean
- *		octet aligned; interop only. The core then matches the octet-aligned implementation, and
- *		our answer to such an offer states octet-align=1. A stated octet-align is followed. Our
- *		offers are not changed.
+ *		Default off. Octet aligned when an offer does not state octet-align (RFC 4867: bandwidth
+ *		efficient): for peers that leave it out but mean octet aligned; interop only. The core
+ *		then matches the octet-aligned implementation, and our answer states octet-align=1. A
+ *		stated octet-align is followed. An answer that leaves it out gets the one we offered on
+ *		its payload type (the core fills it in). Our offers are not changed.
  * force-be
  *		Default off. Bandwidth efficient when the fmtp does not state octet-align. That is
  *		already the RFC 4867 default: its only effect is to cancel force-oa.
@@ -206,10 +206,6 @@ struct amrwb_context {
 	/* enc_mode lowered or raised by adjust-bitrate (kept across switch_core_codec_reset) */
 	switch_bool_t adjusted;
 	uint32_t concealed;
-	/* the last frame decoded, repeated for the first of consecutive lost packets (SFF_PLC) */
-	uint8_t last_frame[SWITCH_AMRWB_OUT_MAX_SIZE];
-	switch_bool_t have_last_frame;
-	uint32_t lost_run;
 	/* RTP timestamp right after the frames of the last decoded payload */
 	uint32_t next_ts;
 	switch_bool_t next_ts_valid;
@@ -771,6 +767,7 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 		switch_mutex_lock(context->decoded_sid_mutex);
 		memset(&context->encoder_state, 0, sizeof(*context) - offsetof(struct amrwb_context, encoder_state));
 		context->destroyed = SWITCH_TRUE;
+		context->cmr = context->cur_mode = SWITCH_AMRWB_CMR_NONE;
 		switch_mutex_unlock(context->decoded_sid_mutex);
 	} else {
 		context = NULL;
@@ -930,6 +927,8 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 				context->encoder_state = NULL;
 			}
 			context->destroyed = SWITCH_TRUE;
+			context->cmr = context->cur_mode = SWITCH_AMRWB_CMR_NONE;
+			context->adjusted = SWITCH_FALSE;
 			codec->private_info = context;
 			return SWITCH_STATUS_FALSE;
 		}
@@ -1081,24 +1080,10 @@ static switch_status_t switch_amrwb_decode(switch_codec_t *codec,
 	context->decoded_sid_pcm_len = 0;
 	switch_mutex_unlock(context->decoded_sid_mutex);
 
-	/* a packet the jitter buffer lost: the payload that comes with it is not the lost one. The
-	 * first of consecutive losses repeats the last frame (closer to the lost audio than concealment
-	 * by the decoder), the next ones are decoded as lost frames, which the decoder mutes step by step */
-	if (flag && (*flag & SFF_PLC)) {
-		if (context->have_last_frame && context->lost_run++ == 0) {
-			frame_type = (context->last_frame[0] >> 3) & 0x0f;
-			D_IF_decode(context->decoder_state, context->last_frame, (int16_t *) decoded_data,
-						frame_type <= SWITCH_AMRWB_SID_FRAME_TYPE && !(context->last_frame[0] & 0x04));
-		} else {
-			frames[0][0] = SWITCH_AMRWB_SPEECH_LOST_TOC;
-			D_IF_decode(context->decoder_state, frames[0], (int16_t *) decoded_data, 0);
-		}
-		*decoded_data_len = frame_bytes;
-		return SWITCH_STATUS_SUCCESS;
-	}
-
-	/* no payload: the core asks for a lost frame */
-	if (!encoded_data_len) {
+	/* a packet the jitter buffer lost (the payload that comes with it is not the lost one), or no
+	 * payload: a lost frame, which the decoder conceals and mutes step by step. Repeating the last
+	 * frame instead measured worse on speech: it updates the decoder's predictors twice */
+	if ((flag && (*flag & SFF_PLC)) || !encoded_data_len) {
 		goto lost;
 	}
 
@@ -1154,9 +1139,6 @@ static switch_status_t switch_amrwb_decode(switch_codec_t *codec,
 					frame_type <= SWITCH_AMRWB_SID_FRAME_TYPE && !(frames[f][0] & 0x04));
 	}
 	*decoded_data_len = (n - skip) * frame_bytes;
-	memcpy(context->last_frame, frames[n - 1], sizeof(context->last_frame));
-	context->have_last_frame = SWITCH_TRUE;
-	context->lost_run = 0;
 
 	/* a SID alone in its payload: the encoder of the other leg may relay it */
 	if (n == 1 && ((frames[0][0] >> 3) & 0x0f) == SWITCH_AMRWB_SID_FRAME_TYPE) {
@@ -1177,8 +1159,6 @@ conceal:
 	}
 
 lost:
-	/* a jitter buffer loss right after this one is not repeated over it */
-	context->lost_run++;
 	frames[0][0] = SWITCH_AMRWB_SPEECH_LOST_TOC;
 	D_IF_decode(context->decoder_state, frames[0], (int16_t *) decoded_data, 0);
 	*decoded_data_len = frame_bytes;
@@ -1350,9 +1330,10 @@ static switch_bool_t has_unsupported_option(const char *fmtp)
 
 static switch_status_t matches_fmtp(const char *fmtp, const char *codec_fmtp)
 {
-	/* fmtp: the far end's (force-oa applies); codec_fmtp: an implementation's, which states it */
+	/* one is the far end's fmtp, the other an implementation's, in either order (the core calls it
+	 * both ways); an implementation's states octet-align, so force-oa applies to the far end's */
 	int oa1 = extract_octet_align(fmtp, amrwb_default_octet_align());
-	int oa2 = extract_octet_align(codec_fmtp, 0);
+	int oa2 = extract_octet_align(codec_fmtp, amrwb_default_octet_align());
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AMRWB fmtp: %s, codec_fmtp: %s\n", switch_str_nil(fmtp), switch_str_nil(codec_fmtp));
 
