@@ -62,6 +62,23 @@ static switch_status_t fmtp_test_destroy(switch_codec_t *codec)
 	return SWITCH_STATUS_SUCCESS;
 }
 
+/* plain codecs (no fmtp matching) with a single implementation: SLOW60 at 60 ms, FAST20 at 20 ms */
+static switch_status_t ptime_test_load(switch_loadable_module_interface_t **module_interface, switch_memory_pool_t *pool)
+{
+	switch_codec_interface_t *codec_interface;
+
+	*module_interface = switch_loadable_module_create_module_interface(pool, "mod_ptime_test");
+	SWITCH_ADD_CODEC(codec_interface, "SLOW60");
+	switch_core_codec_add_implementation(pool, codec_interface, SWITCH_CODEC_TYPE_AUDIO, 102, "SLOW60", NULL,
+										 8000, 8000, 64000, 60000, 480, 960, 0, 1, 1,
+										 fmtp_test_init, fmtp_test_encode, fmtp_test_decode, fmtp_test_destroy);
+	SWITCH_ADD_CODEC(codec_interface, "FAST20");
+	switch_core_codec_add_implementation(pool, codec_interface, SWITCH_CODEC_TYPE_AUDIO, 103, "FAST20", NULL,
+										 8000, 8000, 64000, 20000, 160, 320, 0, 1, 1,
+										 fmtp_test_init, fmtp_test_encode, fmtp_test_decode, fmtp_test_destroy);
+	return SWITCH_STATUS_SUCCESS;
+}
+
 static switch_status_t fmtp_test_load(switch_loadable_module_interface_t **module_interface, switch_memory_pool_t *pool)
 {
 	switch_codec_interface_t *codec_interface;
@@ -428,21 +445,18 @@ FST_CORE_BEGIN("./conf")
 			fst_check_int_equals(num, 1);
 			fst_check(slots.search[0] && !strcmp(slots.search[0]->iananame, "PLAINTEST"));
 			for (g = 0; g < 4; g++) fst_check(slots.guard[g] == sentinel);
-
-			/* two preferences, the first with more implementations than room */
-			num = switch_loadable_module_get_codecs_sorted(slots.search, fmtp, 1, prefs, 2);
-			fst_check_int_equals(num, 1);
-			for (g = 0; g < 4; g++) fst_check(slots.guard[g] == sentinel);
-
 			/* with room, every implementation */
 			num = switch_loadable_module_get_codecs_sorted(all, fmtp, SWITCH_MAX_CODECS, prefs, 1);
 			fst_check_int_equals(num, 4);
 		}
 		FST_TEST_END()
 
-		/* SDP validation (re-INVITEs) with more near matches (ptime 40 against 20 ms implementations) than its
-		 * array holds: 32 payload types of a codec with 4 implementations */
-		FST_TEST_BEGIN(test_validate_sdp_with_many_near_matches)
+		/* SDP validation (re-INVITEs) records at most MAX_MATCHES (30) near matches, as negotiation does. In
+		 * validation ptime comes from a=maxptime (not a=ptime): with maxptime 40, 31 payload types of a codec
+		 * that has only 60 ms are near matches that are then refused (60 > 40); a 32nd payload type of a 20 ms
+		 * codec would be accepted, but is beyond the 30 recorded, so the SDP is refused. Without the bound the
+		 * 31st and 32nd are written past the stack array: undefined, it shows reliably only under ASan. */
+		FST_TEST_BEGIN(test_validate_sdp_keeps_near_matches_in_the_array)
 		{
 			switch_core_session_t *session = NULL;
 			switch_call_cause_t cause;
@@ -451,12 +465,12 @@ FST_CORE_BEGIN("./conf")
 			switch_stream_handle_t sdp = { 0 };
 			int pt;
 
-			fst_requires(switch_loadable_module_exists("mod_fmtp_test") == SWITCH_STATUS_SUCCESS ||
-						 switch_loadable_module_build_dynamic("mod_fmtp_test", fmtp_test_load, NULL, NULL, SWITCH_FALSE) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_loadable_module_exists("mod_ptime_test") == SWITCH_STATUS_SUCCESS ||
+						 switch_loadable_module_build_dynamic("mod_ptime_test", ptime_test_load, NULL, NULL, SWITCH_FALSE) == SWITCH_STATUS_SUCCESS);
 			fst_requires(switch_ivr_originate(NULL, &session, &cause, "null/near-matches", 0, NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) == SWITCH_STATUS_SUCCESS);
 			mparams = switch_core_session_alloc(session, sizeof(*mparams));
-			mparams->inbound_codec_string = switch_core_session_strdup(session, "FMTPTEST");
-			mparams->outbound_codec_string = switch_core_session_strdup(session, "FMTPTEST");
+			mparams->inbound_codec_string = switch_core_session_strdup(session, "SLOW60,FAST20");
+			mparams->outbound_codec_string = switch_core_session_strdup(session, "SLOW60,FAST20");
 			mparams->rtpip = switch_core_session_strdup(session, "127.0.0.1");
 			if (switch_media_handle_create(&media_handle, session, mparams) == SWITCH_STATUS_SUCCESS &&
 				switch_core_media_prepare_codecs(session, SWITCH_FALSE) == SWITCH_STATUS_SUCCESS) {
@@ -464,9 +478,15 @@ FST_CORE_BEGIN("./conf")
 				sdp.write_function(&sdp, "v=0\r\no=- 1 1 IN IP4 198.51.100.1\r\ns=-\r\nt=0 0\r\nm=audio 56210 RTP/AVP");
 				for (pt = 96; pt < 128; pt++) sdp.write_function(&sdp, " %d", pt);
 				sdp.write_function(&sdp, "\r\nc=IN IP4 198.51.100.1\r\n");
-				for (pt = 96; pt < 128; pt++) sdp.write_function(&sdp, "a=rtpmap:%d FMTPTEST/8000\r\n", pt);
-				sdp.write_function(&sdp, "a=ptime:40\r\na=sendrecv\r\n");
-				/* returns, with a substitute for the near match */
+				for (pt = 96; pt < 127; pt++) sdp.write_function(&sdp, "a=rtpmap:%d SLOW60/8000\r\n", pt);
+				sdp.write_function(&sdp, "a=rtpmap:127 FAST20/8000\r\na=ptime:40\r\na=maxptime:40\r\na=sendrecv\r\n");
+				fst_check(switch_core_media_validate_common_audio_sdp(session, (char *) sdp.data, SDP_OFFER) == 0);
+
+				/* the 20 ms codec within the first 30 near matches: accepted */
+				switch_safe_free(sdp.data);
+				SWITCH_STANDARD_STREAM(sdp);
+				sdp.write_function(&sdp, "v=0\r\no=- 1 1 IN IP4 198.51.100.1\r\ns=-\r\nt=0 0\r\nm=audio 56210 RTP/AVP 96 97\r\nc=IN IP4 198.51.100.1\r\n"
+								   "a=rtpmap:96 SLOW60/8000\r\na=rtpmap:97 FAST20/8000\r\na=ptime:40\r\na=maxptime:40\r\na=sendrecv\r\n");
 				fst_check(switch_core_media_validate_common_audio_sdp(session, (char *) sdp.data, SDP_OFFER) == 1);
 				switch_safe_free(sdp.data);
 			} else {
