@@ -1184,6 +1184,8 @@ FST_CORE_BEGIN(".")
 		{
 			switch_codec_t codec = { 0 };
 			static const unsigned char cmr0_reserved_oa[] = { 0x00, 0x54 };
+			/* CMR 0, FT 12, then zeros */
+			static const unsigned char cmr0_reserved_be[] = { 0x06, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00 };
 			unsigned char out[SWITCH_RECOMMENDED_BUFFER_SIZE];
 			uint32_t out_len = sizeof(out), rate = 8000;
 			unsigned int flag = 0;
@@ -1192,6 +1194,16 @@ FST_CORE_BEGIN(".")
 			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr0_reserved_oa, sizeof(cmr0_reserved_oa), 8000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
 			amr_check_ft(&codec, SWITCH_TRUE, 2);
 			switch_core_codec_destroy(&codec);
+
+			/* bandwidth efficient, FT 12: it reads as an octet aligned payload only with reserved bits set
+			 * (not one a sender makes): concealed as well */
+			fst_requires(amr_init(&codec, "mode-set=0,1,2;octet-align=0", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr0_reserved_be, sizeof(cmr0_reserved_be), 8000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(out_len, 320);
+			amr_check_ft(&codec, SWITCH_FALSE, 2);
+			switch_core_codec_destroy(&codec);
+			fst_check(amr_decodes_as_lost("octet-align=0", cmr0_reserved_be, sizeof(cmr0_reserved_be), fst_pool));
 		}
 		FST_TEST_END()
 

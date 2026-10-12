@@ -55,8 +55,9 @@
  * payload always is): a sender cannot make the codec produce more audio than time passes.
  * A payload that is not valid in the negotiated format but is in the other one is decoded as
  * such: the far end may still send the old format right after a re-INVITE changed it. Some are
- * valid in both; the other format is taken when the negotiated one reads with a Q=0 frame, RTP
- * padding or (octet aligned) reserved or padding bits set, and the other one without.
+ * valid in both. The other format is taken only when it reads as an ordinary payload (no Q=0
+ * frame, no RTP padding, octet aligned: no reserved or padding bit set) and the negotiated one
+ * does not; other payloads in the negotiated format, if valid, else concealed.
  * Encoding sends one frame (20 ms) per payload, from the first 20 ms of its input (less is
  * padded with silence), and never a mode request (CMR 15). The encoder makes no SID frames
  * (no DTX); received SID frames are decoded to comfort noise.
@@ -994,12 +995,13 @@ static switch_status_t switch_amr_decode(switch_codec_t *codec,
 	/* the negotiated format, else the other one: right after a re-INVITE changed the format the
 	 * far end may still send the old one. Some payloads are valid in both formats (an octet aligned
 	 * mode 0-2 frame reads as a bandwidth efficient mode 0 frame with Q=0): the other format is
-	 * taken when the negotiated one does not read as an ordinary payload and the other one does */
+	 * taken when it reads as an ordinary payload and the negotiated one does not; a payload valid
+	 * in neither as an ordinary one is not guessed at */
 	oa = switch_test_flag(context, AMR_OPT_OCTET_ALIGN) ? SWITCH_TRUE : SWITCH_FALSE;
 	n = amr_unpack_valid(payload, encoded_data_len, oa, frames, &unusual);
 	if (!n || unusual) {
 		other_n = amr_unpack_valid(payload, encoded_data_len, !oa, other, &other_unusual);
-		if (other_n && (!n || !other_unusual)) {
+		if (other_n && !other_unusual) {
 			n = other_n;
 			memcpy(frames, other, sizeof(frames));
 			if (switch_atomic_read(&global_debug)) {
