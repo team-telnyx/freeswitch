@@ -75,6 +75,11 @@ static switch_status_t fmtp_test_load(switch_loadable_module_interface_t **modul
 											 fmtp_test_init, fmtp_test_encode, fmtp_test_decode, fmtp_test_destroy);
 		codec_interface->implementations->matches_fmtp = fmtp_test_matches;
 	}
+	/* and a plain codec with one implementation */
+	SWITCH_ADD_CODEC(codec_interface, "PLAINTEST");
+	switch_core_codec_add_implementation(pool, codec_interface, SWITCH_CODEC_TYPE_AUDIO, 101, "PLAINTEST", NULL,
+										 8000, 8000, 64000, 20000, 160, 320, 0, 1, 1,
+										 fmtp_test_init, fmtp_test_encode, fmtp_test_decode, fmtp_test_destroy);
 	return SWITCH_STATUS_SUCCESS;
 }
 
@@ -403,6 +408,7 @@ FST_CORE_BEGIN("./conf")
 			} slots;
 			char fmtp[SWITCH_MAX_CODECS][MAX_FMTP_LEN] = { { 0 } };
 			char *prefs[2] = { "FMTPTEST", "FMTPTEST@20i" };
+			char *plain_first[2] = { "PLAINTEST", "FMTPTEST" };
 			const switch_codec_implementation_t *all[SWITCH_MAX_CODECS] = { 0 };
 			const switch_codec_implementation_t *sentinel = (const switch_codec_implementation_t *) &slots;
 			int num, g;
@@ -416,7 +422,14 @@ FST_CORE_BEGIN("./conf")
 			fst_check(slots.search[0] != NULL);
 			for (g = 0; g < 4; g++) fst_check(slots.guard[g] == sentinel);
 
-			/* two preferences, room for one */
+			/* two preferences, room for one: the first fills the array, the second must not be added */
+			for (g = 0; g < 4; g++) slots.guard[g] = sentinel;
+			num = switch_loadable_module_get_codecs_sorted(slots.search, fmtp, 1, plain_first, 2);
+			fst_check_int_equals(num, 1);
+			fst_check(slots.search[0] && !strcmp(slots.search[0]->iananame, "PLAINTEST"));
+			for (g = 0; g < 4; g++) fst_check(slots.guard[g] == sentinel);
+
+			/* the same preference twice counts once */
 			num = switch_loadable_module_get_codecs_sorted(slots.search, fmtp, 1, prefs, 2);
 			fst_check_int_equals(num, 1);
 			for (g = 0; g < 4; g++) fst_check(slots.guard[g] == sentinel);
