@@ -7979,7 +7979,11 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 							}
 						}
 					} else if (!strcasecmp(map->rm_encoding, "AMR")) {
-						if (amr_offerings_n > 1) {
+						/* the offered framing and options decide the implementation, as for AMR-WB */
+						if (!strcasecmp(imp->iananame, "AMR") && imp->matches_fmtp &&
+							SWITCH_STATUS_SUCCESS != imp->matches_fmtp(map->rm_fmtp, imp->fmtp)) {
+							match = 0;
+						} else if (amr_offerings_n > 1) {
 							if (amr_offerings_rejected_n + 1 < amr_offerings_n) {
 								if (SWITCH_STATUS_IGNORE == switch_core_codec_parse_fmtp(map->rm_encoding, map->rm_fmtp, map->rm_rate, &codec_fmtp)) {
 									match = 0;
