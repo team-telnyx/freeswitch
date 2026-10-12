@@ -2718,17 +2718,21 @@ SWITCH_DECLARE(int) switch_loadable_module_get_codecs(const switch_codec_impleme
 				uint32_t default_ptime = switch_default_ptime(imp->iananame, imp->ianacode);
 
 				if (imp->microseconds_per_packet / 1000 == (int)default_ptime) {
-					array[i++] = imp;
+					if (i < arraylen) {
+						array[i++] = imp;
+					}
 					goto found;
 				}
 			}
 			/* oh well we will use what we have */
-			array[i++] = codec_interface->implementations;
+			if (i < arraylen) {
+				array[i++] = codec_interface->implementations;
+			}
 		}
 
 	found:
 
-		if (i > arraylen) {
+		if (i >= arraylen) {
 			break;
 		}
 

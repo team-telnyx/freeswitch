@@ -424,7 +424,7 @@ FST_CORE_BEGIN("./conf")
 				const switch_codec_implementation_t *guard[4];
 			} slots;
 			char fmtp[SWITCH_MAX_CODECS][MAX_FMTP_LEN] = { { 0 } };
-			char *prefs[2] = { "FMTPTEST", "FMTPTEST@20i" };
+			char *prefs[1] = { "FMTPTEST" };
 			char *plain_first[2] = { "PLAINTEST", "FMTPTEST" };
 			const switch_codec_implementation_t *all[SWITCH_MAX_CODECS] = { 0 };
 			const switch_codec_implementation_t *sentinel = (const switch_codec_implementation_t *) &slots;
@@ -448,6 +448,24 @@ FST_CORE_BEGIN("./conf")
 			/* with room, every implementation */
 			num = switch_loadable_module_get_codecs_sorted(all, fmtp, SWITCH_MAX_CODECS, prefs, 1);
 			fst_check_int_equals(num, 4);
+		}
+		FST_TEST_END()
+
+		/* switch_loadable_module_get_codecs (every loaded codec) stays within the caller's array */
+		FST_TEST_BEGIN(test_get_codecs_stays_in_the_array)
+		{
+			struct {
+				const switch_codec_implementation_t *array[2];
+				const switch_codec_implementation_t *guard[4];
+			} slots;
+			const switch_codec_implementation_t *sentinel = (const switch_codec_implementation_t *) &slots;
+			int num, g;
+
+			/* more codecs are loaded than that (PCMU, PCMA, L16, the test codecs ...) */
+			for (g = 0; g < 4; g++) slots.guard[g] = sentinel;
+			num = switch_loadable_module_get_codecs(slots.array, 2);
+			fst_check_int_equals(num, 2);
+			for (g = 0; g < 4; g++) fst_check(slots.guard[g] == sentinel);
 		}
 		FST_TEST_END()
 
