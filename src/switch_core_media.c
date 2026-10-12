@@ -6722,7 +6722,13 @@ SWITCH_DECLARE(int16_t) switch_core_media_validate_common_audio_sdp(switch_core_
 													codec_ms, near_match->number_of_channels);
 
 					prefs[0] = tmp;
-					num = switch_loadable_module_get_codecs_sorted(search, fmtp, 1, prefs, 1);
+					/* a codec with fmtp matching (AMR, AMR-WB ...): the near match is the implementation its fmtp
+					 * matched; a substitute by name would be any of them */
+					if (near_match->matches_fmtp && strcasecmp(near_match->iananame, "opus")) {
+						num = 0;
+					} else {
+						num = switch_loadable_module_get_codecs_sorted(search, fmtp, 1, prefs, 1);
+					}
 
 					if (num) {
 						timp = search[0];
