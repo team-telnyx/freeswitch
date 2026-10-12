@@ -429,7 +429,7 @@ FST_CORE_BEGIN("./conf")
 			fst_check(slots.search[0] && !strcmp(slots.search[0]->iananame, "PLAINTEST"));
 			for (g = 0; g < 4; g++) fst_check(slots.guard[g] == sentinel);
 
-			/* the same preference twice counts once */
+			/* two preferences, the first with more implementations than room */
 			num = switch_loadable_module_get_codecs_sorted(slots.search, fmtp, 1, prefs, 2);
 			fst_check_int_equals(num, 1);
 			for (g = 0; g < 4; g++) fst_check(slots.guard[g] == sentinel);
@@ -437,6 +437,43 @@ FST_CORE_BEGIN("./conf")
 			/* with room, every implementation */
 			num = switch_loadable_module_get_codecs_sorted(all, fmtp, SWITCH_MAX_CODECS, prefs, 1);
 			fst_check_int_equals(num, 4);
+		}
+		FST_TEST_END()
+
+		/* SDP validation (re-INVITEs) with more near matches (ptime 40 against 20 ms implementations) than its
+		 * array holds: 32 payload types of a codec with 4 implementations */
+		FST_TEST_BEGIN(test_validate_sdp_with_many_near_matches)
+		{
+			switch_core_session_t *session = NULL;
+			switch_call_cause_t cause;
+			switch_media_handle_t *media_handle = NULL;
+			switch_core_media_params_t *mparams;
+			switch_stream_handle_t sdp = { 0 };
+			int pt;
+
+			fst_requires(switch_loadable_module_exists("mod_fmtp_test") == SWITCH_STATUS_SUCCESS ||
+						 switch_loadable_module_build_dynamic("mod_fmtp_test", fmtp_test_load, NULL, NULL, SWITCH_FALSE) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_ivr_originate(NULL, &session, &cause, "null/near-matches", 0, NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) == SWITCH_STATUS_SUCCESS);
+			mparams = switch_core_session_alloc(session, sizeof(*mparams));
+			mparams->inbound_codec_string = switch_core_session_strdup(session, "FMTPTEST");
+			mparams->outbound_codec_string = switch_core_session_strdup(session, "FMTPTEST");
+			mparams->rtpip = switch_core_session_strdup(session, "127.0.0.1");
+			if (switch_media_handle_create(&media_handle, session, mparams) == SWITCH_STATUS_SUCCESS &&
+				switch_core_media_prepare_codecs(session, SWITCH_FALSE) == SWITCH_STATUS_SUCCESS) {
+				SWITCH_STANDARD_STREAM(sdp);
+				sdp.write_function(&sdp, "v=0\r\no=- 1 1 IN IP4 198.51.100.1\r\ns=-\r\nt=0 0\r\nm=audio 56210 RTP/AVP");
+				for (pt = 96; pt < 128; pt++) sdp.write_function(&sdp, " %d", pt);
+				sdp.write_function(&sdp, "\r\nc=IN IP4 198.51.100.1\r\n");
+				for (pt = 96; pt < 128; pt++) sdp.write_function(&sdp, "a=rtpmap:%d FMTPTEST/8000\r\n", pt);
+				sdp.write_function(&sdp, "a=ptime:40\r\na=sendrecv\r\n");
+				/* returns, with a substitute for the near match */
+				fst_check(switch_core_media_validate_common_audio_sdp(session, (char *) sdp.data, SDP_OFFER) == 1);
+				switch_safe_free(sdp.data);
+			} else {
+				fst_check(!"media handle");
+			}
+			switch_channel_hangup(switch_core_session_get_channel(session), SWITCH_CAUSE_NORMAL_CLEARING);
+			switch_core_session_rwunlock(session);
 		}
 		FST_TEST_END()
 	}
