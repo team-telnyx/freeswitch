@@ -7034,8 +7034,9 @@ done:
 }
 
 /*
- * The octet-align our last SDP states for a payload type ("octet-align=0" / "octet-align=1"), NULL if it
- * has no such a=fmtp line: what we offered on it, for an answer that leaves it out (AMR / AMR-WB)
+ * The octet-align our last SDP states for a payload type ("octet-align=0" / "octet-align=1", the default
+ * when its a=fmtp line has none), NULL if it has no a=fmtp line for it: what we offered on it, for an
+ * answer that leaves it out (AMR / AMR-WB)
  */
 static const char *amr_offered_octet_align(switch_media_handle_t *smh, int pt)
 {
@@ -7052,8 +7053,9 @@ static const char *amr_offered_octet_align(switch_media_handle_t *smh, int pt)
 			continue;
 		}
 		eol = line + strcspn(line, "\r\n");
+		/* an fmtp of ours without octet-align (e.g. rtp_force_audio_fmtp) offered the RFC 4867 default */
 		if (!(oa = switch_stristr("octet-align", line)) || oa > eol) {
-			return NULL;
+			return "octet-align=0";
 		}
 		for (oa += strlen("octet-align"); *oa == ' ' || *oa == '='; oa++);
 		return *oa == '1' ? "octet-align=1" : "octet-align=0";
@@ -7925,7 +7927,8 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 				 * payload type, as our last SDP states it (RFC 4867 8.3.1 wants it returned unmodified; many
 				 * stacks drop the default). The codec default for an fmtp without octet-align (bandwidth
 				 * efficient, or octet aligned with the codec's force-oa) is for offers. Early media answers to
-				 * our INVITE come here as SDP_OFFER: before the outbound leg is answered they are answers too.
+				 * our INVITE come here as SDP_OFFER: before the outbound leg is answered they are answers too
+				 * (so is an early-dialog UPDATE offer from the far end, whose answer states our octet-align).
 				 */
 				if ((sdp_type == SDP_ANSWER ||
 					 (switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_OUTBOUND && !switch_channel_test_flag(session->channel, CF_ANSWERED))) &&
