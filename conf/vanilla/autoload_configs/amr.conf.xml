@@ -17,7 +17,7 @@
 		<param name="volte" value="0"/>
 		<!-- vary the bitrate within the mode-set according to RTCP feedback -->
 		<param name="adjust-bitrate" value="0"/>
-		<!-- octet aligned for incoming offers that do not state octet-align (interop only) -->
+		<!-- octet aligned when the far end does not state octet-align, in offers and answers (interop only) -->
 		<param name="force-oa" value="0"/>
 		<!--param name="force-be" value="0"/-->
 		<!-- of an offer with several AMR payload types, skip the other framing -->
