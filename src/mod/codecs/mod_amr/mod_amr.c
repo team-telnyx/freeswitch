@@ -72,9 +72,9 @@
  * the session write codec; a request stays across a codec reset (switch_core_codec_reset), as does
  * the encoder's mode stepping. Undecodable payloads (also: more than 3 bytes after the frames,
  * unless RTP padding) are concealed as lost frames, their CMR ignored, with a WARNING at the 1st,
- * 251st, ... of them. A packet the jitter buffer lost (SFF_PLC; only with rtp_jitter_buffer_plc off,
- * else the core conceals) is decoded as a lost frame, whatever payload comes with it: the decoder
- * conceals and fades out.
+ * 251st, ... of them. A packet the jitter buffer lost (SFF_PLC; it reaches the codec only with a jitter
+ * buffer, rtp_jitter_buffer_plc=false and no cng_plc, else the core conceals) is decoded as a lost
+ * frame, whatever payload comes with it: the decoder conceals and fades out.
  *
  * XML Parameters (on/off values: anything switch_true() accepts: true, on, yes, non-zero ...)
  *
