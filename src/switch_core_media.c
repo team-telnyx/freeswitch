@@ -6651,7 +6651,8 @@ SWITCH_DECLARE(int16_t) switch_core_media_validate_common_audio_sdp(switch_core_
 						}
 					}
 
-					/* AMR / AMR-WB on a dynamic payload type below 96, as negotiation matches it (by its fmtp) */
+					/* AMR / AMR-WB on a dynamic payload type below 96: negotiation matches it where the codec has fmtp
+					 * matching (else negotiation still refuses it) */
 					if (!match && map->rm_pt < 96 && !zstr(map->rm_encoding) && !strcasecmp(rm_encoding, imp->iananame) &&
 						(!strcasecmp(imp->iananame, "AMR") || !strcasecmp(imp->iananame, "AMR-WB")) &&
 						(remote_codec_rate == codec_rate || fmtp_remote_codec_rate == imp->actual_samples_per_second)) {
@@ -7034,33 +7035,43 @@ done:
 }
 
 /*
- * The octet-align our last SDP states for a payload type ("octet-align=0" / "octet-align=1", the default
- * when its a=fmtp line has none), NULL if it has no a=fmtp line for it: what we offered on it, for an
- * answer that leaves it out (AMR / AMR-WB)
+ * The octet-align our last SDP states for a payload type of an AMR / AMR-WB rtpmap of ours (encoding) in its
+ * m=audio section: "octet-align=0" / "octet-align=1", the default when its a=fmtp line has none or there is no
+ * a=fmtp line; NULL if our rtpmap for that payload type is another codec or missing. What we offered on it,
+ * for an answer that leaves it out.
  */
-static const char *amr_offered_octet_align(switch_media_handle_t *smh, int pt)
+static const char *amr_offered_octet_align(switch_media_handle_t *smh, int pt, const char *encoding)
 {
-	const char *sdp = smh->mparams->local_sdp_str, *line, *eol, *oa;
+	const char *sdp = smh->mparams->local_sdp_str, *audio, *end, *line, *eol, *oa;
 	char key[32];
-	size_t klen;
+	size_t klen, elen = strlen(encoding);
 
-	if (zstr(sdp)) {
+	if (zstr(sdp) || !(audio = strstr(sdp, "m=audio "))) {
 		return NULL;
 	}
-	klen = switch_snprintf(key, sizeof(key), "a=fmtp:%d ", pt);
-	for (line = sdp; (line = strstr(line, key)); line += klen) {
-		if (line != sdp && line[-1] != '\n') {
-			continue;
-		}
-		eol = line + strcspn(line, "\r\n");
-		/* an fmtp of ours without octet-align (e.g. rtp_force_audio_fmtp) offered the RFC 4867 default */
-		if (!(oa = switch_stristr("octet-align", line)) || oa > eol) {
-			return "octet-align=0";
-		}
-		for (oa += strlen("octet-align"); *oa == ' ' || *oa == '='; oa++);
-		return *oa == '1' ? "octet-align=1" : "octet-align=0";
+	if (!(end = strstr(audio, "\nm="))) {
+		end = audio + strlen(audio);
 	}
-	return NULL;
+
+	/* our rtpmap for the payload type is this codec */
+	klen = switch_snprintf(key, sizeof(key), "a=rtpmap:%d ", pt);
+	for (line = audio; (line = strstr(line, key)) && line < end && line[-1] != '\n'; line += klen);
+	if (!line || line >= end || strncasecmp(line + klen, encoding, elen) || line[klen + elen] != '/') {
+		return NULL;
+	}
+
+	klen = switch_snprintf(key, sizeof(key), "a=fmtp:%d ", pt);
+	for (line = audio; (line = strstr(line, key)) && line < end && line[-1] != '\n'; line += klen);
+	if (!line || line >= end) {
+		return "octet-align=0";
+	}
+	eol = line + strcspn(line, "\r\n");
+	/* an fmtp of ours without octet-align (e.g. rtp_force_audio_fmtp) offered the RFC 4867 default */
+	if (!(oa = switch_stristr("octet-align", line)) || oa > eol) {
+		return "octet-align=0";
+	}
+	for (oa += strlen("octet-align"); *oa == ' ' || *oa == '='; oa++);
+	return *oa == '1' ? "octet-align=1" : "octet-align=0";
 }
 
 //?
@@ -7934,7 +7945,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 					 (switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_OUTBOUND && !switch_channel_test_flag(session->channel, CF_ANSWERED))) &&
 					(!strcasecmp(map->rm_encoding, "AMR") || !strcasecmp(map->rm_encoding, "AMR-WB")) &&
 					(zstr(map->rm_fmtp) || !switch_stristr("octet-align", map->rm_fmtp))) {
-					const char *offered = amr_offered_octet_align(smh, map->rm_pt);
+					const char *offered = amr_offered_octet_align(smh, map->rm_pt, map->rm_encoding);
 
 					if (offered) {
 						map->rm_fmtp = switch_core_session_sprintf(session, "%s%s%s", zstr(map->rm_fmtp) ? "" : map->rm_fmtp, zstr(map->rm_fmtp) ? "" : "; ", offered);
