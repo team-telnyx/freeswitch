@@ -67,8 +67,9 @@
  *
  * A received mode request (CMR 0-7) replaces the previous one and caps the encoding mode at the
  * highest mode of the mode-set not above it (the lowest one if none is), honouring
- * mode-change-neighbor and mode-change-period; CMR 15 ends a request, 8-14 are ignored (RFC 4867
- * 4.3.1, TS 26.114 7.5.2.1.2.2). The session read codec, or the media bug copy of it, passes them to
+ * mode-change-neighbor and mode-change-period; CMR 15 ends a request. CMR 8-14, and a mode outside
+ * the mode-set of the received fmtp, are ignored (RFC 4867 4.3.1); with mode-set-overwrite a mode of
+ * that mode-set we do not encode is followed (TS 26.114 7.5.2.1.2.2). The session read codec, or the media bug copy of it, passes them to
  * the session write codec; a request stays across a codec reset (switch_core_codec_reset), as does
  * the encoder's mode stepping. Undecodable payloads (also: more than 3 bytes after the frames,
  * unless RTP padding) are concealed as lost frames, their CMR ignored, with a WARNING at the 1st,
@@ -203,6 +204,8 @@ struct amr_context {
 	void *encoder_state;
 	void *decoder_state;
 	uint16_t enc_modes;
+	/* the mode-set of the received fmtp (0: none, any mode): mode requests outside it are ignored */
+	uint16_t peer_modes;
 	switch_byte_t enc_mode;
 	uint32_t change_period;
 	switch_byte_t flags;
@@ -329,16 +332,9 @@ static struct amr_cmr_slot *amr_session_cmr(switch_codec_t *codec, struct amr_co
 }
 
 /* CMR 15: no mode request; the session read codec publishes it for the session write codec */
-static void amr_set_cmr(switch_codec_t *codec, struct amr_context *context, uint8_t cmr)
+static void amr_store_cmr(switch_codec_t *codec, struct amr_context *context, uint8_t cmr)
 {
 	struct amr_cmr_slot *shared;
-
-	/* not a speech mode or 15 (no request): ignored (RFC 4867 4.3.1). A speech mode outside the
-	 * mode-set still replaces the previous request; the encoder uses the highest allowed mode not
-	 * above it (TS 26.114 7.5.2.1.2.2) */
-	if (cmr != SWITCH_AMR_CMR_NONE && cmr >= SWITCH_AMR_MODES - 1) {
-		return;
-	}
 
 	context->cmr = cmr;
 
@@ -346,6 +342,19 @@ static void amr_set_cmr(switch_codec_t *codec, struct amr_context *context, uint
 		switch_atomic_set(&shared->owner, context->id);
 		switch_atomic_set(&shared->cmr, cmr);
 	}
+}
+
+/* a received CMR: not a speech mode or 15 (no request), or outside the mode-set the peer signalled:
+ * ignored, the previous request stays (RFC 4867 4.3.1). A mode of that mode-set that we do not encode
+ * (mode-set-overwrite) caps the encoder at the highest allowed mode not above it */
+static void amr_set_cmr(switch_codec_t *codec, struct amr_context *context, uint8_t cmr)
+{
+	if (cmr != SWITCH_AMR_CMR_NONE &&
+		(cmr >= SWITCH_AMR_MODES - 1 || (context->peer_modes && !(context->peer_modes & (1 << cmr))))) {
+		return;
+	}
+
+	amr_store_cmr(codec, context, cmr);
 }
 
 static uint32_t amr_bits(const uint8_t *buf, uint32_t pos, int n)
@@ -819,6 +828,7 @@ static switch_status_t switch_amr_init(switch_codec_t *codec, switch_codec_flag_
 		}
 		amr_set_implementation(codec, switch_test_flag(context, AMR_OPT_OCTET_ALIGN) ? 1 : 0);
 
+		context->peer_modes = context->enc_modes;
 		amr_mode_sets(context->enc_modes, &answer_modes, &context->enc_modes);
 
 		fmtptmp_pos = switch_snprintf(fmtptmp, sizeof(fmtptmp), "mode-set=");
@@ -902,14 +912,15 @@ static switch_status_t switch_amr_init(switch_codec_t *codec, switch_codec_flag_
 		codec->private_info = context;
 
 		/* after a reset the encoder goes on from the mode it sent (mode-change-neighbor and
-		 * -period hold across it), and a received mode request stays until the next one */
+		 * -period hold across it), and a received mode request stays until the next one, also
+		 * when the new mode-set does not have it */
 		if (kept.valid) {
 			if (kept.cur_mode < SWITCH_AMR_MODES - 1) {
 				context->cur_mode = amr_clamp_mode(context, kept.cur_mode);
 				context->frames = kept.frames;
 			}
 			if (kept.cmr != SWITCH_AMR_CMR_NONE) {
-				amr_set_cmr(codec, context, kept.cmr);
+				amr_store_cmr(codec, context, kept.cmr);
 			}
 		}
 
