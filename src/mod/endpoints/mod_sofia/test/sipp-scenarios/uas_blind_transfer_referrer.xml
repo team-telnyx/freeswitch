@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!-- Blind transfer test, B: answers, sends REFER to the target extension 1 s later, answers every
+     NOTIFY, and ends on a BYE from FreeSWITCH or with its own BYE 4 s after the last request. -->
+<scenario name="blind transfer referrer">
+  <recv request="INVITE" crlf="true">
+    <action>
+      <ereg regexp="\n(m|Contact): *[^\r\n]*sip:([a-zA-Z0-9_.@:+-]+)" search_in="msg" check_it="true" assign_to="c0,c1,fs_contact"/>
+      <ereg regexp="\n(f|From): *([^\r\n]+)" search_in="msg" check_it="true" assign_to="f0,f1,inv_from"/>
+      <ereg regexp="\n(t|To): *([^\r\n]+)" search_in="msg" check_it="true" assign_to="t0,t1,inv_to"/>
+    </action>
+  </recv>
+
+  <send>
+    <![CDATA[
+
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_From:]
+      [last_To:];tag=[pid]B[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:referrer@[local_ip]:[local_port]>
+      Allow: INVITE,ACK,CANCEL,BYE,REFER,NOTIFY,OPTIONS
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=B 1 1 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[local_ip_type] [local_ip]
+      t=0 0
+      m=audio [auto_media_port] RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+      a=sendrecv
+    ]]>
+  </send>
+
+  <recv request="ACK"/>
+
+  <pause milliseconds="1000"/>
+
+  <send retrans="500">
+    <![CDATA[
+
+      REFER sip:[$fs_contact] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+      From: [$inv_to];tag=[pid]B[call_number]
+      To: [$inv_from]
+      Call-ID: [call_id]
+      CSeq: 101 REFER
+      Contact: <sip:referrer@[local_ip]:[local_port]>
+      Refer-To: <sip:7878780002@[local_ip]:5080>
+      Max-Forwards: 70
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <recv response="202"/>
+
+  <label id="wait"/>
+  <recv request="NOTIFY|BYE" regexp_match="true" timeout="4000" ontimeout="own_bye">
+    <action>
+      <ereg regexp="CSeq: *[0-9]+ NOTIFY" search_in="msg" check_it="false" assign_to="is_notify"/>
+      <ereg regexp="CSeq: *[0-9]+ BYE" search_in="msg" check_it="false" assign_to="is_bye"/>
+    </action>
+  </recv>
+  <!-- SIPp keeps a matched variable set, so test BYE first. -->
+  <nop next="got_bye" test="is_bye"/>
+  <nop next="got_notify" test="is_notify"/>
+
+  <label id="got_bye"/>
+  <send next="end">
+    <![CDATA[
+
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <label id="got_notify"/>
+  <send next="wait">
+    <![CDATA[
+
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <label id="own_bye"/>
+  <send retrans="500">
+    <![CDATA[
+
+      BYE sip:[$fs_contact] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+      From: [$inv_to];tag=[pid]B[call_number]
+      To: [$inv_from]
+      Call-ID: [call_id]
+      CSeq: 102 BYE
+      Max-Forwards: 70
+      Content-Length: 0
+
+    ]]>
+  </send>
+  <recv response="200"/>
+
+  <label id="end"/>
+  <Reference variables="c0,c1,f0,f1,t0,t1"/>
+</scenario>
