@@ -2000,6 +2000,25 @@ FST_CORE_BEGIN(".")
 		}
 		FST_SESSION_END()
 
+		/* an early-dialog UPDATE offer from the far end (the endpoint marks it CF_REMOTE_SDP_OFFER) is an offer,
+		 * not an early media answer: without octet-align it is bandwidth efficient (force-oa off), also on a
+		 * payload type we offered octet aligned */
+		FST_SESSION_BEGIN(amrwb_early_update_offer_keeps_its_framing)
+		{
+			int pt;
+
+			fst_requires(amrwb_reload("<param name=\"force-oa\" value=\"0\"/>") == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_channel_direction(switch_core_session_get_channel(fst_session)) == SWITCH_CALL_DIRECTION_OUTBOUND);
+			switch_channel_clear_flag(switch_core_session_get_channel(fst_session), CF_ANSWERED);
+			fst_requires(amrwb_session_media(fst_session, NULL) == SWITCH_STATUS_SUCCESS);
+			switch_core_media_gen_local_sdp(fst_session, SDP_OFFER, "127.0.0.1", 12345, NULL, 1);
+			fst_requires((pt = amrwb_local_pt(fst_session, "octet-align=1")) > 0);
+			switch_channel_set_flag(switch_core_session_get_channel(fst_session), CF_REMOTE_SDP_OFFER);
+			amrwb_check_int(amrwb_answer_on(fst_session, pt, "mode-set=2", SDP_OFFER), 0);
+			switch_channel_clear_flag(switch_core_session_get_channel(fst_session), CF_REMOTE_SDP_OFFER);
+		}
+		FST_SESSION_END()
+
 		/* a re-INVITE we send on an established call (one payload type, the negotiated one): an answer without
 		 * octet-align keeps the framing we offered there, not the one of the implementation registered on that
 		 * payload type number; strict matching, so a wrong framing would re-create the codec */

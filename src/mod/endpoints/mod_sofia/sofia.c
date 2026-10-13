@@ -10041,7 +10041,9 @@ void sofia_handle_sip_i_update(nua_t *nua, sofia_profile_t *profile, nua_handle_
 				switch_core_media_set_sdp_codec_string(session, r_sdp, SDP_TYPE_REQUEST);
 				sofia_glue_pass_sdp(tech_pvt, (char *) r_sdp);
 				sofia_set_flag(tech_pvt, TFLAG_NEW_SDP);
+				switch_channel_set_flag(channel, CF_REMOTE_SDP_OFFER);
 				match = sofia_media_negotiate_sdp(session, r_sdp, SDP_TYPE_REQUEST);
+				switch_channel_clear_flag(channel, CF_REMOTE_SDP_OFFER);
 				if (match) {
 					switch_channel_set_variable(channel, SWITCH_R_SDP_VARIABLE, r_sdp);
 					tech_pvt->mparams.remote_sdp_str = switch_core_session_strdup(session, r_sdp);

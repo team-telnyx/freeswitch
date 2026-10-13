@@ -6730,12 +6730,13 @@ SWITCH_DECLARE(int16_t) switch_core_media_validate_common_audio_sdp(switch_core_
 													codec_ms, near_match->number_of_channels);
 
 					prefs[0] = tmp;
-					/* a codec with fmtp matching (AMR, AMR-WB ...): the near match is the implementation its fmtp
-					 * matched; a substitute by name would be any of them */
-					if (near_match->matches_fmtp && strcasecmp(near_match->iananame, "opus")) {
+					num = switch_loadable_module_get_codecs_sorted(search, fmtp, 1, prefs, 1);
+					/* a codec with fmtp matching (AMR, AMR-WB ...): the lookup by name ignores the interval and
+					 * returns the head of its implementations; keep the near match, which the fmtp matched, if
+					 * the substitute's fmtp does not match (e.g. the other payload framing) */
+					if (num && near_match->matches_fmtp && strcasecmp(near_match->iananame, "opus") &&
+						(!search[0]->matches_fmtp || search[0]->matches_fmtp(near_matches[j].map->rm_fmtp, search[0]->fmtp) != SWITCH_STATUS_SUCCESS)) {
 						num = 0;
-					} else {
-						num = switch_loadable_module_get_codecs_sorted(search, fmtp, 1, prefs, 1);
 					}
 
 					if (num) {
@@ -7938,11 +7939,13 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 				 * payload type, as our last SDP states it (RFC 4867 8.3.1 wants it returned unmodified; many
 				 * stacks drop the default). The codec default for an fmtp without octet-align (bandwidth
 				 * efficient, or octet aligned with the codec's force-oa) is for offers. Early media answers to
-				 * our INVITE come here as SDP_OFFER: before the outbound leg is answered they are answers too
-				 * (so is an early-dialog UPDATE offer from the far end, whose answer states our octet-align).
+				 * our INVITE come here as SDP_OFFER: before the outbound leg is answered they are answers too,
+				 * unless the endpoint marks a real offer (CF_REMOTE_SDP_OFFER: an early-dialog UPDATE from the
+				 * far end, which keeps the default and is answered with the framing it offered).
 				 */
 				if ((sdp_type == SDP_ANSWER ||
-					 (switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_OUTBOUND && !switch_channel_test_flag(session->channel, CF_ANSWERED))) &&
+					 (switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_OUTBOUND && !switch_channel_test_flag(session->channel, CF_ANSWERED) &&
+					  !switch_channel_test_flag(session->channel, CF_REMOTE_SDP_OFFER))) &&
 					(!strcasecmp(map->rm_encoding, "AMR") || !strcasecmp(map->rm_encoding, "AMR-WB")) &&
 					(zstr(map->rm_fmtp) || !switch_stristr("octet-align", map->rm_fmtp))) {
 					const char *offered = amr_offered_octet_align(smh, map->rm_pt, map->rm_encoding);
@@ -8196,12 +8199,13 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 									codec_ms, near_match->number_of_channels);
 
 					prefs[0] = tmp;
-					/* a codec with fmtp matching (AMR, AMR-WB ...): the near match is the implementation its fmtp
-					 * matched; a substitute by name would be any of them */
-					if (near_match->matches_fmtp && strcasecmp(near_match->iananame, "opus")) {
+					num = switch_loadable_module_get_codecs_sorted(search, fmtp, 1, prefs, 1);
+					/* a codec with fmtp matching (AMR, AMR-WB ...): the lookup by name ignores the interval and
+					 * returns the head of its implementations; keep the near match, which the fmtp matched, if
+					 * the substitute's fmtp does not match (e.g. the other payload framing) */
+					if (num && near_match->matches_fmtp && strcasecmp(near_match->iananame, "opus") &&
+						(!search[0]->matches_fmtp || search[0]->matches_fmtp(near_matches[j].map->rm_fmtp, search[0]->fmtp) != SWITCH_STATUS_SUCCESS)) {
 						num = 0;
-					} else {
-						num = switch_loadable_module_get_codecs_sorted(search, fmtp, 1, prefs, 1);
 					}
 
 					if (num) {
