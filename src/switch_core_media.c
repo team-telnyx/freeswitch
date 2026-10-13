@@ -19890,6 +19890,13 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 
 	if (frame->codec) {
 		session->raw_write_frame.datalen = session->raw_write_frame.buflen;
+		/* room for the channel expansion below, which is done in place: a codec may decode more than one
+		 * packet's worth of audio (e.g. several AMR frames in one payload) */
+		if (session->write_impl.number_of_channels > frame->codec->implementation->number_of_channels) {
+			uint32_t in_ch = frame->codec->implementation->number_of_channels, out_ch = session->write_impl.number_of_channels;
+
+			session->raw_write_frame.datalen = session->raw_write_frame.buflen / 2 / out_ch * 2 * in_ch;
+		}
 		frame->codec->cur_frame = frame;
 		session->write_codec->cur_frame = frame;
 		status = switch_core_codec_decode(frame->codec,

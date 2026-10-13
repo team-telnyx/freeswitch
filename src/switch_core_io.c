@@ -505,6 +505,13 @@ cnt_with_cng:
 
 		if (read_frame->codec || (is_cng && session->plc)) {
 			session->raw_read_frame.datalen = session->raw_read_frame.buflen;
+			/* room for the channel expansion below, which is done in place: a codec may decode more than one
+			 * packet's worth of audio (e.g. several AMR frames in one payload) */
+			if (read_frame->codec && session->read_impl.number_of_channels > read_frame->codec->implementation->number_of_channels) {
+				uint32_t in_ch = read_frame->codec->implementation->number_of_channels, out_ch = session->read_impl.number_of_channels;
+
+				session->raw_read_frame.datalen = session->raw_read_frame.buflen / 2 / out_ch * 2 * in_ch;
+			}
 
 			if (is_cng) {
 				if (session->plc) {

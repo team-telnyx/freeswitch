@@ -358,6 +358,21 @@ static switch_status_t amrwb_reload(const char *settings)
 	return status;
 }
 
+/* the largest frame a write-replace bug saw */
+static uint32_t amrwb_max_write_len = 0;
+
+static switch_bool_t amrwb_write_len_bug(switch_media_bug_t *bug, void *user_data, switch_abc_type_t type)
+{
+	if (type == SWITCH_ABC_TYPE_WRITE_REPLACE) {
+		switch_frame_t *frame = switch_core_media_bug_get_write_replace_frame(bug);
+
+		if (frame && frame->datalen > amrwb_max_write_len) {
+			amrwb_max_write_len = frame->datalen;
+		}
+	}
+	return SWITCH_TRUE;
+}
+
 /* telephone-event payload type of our offers, 0 none */
 static int amrwb_te = 0;
 
@@ -1997,6 +2012,55 @@ FST_CORE_BEGIN(".")
 			switch_core_media_gen_local_sdp(fst_session, SDP_OFFER, "127.0.0.1", 12345, NULL, 1);
 			fst_requires((pt = amrwb_local_pt(fst_session, "octet-align=0")) > 0);
 			amrwb_check_int(amrwb_answer_on(fst_session, pt, "mode-set=2", SDP_OFFER), 0);
+		}
+		FST_SESSION_END()
+
+		/* a payload of 12 frames written to a leg with a stereo codec: the core decodes it and expands it to
+		 * two channels in place, and must leave the decoder room for that (7680 bytes would become 15360) */
+		FST_SESSION_BEGIN(amrwb_multi_frame_payload_to_a_stereo_leg_fits)
+		{
+			switch_codec_t encoder = { 0 }, decoder = { 0 }, stereo = { 0 };
+			switch_media_bug_t *bug = NULL;
+			unsigned char frames[12][64], payload[1024];
+			int16_t pcm[320] = { 0 };
+			uint32_t len, rate = 16000;
+			unsigned int flag = 0;
+			switch_frame_t frame = { 0 };
+			int f;
+
+			fst_requires(amrwb_init(&encoder, "mode-set=0,1,2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			for (f = 0; f < 12; f++) {
+				len = sizeof(frames[f]);
+				if (switch_core_codec_encode(&encoder, NULL, pcm, sizeof(pcm), 16000, frames[f], &len, &rate, &flag) != SWITCH_STATUS_SUCCESS) break;
+			}
+			switch_core_codec_destroy(&encoder);
+			fst_requires(f == 12);
+			fst_requires(switch_core_codec_init(&stereo, "L16", NULL, NULL, 16000, 20, 2, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
+												NULL, switch_core_session_get_pool(fst_session)) == SWITCH_STATUS_SUCCESS);
+			if (switch_core_session_set_write_codec(fst_session, &stereo) == SWITCH_STATUS_SUCCESS &&
+				amrwb_init(&decoder, "mode-set=0,1,2;octet-align=1", SWITCH_CODEC_FLAG_DECODE, switch_core_session_get_pool(fst_session)) == SWITCH_STATUS_SUCCESS &&
+				switch_core_media_bug_add(fst_session, "amrwb_test", NULL, amrwb_write_len_bug, NULL, 0, SMBF_WRITE_REPLACE, &bug) == SWITCH_STATUS_SUCCESS) {
+				frame.codec = &decoder;
+				frame.data = payload;
+				frame.datalen = amrwb_payload(frames, 12, SWITCH_TRUE, payload, sizeof(payload));
+				frame.buflen = sizeof(payload);
+				frame.timestamp = 0;
+				frame.samples = 12 * 320;
+				frame.rate = 16000;
+				frame.channels = 1;
+				amrwb_max_write_len = 0;
+				fst_check(switch_core_session_write_frame(fst_session, &frame, SWITCH_IO_FLAG_NONE, 0) == SWITCH_STATUS_SUCCESS);
+				fst_check(amrwb_max_write_len > 0);
+				fst_check(amrwb_max_write_len <= SWITCH_RECOMMENDED_BUFFER_SIZE);
+			} else {
+				fst_check(!"write codec, decoder or media bug");
+			}
+			if (bug) {
+				switch_core_media_bug_remove(fst_session, &bug);
+			}
+			switch_core_session_set_write_codec(fst_session, NULL);
+			switch_core_codec_destroy(&decoder);
+			switch_core_codec_destroy(&stereo);
 		}
 		FST_SESSION_END()
 
