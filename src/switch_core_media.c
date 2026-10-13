@@ -6159,6 +6159,27 @@ static int same_codec_framing(switch_core_session_t *session, switch_codec_t *co
 	return same;
 }
 
+/*
+ * A re-offer carrying a different fmtp than the one we stored fails
+ * fmtp_check_match() and allocates a fresh payload map, and only
+ * switch_core_media_set_codec() ever fills in fmtp_out. Keeping the
+ * codec means it is not called, so the answer would advertise the
+ * codec with no a=fmtp at all. Carry the fmtp of the codec we are
+ * keeping over to the new payload map.
+ */
+static void keep_codec_fmtp(switch_core_session_t *session, switch_rtp_engine_t *a_engine, const switch_codec_implementation_t *selected_imp)
+{
+	if (a_engine->cur_payload_map && selected_imp && switch_core_codec_ready(&a_engine->write_codec) &&
+		!zstr(a_engine->write_codec.fmtp_out) &&
+		same_codec_impl(a_engine->write_codec.implementation, selected_imp) &&
+		zstr(a_engine->cur_payload_map->fmtp_out)) {
+		a_engine->cur_payload_map->fmtp_out = switch_core_session_strdup(session, a_engine->write_codec.fmtp_out);
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+						  "Keeping fmtp [%s] for %s on the new payload map\n",
+						  a_engine->cur_payload_map->fmtp_out, a_engine->read_impl.iananame);
+	}
+}
+
 static void greedy_sort(switch_media_handle_t *smh, struct matches *matches, int m_idx, const switch_codec_implementation_t **codec_array, int total_codecs)
 {
 	int j = 0, f = 0, g;
@@ -8327,30 +8348,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 							switch_clear_flag(&a_engine->read_codec, SWITCH_CODEC_FLAG_RESET_PENDING);
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Not resetting codec. We stick to %s\n", a_engine->read_impl.iananame);
 
-							/*
-							 * A re-offer carrying a different fmtp than the one we stored fails
-							 * fmtp_check_match() and allocates a fresh payload map, and only
-							 * switch_core_media_set_codec() ever fills in fmtp_out. Keeping the
-							 * codec means it is not called, so the answer would advertise the
-							 * codec with no a=fmtp at all. Carry the fmtp of the codec we are
-							 * keeping over to the new payload map.
-							 */
-							if (a_engine->cur_payload_map && switch_core_codec_ready(&a_engine->write_codec) &&
-								!zstr(a_engine->write_codec.fmtp_out) &&
-								same_codec_impl(a_engine->write_codec.implementation, selected_imp)) {
-								const char *kept = NULL;
-
-								if (zstr(a_engine->cur_payload_map->fmtp_out)) {
-									a_engine->cur_payload_map->fmtp_out = switch_core_session_strdup(session, a_engine->write_codec.fmtp_out);
-									kept = a_engine->cur_payload_map->fmtp_out;
-								}
-
-								if (kept) {
-									switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-													  "Keeping fmtp [%s] for %s on the new payload map\n",
-													  kept, a_engine->read_impl.iananame);
-								}
-							}
+							keep_codec_fmtp(session, a_engine, selected_imp);
 						} else if (same_codec_name) {
 							/*
 							 * The codec already in use, at a different implementation, ptime,
@@ -8379,6 +8377,26 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 							 */
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Deferring codec reset for %s\n", a_engine->read_impl.iananame);
 						}
+					} else if (selected_imp && a_engine->cur_payload_map && switch_core_codec_ready(&a_engine->read_codec) &&
+							   !strcasecmp(selected_imp->iananame, a_engine->read_impl.iananame) &&
+							   !same_codec_framing(session, &a_engine->read_codec, a_engine->cur_payload_map->rm_fmtp)) {
+						/*
+						 * The running codec latched a payload framing (AMR octet-align, say) that
+						 * the selected payload no longer has. Keeping it would leave us sending
+						 * and expecting the old framing, so reset now: the answer is generated
+						 * before the deferred reset in the read loop runs, and it takes a=fmtp
+						 * from the payload map that switch_core_media_set_codec() fills in.
+						 */
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Force reset codec for %s (payload framing changed)\n",
+										  a_engine->read_impl.iananame);
+						if (switch_core_media_set_codec(session, 2, smh->mparams->codec_flags) != SWITCH_STATUS_SUCCESS) {
+							match = 0;
+						} else {
+							a_engine->reset_codec = 0;
+							if (switch_core_codec_ready(&a_engine->read_codec)) {
+								switch_clear_flag(&a_engine->read_codec, SWITCH_CODEC_FLAG_RESET_PENDING);
+							}
+						}
 					} else {
 						for(z = 0; z < m_idx && smh->num_negotiated_codecs < SWITCH_MAX_CODECS; z++) { 
 							if (!(!switch_core_codec_ready(&a_engine->read_codec) ||
@@ -8391,6 +8409,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 									switch_clear_flag(&a_engine->read_codec, SWITCH_CODEC_FLAG_RESET_PENDING);
 								}
 								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Not resetting codec. We stick to %s\n", a_engine->read_impl.iananame);
+								keep_codec_fmtp(session, a_engine, selected_imp);
 								break;
 							} 
 						}
