@@ -1849,7 +1849,9 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 			event = switch_channel_get_variable(channel, "sip_blind_transfer_event");
 			uuid = switch_channel_get_variable(channel, "blind_transfer_uuid");
 
-			if (event && uuid) {
+			/* Only a leg still parked for this result: if it left CS_PARK
+			   (moved by uuid_transfer or uuid_bridge), the result is stale. */
+			if (event && uuid && switch_channel_get_state(channel) == CS_PARK) {
 				/* Default failure sipfrag: also the one sent when the transferred
 				   leg is already down, because the locate below then fails. */
 				char payload_str[255] = "SIP/2.0 403 Forbidden\r\n";
@@ -1863,11 +1865,10 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 					switch_core_session_t *other_session = switch_core_session_locate(uuid);
 					if (other_session) {
 						switch_channel_t *other_channel = switch_core_session_get_channel(other_session);
-						/* The locate refuses channels in CS_HANGUP or later; peer_alive
-						   re-checks in case the leg went down after the locate. */
 						const char *invite_failure_status = switch_channel_get_variable(other_channel, "sip_invite_failure_status");
 						const char *invite_failure_str = switch_channel_get_variable(other_channel, "sip_invite_failure_phrase");
-						peer_alive = !switch_channel_down_nosig(other_channel);
+						/* The locate refuses channels that are already down. */
+						peer_alive = SWITCH_TRUE;
 						if (!zstr(invite_failure_status) && !zstr(invite_failure_str)) {
 							snprintf(payload_str, sizeof(payload_str), "SIP/2.0 %s %s\r\n", invite_failure_status, invite_failure_str);
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
@@ -1900,6 +1901,11 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 						switch_channel_hangup(channel, SWITCH_CAUSE_BLIND_TRANSFER);
 					}
 				}
+
+				/* The result is delivered: a later one finds nothing to answer.
+				   Cleared last, because event and uuid point into these variables. */
+				switch_channel_set_variable(channel, "sip_blind_transfer_event", NULL);
+				switch_channel_set_variable(channel, "blind_transfer_uuid", NULL);
 			}
 
 		}

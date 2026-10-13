@@ -31,15 +31,16 @@
 #include <switch.h>
 #include <test/switch_test.h>
 
-/* Counts BLIND_TRANSFER_RESPONSE messages delivered to the parked peer. */
+/* Counts BLIND_TRANSFER_RESPONSE messages delivered to the parked peer. The hook
+   writes numeric_arg before the atomic increment, which publishes it to the reader. */
 static switch_atomic_t blind_transfer_response_count;
-static int blind_transfer_response_numeric_arg = -1;
+static volatile int blind_transfer_response_numeric_arg = -1;
 
 static switch_status_t blind_transfer_response_hook(switch_core_session_t *session, switch_core_session_message_t *msg)
 {
 	if (msg->message_id == SWITCH_MESSAGE_INDICATE_BLIND_TRANSFER_RESPONSE) {
-		switch_atomic_inc(&blind_transfer_response_count);
 		blind_transfer_response_numeric_arg = msg->numeric_arg;
+		switch_atomic_inc(&blind_transfer_response_count);
 	}
 	return SWITCH_STATUS_SUCCESS;
 }
@@ -68,6 +69,18 @@ static void wait_for_response(void)
 	for (i = 0; i < 500 && switch_atomic_read(&blind_transfer_response_count) == 0; ++i) {
 		switch_yield(10000);
 	}
+}
+
+/* Waits up to about 5 s for the hung-up leg to finish its hangup state, where the
+   teardown producer runs, so that every response it could send has arrived. */
+static void wait_for_destroy(switch_channel_t *channel)
+{
+	int i;
+
+	for (i = 0; i < 500 && switch_channel_get_state(channel) != CS_DESTROY; ++i) {
+		switch_yield(10000);
+	}
+	switch_yield(100000);
 }
 
 /* Removes the hook and ends the peer. */
@@ -302,7 +315,7 @@ FST_CORE_BEGIN("./conf")
 			switch_channel_set_variable(fst_channel, "blind_transfer_uuid", switch_core_session_get_uuid(peer_session));
 
 			switch_channel_hangup(fst_channel, SWITCH_CAUSE_NORMAL_CLEARING);
-			wait_for_response();
+			wait_for_destroy(fst_channel);
 
 			fst_xcheck(switch_atomic_read(&blind_transfer_response_count) == 1, "one failure response delivered to the peer on hangup");
 			fst_xcheck(blind_transfer_response_numeric_arg == 0, "failure response carries numeric_arg=0");
@@ -315,7 +328,6 @@ FST_CORE_BEGIN("./conf")
 		FST_SESSION_BEGIN(blind_transfer_ack_suppresses_hangup_producer)
 		{
 			switch_core_session_t *peer_session = start_peer();
-			int i;
 
 			fst_requires(peer_session);
 			switch_channel_set_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER);
@@ -328,10 +340,7 @@ FST_CORE_BEGIN("./conf")
 			fst_xcheck(!switch_channel_test_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER), "flag cleared by the explicit ack");
 
 			switch_channel_hangup(fst_channel, SWITCH_CAUSE_NORMAL_CLEARING);
-			for (i = 0; i < 500 && switch_channel_get_state(fst_channel) != CS_DESTROY; ++i) {
-				switch_yield(10000);
-			}
-			switch_yield(100000);
+			wait_for_destroy(fst_channel);
 			fst_xcheck(switch_atomic_read(&blind_transfer_response_count) == 1, "no second response after the explicit ack");
 			stop_peer(peer_session);
 		}
