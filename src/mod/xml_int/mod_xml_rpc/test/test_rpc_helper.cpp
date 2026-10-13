@@ -33,6 +33,7 @@ static inline double switch_core_idle_cpu(void) { return g_idle_cpu; }
 extern "C" {
 	switch_bool_t is_resource_available(const char *command, const char *api_str);
 	switch_bool_t is_api_response_error(const char *response);
+	switch_bool_t should_stop_batch(const char *response, switch_bool_t continue_on_fail, switch_bool_t run_all);
 	void set_min_idle_cpu_watermark(const char *idle_cpu);
 	void set_throttled_api_calls(const char *api);
 }
@@ -283,6 +284,40 @@ static void test_api_response_error_detection(void)
 		"api_response: NULL response is not classified as API failure");
 }
 
+static void test_should_stop_batch(void)
+{
+	CHECK(should_stop_batch("ERROR!", SWITCH_FALSE, SWITCH_FALSE) == SWITCH_TRUE,
+		"batch_stop: failed reply stops by default");
+	CHECK(should_stop_batch("-ERR no such channel", SWITCH_FALSE, SWITCH_FALSE) == SWITCH_TRUE,
+		"batch_stop: -ERR reply stops by default");
+	CHECK(should_stop_batch("  -USAGE: uuid_kill <uuid>", SWITCH_FALSE, SWITCH_FALSE) == SWITCH_TRUE,
+		"batch_stop: -USAGE after whitespace stops by default");
+	CHECK(should_stop_batch("UNAUTHORIZED!", SWITCH_FALSE, SWITCH_FALSE) == SWITCH_TRUE,
+		"batch_stop: unauthorized reply stops by default");
+	CHECK(should_stop_batch("+OK", SWITCH_FALSE, SWITCH_FALSE) == SWITCH_FALSE,
+		"batch_stop: success reply continues");
+	CHECK(should_stop_batch("", SWITCH_FALSE, SWITCH_FALSE) == SWITCH_FALSE,
+		"batch_stop: empty reply continues");
+	CHECK(should_stop_batch(NULL, SWITCH_FALSE, SWITCH_FALSE) == SWITCH_FALSE,
+		"batch_stop: NULL reply continues");
+	CHECK(should_stop_batch("ERROR! ", SWITCH_FALSE, SWITCH_FALSE) == SWITCH_FALSE,
+		"batch_stop: ERROR! is an exact match, trailing text continues");
+
+	CHECK(should_stop_batch("ERROR!", SWITCH_TRUE, SWITCH_FALSE) == SWITCH_FALSE,
+		"batch_stop: continue_on_fail keeps going after a failed reply");
+	CHECK(should_stop_batch("-ERR no such channel", SWITCH_TRUE, SWITCH_FALSE) == SWITCH_FALSE,
+		"batch_stop: continue_on_fail keeps going after -ERR");
+	CHECK(should_stop_batch("ERROR!", SWITCH_FALSE, SWITCH_TRUE) == SWITCH_FALSE,
+		"batch_stop: run_all keeps going after a failed reply");
+	CHECK(should_stop_batch("-ERR no such channel", SWITCH_TRUE, SWITCH_TRUE) == SWITCH_FALSE,
+		"batch_stop: both flags keep going after -ERR");
+
+	CHECK(should_stop_batch("+OK", SWITCH_TRUE, SWITCH_FALSE) == SWITCH_FALSE,
+		"batch_stop: continue_on_fail with success continues");
+	CHECK(should_stop_batch("+OK", SWITCH_FALSE, SWITCH_TRUE) == SWITCH_FALSE,
+		"batch_stop: run_all with success continues");
+}
+
 int main(void)
 {
 	struct { const char *name; void (*fn)(void); } tests[] = {
@@ -299,6 +334,7 @@ int main(void)
 		{"idle_exactly_at_watermark_allowed",          test_idle_exactly_at_watermark_allowed},
 		{"null_or_empty_cmd",                          test_null_or_empty_cmd},
 		{"api_response_error_detection",               test_api_response_error_detection},
+		{"should_stop_batch",                          test_should_stop_batch},
 	};
 	for (size_t i = 0; i < sizeof(tests) / sizeof(tests[0]); ++i) {
 		printf("[%s]\n", tests[i].name);

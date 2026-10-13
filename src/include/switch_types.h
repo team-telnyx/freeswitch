@@ -886,6 +886,7 @@ typedef enum {
 	SWITCH_RTP_FLAG_ICE_NO_RESPONSE_IGNORED,
 	SWITCH_RTP_FLAG_ICE_FAILED,
 	SWITCH_RTP_FLAG_IGNORE_RTP_DURING_DTMF,
+	SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP,
 	SWITCH_RTP_FLAG_INVALID
 } switch_rtp_flag_t;
 
@@ -1830,6 +1831,7 @@ SWITCH_CODEC_FLAG_SILENCE =			(1 <<  4) - Silence
 SWITCH_CODEC_FLAG_FREE_POOL =		(1 <<  5) - Free codec's pool on destruction
 SWITCH_CODEC_FLAG_AAL2 =			(1 <<  6) - USE AAL2 Bitpacking
 SWITCH_CODEC_FLAG_PASSTHROUGH =		(1 <<  7) - Passthrough only
+SWITCH_CODEC_FLAG_NATIVE_DTX =		(1 << 17) - Codec carries its own silence descriptors (e.g. AMR SID); the receiver generates comfort noise from them
 </pre>
 */
 typedef enum {
@@ -1846,7 +1848,8 @@ typedef enum {
 	SWITCH_CODEC_FLAG_CONCEAL_OVERRUN_LOGGED = (1 << 10),
 	SWITCH_CODEC_FLAG_HAS_ADJ_BITRATE = (1 << 14),
 	SWITCH_CODEC_FLAG_HAS_PLC = (1 << 15),
-	SWITCH_CODEC_FLAG_VIDEO_PATCHING = (1 << 16)
+	SWITCH_CODEC_FLAG_VIDEO_PATCHING = (1 << 16),
+	SWITCH_CODEC_FLAG_NATIVE_DTX = (1 << 17)
 } switch_codec_flag_enum_t;
 typedef uint32_t switch_codec_flag_t;
 

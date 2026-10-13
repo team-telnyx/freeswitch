@@ -49,11 +49,13 @@ test_test_string_stream_mem_leak_LDADD = libsofiamod.la $(SOFIA_SIP_LIBS) $(STIR
 TESTS = test/test_sofia_funcs.sh test/test_nuafail test/test_string_stream_mem_leak
 #TESTS += test/test_run_sipp.sh
 TESTS += test/test_t38_session_refresh.sh
+TESTS += test/test_delayed_offer_media_race.sh
 TESTS += test/test_blind_transfer_notify.sh
 
 # The SIPp suites start FreeSWITCH with test/conf-sipp and SIPp on port 5062: never run them at the same time.
 TEST_EXTENSIONS = .sh
-test/test_blind_transfer_notify.log: test/test_t38_session_refresh.log
+test/test_delayed_offer_media_race.log: test/test_t38_session_refresh.log
+test/test_blind_transfer_notify.log: test/test_delayed_offer_media_race.log
 
 if ISMAC
 mod_sofia_la_LDFLAGS += -framework CoreFoundation -framework SystemConfiguration
