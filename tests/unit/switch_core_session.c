@@ -352,7 +352,7 @@ FST_CORE_BEGIN("./conf")
 		 * NOT deliver the success BLIND_TRANSFER_RESPONSE, and must leave
 		 * CF_CONFIRM_BLIND_TRANSFER set so the answer-time producer (or a
 		 * failure producer) can still fire. Same contract when the peer has
-		 * already rejected (P1-1): at CS_HANGUP switch_core_session_locate
+		 * already rejected: at CS_HANGUP switch_core_session_locate
 		 * refuses it, and an unlocatable peer never answered.
 		 */
 		FST_SESSION_BEGIN(blind_transfer_defer_on_early_media)
