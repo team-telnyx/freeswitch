@@ -339,13 +339,41 @@ FST_CORE_BEGIN(".")
 		}
 		FST_SESSION_END()
 
-		FST_SESSION_BEGIN(amr_legacy_reoffer_keeps_stale_framing)
+		FST_SESSION_BEGIN(amr_reoffer_octet_aligned_to_bandwidth_efficient)
 		{
 			amr_reoffer_result_t result = amr_reoffer(fst_session, NULL, AMR_FMTP_OA, amr_offer(fst_session, 2, AMR_FMTP_BE), AMR_FMTP_BE);
 
 			fst_requires(result.negotiated);
-			fst_xcheck(!result.codec_reset, "without strict matching the codec is kept across the re-offer");
-			fst_xcheck(result.framing_stale, "the kept codec still runs the old framing");
+			fst_xcheck(result.codec_reset, "without strict matching a framing change still resets the codec");
+			fst_xcheck(!result.framing_stale, "the codec runs the new framing");
+			fst_xcheck(result.decoded, "bandwidth efficient frames decode after the re-offer");
+			fst_xcheck(result.answer_octet_align == 0, "the answer advertises bandwidth efficient framing");
+			fst_xcheck(result.stale_decode_failures == 0, "octet aligned frames sent before the answer do not fail to decode");
+		}
+		FST_SESSION_END()
+
+		FST_SESSION_BEGIN(amr_reoffer_bandwidth_efficient_to_octet_aligned)
+		{
+			amr_reoffer_result_t result = amr_reoffer(fst_session, NULL, AMR_FMTP_BE, amr_offer(fst_session, 2, AMR_FMTP_OA), AMR_FMTP_OA);
+
+			fst_requires(result.negotiated);
+			fst_xcheck(result.codec_reset, "without strict matching a framing change still resets the codec");
+			fst_xcheck(!result.framing_stale, "the codec runs the new framing");
+			fst_xcheck(result.decoded, "octet aligned frames decode after the re-offer");
+			fst_xcheck(result.answer_octet_align == 1, "the answer advertises octet aligned framing");
+			fst_xcheck(result.stale_decode_failures == 0, "bandwidth efficient frames sent before the answer do not fail to decode");
+		}
+		FST_SESSION_END()
+
+		FST_SESSION_BEGIN(amr_reoffer_fmtp_change_without_framing_change_keeps_codec)
+		{
+			amr_reoffer_result_t result = amr_reoffer(fst_session, NULL, AMR_FMTP_OA,
+													  amr_offer(fst_session, 2, AMR_FMTP_OA "; max-red=0"), AMR_FMTP_OA);
+
+			fst_requires(result.negotiated);
+			fst_xcheck(!result.codec_reset, "without strict matching an fmtp change the codec ignores keeps the codec");
+			fst_xcheck(result.decoded, "octet aligned frames still decode");
+			fst_xcheck(result.answer_octet_align == 1, "the answer keeps the a=fmtp of the codec it kept");
 		}
 		FST_SESSION_END()
 
