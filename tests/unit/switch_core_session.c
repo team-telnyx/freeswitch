@@ -32,7 +32,7 @@
 #include <test/switch_test.h>
 
 /*
- * TELCORE-564: observe SWITCH_MESSAGE_INDICATE_BLIND_TRANSFER_RESPONSE
+ * Observe SWITCH_MESSAGE_INDICATE_BLIND_TRANSFER_RESPONSE
  * delivered to the parked REFER sender. A receive_message event hook on the
  * REFER sender's session fires after the endpoint has processed the
  * message, so counting there catches every producer (bridge, answer-time,
@@ -306,11 +306,13 @@ FST_CORE_BEGIN("./conf")
 		FST_SESSION_END()
 
 		/*
-		 * blind_transfer_defer_on_early_media: TELCORE-564. When the bridge
+		 * blind_transfer_defer_on_early_media: when the bridge
 		 * proceeds on early media (peer not CF_ANSWERED), INDICATE_BRIDGE must
 		 * NOT deliver the success BLIND_TRANSFER_RESPONSE, and must leave
 		 * CF_CONFIRM_BLIND_TRANSFER set so the answer-time producer (or a
-		 * failure producer) can still fire.
+		 * failure producer) can still fire. Same contract when the peer has
+		 * already rejected (P1-1): at CS_HANGUP switch_core_session_locate
+		 * refuses it, and an unlocatable peer never answered.
 		 */
 		FST_SESSION_BEGIN(blind_transfer_defer_on_early_media)
 		{
@@ -338,10 +340,16 @@ FST_CORE_BEGIN("./conf")
 			fst_check(bt_response_count == 0);
 			fst_check(switch_channel_test_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER));
 
+			/* peer rejects after early media: locate now fails, still no success */
+			switch_channel_hangup(switch_core_session_get_channel(p_session), SWITCH_CAUSE_USER_BUSY);
+			fst_requires(switch_core_session_receive_message(fst_session, &msg) == SWITCH_STATUS_SUCCESS);
+			fst_check(bt_response_count == 0);
+			fst_check(switch_channel_test_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER));
+
 			/* cleanup */
 			switch_channel_clear_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER);
 			bt_release_session(r_session);
-			bt_release_session(p_session);
+			switch_core_session_rwunlock(p_session);
 		}
 		FST_SESSION_END()
 
@@ -388,7 +396,7 @@ FST_CORE_BEGIN("./conf")
 		FST_SESSION_END()
 
 		/*
-		 * blind_transfer_answer_time_producer: TELCORE-564. After an
+		 * blind_transfer_answer_time_producer: after an
 		 * early-media bridge defers the confirmation, the target's answer
 		 * must deliver exactly one success response through the
 		 * mark_answered originator hook.
@@ -424,6 +432,7 @@ FST_CORE_BEGIN("./conf")
 			bt_release_session(t_session);
 		}
 		FST_SESSION_END()
+
 	}
 	FST_SUITE_END()
 }

@@ -971,11 +971,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_perform_receive_message(swit
 			switch_channel_test_flag(session->channel, CF_CONFIRM_BLIND_TRANSFER)) {
 			switch_core_session_t *other_session;
 			const char *uuid = switch_channel_get_variable(session->channel, "blind_transfer_uuid");
-			int peer_answered = 1; /* legacy default when no peer uuid available */
+			/* string_arg carries the bridge peer uuid (absent only for conference/
+			   eavesdrop, which keep the legacy success). A peer that can't be
+			   located is already at CS_HANGUP and never answered: defer. */
+			int peer_answered = zstr(message->string_arg) ? 1 : 0;
 
-			/* message->string_arg carries the bridge peer uuid on both the media-bridge
-			   (switch_ivr_bridge.c) and signal-bridge paths. Conference/eavesdrop raise
-			   INDICATE_BRIDGE without string_arg; treat those as completed transfers. */
 			if (!zstr(message->string_arg)) {
 				switch_core_session_t *peer_session;
 				if ((peer_session = switch_core_session_locate(message->string_arg))) {

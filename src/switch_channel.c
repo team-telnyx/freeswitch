@@ -4315,7 +4315,7 @@ SWITCH_DECLARE(switch_status_t) switch_channel_perform_mark_answered(switch_chan
 		switch_channel_t *other_channel = switch_core_session_get_channel(other_session);
 		switch_core_session_kill_channel(other_session, SWITCH_SIG_BREAK);
 
-		/* TELCORE-564: deliver deferred blind-transfer confirmation now that the target answered */
+		/* deliver deferred blind-transfer confirmation now that the target answered */
 		if (switch_channel_test_flag(other_channel, CF_CONFIRM_BLIND_TRANSFER)) {
 			const char *xfer_uuid = switch_channel_get_variable(other_channel, "blind_transfer_uuid");
 			switch_core_session_t *xfer_session;
