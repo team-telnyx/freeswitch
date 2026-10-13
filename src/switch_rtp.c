@@ -1825,6 +1825,20 @@ static switch_bool_t ice_restart_ready(switch_rtp_t *rtp_session, switch_rtp_ice
 	return window_ms && (uint64_t)(now - ice->restart_started_us) / 1000 < window_ms ? SWITCH_TRUE : SWITCH_FALSE;
 }
 
+/* Advertised candidates remain usable after the peer-reflexive learning window. */
+static switch_bool_t ice_restart_check_ready(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
+	int candidate_idx, switch_time_t now)
+{
+	icand_t *candidate;
+
+	if (ice_restart_ready(rtp_session, ice, now)) return SWITCH_TRUE;
+	if (!ice_restart_pending(rtp_session, ice) || !ice->ice_params || candidate_idx < 0 ||
+		candidate_idx >= ice->ice_params->cand_idx[ice->proto]) return SWITCH_FALSE;
+	candidate = &ice->ice_params->cands[candidate_idx][ice->proto];
+	return candidate->ready && !zstr(candidate->cand_type) && strcmp(candidate->cand_type, "prflx") ?
+		SWITCH_TRUE : SWITCH_FALSE;
+}
+
 static switch_bool_t ice_controlling_startup_ready(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice)
 {
 	if (!rtp_session || !ice || (rtp_session->dtls && rtp_session->dtls->state == DS_READY) ||
@@ -1852,7 +1866,7 @@ static void ice_controlling_failover_tick(switch_rtp_t *rtp_session, switch_rtp_
 	if (ice && (ice->controlling_failover_state == SWITCH_RTP_ICE_CONTROLLING_STARTUP_NOMINATING ||
 		ice->controlling_failover_state == SWITCH_RTP_ICE_CONTROLLING_RESTART_NOMINATING)) {
 		if (!(ice->controlling_failover_state == SWITCH_RTP_ICE_CONTROLLING_RESTART_NOMINATING ?
-			ice_restart_ready(rtp_session, ice, now) : ice_controlling_startup_ready(rtp_session, ice))) {
+			ice_restart_check_ready(rtp_session, ice, ice->controlling_failover_idx, now) : ice_controlling_startup_ready(rtp_session, ice))) {
 			ice_controlling_failover_reset(ice, SWITCH_TRUE);
 			return;
 		}
@@ -2539,7 +2553,7 @@ static switch_bool_t ice_controlling_failover_handle_response(switch_rtp_t *rtp_
 	if (ice && (ice->controlling_failover_state == SWITCH_RTP_ICE_CONTROLLING_STARTUP_NOMINATING ||
 		ice->controlling_failover_state == SWITCH_RTP_ICE_CONTROLLING_RESTART_NOMINATING)) {
 		if (!(ice->controlling_failover_state == SWITCH_RTP_ICE_CONTROLLING_RESTART_NOMINATING ?
-			ice_restart_ready(rtp_session, ice, now) : ice_controlling_startup_ready(rtp_session, ice))) {
+			ice_restart_check_ready(rtp_session, ice, ice->controlling_failover_idx, now) : ice_controlling_startup_ready(rtp_session, ice))) {
 			ice_controlling_failover_reset(ice, SWITCH_TRUE);
 			return SWITCH_TRUE;
 		}
@@ -2653,6 +2667,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 	int got_fingerprint = 0;
 	int got_ice_controlled = 0;
 	int got_ice_controlling = 0;
+	const char *peer_tie_breaker = NULL;
 	uint32_t prflx_bootstrap_ms = 0;
 	uint32_t stun_packet_len = 0;
 	uint16_t raw_packet_type = 0;
@@ -2775,10 +2790,12 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 			got_fingerprint = 1;
 			break;
 		case SWITCH_STUN_ATTR_CONTROLLED:
-			got_ice_controlled = 1;
+			got_ice_controlled++;
+			if (!got_message_integrity && attr->length == 8) peer_tie_breaker = attr->value;
 			break;
 		case SWITCH_STUN_ATTR_CONTROLLING:
-			got_ice_controlling = 1;
+			got_ice_controlling++;
+			if (!got_message_integrity && attr->length == 8) peer_tie_breaker = attr->value;
 			break;
 		case SWITCH_STUN_ATTR_ERROR_CODE:
 			{
@@ -2853,7 +2870,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 			SWITCH_TRUE : SWITCH_FALSE;
 
 		if (ice->controlling_failover_state == SWITCH_RTP_ICE_CONTROLLING_RESTART_NOMINATING &&
-			(!ice_restart_ready(rtp_session, ice, packet_now) ||
+			(!ice_restart_check_ready(rtp_session, ice, ice->controlling_failover_idx, packet_now) ||
 			 switch_rtp_pvt_controlling_failover_timer_action(ice->controlling_failover_state,
 				ice->controlling_failover_started_us, ice->controlling_failover_sent_us,
 				ice->controlling_failover_attempts, packet_now) == SWITCH_RTP_ICE_CONTROLLING_TIMER_EXPIRE)) {
@@ -2906,15 +2923,13 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 	authenticated_current_request = raw_packet_type == SWITCH_STUN_BINDING_REQUEST && direct_username_match &&
 		got_message_integrity && got_fingerprint && stun_auth_valid ? SWITCH_TRUE : SWITCH_FALSE;
 	if (ice_restart_pending(rtp_session, ice)) {
-		int restart_idx;
+		int restart_idx, candidate_family = AF_UNSPEC;
+		switch_bool_t learning_open = ice_restart_ready(rtp_session, ice, packet_now);
+		switch_bool_t controlling = !(ice->type & ICE_CONTROLLED);
 		switch_stun_packet_t *response;
 		uint8_t response_buf[128] = { 0 };
 		switch_size_t response_bytes;
 
-		if (!ice_restart_ready(rtp_session, ice, packet_now)) {
-			ice_controlling_failover_reset(ice, SWITCH_TRUE);
-			goto end;
-		}
 		if (raw_packet_type == SWITCH_STUN_BINDING_RESPONSE) {
 			ice_controlling_failover_handle_response(rtp_session, ice, from_addr, response_candidate_idx,
 				packet->header.id, stun_response_auth_valid, response_local_socket,
@@ -2922,21 +2937,48 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 			goto end;
 		}
 		if (!authenticated_current_request || !pri || !ntohl(*pri) || !response_local_addr ||
-			switch_sockaddr_get_family(from_addr) != switch_sockaddr_get_family(response_local_addr)) {
+			switch_sockaddr_get_family(from_addr) != switch_sockaddr_get_family(response_local_addr) ||
+			!ice_remote_ip_is_acceptable(rtp_session, from_host, "udp", &candidate_family) ||
+			!peer_tie_breaker || got_ice_controlled + got_ice_controlling != 1) {
 			goto end;
 		}
-		if (ice->type & ICE_CONTROLLED) {
-			int candidate_family = AF_UNSPEC;
+		if ((controlling && got_ice_controlling) || (!controlling && got_ice_controlled)) {
+			int tie_cmp = memcmp(rtp_session->ice_tie_breaker, peer_tie_breaker, 8);
 
+			if ((controlling && tie_cmp >= 0) || (!controlling && tie_cmp < 0)) {
+				switch_stun_packet_attribute_t *error;
+
+				response = switch_stun_packet_build_header(SWITCH_STUN_BINDING_ERROR_RESPONSE, packet->header.id, response_buf);
+				error = (switch_stun_packet_attribute_t *)(response_buf + sizeof(response->header));
+				error->type = htons(SWITCH_STUN_ATTR_ERROR_CODE);
+				error->length = htons(4);
+				error->value[2] = 4;
+				error->value[3] = 87;
+				response->header.length = htons(8);
+				switch_stun_packet_attribute_add_integrity(response, ice->pass);
+				switch_stun_packet_attribute_add_fingerprint(response);
+				response_bytes = switch_stun_packet_length(response);
+				switch_socket_sendto(rtp_session->sock_output, from_addr, 0, (void *)response, &response_bytes);
+				goto end;
+			}
+			switch_rtp_pvt_ice_role_conflict_cancel(&rtp_session->ice);
+			switch_rtp_pvt_ice_role_conflict_cancel(&rtp_session->rtcp_ice);
+			switch_rtp_pvt_ice_role_conflict_apply(&rtp_session->ice, controlling);
+			switch_rtp_pvt_ice_role_conflict_apply(&rtp_session->rtcp_ice, controlling);
+		}
+		restart_idx = ice_find_candidate_by_addr(ice, from_host, from_port);
+		if (!ice_restart_check_ready(rtp_session, ice, restart_idx, packet_now)) goto end;
+		if (ice->type & ICE_CONTROLLED) {
 			/* Connectivity checks need a response before the controlling peer can nominate. */
-			if (!got_ice_controlling || got_ice_controlled ||
-				!ice_remote_ip_is_acceptable(rtp_session, from_host, "udp", &candidate_family)) {
+			if (!got_ice_controlling || got_ice_controlled) {
 				goto end;
 			}
 			if (got_use_candidate) {
 				if (!authenticated_vanilla_use_candidate) goto end;
-				restart_idx = ice_note_authenticated_prflx_candidate(rtp_session, ice, from_host, from_port,
-					ntohl(*pri), authenticated_current_request, SWITCH_FALSE);
+				if (learning_open) {
+					restart_idx = ice_note_authenticated_prflx_candidate(rtp_session, ice, from_host, from_port,
+						ntohl(*pri), authenticated_current_request, SWITCH_FALSE);
+				}
 				if (restart_idx < 0) goto end;
 				ice_controlling_bootstrap_commit(rtp_session, ice, restart_idx, packet_now);
 				if (ice->initializing) goto end;
@@ -2946,8 +2988,15 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 		}
 		if (!(ice->type & ICE_CONTROLLED)) {
 			ice_controlling_failover_tick(rtp_session, ice, packet_now);
-			restart_idx = ice_controlling_bootstrap_note_candidate(rtp_session, ice, from_host, from_port,
-				ntohl(*pri), authenticated_current_request, packet_now);
+			if (learning_open) {
+				restart_idx = ice_controlling_bootstrap_note_candidate(rtp_session, ice, from_host, from_port,
+					ntohl(*pri), authenticated_current_request, packet_now);
+			} else if (ice->controlling_failover_state == SWITCH_RTP_ICE_CONTROLLING_FAILOVER_IDLE) {
+				ice->controlling_failover_idx = restart_idx;
+				ice->controlling_failover_candidate_us = packet_now;
+			} else if (restart_idx != ice->controlling_failover_idx) {
+				goto end;
+			}
 			if (restart_idx < 0) goto end;
 		}
 		response = switch_stun_packet_build_header(SWITCH_STUN_BINDING_RESPONSE, packet->header.id, response_buf);

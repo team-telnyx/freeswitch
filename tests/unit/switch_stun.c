@@ -61,11 +61,10 @@ static void *SWITCH_THREAD_FUNC reset_during_control(switch_thread_t *thread, vo
 	return NULL;
 }
 
-static switch_size_t build_authenticated_request_with_role(uint8_t *buf, switch_size_t buflen,
+static switch_size_t build_authenticated_request_with_tie(uint8_t *buf, switch_size_t buflen,
 	const char *username, const char *password, switch_bool_t use_candidate,
-	switch_bool_t peer_controlled, switch_bool_t peer_controlling)
+	switch_bool_t peer_controlled, switch_bool_t peer_controlling, const char tie_breaker[8])
 {
-	static const char tie_breaker[8] = { 0x01, 0x23, 0x45, 0x67, 0x11, 0x22, 0x33, 0x44 };
 	switch_stun_packet_t *packet;
 	switch_size_t bytes;
 
@@ -92,6 +91,77 @@ static switch_size_t build_authenticated_request_with_role(uint8_t *buf, switch_
 	switch_assert(bytes <= buflen);
 
 	return bytes;
+}
+
+static switch_size_t build_authenticated_request_with_role(uint8_t *buf, switch_size_t buflen,
+	const char *username, const char *password, switch_bool_t use_candidate,
+	switch_bool_t peer_controlled, switch_bool_t peer_controlling)
+{
+	static const char tie[8] = { 0x01, 0x23, 0x45, 0x67, 0x11, 0x22, 0x33, 0x44 };
+	return build_authenticated_request_with_tie(buf, buflen, username, password, use_candidate,
+		peer_controlled, peer_controlling, tie);
+}
+
+static switch_bool_t receive_authenticated_stun(switch_rtp_t *rtp, switch_sockaddr_t *source,
+	uint16_t type, const char *transaction, const char *password, char result_id[13])
+{
+	uint8_t wire[512];
+	switch_size_t len;
+	switch_stun_packet_t *packet;
+	switch_stun_packet_attribute_t *attr;
+	switch_time_t deadline = switch_micro_time_now() + 300000;
+	int expected;
+
+	do {
+		len = sizeof(wire);
+		if (switch_socket_recvfrom(source, switch_rtp_get_rtp_socket(rtp), 0, (char *)wire, &len) != SWITCH_STATUS_SUCCESS ||
+			!switch_stun_packet_validate_auth(wire, (uint32_t)len, password)) continue;
+		packet = switch_stun_packet_parse(wire, (uint32_t)len);
+		if (!packet || packet->header.type != type || (transaction && memcmp(packet->header.id, transaction, 12))) continue;
+		expected = type == SWITCH_STUN_BINDING_RESPONSE;
+		switch_stun_packet_first_attribute(packet, attr);
+		do {
+			if (type == SWITCH_STUN_BINDING_REQUEST && attr->type == SWITCH_STUN_ATTR_USE_CAND) expected = 1;
+			if (type == SWITCH_STUN_BINDING_ERROR_RESPONSE && attr->type == SWITCH_STUN_ATTR_ERROR_CODE &&
+				attr->length >= 4 && ((switch_stun_error_code_t *)attr->value)->code == 4 &&
+				((switch_stun_error_code_t *)attr->value)->number == 87) expected = 1;
+		} while (switch_stun_packet_next_attribute(attr, (void *)(wire + len)));
+		if (expected) {
+			if (result_id) memcpy(result_id, packet->header.id, 12);
+			return SWITCH_TRUE;
+		}
+	} while (switch_micro_time_now() < deadline);
+	return SWITCH_FALSE;
+}
+
+static struct {
+	switch_core_session_t *sessions[2];
+	switch_rtp_t *rtp[2];
+	void (*alarm_handler)(int);
+	int alarm_active;
+} restart_fixture;
+
+static void cleanup_restart_fixture(void)
+{
+	int i;
+
+	for (i = 0; i < 2; i++) {
+		if (restart_fixture.sessions[i]) {
+			switch_core_media_set_rtp_session(restart_fixture.sessions[i], SWITCH_MEDIA_TYPE_AUDIO, NULL);
+			if (restart_fixture.rtp[i]) {
+				switch_rtp_destroy(&restart_fixture.rtp[i]);
+				restart_fixture.rtp[i] = NULL;
+			}
+			switch_channel_hangup(switch_core_session_get_channel(restart_fixture.sessions[i]), SWITCH_CAUSE_NORMAL_CLEARING);
+			switch_core_session_rwunlock(restart_fixture.sessions[i]);
+			restart_fixture.sessions[i] = NULL;
+		}
+	}
+	if (restart_fixture.alarm_active) {
+		alarm(0);
+		signal(SIGALRM, restart_fixture.alarm_handler);
+		restart_fixture.alarm_active = 0;
+	}
 }
 
 static switch_size_t build_authenticated_request(uint8_t *buf, switch_size_t buflen, const char *username,
@@ -159,6 +229,7 @@ FST_SETUP_END()
 
 FST_TEARDOWN_BEGIN()
 {
+	cleanup_restart_fixture();
 }
 FST_TEARDOWN_END()
 	FST_TEST_BEGIN(test_binding_indication)
@@ -1293,8 +1364,8 @@ FST_TEARDOWN_END()
 		FST_SESSION_END()
 		FST_SESSION_BEGIN(test_ready_dtls_restart_nominates_observed_tuple)
 		{
-			switch_core_session_t *sessions[2] = { NULL, NULL };
-			switch_rtp_t *rtp[2] = { NULL, NULL };
+			switch_core_session_t **sessions = restart_fixture.sessions;
+			switch_rtp_t **rtp = restart_fixture.rtp;
 			switch_memory_pool_t *pools[2] = { NULL, NULL };
 			switch_rtp_flag_t flags[SWITCH_RTP_FLAG_INVALID] = { 0 };
 			dtls_fingerprint_t fingerprints[2] = { { 0 }, { 0 } };
@@ -1304,7 +1375,7 @@ FST_TEARDOWN_END()
 			switch_frame_t frame = { 0 };
 			switch_rtcp_frame_t rtcp_frame;
 			switch_sockaddr_t *source = NULL;
-			ice_t params = { 0 };
+			static ice_t params;
 			const char *err = NULL;
 			char host[80] = "";
 			char remote_ufrag[32], username[80];
@@ -1320,10 +1391,13 @@ FST_TEARDOWN_END()
 			switch_port_t ports[2] = { 25000, 25002 };
 			switch_port_t learned_port;
 			int i, mode, bad, received, nominated;
-			void (*old_alarm_handler)(int);
+			char peer_tie[8];
+			int peer_controlling, fs_controlling, expect_error;
 
 			/* Bound the entire test, including failures inside the RTP read path. */
-			old_alarm_handler = signal(SIGALRM, SIG_DFL);
+			restart_fixture.alarm_handler = signal(SIGALRM, SIG_DFL);
+			fst_requires(restart_fixture.alarm_handler != SIG_ERR);
+			restart_fixture.alarm_active = 1;
 			alarm(60);
 			fst_requires(switch_find_local_ip(host, sizeof(host), NULL, AF_INET) == SWITCH_STATUS_SUCCESS);
 			fst_requires(strncmp(host, "127.", 4));
@@ -1390,6 +1464,100 @@ FST_TEARDOWN_END()
 			fst_requires(switch_rtp_activate_ice(rtp[0], "remote0", "local0", "local-password0",
 				"remote-password0", IPR_RTP, ICE_VANILLA, &params) == SWITCH_STATUS_SUCCESS);
 			fst_requires(switch_sockaddr_info_get(&source, rx_host, SWITCH_UNSPEC, ports[0], 0, pools[0]) == SWITCH_STATUS_SUCCESS);
+
+			/* Expired advertised-candidate recovery and both role-conflict outcomes. */
+			for (mode = 0; mode < 6; mode++) {
+				fs_controlling = mode == 1 || mode == 2 || mode == 3;
+				peer_controlling = mode >= 2 ? fs_controlling : !fs_controlling;
+				expect_error = mode == 2 || mode == 4;
+				memset(peer_tie, mode == 3 || mode == 4 ? 0xff : 0, sizeof(peer_tie));
+				switch_snprintf(remote_ufrag, sizeof(remote_ufrag), "recovery%d", mode);
+				switch_snprintf(username, sizeof(username), "local1:%s", remote_ufrag);
+				learned_port = 25300 + mode * 2;
+				fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp[0], IPR_RTP, &prior) == SWITCH_STATUS_SUCCESS);
+				switch_rtp_clear_flag(rtp[1], SWITCH_RTP_FLAG_ENABLE_RTCP);
+				fst_requires(switch_rtp_set_local_address(rtp[1], "0.0.0.0", learned_port, &err) == SWITCH_STATUS_SUCCESS);
+				fst_requires(switch_rtp_set_remote_address(rtp[1], host, ports[0], 0, SWITCH_FALSE, &err) == SWITCH_STATUS_SUCCESS);
+				fst_requires(switch_rtp_activate_rtcp(rtp[1], 100, ports[0], SWITCH_TRUE) == SWITCH_STATUS_SUCCESS);
+				fst_requires(switch_socket_timeout_set(switch_rtp_get_rtp_socket(rtp[1]), 10000) == SWITCH_STATUS_SUCCESS);
+				memset(&params, 0, sizeof(params));
+				params.cand_idx[IPR_RTP] = 1;
+				params.cands[0][IPR_RTP].con_addr = host;
+				params.cands[0][IPR_RTP].con_port = mode < 2 ? learned_port : 25100;
+				params.cands[0][IPR_RTP].ready = 1;
+				params.cands[0][IPR_RTP].cand_type = "srflx";
+				switch_channel_set_variable(channel, "rtp_ice_prflx_bootstrap_ms", mode < 2 ? "1" : "10000");
+				switch_rtp_prepare_ice_restart(rtp[0], IPR_RTP, SWITCH_TRUE);
+				fst_requires(switch_rtp_activate_ice(rtp[0], remote_ufrag, "local1", "local-password1",
+					"remote-password1", IPR_RTP, ICE_VANILLA | (fs_controlling ? 0 : ICE_CONTROLLED), &params) == SWITCH_STATUS_SUCCESS);
+				if (mode < 2) {
+					switch_sleep(20000);
+					switch_rtp_prepare_ice_restart(rtp[0], IPR_RTP, SWITCH_FALSE);
+					fst_requires(switch_rtp_activate_ice(rtp[0], remote_ufrag, "local1", "local-password1",
+						"remote-password1", IPR_RTP, ICE_VANILLA, &params) == SWITCH_STATUS_SUCCESS);
+					len = build_authenticated_request_with_tie(packet, sizeof(packet), username, "local-password1",
+						SWITCH_TRUE, !peer_controlling, peer_controlling, peer_tie);
+					fst_requires(switch_rtp_pvt_handle_ice_from(rtp[0], IPR_RTP, host, learned_port + 30, packet, len) == SWITCH_STATUS_SUCCESS);
+					fst_check(params.cand_idx[IPR_RTP] == 1 && !params.cands[0][IPR_RTP].use_candidate);
+				}
+				fst_requires(switch_sockaddr_info_get(&source, host, SWITCH_UNSPEC, ports[0], 0, pools[0]) == SWITCH_STATUS_SUCCESS);
+				len = build_authenticated_request_with_tie(packet, sizeof(packet), username, "wrong-password",
+					SWITCH_FALSE, !peer_controlling, peer_controlling, peer_tie);
+				fst_requires(switch_socket_sendto(switch_rtp_get_rtp_socket(rtp[1]), source, 0, (char *)packet, &len) == SWITCH_STATUS_SUCCESS);
+				/* Invalid credentials cannot change roles or nominate. */
+				len = build_authenticated_request_with_tie(packet, sizeof(packet), username, "wrong-password",
+					SWITCH_FALSE, !peer_controlling, peer_controlling, peer_tie);
+				fst_requires(switch_rtp_pvt_handle_ice_from(rtp[0], IPR_RTP, host, learned_port, packet, len) == SWITCH_STATUS_SUCCESS);
+				fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp[0], IPR_RTP, &after) == SWITCH_STATUS_SUCCESS);
+				fst_check(!!(after.ice_type & ICE_CONTROLLED) == !fs_controlling);
+				fst_check(!after.ice_ready && !params.cands[0][IPR_RTP].use_candidate);
+				len = build_authenticated_request_with_tie(packet, sizeof(packet), username, "local-password1",
+					SWITCH_FALSE, !peer_controlling, peer_controlling, peer_tie);
+				memcpy(ordinary_transaction, ((switch_stun_packet_t *)packet)->header.id, 12);
+				fst_requires(switch_rtp_pvt_handle_ice_from(rtp[0], IPR_RTP, host, learned_port, packet, len) == SWITCH_STATUS_SUCCESS);
+				if (expect_error) {
+					fst_requires(receive_authenticated_stun(rtp[1], source, SWITCH_STUN_BINDING_ERROR_RESPONSE,
+						ordinary_transaction, "local-password1", NULL));
+					fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp[0], IPR_RTP, &after) == SWITCH_STATUS_SUCCESS);
+					fst_check(!!(after.ice_type & ICE_CONTROLLED) == !fs_controlling);
+					fst_check(params.cand_idx[IPR_RTP] == 1 && !after.ice_ready);
+					peer_controlling = !peer_controlling;
+					len = build_authenticated_request_with_tie(packet, sizeof(packet), username, "local-password1",
+						SWITCH_FALSE, !peer_controlling, peer_controlling, peer_tie);
+					memcpy(ordinary_transaction, ((switch_stun_packet_t *)packet)->header.id, 12);
+					fst_requires(switch_rtp_pvt_handle_ice_from(rtp[0], IPR_RTP, host, learned_port, packet, len) == SWITCH_STATUS_SUCCESS);
+				} else if (mode >= 2) {
+					fs_controlling = !fs_controlling;
+				}
+				fst_requires(receive_authenticated_stun(rtp[1], source, SWITCH_STUN_BINDING_RESPONSE,
+					ordinary_transaction, "local-password1", NULL));
+				fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp[0], IPR_RTP, &after) == SWITCH_STATUS_SUCCESS);
+				fst_check(!!(after.ice_type & ICE_CONTROLLED) == !fs_controlling);
+				fst_check(!after.ice_ready && after.dtls_remote_port == prior.dtls_remote_port);
+				if (fs_controlling) {
+					fst_requires(receive_authenticated_stun(rtp[1], source, SWITCH_STUN_BINDING_REQUEST,
+						NULL, "remote-password1", transaction));
+					len = build_authenticated_response(packet, sizeof(packet), "wrong-id-123", "remote-password1");
+					fst_requires(switch_rtp_pvt_handle_ice_from(rtp[0], IPR_RTP, host, learned_port, packet, len) == SWITCH_STATUS_SUCCESS);
+					fst_check(switch_rtp_pvt_ice_restart_pending(rtp[0]));
+					len = build_authenticated_response(packet, sizeof(packet), transaction, "remote-password1");
+				} else {
+					len = build_authenticated_request_with_tie(packet, sizeof(packet), username, "local-password1",
+						SWITCH_TRUE, SWITCH_FALSE, SWITCH_TRUE, peer_tie);
+					memcpy(ordinary_transaction, ((switch_stun_packet_t *)packet)->header.id, 12);
+				}
+				fst_requires(switch_rtp_pvt_handle_ice_from(rtp[0], IPR_RTP, host, learned_port, packet, len) == SWITCH_STATUS_SUCCESS);
+				if (!fs_controlling) {
+					fst_requires(receive_authenticated_stun(rtp[1], source, SWITCH_STUN_BINDING_RESPONSE,
+						ordinary_transaction, "local-password1", NULL));
+				}
+				fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp[0], IPR_RTP, &after) == SWITCH_STATUS_SUCCESS);
+				fst_check(after.ice_ready && after.ice_rready && !switch_rtp_pvt_ice_restart_pending(rtp[0]));
+				fst_check(after.dtls_state == DS_READY && after.dtls_context == before.dtls_context &&
+					after.dtls_ssl == before.dtls_ssl && after.socket == before.socket);
+				fst_check(after.ice_remote_port == learned_port && after.dtls_remote_port == learned_port);
+				fst_check(params.cands[params.chosen[IPR_RTP]][IPR_RTP].use_candidate);
+			}
 
 			/* Signaled+trickle, provisional+487, expired transaction, expired 487
 			 * handoff+trickle, and successful provisional controlling restart. */
@@ -1742,14 +1910,7 @@ FST_TEARDOWN_END()
 				}
 			}
 #endif
-			for (i = 0; i < 2; i++) {
-				switch_core_media_set_rtp_session(sessions[i], SWITCH_MEDIA_TYPE_AUDIO, NULL);
-				switch_rtp_destroy(&rtp[i]);
-				switch_channel_hangup(switch_core_session_get_channel(sessions[i]), SWITCH_CAUSE_NORMAL_CLEARING);
-				switch_core_session_rwunlock(sessions[i]);
-			}
-			alarm(0);
-			signal(SIGALRM, old_alarm_handler);
+			cleanup_restart_fixture();
 		}
 		FST_SESSION_END()
 }
