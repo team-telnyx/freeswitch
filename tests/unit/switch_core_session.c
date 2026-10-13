@@ -390,6 +390,13 @@ FST_CORE_BEGIN("./conf")
 			fst_requires(switch_core_session_receive_message(fst_session, &msg) == SWITCH_STATUS_SUCCESS);
 			fst_check(bt_response_count == 1);
 
+			/* REFER sender gone: nothing to answer, the flag must not stay set */
+			switch_channel_set_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER);
+			switch_channel_set_variable(fst_channel, "blind_transfer_uuid", "00000000-0000-0000-0000-000000000000");
+			fst_requires(switch_core_session_receive_message(fst_session, &msg) == SWITCH_STATUS_SUCCESS);
+			fst_check(bt_response_count == 1);
+			fst_check(!switch_channel_test_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER));
+
 			bt_release_session(r_session);
 			bt_release_session(p_session);
 		}

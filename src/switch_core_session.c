@@ -969,8 +969,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_perform_receive_message(swit
 
 		if (message->message_id == SWITCH_MESSAGE_INDICATE_BRIDGE &&
 			switch_channel_test_flag(session->channel, CF_CONFIRM_BLIND_TRANSFER)) {
-			switch_core_session_t *other_session;
-			const char *uuid = switch_channel_get_variable(session->channel, "blind_transfer_uuid");
 			/* string_arg carries the bridge peer uuid (absent only for conference/
 			   eavesdrop, which keep the legacy success). A peer that can't be
 			   located is already at CS_HANGUP and never answered: defer. */
@@ -989,15 +987,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_perform_receive_message(swit
 				   answer-time producer (mark_answered) or a failure producer fires later */
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 								  "Deferring blind transfer confirmation until the peer answers\n");
-			} else if (!zstr(uuid) && (other_session = switch_core_session_locate(uuid))) {
-				if (switch_channel_test_and_clear_flag(session->channel, CF_CONFIRM_BLIND_TRANSFER)) {
-					switch_core_session_message_t msg = { 0 };
-					msg.message_id = SWITCH_MESSAGE_INDICATE_BLIND_TRANSFER_RESPONSE;
-					msg.from = __FILE__;
-					msg.numeric_arg = 1;
-					switch_core_session_receive_message(other_session, &msg);
-				}
-				switch_core_session_rwunlock(other_session);
+			} else {
+				switch_ivr_blind_transfer_ack(session, SWITCH_TRUE);
 			}
 		}
 	}

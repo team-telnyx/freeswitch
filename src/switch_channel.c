@@ -4312,25 +4312,10 @@ SWITCH_DECLARE(switch_status_t) switch_channel_perform_mark_answered(switch_chan
 	 */
 	if ((uuid = switch_channel_get_variable(channel, SWITCH_ORIGINATOR_VARIABLE))
 		&& (other_session = switch_core_session_locate(uuid))) {
-		switch_channel_t *other_channel = switch_core_session_get_channel(other_session);
 		switch_core_session_kill_channel(other_session, SWITCH_SIG_BREAK);
 
 		/* deliver deferred blind-transfer confirmation now that the target answered */
-		if (switch_channel_test_flag(other_channel, CF_CONFIRM_BLIND_TRANSFER)) {
-			const char *xfer_uuid = switch_channel_get_variable(other_channel, "blind_transfer_uuid");
-			switch_core_session_t *xfer_session;
-
-			if (!zstr(xfer_uuid) && (xfer_session = switch_core_session_locate(xfer_uuid))) {
-				if (switch_channel_test_and_clear_flag(other_channel, CF_CONFIRM_BLIND_TRANSFER)) {
-					switch_core_session_message_t msg = { 0 };
-					msg.message_id = SWITCH_MESSAGE_INDICATE_BLIND_TRANSFER_RESPONSE;
-					msg.from = __FILE__;
-					msg.numeric_arg = 1;
-					switch_core_session_receive_message(xfer_session, &msg);
-				}
-				switch_core_session_rwunlock(xfer_session);
-			}
-		}
+		switch_ivr_blind_transfer_ack(other_session, SWITCH_TRUE);
 
 		switch_core_session_rwunlock(other_session);
 	}
