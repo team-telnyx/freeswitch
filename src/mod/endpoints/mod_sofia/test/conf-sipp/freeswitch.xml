@@ -439,6 +439,37 @@
       </settings>
   </profile>
 
+<profile name="delayed-offer">
+  <domains>
+    <domain name="all" alias="false" parse="false"/>
+  </domains>
+  <settings>
+    <param name="debug" value="1"/>
+    <param name="user-agent-string" value="Unit Test"/>
+    <param name="sip-trace" value="yes"/>
+    <param name="sip-port" value="5090"/>
+    <param name="dialplan" value="XML"/>
+    <param name="context" value="default"/>
+    <param name="inbound-codec-prefs" value="PCMU"/>
+    <param name="outbound-codec-prefs" value="PCMU"/>
+    <param name="rtp-timer-name" value="soft"/>
+    <param name="local-network-acl" value="localnet.auto"/>
+    <param name="manage-presence" value="false"/>
+    <param name="inbound-codec-negotiation" value="generous"/>
+    <param name="inbound-late-negotiation" value="true"/>
+    <param name="enable-100rel" value="true"/>
+    <param name="enable-3pcc" value="proxy"/>
+    <param name="enable-3pcc-early-offer" value="true"/>
+    <param name="timer-T1X64" value="4000"/>
+    <param name="rtp-ip" value="$${local_ip_v4}"/>
+    <param name="sip-ip" value="$${local_ip_v4}"/>
+    <param name="ext-rtp-ip" value="$${local_ip_v4}"/>
+    <param name="ext-sip-ip" value="$${local_ip_v4}"/>
+    <param name="rtp-timeout-sec" value="300"/>
+    <param name="tls" value="false"/>
+  </settings>
+</profile>
+
 <profile name="external-ipv6">
   <!-- http://wiki.freeswitch.org/wiki/Sofia_Configuration_Files -->
   <!-- This profile is only for outbound registrations to providers -->
@@ -585,6 +616,45 @@
       <condition field="destination_number" expression="^1212121212$">
         <action application="answer"/>
         <action application="set" data="park_after_bridge=true"/>
+        <action application="park"/>
+      </condition>
+    </extension>
+
+    <extension name="delayed_offer_park">
+      <condition field="destination_number" expression="^3434343434$">
+        <action application="ring_ready"/>
+        <action application="park"/>
+      </condition>
+    </extension>
+
+    <extension name="delayed_offer_ring_hook_pre_answer_park">
+      <condition field="destination_number" expression="^3434343436$">
+        <action application="set" data="ring_ready_early_media=true"/>
+        <action application="set" data="execute_on_ring=pre_answer"/>
+        <action application="park"/>
+      </condition>
+    </extension>
+
+    <extension name="delayed_offer_pre_answer_hook_log_park">
+      <condition field="destination_number" expression="^3434343438$">
+        <action application="set" data="execute_on_pre_answer=log INFO pre-answer-hook-${uuid}"/>
+        <action application="ring_ready"/>
+        <action application="park"/>
+      </condition>
+    </extension>
+
+    <extension name="delayed_offer_pre_answer_hook_answer_park">
+      <condition field="destination_number" expression="^3434343437$">
+        <action application="set" data="execute_on_pre_answer=answer"/>
+        <action application="ring_ready"/>
+        <action application="park"/>
+      </condition>
+    </extension>
+
+    <extension name="delayed_offer_ring_ready_early_media_park">
+      <condition field="destination_number" expression="^3434343435$">
+        <action application="set" data="ring_ready_early_media=true"/>
+        <action application="ring_ready"/>
         <action application="park"/>
       </condition>
     </extension>

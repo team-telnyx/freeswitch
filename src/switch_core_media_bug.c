@@ -1252,6 +1252,17 @@ SWITCH_DECLARE(uint32_t) switch_core_media_bug_count(switch_core_session_t *orig
 	return x;
 }
 
+SWITCH_DECLARE(switch_bool_t) switch_core_media_bug_tap_only(switch_core_session_t *orig_session)
+{
+	switch_bool_t tap_only;
+
+	switch_thread_rwlock_rdlock(orig_session->bug_rwlock);
+	tap_only = (!orig_session->bugs || orig_session->bug_tap_only) ? SWITCH_TRUE : SWITCH_FALSE;
+	switch_thread_rwlock_unlock(orig_session->bug_rwlock);
+
+	return tap_only;
+}
+
 SWITCH_DECLARE(uint32_t) switch_core_media_bug_patch_video(switch_core_session_t *orig_session, switch_frame_t *frame)
 {
 	switch_media_bug_t *bp;

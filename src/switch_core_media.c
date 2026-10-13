@@ -11792,6 +11792,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 	if ((!val && !switch_media_handle_test_media_flag(smh, SCMF_REWRITE_TIMESTAMPS)) || (val && switch_false(val))) {
 		flags[SWITCH_RTP_FLAG_RAW_WRITE]++;
 	}
+
+	val = switch_channel_get_variable(session->channel, "rtp_rebase_timestamps_on_jump");
+	if ((!val && switch_media_handle_test_media_flag(smh, SCMF_REBASE_TIMESTAMPS_ON_JUMP)) || (val && switch_true(val))) {
+		flags[SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP]++;
+	}
 	
 	// Deprecated channel variable. please use rtp_use_ms_per_packet
 	if (((val = switch_channel_get_variable(session->channel, "rtp_genesys_dtmf")) && switch_true(val))) {
@@ -12839,6 +12844,13 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 			if (switch_true(switch_channel_get_variable(session->channel, "rtp_use_bundle")) && v_engine->rtcp_mux > 0 && a_engine->rtp_session) {
 				v_engine->rtp_session = a_engine->rtp_session;
 				v_engine->bundled_with_audio = 1;
+
+				/* Video on the audio session would move the audio timestamp mapping: keep it off there */
+				if (switch_rtp_test_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP)) {
+					switch_rtp_clear_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP);
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+									  "rtp_rebase_timestamps_on_jump disabled: video shares the audio RTP session (rtp_use_bundle)\n");
+				}
 			} else {
 				v_engine->rtp_session = switch_rtp_new(a_engine->local_sdp_ip,
 														 v_engine->local_sdp_port,
@@ -13687,6 +13699,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 	//int red = 0;
 	payload_map_t *pmap;
 	int is_outbound = switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_OUTBOUND;
+	int proxy_3pcc_offer;
 	const char *vbw;
 	int bw = 256, i = 0;
 	uint8_t fir = 0, nack = 0, pli = 0, tmmbr = 0, has_vid = 0;
@@ -13755,6 +13768,23 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 		switch_core_session_check_outgoing_crypto(session, sdp_type);
 	}
 
+	/*
+	 * An inbound 3PCC proxy call answering a late-offer INVITE generates its own
+	 * offer here without CF_3PCC. When rtp_secure_media_3pcc_proxy_offer is set,
+	 * prepare SDES crypto for that offer as for the other 3PCC offers. Media we
+	 * don't terminate (proxy/bypass) and WebRTC/DTLS offers are left as they are.
+	 */
+	proxy_3pcc_offer = !is_outbound &&
+		sdp_type == SDP_OFFER &&
+		switch_channel_test_flag(session->channel, CF_3PCC_PROXY) &&
+		!switch_channel_test_flag(session->channel, CF_PROXY_MODE) &&
+		!switch_channel_test_flag(session->channel, CF_PROXY_MEDIA) &&
+		!switch_channel_test_flag(session->channel, CF_AVPF) &&
+		!switch_channel_test_flag(session->channel, CF_DTLS) &&
+		!switch_true(switch_channel_get_variable(session->channel, "media_webrtc")) &&
+		!switch_true(switch_channel_get_variable(session->channel, "rtp_use_dtls")) &&
+		switch_channel_var_true(session->channel, "rtp_secure_media_3pcc_proxy_offer");
+
 	if (is_outbound || switch_channel_test_flag(session->channel, CF_RECOVERING) ||
 		switch_channel_test_flag(session->channel, CF_3PCC)) {
 		if (!switch_channel_test_flag(session->channel, CF_AVPF) &&
@@ -13782,6 +13812,10 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 				generate_local_fingerprint(smh, SWITCH_MEDIA_TYPE_AUDIO);
 			}
 		}
+	}
+
+	if (is_outbound || switch_channel_test_flag(session->channel, CF_RECOVERING) ||
+		switch_channel_test_flag(session->channel, CF_3PCC) || proxy_3pcc_offer) {
 		switch_core_session_parse_crypto_prefs(session);
 
 		/*
@@ -13794,7 +13828,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 		 */
 		if (!is_outbound &&
 		    sdp_type == SDP_OFFER &&
-		    switch_channel_test_flag(session->channel, CF_3PCC) &&
+		    (switch_channel_test_flag(session->channel, CF_3PCC) || proxy_3pcc_offer) &&
 		    !switch_channel_test_flag(session->channel, CF_RECOVERING) &&
 		    smh->crypto_mode == CRYPTO_MODE_OPTIONAL &&
 		    !switch_channel_var_true(session->channel, "rtp_secure_media_3pcc_offer_both")) {
