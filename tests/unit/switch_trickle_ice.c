@@ -1704,7 +1704,7 @@ FCT_BGN()
 			added = switch_rtp_merge_remote_ice_candidates_into_engine(rtp, session, &candidates);
 			fst_check(added == 1);
 			fst_check(candidates.cand_idx[1] == 1);
-			fst_check(candidates.cands[0][1].ready == 1);
+			fst_check(candidates.cands[0][1].ready == 0);
 			added = switch_rtp_merge_remote_ice_candidates_into_engine(rtp, session, &candidates);
 			fst_check(added == 0);
 
@@ -1720,12 +1720,61 @@ FCT_BGN()
 				added = switch_rtp_merge_remote_ice_candidates_into_engine(rtp, session, &candidates);
 				fst_check(added == 1);
 				fst_check(candidates.cand_idx[0] == i);
-				fst_check(candidates.cands[i - 1][0].ready == 1);
+				fst_check(candidates.cands[i - 1][0].ready == 0);
 				added = switch_rtp_merge_remote_ice_candidates_into_engine(rtp, session, &candidates);
 				fst_check(added == 0);
 			}
 
 			fst_check_string_equals(candidates.cands[25][0].cand_type, "relay");
+			cleanup_rtp(&rtp);
+			switch_core_destroy_memory_pool(&rtp_pool);
+			switch_core_session_destroy(&session);
+		}
+		FCT_TEST_END();
+
+		FCT_TEST_BGN(remote_candidate_reset_discards_pending_publication)
+		{
+			switch_core_session_t *session = NULL;
+			switch_memory_pool_t *rtp_pool = NULL;
+			switch_rtp_t *rtp = NULL;
+			const char *err = NULL;
+			ice_t candidates;
+			switch_status_t status;
+			int added;
+
+			memset(&candidates, 0, sizeof(candidates));
+			candidates.chosen[0] = candidates.chosen[1] = -1;
+			session = switch_core_session_request_by_name("null", SWITCH_CALL_DIRECTION_OUTBOUND, NULL);
+			fst_requires(session != NULL);
+			fst_requires(switch_core_new_memory_pool(&rtp_pool) == SWITCH_STATUS_SUCCESS);
+			switch_core_memory_pool_set_data(rtp_pool, "__session", session);
+			fst_requires(make_real_rtp(rtp_pool, &rtp, &err) == SWITCH_STATUS_SUCCESS && rtp != NULL);
+			switch_rtp_prepare_trickle_ice(rtp, IPR_RTP, &candidates);
+			switch_rtp_prepare_trickle_ice(rtp, IPR_RTCP, &candidates);
+
+			status = switch_rtp_add_trickle_remote_candidate(rtp, 0, "0",
+				"candidate:rtp 1 udp 1900000001 192.0.2.10 41000 typ host");
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			status = switch_rtp_add_trickle_remote_candidate(rtp, 0, "0",
+				"candidate:rtcp 2 udp 1900000000 192.0.2.10 41001 typ host");
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			fst_check(candidates.cand_idx[0] == 1);
+			fst_check(candidates.cand_idx[1] == 1);
+
+			switch_rtp_invalidate_remote_ice_candidates(rtp, &candidates);
+			fst_check(candidates.cand_idx[0] == 0);
+			fst_check(candidates.cand_idx[1] == 0);
+			added = switch_rtp_merge_remote_ice_candidates_into_engine(rtp, session, &candidates);
+			fst_check(added == 0);
+
+			status = switch_rtp_add_trickle_remote_candidate(rtp, 0, "0",
+				"candidate:new 1 udp 1899999999 192.0.2.20 42000 typ host");
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			added = switch_rtp_merge_remote_ice_candidates_into_engine(rtp, session, &candidates);
+			fst_check(added == 1);
+			fst_check(candidates.cand_idx[0] == 1);
+			fst_check(candidates.cands[0][0].ready == 0);
+
 			cleanup_rtp(&rtp);
 			switch_core_destroy_memory_pool(&rtp_pool);
 			switch_core_session_destroy(&session);
