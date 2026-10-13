@@ -1,6 +1,7 @@
 
 #include <switch.h>
 #include <test/switch_test.h>
+#include <unistd.h>
 #include "../../libs/srtp/include/srtp.h"
 
 #pragma weak srtp_create
@@ -27,6 +28,85 @@ switch_io_flag_t io_flags;
 switch_payload_t read_pt;
 int send_rtcp_test_success = 0;
 
+static switch_memory_pool_t *media_pool = NULL;
+static switch_rtp_t *media_rtp = NULL;
+static switch_core_session_t *media_session = NULL;
+static switch_pollfd_t *media_poll = NULL;
+static payload_map_t media_map, *media_maps = &media_map;
+static switch_port_t media_port;
+static int media_fd = -1, media_fork_fd = -1;
+
+static void media_cleanup(void)
+{
+	if (media_session) switch_core_session_set_fork_read_frame(media_session, NULL);
+	if (media_rtp) {
+		switch_rtp_fork_deactivate(media_rtp, FORK_DIRECTION_RX);
+		switch_rtp_destroy(&media_rtp);
+		media_rtp = NULL;
+	}
+	media_port = 0;
+	if (media_fd >= 0) close(media_fd);
+	if (media_fork_fd >= 0) close(media_fork_fd);
+	media_fd = media_fork_fd = -1;
+	media_poll = NULL;
+	if (media_pool) switch_core_destroy_memory_pool(&media_pool);
+	if (media_session) {
+		switch_channel_hangup(switch_core_session_get_channel(media_session), SWITCH_CAUSE_NORMAL_CLEARING);
+		switch_core_session_rwunlock(media_session);
+		media_session = NULL;
+	}
+}
+
+static switch_bool_t send_udp_packet(int fd, switch_port_t port, const uint8_t *packet, size_t packet_len)
+{
+	struct sockaddr_in addr;
+	ssize_t sent;
+
+	if (fd < 0 || !port || !packet || !packet_len) return SWITCH_FALSE;
+
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	addr.sin_port = htons(port);
+	sent = sendto(fd, packet, packet_len, 0, (const struct sockaddr *)&addr, sizeof(addr));
+	return sent == (ssize_t)packet_len ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
+static switch_bool_t recv_rtp_packet(int fd, uint8_t *packet, size_t packet_size, size_t *packet_len, int timeout_ms)
+{
+	fd_set read_fds;
+	struct timeval timeout;
+	ssize_t bytes;
+	int ready;
+
+	if (fd < 0 || !packet || !packet_size || !packet_len || timeout_ms < 0) return SWITCH_FALSE;
+	FD_ZERO(&read_fds);
+	FD_SET(fd, &read_fds);
+	timeout.tv_sec = timeout_ms / 1000;
+	timeout.tv_usec = (timeout_ms % 1000) * 1000;
+	ready = select(fd + 1, &read_fds, NULL, NULL, &timeout);
+	if (ready != 1) return SWITCH_FALSE;
+
+	bytes = recvfrom(fd, packet, packet_size, 0, NULL, NULL);
+	if (bytes < SWITCH_RTP_HEADER_LEN) return SWITCH_FALSE;
+	*packet_len = (size_t)bytes;
+	return SWITCH_TRUE;
+}
+
+static void media_fork_packet(uint8_t *packet, uint16_t seq)
+{
+	uint32_t ts = htonl(16000 + (uint32_t)seq * 160);
+	uint16_t net_seq = htons(seq);
+	uint32_t ssrc = htonl(0x11223344);
+
+	memset(packet, seq & 0xff, 172);
+	packet[0] = 0x80;
+	packet[1] = 0;
+	memcpy(packet + 2, &net_seq, sizeof(net_seq));
+	memcpy(packet + 4, &ts, sizeof(ts));
+	memcpy(packet + 8, &ssrc, sizeof(ssrc));
+}
+
 static int make_udp_sink(switch_port_t *port)
 {
 	struct sockaddr_in addr;
@@ -50,6 +130,43 @@ static int make_udp_sink(switch_port_t *port)
 
 	*port = ntohs(addr.sin_port);
 	return fd;
+}
+
+static switch_bool_t media_open(int timed)
+{
+	switch_rtp_flag_t test_flags[SWITCH_RTP_FLAG_INVALID] = {0};
+	switch_port_t peer_port;
+	const char *error = NULL;
+
+	if (switch_core_new_memory_pool(&media_pool) != SWITCH_STATUS_SUCCESS) return SWITCH_FALSE;
+	if (media_session) switch_core_memory_pool_set_data(media_pool, "__session", media_session);
+	media_fd = make_udp_sink(&peer_port);
+	if (media_fd < 0 || !(media_port = switch_rtp_request_port(rx_host))) return SWITCH_FALSE;
+	test_flags[SWITCH_RTP_FLAG_USE_TIMER] = timed;
+	media_rtp = switch_rtp_new(rx_host, media_port, tx_host, peer_port, 0, 160, 20000,
+		test_flags, timed ? "soft" : NULL, &error, media_pool);
+	if (!media_rtp) return SWITCH_FALSE;
+	switch_rtp_clear_flag(media_rtp, SWITCH_RTP_FLAG_PAUSE);
+	switch_rtp_clear_flag(media_rtp, SWITCH_RTP_FLAG_FLUSH);
+	memset(&media_map, 0, sizeof(media_map));
+	media_map.allocated = media_map.negotiated = 1;
+	return switch_rtp_set_payload_map(media_rtp, &media_maps) == SWITCH_STATUS_SUCCESS &&
+		switch_socket_create_pollfd(&media_poll, switch_rtp_get_rtp_socket(media_rtp), SWITCH_POLLIN,
+			NULL, media_pool) == SWITCH_STATUS_SUCCESS;
+}
+
+static switch_bool_t media_ready(void)
+{
+	int ready = 0;
+
+	/* Wait for queued input without retrying the RTP operation under test. */
+	return switch_poll(media_poll, 1, &ready, 1000000) == SWITCH_STATUS_SUCCESS;
+}
+
+static switch_status_t media_read(switch_frame_t *frame, switch_io_flag_t io_flags)
+{
+	memset(frame, 0, sizeof(*frame));
+	return switch_rtp_zerocopy_read_frame(media_rtp, frame, io_flags);
 }
 
 static switch_bool_t recv_rtp_pt_ts(int fd, switch_payload_t pt, uint32_t *ts, uint8_t *m, int timeout_ms)
@@ -522,6 +639,89 @@ static void send_rtcp_event_handler(switch_event_t *event)
 	show_event(event);
 }
 
+static switch_timer_interface_t arrival_timer_interface;
+static switch_timer_interface_t *arrival_original_interface;
+static switch_bool_t arrival_sent, arrival_empty;
+
+static switch_status_t media_arrival_next(switch_timer_t *timer)
+{
+	uint8_t packet[172];
+	int ready = 0;
+
+	arrival_empty = switch_poll(media_poll, 1, &ready, 0) == SWITCH_STATUS_TIMEOUT;
+	media_fork_packet(packet, 2);
+	arrival_sent = send_udp_packet(media_fd, media_port, packet, sizeof(packet)) && media_ready();
+	return arrival_original_interface->timer_next(timer);
+}
+
+static switch_bool_t media_arrival_case(int mode, int rejects)
+{
+	switch_call_cause_t cause;
+	switch_port_t fork_port;
+	switch_timer_t *timer;
+	switch_frame_t frame;
+	switch_status_t status;
+	uint8_t packet[172], received[2048], processed[160];
+	const uint8_t rejected[] = {0x80, 20, 0, 7, 0, 0, 0x7d, 0, 0x55, 0x66, 0x77, 0x88};
+	size_t received_len;
+	int i, j;
+	switch_bool_t ok = SWITCH_FALSE;
+
+	if (switch_ivr_originate(NULL, &media_session, &cause, "null/+15553334444", 2,
+		NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) != SWITCH_STATUS_SUCCESS) goto done;
+	switch_channel_set_variable(switch_core_session_get_channel(media_session), "read_codec", "PCMU");
+	if (!media_open(1)) goto done;
+	media_fork_fd = make_udp_sink(&fork_port);
+	if (media_fork_fd < 0 || switch_rtp_fork_set(media_rtp, FORK_DIRECTION_RX, rx_host, fork_port,
+		0x11223344, "start", "PCMU") != SWITCH_STATUS_SUCCESS ||
+		switch_rtp_fork_activate(media_rtp, FORK_DIRECTION_RX) != SWITCH_STATUS_SUCCESS) goto done;
+	if (mode == 1) switch_rtp_set_flag(media_rtp, SWITCH_RTP_FLAG_AUTOFLUSH);
+	if (mode == 2) switch_rtp_set_flag(media_rtp, SWITCH_RTP_FLAG_STICKY_FLUSH);
+	timer = switch_rtp_get_media_timer(media_rtp);
+	if (!timer) goto done;
+	arrival_original_interface = timer->timer_interface;
+	arrival_timer_interface = *arrival_original_interface;
+	arrival_timer_interface.timer_next = media_arrival_next;
+
+	for (i = 1; i <= 4; i++) {
+		if (i == 2) {
+			for (j = 0; j < rejects; j++) {
+				if (!send_udp_packet(media_fd, media_port, rejected, sizeof(rejected))) goto done;
+			}
+			if (rejects && !media_ready()) goto done;
+			arrival_sent = SWITCH_FALSE;
+			/* Inject after any pre-read, before the original timer returns. */
+			timer->timer_interface = &arrival_timer_interface;
+		} else {
+			media_fork_packet(packet, (uint16_t)i);
+			if (!send_udp_packet(media_fd, media_port, packet, sizeof(packet)) || !media_ready()) goto done;
+		}
+		status = media_read(&frame, SWITCH_IO_FLAG_NONE);
+		timer->timer_interface = arrival_original_interface;
+		if (i == 2 && (!arrival_sent || (mode && !arrival_empty))) goto done;
+		if (status != SWITCH_STATUS_SUCCESS || switch_test_flag(&frame, SFF_CNG)) goto done;
+		media_fork_packet(packet, (uint16_t)i);
+		if (frame.seq != i || frame.payload != 0 || frame.timestamp != 16000 + i * 160 ||
+			frame.datalen != 160 || memcmp(frame.data, packet + 12, 160)) goto done;
+		memcpy(processed, frame.data, sizeof(processed));
+		processed[0] ^= 0x5a;
+		frame.packet = NULL;
+		frame.data = processed;
+		frame.buflen = sizeof(processed);
+		if (switch_core_session_set_fork_read_frame(media_session, &frame) != SWITCH_STATUS_SUCCESS) goto done;
+		if (i > 1) {
+			if (!recv_rtp_packet(media_fork_fd, received, sizeof(received), &received_len, 1000)) goto done;
+			media_fork_packet(packet, (uint16_t)(i - 1));
+			packet[12] ^= 0x5a;
+			if (received_len != sizeof(packet) || memcmp(received, packet, sizeof(packet))) goto done;
+		}
+	}
+	ok = SWITCH_TRUE;
+ done:
+	media_cleanup();
+	return ok;
+}
+
 FST_CORE_BEGIN("./conf")
 {
 FST_SUITE_BEGIN(switch_rtp)
@@ -534,6 +734,7 @@ FST_SETUP_END()
 
 FST_TEARDOWN_BEGIN()
 {
+	media_cleanup();
 }
 FST_TEARDOWN_END()
 	FST_TEST_BEGIN(test_rtp)
@@ -559,6 +760,122 @@ FST_TEARDOWN_END()
 	}
 	FST_TEST_END()
 
+	FST_TEST_BEGIN(test_media_fork_rejected_preread)
+	{
+		int mode, rejects;
+		char description[64];
+
+		for (mode = 0; mode < 3; mode++) {
+			for (rejects = 0; rejects <= 3; rejects += 3) {
+				snprintf(description, sizeof(description), "arrival mode=%d rejects=%d", mode, rejects);
+				fst_xcheck(media_arrival_case(mode, rejects), description);
+			}
+		}
+	}
+	FST_TEST_END()
+
+	FST_TEST_BEGIN(test_media_fork_unnegotiated_triplets)
+	{
+		switch_call_cause_t cause;
+		switch_port_t fork_port;
+		switch_frame_t frame = {0};
+		uint8_t packet[172], received[2048], processed[160];
+		const uint8_t rejected[] = {0x80, 20, 0, 7, 0, 0, 0x7d, 0, 0x55, 0x66, 0x77, 0x88};
+		size_t received_len;
+		int i, j;
+
+		fst_requires(switch_ivr_originate(NULL, &media_session, &cause, "null/+15553334444", 2,
+			NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) == SWITCH_STATUS_SUCCESS);
+		switch_channel_set_variable(switch_core_session_get_channel(media_session), "read_codec", "PCMU");
+		fst_requires(media_open(1));
+		media_fork_fd = make_udp_sink(&fork_port);
+		fst_requires(media_fork_fd >= 0);
+		fst_requires(switch_rtp_fork_set(media_rtp, FORK_DIRECTION_RX, rx_host, fork_port,
+			0x11223344, "start", "PCMU") == SWITCH_STATUS_SUCCESS);
+		fst_requires(switch_rtp_fork_activate(media_rtp, FORK_DIRECTION_RX) == SWITCH_STATUS_SUCCESS);
+
+		for (i = 1; i <= 6; i++) {
+			if (i == 2 || i == 4) {
+				for (j = 0; j < 3; j++) fst_requires(send_udp_packet(media_fd, media_port, rejected, sizeof(rejected)));
+			}
+			media_fork_packet(packet, (uint16_t)i);
+			fst_requires(send_udp_packet(media_fd, media_port, packet, sizeof(packet)));
+		}
+		for (i = 1; i <= 6; i++) {
+			fst_requires(media_ready());
+			fst_requires(media_read(&frame, SWITCH_IO_FLAG_NONE) == SWITCH_STATUS_SUCCESS);
+			fst_requires(!switch_test_flag(&frame, SFF_CNG));
+			media_fork_packet(packet, (uint16_t)i);
+			fst_check(frame.seq == i && frame.payload == 0 && frame.timestamp == 16000 + i * 160);
+			fst_requires(frame.datalen == 160);
+			fst_check(memcmp(frame.data, packet + 12, 160) == 0);
+
+			memcpy(processed, frame.data, sizeof(processed));
+			processed[0] ^= 0x5a;
+			frame.packet = NULL;
+			frame.data = processed;
+			frame.buflen = sizeof(processed);
+			fst_requires(switch_core_session_set_fork_read_frame(media_session, &frame) == SWITCH_STATUS_SUCCESS);
+			if (i > 1) {
+				fst_requires(recv_rtp_packet(media_fork_fd, received, sizeof(received), &received_len, 1000));
+				media_fork_packet(packet, (uint16_t)(i - 1));
+				packet[12] ^= 0x5a;
+				fst_check(received_len == sizeof(packet) && memcmp(received, packet, sizeof(packet)) == 0);
+			}
+		}
+	}
+	FST_TEST_END()
+	FST_TEST_BEGIN(test_unnegotiated_payload_controls)
+	{
+		uint8_t packet[172];
+		switch_frame_t frame = {0};
+		int mode, i;
+
+		for (mode = 0; mode < 2; mode++) {
+			fst_requires(media_open(mode));
+			media_fork_packet(packet, 1);
+			packet[1] = 20;
+			for (i = 0; i < 3; i++) fst_requires(send_udp_packet(media_fd, media_port, packet, 12));
+			fst_requires(media_ready());
+			fst_check(media_read(&frame, SWITCH_IO_FLAG_NOBLOCK) == SWITCH_STATUS_BREAK);
+			/* Exhaust the discard budget, then read the remaining audio. */
+			for (i = 0; i < 24; i++) fst_requires(send_udp_packet(media_fd, media_port, packet, 12));
+			media_fork_packet(packet, 1);
+			fst_requires(send_udp_packet(media_fd, media_port, packet, sizeof(packet)));
+			fst_requires(media_ready());
+			fst_check(media_read(&frame, SWITCH_IO_FLAG_NOBLOCK) == SWITCH_STATUS_BREAK);
+			fst_requires(media_ready());
+			fst_requires(media_read(&frame, SWITCH_IO_FLAG_NOBLOCK) == SWITCH_STATUS_SUCCESS);
+			fst_check(!switch_test_flag(&frame, SFF_CNG) && frame.seq == 1 && frame.payload == 0);
+			fst_requires(frame.datalen == 160);
+			fst_check(memcmp(frame.data, packet + 12, 160) == 0);
+
+			for (i = 0; i < 2; i++) {
+				switch_payload_t cn_pt = i ? 98 : 13;
+				uint32_t speech_ts = htonl(16000 + (uint32_t)(4 + i * 2) * 160);
+				switch_rtp_set_cng_pt(media_rtp, cn_pt);
+				media_fork_packet(packet, (uint16_t)(2 + i * 2));
+				packet[1] = cn_pt;
+				packet[12] = 0x41;
+				packet[13] = 0;
+				fst_requires(send_udp_packet(media_fd, media_port, packet, 14));
+				media_fork_packet(packet, (uint16_t)(3 + i * 2));
+				/* Skip the timestamp already emitted by the CN path. */
+				memcpy(packet + 4, &speech_ts, sizeof(speech_ts));
+				fst_requires(send_udp_packet(media_fd, media_port, packet, sizeof(packet)));
+				fst_requires(media_ready());
+				fst_requires(media_read(&frame, SWITCH_IO_FLAG_NOBLOCK) == SWITCH_STATUS_SUCCESS);
+				fst_check(switch_test_flag(&frame, SFF_CNG) && frame.payload == cn_pt && frame.datalen == 2);
+				fst_requires(media_ready());
+				fst_requires(media_read(&frame, SWITCH_IO_FLAG_NOBLOCK) == SWITCH_STATUS_SUCCESS);
+				fst_check(!switch_test_flag(&frame, SFF_CNG) && frame.payload == 0 && frame.seq == 3 + i * 2);
+				fst_requires(frame.datalen == 160);
+				fst_check(memcmp(frame.data, packet + 12, 160) == 0);
+			}
+			media_cleanup();
+		}
+	}
+	FST_TEST_END()
 	FST_TEST_BEGIN(test_session_with_rtp)
 	{
 		switch_core_session_t *session = NULL;
