@@ -4307,10 +4307,16 @@ SWITCH_DECLARE(switch_status_t) switch_channel_perform_mark_answered(switch_chan
 	if ((uuid = switch_channel_get_variable(channel, SWITCH_ORIGINATOR_VARIABLE))
 		&& (other_session = switch_core_session_locate(uuid))) {
 		switch_core_session_kill_channel(other_session, SWITCH_SIG_BREAK);
+		switch_core_session_rwunlock(other_session);
+	}
 
-		/* deliver deferred blind-transfer confirmation now that the target answered */
+	/* Answered while already bridged to a leg that waits for a blind transfer confirmation (the bridge
+	   started on early media and deferred it): report success now. A leg that is not bridged yet gets
+	   its success from the bridge start. */
+	if (((uuid = switch_channel_get_variable_dup(channel, SWITCH_BRIDGE_VARIABLE, SWITCH_TRUE, -1)) ||
+		 (uuid = switch_channel_get_variable_dup(channel, SWITCH_SIGNAL_BRIDGE_VARIABLE, SWITCH_TRUE, -1)))
+		&& (other_session = switch_core_session_locate(uuid))) {
 		switch_ivr_blind_transfer_ack(other_session, SWITCH_TRUE);
-
 		switch_core_session_rwunlock(other_session);
 	}
 

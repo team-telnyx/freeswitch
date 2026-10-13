@@ -436,28 +436,40 @@ FST_CORE_BEGIN("./conf")
 		FST_SESSION_END()
 
 		/*
-		 * blind_transfer_answer_time_producer: after an
-		 * early-media bridge defers the confirmation, the target's answer
-		 * must deliver exactly one success response through the
-		 * mark_answered originator hook.
+		 * blind_transfer_answer_time_producer: after an early-media bridge
+		 * defers the confirmation, the answer of the leg bridged to the
+		 * transferred leg delivers exactly one success. A leg that the
+		 * transferred leg originated but has not bridged yet (for example
+		 * a group_confirm leg) must not report success when it answers.
 		 */
 		FST_SESSION_BEGIN(blind_transfer_answer_time_producer)
 		{
 			switch_core_session_t *r_session = NULL; /* parked REFER sender */
-			switch_core_session_t *t_session = NULL; /* transfer target */
+			switch_core_session_t *o_session = NULL; /* originated, not bridged yet */
+			switch_core_session_t *t_session = NULL; /* transfer target bridged on early media */
+			switch_channel_t *o_channel;
 			switch_channel_t *t_channel;
 
 			fst_requires((r_session = start_peer()));
+			fst_requires((o_session = start_peer()));
 			fst_requires((t_session = start_peer()));
+			o_channel = switch_core_session_get_channel(o_session);
 			t_channel = switch_core_session_get_channel(t_session);
 			/* mark_answered early-returns on an already answered channel */
+			switch_channel_clear_flag(o_channel, CF_ANSWERED);
 			switch_channel_clear_flag(t_channel, CF_ANSWERED);
 
 			switch_channel_set_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER);
 			switch_channel_set_variable(fst_channel, "blind_transfer_uuid", switch_core_session_get_uuid(r_session));
-			switch_channel_set_variable(t_channel, SWITCH_ORIGINATOR_VARIABLE, switch_core_session_get_uuid(fst_session));
 
-			/* the target answers after the early-media bridge */
+			/* answered but not bridged: no result yet */
+			switch_channel_set_variable(o_channel, SWITCH_ORIGINATOR_VARIABLE, switch_core_session_get_uuid(fst_session));
+			switch_channel_mark_answered(o_channel);
+			fst_check(switch_atomic_read(&blind_transfer_response_count) == 0);
+			fst_check(switch_channel_test_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER));
+
+			/* the target bridged on early media answers */
+			switch_channel_set_variable(t_channel, SWITCH_BRIDGE_VARIABLE, switch_core_session_get_uuid(fst_session));
 			switch_channel_mark_answered(t_channel);
 
 			fst_check(switch_atomic_read(&blind_transfer_response_count) == 1);
@@ -465,6 +477,7 @@ FST_CORE_BEGIN("./conf")
 			fst_check(!switch_channel_test_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER));
 
 			stop_peer(r_session);
+			stop_peer(o_session);
 			stop_peer(t_session);
 		}
 		FST_SESSION_END()
