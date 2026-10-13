@@ -9085,7 +9085,8 @@ static int get_recv_payload(switch_rtp_t *rtp_session)
 #define return_cng_frame() do_cng = 1; goto timer_check
 
 static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t *bytes, switch_frame_flag_t *flags,
-									   payload_map_t **pmapP, switch_status_t poll_status, switch_bool_t return_jb_packet)
+									   payload_map_t **pmapP, switch_status_t poll_status, switch_bool_t return_jb_packet,
+									   switch_bool_t *retry_rejected)
 {
 	switch_status_t status = SWITCH_STATUS_FALSE;
 	uint32_t ts = 0;
@@ -9159,7 +9160,8 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 
 	memset(&rtp_session->last_rtp_hdr, 0, sizeof(rtp_session->last_rtp_hdr));
 
-	if (rtp_session->fork.fork_rx.active) {
+	/* A post-timer retry must retain the pre-read fork snapshot. */
+	if (rtp_session->fork.fork_rx.active && !(retry_rejected && *retry_rejected)) {
 		// To apply media bug modification to fork stream
 		// get the last read frame data instead
 		if (rtp_session->last_poll_status == SWITCH_STATUS_SUCCESS)  {
@@ -9185,6 +9187,8 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 		}
 		rtp_session->last_poll_status = poll_status;
 	}
+
+	if (retry_rejected) *retry_rejected = SWITCH_FALSE;
 
 	recv_again:
 	/* Re-read after the previous fork frame was saved so skipped packets cannot overwrite it. */
@@ -9292,15 +9296,17 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 
 				if (!accept_packet) {
 					int fdr = 0;
+					switch_status_t rejected_poll_status;
 
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG1,
 									  "Invalid Packet SEQ: %d TS: %d PT:%d ignored\n",
 									  ntohs(rtp_session->recv_msg.header.seq), ntohl(rtp_session->last_rtp_hdr.ts), rtp_session->last_rtp_hdr.pt);
 					*bytes = 0;
 					/* Bound rejection draining to packets already queued. */
-					if (++rejected_packets < RTP_MAX_REJECTED_PACKETS_PER_READ && rtp_session->read_pollfd &&
-						switch_poll(rtp_session->read_pollfd, 1, &fdr, 0) == SWITCH_STATUS_SUCCESS) {
-						goto recv_again;
+					if (++rejected_packets < RTP_MAX_REJECTED_PACKETS_PER_READ && rtp_session->read_pollfd) {
+						rejected_poll_status = switch_poll(rtp_session->read_pollfd, 1, &fdr, 0);
+						if (rejected_poll_status == SWITCH_STATUS_SUCCESS) goto recv_again;
+						if (retry_rejected && rejected_poll_status == SWITCH_STATUS_TIMEOUT) *retry_rejected = SWITCH_TRUE;
 					}
 				}
 			}
@@ -10842,6 +10848,7 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 	while (switch_rtp_ready(rtp_session)) {
 		int do_cng = 0;
 		int read_pretriggered = 0;
+		switch_bool_t retry_rejected = SWITCH_FALSE;
 		int has_rtcp = 0;
 		int got_rtp_poll = 0;
 
@@ -10855,7 +10862,7 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 
 			if (rtp_session->jb && !rtp_session->pause_jb && jb_valid(rtp_session)) {
 				while (switch_rtp_ready(rtp_session) && switch_poll(rtp_session->read_pollfd, 1, &fdr, 0) == SWITCH_STATUS_SUCCESS) {
-					status = read_rtp_packet(rtp_session, &bytes, flags, pmapP, SWITCH_STATUS_SUCCESS, SWITCH_FALSE);
+					status = read_rtp_packet(rtp_session, &bytes, flags, pmapP, SWITCH_STATUS_SUCCESS, SWITCH_FALSE, NULL);
 
 					if (status == SWITCH_STATUS_GENERR) {
 						ret = -1;
@@ -10878,7 +10885,7 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 			} else if ((rtp_session->flags[SWITCH_RTP_FLAG_AUTOFLUSH] || rtp_session->flags[SWITCH_RTP_FLAG_STICKY_FLUSH])) {
 
 				if (switch_poll(rtp_session->read_pollfd, 1, &fdr, 0) == SWITCH_STATUS_SUCCESS) {
-					status = read_rtp_packet(rtp_session, &bytes, flags, pmapP, SWITCH_STATUS_SUCCESS, SWITCH_FALSE);
+					status = read_rtp_packet(rtp_session, &bytes, flags, pmapP, SWITCH_STATUS_SUCCESS, SWITCH_FALSE, &retry_rejected);
 					if (status == SWITCH_STATUS_GENERR) {
 						ret = -1;
 						goto end;
@@ -10891,7 +10898,7 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 					}
 
 					/* switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "Initial (%i) %d\n", status, bytes); */
-					if (status != SWITCH_STATUS_FALSE) {
+					if (status != SWITCH_STATUS_FALSE && !retry_rejected) {
 						read_pretriggered = 1;
 					}
 
@@ -11044,7 +11051,7 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 			} else {
 				
 				
-				status = read_rtp_packet(rtp_session, &bytes, flags, pmapP, poll_status, got_jb);
+				status = read_rtp_packet(rtp_session, &bytes, flags, pmapP, poll_status, got_jb, &retry_rejected);
 
 				if (status == SWITCH_STATUS_GENERR) {
 					ret = -1;

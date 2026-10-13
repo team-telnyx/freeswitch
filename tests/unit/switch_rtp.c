@@ -639,6 +639,89 @@ static void send_rtcp_event_handler(switch_event_t *event)
 	show_event(event);
 }
 
+static switch_timer_interface_t arrival_timer_interface;
+static switch_timer_interface_t *arrival_original_interface;
+static switch_bool_t arrival_sent, arrival_empty;
+
+static switch_status_t media_arrival_next(switch_timer_t *timer)
+{
+	uint8_t packet[172];
+	int ready = 0;
+
+	arrival_empty = switch_poll(media_poll, 1, &ready, 0) == SWITCH_STATUS_TIMEOUT;
+	media_fork_packet(packet, 2);
+	arrival_sent = send_udp_packet(media_fd, media_port, packet, sizeof(packet)) && media_ready();
+	return arrival_original_interface->timer_next(timer);
+}
+
+static switch_bool_t media_arrival_case(int mode, int rejects)
+{
+	switch_call_cause_t cause;
+	switch_port_t fork_port;
+	switch_timer_t *timer;
+	switch_frame_t frame;
+	switch_status_t status;
+	uint8_t packet[172], received[2048], processed[160];
+	const uint8_t rejected[] = {0x80, 20, 0, 7, 0, 0, 0x7d, 0, 0x55, 0x66, 0x77, 0x88};
+	size_t received_len;
+	int i, j;
+	switch_bool_t ok = SWITCH_FALSE;
+
+	if (switch_ivr_originate(NULL, &media_session, &cause, "null/+15553334444", 2,
+		NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) != SWITCH_STATUS_SUCCESS) goto done;
+	switch_channel_set_variable(switch_core_session_get_channel(media_session), "read_codec", "PCMU");
+	if (!media_open(1)) goto done;
+	media_fork_fd = make_udp_sink(&fork_port);
+	if (media_fork_fd < 0 || switch_rtp_fork_set(media_rtp, FORK_DIRECTION_RX, rx_host, fork_port,
+		0x11223344, "start", "PCMU") != SWITCH_STATUS_SUCCESS ||
+		switch_rtp_fork_activate(media_rtp, FORK_DIRECTION_RX) != SWITCH_STATUS_SUCCESS) goto done;
+	if (mode == 1) switch_rtp_set_flag(media_rtp, SWITCH_RTP_FLAG_AUTOFLUSH);
+	if (mode == 2) switch_rtp_set_flag(media_rtp, SWITCH_RTP_FLAG_STICKY_FLUSH);
+	timer = switch_rtp_get_media_timer(media_rtp);
+	if (!timer) goto done;
+	arrival_original_interface = timer->timer_interface;
+	arrival_timer_interface = *arrival_original_interface;
+	arrival_timer_interface.timer_next = media_arrival_next;
+
+	for (i = 1; i <= 4; i++) {
+		if (i == 2) {
+			for (j = 0; j < rejects; j++) {
+				if (!send_udp_packet(media_fd, media_port, rejected, sizeof(rejected))) goto done;
+			}
+			if (rejects && !media_ready()) goto done;
+			arrival_sent = SWITCH_FALSE;
+			/* Inject after any pre-read, before the original timer returns. */
+			timer->timer_interface = &arrival_timer_interface;
+		} else {
+			media_fork_packet(packet, (uint16_t)i);
+			if (!send_udp_packet(media_fd, media_port, packet, sizeof(packet)) || !media_ready()) goto done;
+		}
+		status = media_read(&frame, SWITCH_IO_FLAG_NONE);
+		timer->timer_interface = arrival_original_interface;
+		if (i == 2 && (!arrival_sent || (mode && !arrival_empty))) goto done;
+		if (status != SWITCH_STATUS_SUCCESS || switch_test_flag(&frame, SFF_CNG)) goto done;
+		media_fork_packet(packet, (uint16_t)i);
+		if (frame.seq != i || frame.payload != 0 || frame.timestamp != 16000 + i * 160 ||
+			frame.datalen != 160 || memcmp(frame.data, packet + 12, 160)) goto done;
+		memcpy(processed, frame.data, sizeof(processed));
+		processed[0] ^= 0x5a;
+		frame.packet = NULL;
+		frame.data = processed;
+		frame.buflen = sizeof(processed);
+		if (switch_core_session_set_fork_read_frame(media_session, &frame) != SWITCH_STATUS_SUCCESS) goto done;
+		if (i > 1) {
+			if (!recv_rtp_packet(media_fork_fd, received, sizeof(received), &received_len, 1000)) goto done;
+			media_fork_packet(packet, (uint16_t)(i - 1));
+			packet[12] ^= 0x5a;
+			if (received_len != sizeof(packet) || memcmp(received, packet, sizeof(packet))) goto done;
+		}
+	}
+	ok = SWITCH_TRUE;
+ done:
+	media_cleanup();
+	return ok;
+}
+
 FST_CORE_BEGIN("./conf")
 {
 FST_SUITE_BEGIN(switch_rtp)
@@ -674,6 +757,20 @@ FST_TEARDOWN_END()
 		switch_rtp_destroy(&rtp_session);
 
 		switch_core_destroy_memory_pool(&pool);
+	}
+	FST_TEST_END()
+
+	FST_TEST_BEGIN(test_media_fork_rejected_preread)
+	{
+		int mode, rejects;
+		char description[64];
+
+		for (mode = 0; mode < 3; mode++) {
+			for (rejects = 0; rejects <= 3; rejects += 3) {
+				snprintf(description, sizeof(description), "arrival mode=%d rejects=%d", mode, rejects);
+				fst_xcheck(media_arrival_case(mode, rejects), description);
+			}
+		}
 	}
 	FST_TEST_END()
 
