@@ -6651,6 +6651,14 @@ SWITCH_DECLARE(int16_t) switch_core_media_validate_common_audio_sdp(switch_core_
 						}
 					}
 
+					/* AMR / AMR-WB on a dynamic payload type below 96: negotiation matches it where the codec has fmtp
+					 * matching (else negotiation still refuses it) */
+					if (!match && map->rm_pt < 96 && !zstr(map->rm_encoding) && !strcasecmp(rm_encoding, imp->iananame) &&
+						(!strcasecmp(imp->iananame, "AMR") || !strcasecmp(imp->iananame, "AMR-WB")) &&
+						(remote_codec_rate == codec_rate || fmtp_remote_codec_rate == imp->actual_samples_per_second)) {
+						match = 1;
+					}
+
 					if (match && bit_rate && map_bit_rate &&
 							map_bit_rate != bit_rate && strcasecmp(map->rm_encoding, "ilbc") &&
 							strcasecmp(map->rm_encoding, "isac")) {
@@ -6723,6 +6731,13 @@ SWITCH_DECLARE(int16_t) switch_core_media_validate_common_audio_sdp(switch_core_
 
 					prefs[0] = tmp;
 					num = switch_loadable_module_get_codecs_sorted(search, fmtp, 1, prefs, 1);
+					/* a codec with fmtp matching (AMR, AMR-WB ...): the lookup by name ignores the interval and
+					 * returns the head of its implementations; keep the near match, which the fmtp matched, if
+					 * the substitute's fmtp does not match (e.g. the other payload framing) */
+					if (num && near_match->matches_fmtp && strcasecmp(near_match->iananame, "opus") &&
+						(!search[0]->matches_fmtp || search[0]->matches_fmtp(near_matches[j].map->rm_fmtp, search[0]->fmtp) != SWITCH_STATUS_SUCCESS)) {
+						num = 0;
+					}
 
 					if (num) {
 						timp = search[0];
@@ -7018,6 +7033,46 @@ done:
 	}
 
 	return 0;
+}
+
+/*
+ * The octet-align our last SDP states for a payload type of an AMR / AMR-WB rtpmap of ours (encoding) in its
+ * m=audio section: "octet-align=0" / "octet-align=1", the default when its a=fmtp line has none or there is no
+ * a=fmtp line; NULL if our rtpmap for that payload type is another codec or missing. What we offered on it,
+ * for an answer that leaves it out.
+ */
+static const char *amr_offered_octet_align(switch_media_handle_t *smh, int pt, const char *encoding)
+{
+	const char *sdp = smh->mparams->local_sdp_str, *audio, *end, *line, *eol, *oa;
+	char key[32];
+	size_t klen, elen = strlen(encoding);
+
+	if (zstr(sdp) || !(audio = strstr(sdp, "m=audio "))) {
+		return NULL;
+	}
+	if (!(end = strstr(audio, "\nm="))) {
+		end = audio + strlen(audio);
+	}
+
+	/* our rtpmap for the payload type is this codec */
+	klen = switch_snprintf(key, sizeof(key), "a=rtpmap:%d ", pt);
+	for (line = audio; (line = strstr(line, key)) && line < end && line[-1] != '\n'; line += klen);
+	if (!line || line >= end || strncasecmp(line + klen, encoding, elen) || line[klen + elen] != '/') {
+		return NULL;
+	}
+
+	klen = switch_snprintf(key, sizeof(key), "a=fmtp:%d ", pt);
+	for (line = audio; (line = strstr(line, key)) && line < end && line[-1] != '\n'; line += klen);
+	if (!line || line >= end) {
+		return "octet-align=0";
+	}
+	eol = line + strcspn(line, "\r\n");
+	/* an fmtp of ours without octet-align (e.g. rtp_force_audio_fmtp) offered the RFC 4867 default */
+	if (!(oa = switch_stristr("octet-align", line)) || oa > eol) {
+		return "octet-align=0";
+	}
+	for (oa += strlen("octet-align"); *oa == ' ' || *oa == '='; oa++);
+	return *oa == '1' ? "octet-align=1" : "octet-align=0";
 }
 
 //?
@@ -7879,6 +7934,29 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 				fmtp_remote_codec_rate = 0;
 				memset(&codec_fmtp, 0, sizeof(codec_fmtp));
 
+				/*
+				 * AMR / AMR-WB answer to our offer that leaves out octet-align: it is the one we offered on that
+				 * payload type, as our last SDP states it (RFC 4867 8.3.1 wants it returned unmodified; many
+				 * stacks drop the default). The codec default for an fmtp without octet-align (bandwidth
+				 * efficient, or octet aligned with the codec's force-oa) is for offers. Early media answers to
+				 * our INVITE come here as SDP_OFFER: before the outbound leg is answered they are answers too,
+				 * unless the endpoint marks a real offer (CF_REMOTE_SDP_OFFER: an early-dialog UPDATE from the
+				 * far end, which keeps the default and is answered with the framing it offered).
+				 */
+				if ((sdp_type == SDP_ANSWER ||
+					 (switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_OUTBOUND && !switch_channel_test_flag(session->channel, CF_ANSWERED) &&
+					  !switch_channel_test_flag(session->channel, CF_REMOTE_SDP_OFFER))) &&
+					(!strcasecmp(map->rm_encoding, "AMR") || !strcasecmp(map->rm_encoding, "AMR-WB")) &&
+					(zstr(map->rm_fmtp) || !switch_stristr("octet-align", map->rm_fmtp))) {
+					const char *offered = amr_offered_octet_align(smh, map->rm_pt, map->rm_encoding);
+
+					if (offered) {
+						map->rm_fmtp = switch_core_session_sprintf(session, "%s%s%s", zstr(map->rm_fmtp) ? "" : map->rm_fmtp, zstr(map->rm_fmtp) ? "" : "; ", offered);
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s answer on payload type %d without octet-align: as offered, fmtp [%s]\n",
+										  map->rm_encoding, map->rm_pt, map->rm_fmtp);
+					}
+				}
+
 				if (zstr(map->rm_fmtp)) {
 					if (!strcasecmp(map->rm_encoding, "ilbc")) {
 						codec_ms = 30;
@@ -8122,6 +8200,13 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 
 					prefs[0] = tmp;
 					num = switch_loadable_module_get_codecs_sorted(search, fmtp, 1, prefs, 1);
+					/* a codec with fmtp matching (AMR, AMR-WB ...): the lookup by name ignores the interval and
+					 * returns the head of its implementations; keep the near match, which the fmtp matched, if
+					 * the substitute's fmtp does not match (e.g. the other payload framing) */
+					if (num && near_match->matches_fmtp && strcasecmp(near_match->iananame, "opus") &&
+						(!search[0]->matches_fmtp || search[0]->matches_fmtp(near_matches[j].map->rm_fmtp, search[0]->fmtp) != SWITCH_STATUS_SUCCESS)) {
+						num = 0;
+					}
 
 					if (num) {
 						timp = search[0];
@@ -19817,6 +19902,13 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 
 	if (frame->codec) {
 		session->raw_write_frame.datalen = session->raw_write_frame.buflen;
+		/* room for the channel expansion below, which is done in place: a codec may decode more than one
+		 * packet's worth of audio (e.g. several AMR frames in one payload) */
+		if (session->write_impl.number_of_channels > frame->codec->implementation->number_of_channels) {
+			uint32_t in_ch = frame->codec->implementation->number_of_channels, out_ch = session->write_impl.number_of_channels;
+
+			session->raw_write_frame.datalen = session->raw_write_frame.buflen / 2 / out_ch * 2 * in_ch;
+		}
 		frame->codec->cur_frame = frame;
 		session->write_codec->cur_frame = frame;
 		status = switch_core_codec_decode(frame->codec,

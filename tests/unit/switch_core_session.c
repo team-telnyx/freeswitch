@@ -31,6 +31,21 @@
 #include <switch.h>
 #include <test/switch_test.h>
 
+/* the null endpoint's read_frame, replaced for a read that returns one large frame first */
+static switch_io_read_frame_t null_read_frame = NULL;
+static switch_frame_t *large_frame = NULL;
+
+static switch_status_t large_frame_read(switch_core_session_t *session, switch_frame_t **frame, switch_io_flag_t flags, int stream_id)
+{
+	if (large_frame) {
+		*frame = large_frame;
+		large_frame = NULL;
+		return SWITCH_STATUS_SUCCESS;
+	}
+
+	return null_read_frame(session, frame, flags, stream_id);
+}
+
 
 FST_CORE_BEGIN("./conf")
 {
@@ -241,6 +256,69 @@ FST_CORE_BEGIN("./conf")
 			fst_check_string_equals(switch_str_nil(switch_channel_get_variable(fst_channel, "parse_event_test2")), "2");
 
 			switch_event_destroy(&event);
+		}
+		FST_SESSION_END()
+
+		/*
+		 * A frame that decodes to more audio than one packet, read through a read codec at a higher rate
+		 * (a conference pushes one at its own rate): upsampled it no longer fits the frame it was decoded
+		 * into, and must reach the read buffer without overrunning it. 8000 bytes of L16 at 8 kHz become
+		 * 48000 at 48 kHz, past the session's read buffers.
+		 */
+		FST_SESSION_BEGIN(read_frame_upsampled_past_the_frame_is_buffered)
+		{
+			switch_codec_t codec_8k = { 0 }, codec_48k = { 0 };
+			switch_endpoint_interface_t *endpoint;
+			switch_frame_t frame = { 0 }, *read_frame = NULL;
+			switch_log_level_t loglevel = switch_core_session_get_loglevel(fst_session);
+			int16_t *samples;
+			switch_status_t status;
+			int i;
+
+			fst_requires(switch_core_codec_init(&codec_8k, "L16", NULL, NULL, 8000, 20, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
+												NULL, switch_core_session_get_pool(fst_session)) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_core_codec_init(&codec_48k, "L16", NULL, NULL, 48000, 20, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
+												NULL, switch_core_session_get_pool(fst_session)) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_core_session_set_read_codec(fst_session, &codec_48k) == SWITCH_STATUS_SUCCESS);
+			fst_requires((endpoint = switch_loadable_module_get_endpoint_interface("null")));
+			fst_requires(endpoint->io_routines && endpoint->io_routines->read_frame);
+
+			samples = switch_core_session_alloc(fst_session, 8000);
+			for (i = 0; i < 4000; i++) {
+				samples[i] = 0x4141;
+			}
+			frame.codec = &codec_8k;
+			frame.data = samples;
+			frame.datalen = frame.buflen = 8000;
+			frame.samples = 4000;
+			frame.rate = 8000;
+			frame.channels = 1;
+
+			null_read_frame = endpoint->io_routines->read_frame;
+			endpoint->io_routines->read_frame = large_frame_read;
+			large_frame = &frame;
+
+			/* the first packet of the 48000 bytes (25 packets of 1920 at 48 kHz) */
+			status = switch_core_session_read_frame(fst_session, &read_frame, SWITCH_IO_FLAG_NONE, 0);
+
+			endpoint->io_routines->read_frame = null_read_frame;
+			large_frame = NULL;
+			UNPROTECT_INTERFACE(endpoint);
+
+			/* nothing past the read buffers was written over */
+			fst_check(switch_core_session_get_loglevel(fst_session) == loglevel);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			if (status == SWITCH_STATUS_SUCCESS && read_frame) {
+				int16_t v = ((int16_t *) read_frame->data)[480];
+
+				fst_check(read_frame->datalen == 1920);
+				/* past the resampler's start-up, the constant */
+				fst_check(read_frame->datalen != 1920 || (v > 0x4141 - 64 && v < 0x4141 + 64));
+			}
+
+			switch_core_session_set_read_codec(fst_session, NULL);
+			switch_core_codec_destroy(&codec_48k);
+			switch_core_codec_destroy(&codec_8k);
 		}
 		FST_SESSION_END()
 	}
