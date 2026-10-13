@@ -1,6 +1,9 @@
 
 #include <switch.h>
 #include <test/switch_test.h>
+#include <signal.h>
+#include <stdlib.h>
+#include <unistd.h>
 
 #ifndef MSG_CONFIRM
 #define MSG_CONFIRM 0
@@ -20,6 +23,65 @@ switch_frame_flag_t *frame_flags;
 switch_io_flag_t io_flags;
 switch_payload_t read_pt;
 int send_rtcp_test_success = 0;
+
+static void media_fork_timeout_handler(int signal_number)
+{
+	static const char message[] = "switch_rtp: media-fork regression timed out\n";
+
+	(void)signal_number;
+	(void)write(STDERR_FILENO, message, sizeof(message) - 1);
+	_exit(EXIT_FAILURE);
+}
+
+static switch_bool_t send_udp_packet(int fd, switch_port_t port, const uint8_t *packet, size_t packet_len)
+{
+	struct sockaddr_in addr;
+	ssize_t sent;
+
+	if (fd < 0 || !port || !packet || !packet_len) return SWITCH_FALSE;
+
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	addr.sin_port = htons(port);
+	sent = sendto(fd, packet, packet_len, 0, (const struct sockaddr *)&addr, sizeof(addr));
+	return sent == (ssize_t)packet_len ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
+static switch_bool_t recv_rtp_packet(int fd, uint8_t *packet, size_t packet_size, size_t *packet_len, int timeout_ms)
+{
+	fd_set read_fds;
+	struct timeval timeout;
+	ssize_t bytes;
+	int ready;
+
+	if (fd < 0 || !packet || !packet_size || !packet_len || timeout_ms < 0) return SWITCH_FALSE;
+	FD_ZERO(&read_fds);
+	FD_SET(fd, &read_fds);
+	timeout.tv_sec = timeout_ms / 1000;
+	timeout.tv_usec = (timeout_ms % 1000) * 1000;
+	ready = select(fd + 1, &read_fds, NULL, NULL, &timeout);
+	if (ready != 1) return SWITCH_FALSE;
+
+	bytes = recvfrom(fd, packet, packet_size, 0, NULL, NULL);
+	if (bytes < SWITCH_RTP_HEADER_LEN) return SWITCH_FALSE;
+	*packet_len = (size_t)bytes;
+	return SWITCH_TRUE;
+}
+
+static void media_fork_packet(uint8_t *packet, uint16_t seq)
+{
+	uint32_t ts = htonl(16000 + (uint32_t)seq * 160);
+	uint16_t net_seq = htons(seq);
+	uint32_t ssrc = htonl(0x11223344);
+
+	memset(packet, seq & 0xff, 172);
+	packet[0] = 0x80;
+	packet[1] = 0;
+	memcpy(packet + 2, &net_seq, sizeof(net_seq));
+	memcpy(packet + 4, &ts, sizeof(ts));
+	memcpy(packet + 8, &ssrc, sizeof(ssrc));
+}
 
 static int make_udp_sink(switch_port_t *port)
 {
@@ -175,6 +237,291 @@ FST_TEARDOWN_END()
 	}
 	FST_TEST_END()
 
+	FST_TEST_BEGIN(test_legacy_accept_any_payload_keeps_inbound_stats)
+	{
+		switch_memory_pool_t *test_pool = NULL;
+		switch_rtp_t *legacy_rtp = NULL;
+		switch_socket_t *send_sock = NULL;
+		switch_sockaddr_t *send_bind_addr = NULL, *rtp_addr = NULL, *local_sa = NULL;
+		switch_rtp_flag_t legacy_flags[SWITCH_RTP_FLAG_INVALID] = {0};
+		payload_map_t negotiated_map = {0};
+		payload_map_t *negotiated_maps = &negotiated_map;
+		const char *legacy_err = NULL;
+		switch_frame_t frame = { 0 };
+		switch_rtp_stats_t *stats;
+		switch_port_t local_port = 0;
+		switch_port_t remote_port = 0;
+		switch_size_t packet_len;
+		switch_status_t status;
+		uint8_t packet[] = {
+			0x80, 96, 0x00, 0x01, 0x00, 0x00, 0x00, 0xa0, 0x11, 0x22, 0x33, 0x44,
+			0x7f
+		};
+
+		fst_requires(switch_core_new_memory_pool(&test_pool) == SWITCH_STATUS_SUCCESS);
+		local_port = switch_rtp_request_port(rx_host);
+		fst_requires(local_port > 0);
+		fst_requires(switch_sockaddr_info_get(&send_bind_addr, rx_host, SWITCH_UNSPEC, 0, 0, test_pool) == SWITCH_STATUS_SUCCESS);
+		fst_requires(switch_socket_create(&send_sock, switch_sockaddr_get_family(send_bind_addr), SOCK_DGRAM, 0, test_pool) == SWITCH_STATUS_SUCCESS);
+		fst_requires(switch_socket_bind(send_sock, send_bind_addr) == SWITCH_STATUS_SUCCESS);
+		fst_requires(switch_socket_addr_get(&local_sa, SWITCH_FALSE, send_sock) == SWITCH_STATUS_SUCCESS);
+		remote_port = switch_sockaddr_get_port(local_sa);
+		fst_requires(remote_port > 0);
+
+		legacy_rtp = switch_rtp_new(rx_host, local_port, tx_host, remote_port, TEST_PT, 8000, 20 * 1000,
+			legacy_flags, "soft", &legacy_err, test_pool);
+		fst_requires(legacy_rtp != NULL);
+		fst_requires(switch_rtp_ready(legacy_rtp));
+		negotiated_map.allocated = 1;
+		negotiated_map.negotiated = 1;
+		negotiated_map.pt = TEST_PT;
+		negotiated_map.recv_pt = TEST_PT;
+		fst_requires(switch_rtp_set_payload_map(legacy_rtp, &negotiated_maps) == SWITCH_STATUS_SUCCESS);
+		switch_rtp_intentional_bugs(legacy_rtp, RTP_BUG_ACCEPT_ANY_PAYLOAD);
+		switch_rtp_clear_flag(legacy_rtp, SWITCH_RTP_FLAG_PAUSE);
+		fst_requires(switch_sockaddr_info_get(&rtp_addr, rx_host, SWITCH_UNSPEC, local_port, 0, test_pool) == SWITCH_STATUS_SUCCESS);
+
+		packet_len = sizeof(packet);
+		fst_requires(switch_socket_sendto(send_sock, rtp_addr, 0, (const char *)packet, &packet_len) == SWITCH_STATUS_SUCCESS);
+		status = switch_rtp_zerocopy_read_frame(legacy_rtp, &frame, SWITCH_IO_FLAG_NONE);
+		fst_requires(status == SWITCH_STATUS_SUCCESS);
+		/* Accepted legacy payloads must reach inbound statistics even if the read returns PLC. */
+		stats = switch_rtp_get_stats(legacy_rtp, NULL);
+		fst_requires(stats != NULL);
+		fst_check(stats->inbound.packet_count == 1);
+		fst_check(stats->inbound.media_packet_count == 1);
+
+		if (send_sock) {
+			switch_socket_close(send_sock);
+		}
+		switch_rtp_destroy(&legacy_rtp);
+		switch_core_destroy_memory_pool(&test_pool);
+	}
+	FST_TEST_END()
+	FST_TEST_BEGIN(test_media_fork_unnegotiated_triplets)
+	{
+		switch_core_session_t *session = NULL;
+		switch_memory_pool_t *test_pool = NULL;
+		switch_rtp_t *test_rtp = NULL;
+		switch_channel_t *channel;
+		switch_call_cause_t cause;
+		switch_rtp_flag_t test_flags[SWITCH_RTP_FLAG_INVALID] = {0};
+		payload_map_t map = {0}, *maps = &map;
+		const char *test_err = NULL;
+		switch_port_t peer_port, fork_port, local_port;
+		int peer_fd, fork_fd, mode, i, j;
+		uint8_t processed[160];
+		switch_frame_t fork_frame;
+		uint8_t packet[172], received[2048];
+		/* Synthetic header-only PT20 trigger, separate SSRC, repeated three times. */
+		const uint8_t rejected[] = {0x80, 20, 0, 7, 0x00, 0x00, 0x7d, 0x00, 0x55, 0x66, 0x77, 0x88};
+		size_t received_len;
+		switch_frame_t frame;
+		switch_time_t started, elapsed, first_audio_time, last_audio_time, first_fork_time, last_fork_time, fork_delay;
+		int audio_count, cng_count, fork_count, peer_count, corrupt_count;
+		uint16_t last_audio_seq, previous_fork_seq;
+		void (*old_handler)(int);
+
+		old_handler = signal(SIGALRM, media_fork_timeout_handler);
+		alarm(15);
+		fst_requires(switch_ivr_originate(NULL, &session, &cause, "null/+15553334444", 2,
+			NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) == SWITCH_STATUS_SUCCESS);
+		fst_requires(session != NULL);
+		channel = switch_core_session_get_channel(session);
+		switch_channel_set_variable(channel, "read_codec", "PCMU");
+		switch_channel_set_variable(channel, "rtp_use_pt", "0");
+
+		/* Rejected datagrams must not consume extra 20 ms read slots. */
+		for (mode = 0; mode < 2; mode++) {
+			fst_requires(switch_core_new_memory_pool(&test_pool) == SWITCH_STATUS_SUCCESS);
+			switch_core_memory_pool_set_data(test_pool, "__session", session);
+			peer_fd = make_udp_sink(&peer_port);
+			fork_fd = make_udp_sink(&fork_port);
+			fst_requires(peer_fd >= 0 && fork_fd >= 0);
+			local_port = switch_rtp_request_port(rx_host);
+			fst_requires(local_port > 0);
+			test_flags[SWITCH_RTP_FLAG_USE_TIMER] = 1;
+			test_rtp = switch_rtp_new(rx_host, local_port, tx_host, peer_port, 0, 160, 20000,
+				test_flags, "soft", &test_err, test_pool);
+			fst_requires(test_rtp != NULL);
+			switch_rtp_clear_flag(test_rtp, SWITCH_RTP_FLAG_PAUSE);
+			switch_rtp_clear_flag(test_rtp, SWITCH_RTP_FLAG_FLUSH);
+			map.allocated = map.negotiated = 1;
+			map.pt = map.recv_pt = 0;
+			fst_requires(switch_rtp_set_payload_map(test_rtp, &maps) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_rtp_fork_set(test_rtp, FORK_DIRECTION_RX, rx_host, fork_port,
+				0x11223344, "start", "PCMU") == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_rtp_fork_activate(test_rtp, FORK_DIRECTION_RX) == SWITCH_STATUS_SUCCESS);
+			switch_core_session_set_fork_read_frame(session, NULL);
+
+			/* Queue both runs to eliminate producer scheduling jitter. */
+			for (i = 1; i <= 100; i++) {
+				if (mode && i % 15 == 0) {
+					for (j = 0; j < 3; j++) fst_requires(send_udp_packet(peer_fd, local_port, rejected, sizeof(rejected)));
+				}
+				media_fork_packet(packet, (uint16_t)i);
+				fst_requires(send_udp_packet(peer_fd, local_port, packet, sizeof(packet)));
+			}
+
+			audio_count = cng_count = fork_count = peer_count = corrupt_count = 0;
+			last_audio_seq = previous_fork_seq = 0;
+			first_audio_time = last_audio_time = first_fork_time = last_fork_time = 0;
+			started = switch_micro_time_now();
+			for (i = 0; i < 118 && audio_count < 100; i++) {
+				memset(&frame, 0, sizeof(frame));
+				fst_requires(switch_rtp_zerocopy_read_frame(test_rtp, &frame, SWITCH_IO_FLAG_NONE) == SWITCH_STATUS_SUCCESS);
+				if (switch_test_flag(&frame, SFF_CNG)) {
+					cng_count++;
+				} else {
+					audio_count++;
+					last_audio_seq = frame.seq;
+					last_audio_time = switch_micro_time_now();
+					if (!first_audio_time) first_audio_time = last_audio_time;
+					media_fork_packet(packet, frame.seq);
+					if (frame.payload != 0 || frame.seq != audio_count || frame.datalen != 160 ||
+						frame.timestamp != 16000 + frame.seq * 160 || memcmp(frame.data, packet + 12, 160)) corrupt_count++;
+					/* Exercise actual RTP output as the bridged telephony peer. */
+					fst_requires(switch_rtp_write_frame(test_rtp, &frame) > 0);
+					if (recv_rtp_packet(peer_fd, received, sizeof(received), &received_len, 10)) {
+						peer_count++;
+						if (received_len != 172 || (received[1] & 0x7f) != 0 || memcmp(received + 12, packet + 12, 160)) corrupt_count++;
+					}
+				}
+				/* This is the core-IO handoff after media-bug processing. */
+				fork_frame = frame;
+				fork_frame.buflen = sizeof(processed);
+				fork_frame.packet = NULL;
+				fork_frame.data = processed;
+				fst_requires(frame.datalen <= sizeof(processed));
+				memcpy(processed, frame.data, frame.datalen);
+				processed[0] ^= 0x5a; /* distinguish post-media-bug audio from raw RTP */
+				fst_requires(switch_core_session_set_fork_read_frame(session, &fork_frame) == SWITCH_STATUS_SUCCESS);
+				while (recv_rtp_packet(fork_fd, received, sizeof(received), &received_len, 0)) {
+					uint16_t seq = (uint16_t)((received[2] << 8) | received[3]);
+					fork_count++;
+					last_fork_time = switch_micro_time_now();
+					if (!first_fork_time) first_fork_time = last_fork_time;
+					media_fork_packet(packet, seq);
+					packet[12] ^= 0x5a;
+					if (received_len != 172 || memcmp(received, packet, 172) || seq != previous_fork_seq + 1) corrupt_count++;
+					previous_fork_seq = seq;
+				}
+			}
+			fork_delay = last_fork_time - first_fork_time - (previous_fork_seq - 1) * 20000;
+			elapsed = last_audio_time - first_audio_time - (last_audio_seq - 1) * 20000;
+			fprintf(stderr, "media-fork mode=%d audio=%d cng=%d fork=%d peer=%d corrupt=%d added_delay_us=%lld fork_delay_us=%lld elapsed_us=%lld\n",
+				mode, audio_count, cng_count, fork_count, peer_count, corrupt_count,
+				(long long)elapsed, (long long)fork_delay, (long long)(switch_micro_time_now() - started));
+			fst_check(audio_count == 100);
+			fst_check(cng_count == 0);
+			fst_check(fork_count == 99);
+			fst_check(peer_count == 100);
+			fst_check(corrupt_count == 0);
+			fst_check(elapsed < 100000);
+			fst_check(fork_delay < 100000);
+
+			switch_rtp_fork_deactivate(test_rtp, FORK_DIRECTION_RX);
+			switch_rtp_destroy(&test_rtp);
+			switch_core_session_set_fork_read_frame(session, NULL);
+			close(peer_fd);
+			close(fork_fd);
+			switch_core_destroy_memory_pool(&test_pool);
+		}
+		switch_channel_hangup(channel, SWITCH_CAUSE_NORMAL_CLEARING);
+		switch_core_session_rwunlock(session);
+		alarm(0);
+		signal(SIGALRM, old_handler);
+	}
+	FST_TEST_END()
+	FST_TEST_BEGIN(test_unnegotiated_payload_controls)
+	{
+		switch_memory_pool_t *test_pool = NULL;
+		switch_rtp_t *test_rtp = NULL;
+		switch_rtp_flag_t test_flags[SWITCH_RTP_FLAG_INVALID] = {0};
+		payload_map_t map = {0}, *maps = &map;
+		const char *test_err = NULL;
+		switch_port_t peer_port, local_port;
+		int peer_fd, i, mode;
+		uint8_t packet[172];
+		switch_frame_t frame;
+		switch_time_t started;
+		void (*old_handler)(int);
+
+		old_handler = signal(SIGALRM, media_fork_timeout_handler);
+		alarm(10);
+		/* Both timed and timerless reads must drain only queued rejects. */
+		for (mode = 0; mode < 2; mode++) {
+			fst_requires(switch_core_new_memory_pool(&test_pool) == SWITCH_STATUS_SUCCESS);
+			peer_fd = make_udp_sink(&peer_port);
+			fst_requires(peer_fd >= 0);
+			local_port = switch_rtp_request_port(rx_host);
+			fst_requires(local_port > 0);
+			test_rtp = switch_rtp_new(rx_host, local_port, tx_host, peer_port, 0, 160, 20000,
+				test_flags, mode ? "soft" : NULL, &test_err, test_pool);
+			fst_requires(test_rtp != NULL);
+			switch_rtp_clear_flag(test_rtp, SWITCH_RTP_FLAG_PAUSE);
+			switch_rtp_clear_flag(test_rtp, SWITCH_RTP_FLAG_FLUSH);
+			map.allocated = map.negotiated = 1;
+			map.pt = map.recv_pt = 0;
+			fst_requires(switch_rtp_set_payload_map(test_rtp, &maps) == SWITCH_STATUS_SUCCESS);
+
+			/* An empty receive queue stays nonblocking after a rejected triplet. */
+			media_fork_packet(packet, 1);
+			packet[1] = 20;
+			for (i = 0; i < 3; i++) fst_requires(send_udp_packet(peer_fd, local_port, packet, 12));
+			memset(&frame, 0, sizeof(frame));
+			started = switch_micro_time_now();
+			fst_check(switch_rtp_zerocopy_read_frame(test_rtp, &frame, SWITCH_IO_FLAG_NOBLOCK) == SWITCH_STATUS_BREAK);
+			fst_check(switch_micro_time_now() - started < 100000);
+
+			/* Exhausting the discard budget must yield without blocking the next read. */
+			for (i = 0; i < 24; i++) fst_requires(send_udp_packet(peer_fd, local_port, packet, 12));
+			media_fork_packet(packet, 1);
+			fst_requires(send_udp_packet(peer_fd, local_port, packet, sizeof(packet)));
+			memset(&frame, 0, sizeof(frame));
+			started = switch_micro_time_now();
+			fst_check(switch_rtp_zerocopy_read_frame(test_rtp, &frame, SWITCH_IO_FLAG_NOBLOCK) == SWITCH_STATUS_BREAK);
+			fst_check(switch_micro_time_now() - started < 100000);
+			memset(&frame, 0, sizeof(frame));
+			fst_requires(switch_rtp_zerocopy_read_frame(test_rtp, &frame, SWITCH_IO_FLAG_NOBLOCK) == SWITCH_STATUS_SUCCESS);
+			fst_check(!switch_test_flag(&frame, SFF_CNG));
+			fst_check(frame.payload == 0 && frame.seq == 1 && frame.datalen == 160);
+			fst_check(memcmp(frame.data, packet + 12, 160) == 0);
+
+			/* Preserve negotiated static and dynamic CN ahead of queued PCMU. */
+			for (i = 0; i < 2; i++) {
+				switch_payload_t cn_pt = i ? 98 : 13;
+				switch_rtp_set_cng_pt(test_rtp, cn_pt);
+				media_fork_packet(packet, (uint16_t)(2 + i * 2));
+				packet[1] = cn_pt;
+				packet[12] = 0x41;
+				packet[13] = 0;
+				fst_requires(send_udp_packet(peer_fd, local_port, packet, 14));
+				media_fork_packet(packet, (uint16_t)(3 + i * 2));
+				/* Leave a CN interval before speech; the existing CNG path
+				 * has already generated the immediately following timestamp. */
+				{
+					uint32_t speech_ts = htonl(16000 + (uint32_t)(4 + i * 2) * 160);
+					memcpy(packet + 4, &speech_ts, sizeof(speech_ts));
+				}
+				fst_requires(send_udp_packet(peer_fd, local_port, packet, sizeof(packet)));
+				memset(&frame, 0, sizeof(frame));
+				fst_requires(switch_rtp_zerocopy_read_frame(test_rtp, &frame, SWITCH_IO_FLAG_NOBLOCK) == SWITCH_STATUS_SUCCESS);
+				fst_check(switch_test_flag(&frame, SFF_CNG));
+				fst_check(frame.payload == cn_pt && frame.datalen == 2);
+				memset(&frame, 0, sizeof(frame));
+				fst_requires(switch_rtp_zerocopy_read_frame(test_rtp, &frame, SWITCH_IO_FLAG_NOBLOCK) == SWITCH_STATUS_SUCCESS);
+				fst_check(!switch_test_flag(&frame, SFF_CNG));
+				fst_check(frame.payload == 0 && frame.seq == 3 + i * 2 && frame.datalen == 160);
+			}
+			switch_rtp_destroy(&test_rtp);
+			close(peer_fd);
+			switch_core_destroy_memory_pool(&test_pool);
+		}
+		alarm(0);
+		signal(SIGALRM, old_handler);
+	}
+	FST_TEST_END()
 	FST_TEST_BEGIN(test_session_with_rtp)
 	{
 		switch_core_session_t *session = NULL;

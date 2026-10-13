@@ -9044,6 +9044,7 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 	int tries = 0;
 	int block = 0;
 	int accelerate = 0;
+	int rejected_packets = 0;
 
 	switch_assert(bytes);
 
@@ -9132,6 +9133,14 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 		}
 		rtp_session->last_poll_status = poll_status;
 	}
+
+	recv_again:
+	/* Retry below the capture to preserve the previous processed fork frame. */
+	*bytes = sizeof(rtp_msg_t);
+	rtp_session->has_rtp = 0;
+	rtp_session->has_ice = 0;
+	rtp_session->has_rtcp = 0;
+	memset(&rtp_session->last_rtp_hdr, 0, sizeof(rtp_session->last_rtp_hdr));
 
 	if (poll_status == SWITCH_STATUS_SUCCESS) {
 		status = switch_socket_recvfrom(rtp_session->from_addr, rtp_session->sock_input, 0, (void *) &rtp_session->recv_msg, bytes);
@@ -9230,10 +9239,17 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 				}
 
 				if (!accept_packet) {
+					int fdr = 0;
+
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG1,
 									  "Invalid Packet SEQ: %d TS: %d PT:%d ignored\n",
 									  ntohs(rtp_session->recv_msg.header.seq), ntohl(rtp_session->last_rtp_hdr.ts), rtp_session->last_rtp_hdr.pt);
 					*bytes = 0;
+					/* Bound rejection draining to packets already queued. */
+					if (++rejected_packets < 20 && rtp_session->read_pollfd &&
+						switch_poll(rtp_session->read_pollfd, 1, &fdr, 0) == SWITCH_STATUS_SUCCESS) {
+						goto recv_again;
+					}
 				}
 			}
 
