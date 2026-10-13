@@ -432,6 +432,11 @@ struct switch_rtp {
 	uint32_t ts;
 	//uint32_t last_clock_ts;
 	uint32_t last_write_ts;
+	uint32_t raw_ts_offset;		/* added to forwarded audio ts after generated frames */
+	uint8_t raw_ts_forwarded;
+	uint8_t raw_ts_generated;
+	uint32_t raw_ts_anchor;		/* last forwarded audio ts sent */
+	switch_time_t raw_ts_anchor_time;
 	uint32_t last_read_ts;
 	uint32_t prev_read_ts;
 	uint32_t last_cng_ts;
@@ -442,9 +447,9 @@ struct switch_rtp {
 	uint32_t queue_delay;
 	switch_time_t last_write_timestamp;
 	uint32_t raw_ts_rebase_offset;
-	uint32_t raw_ts_anchor_ts;
-	switch_time_t raw_ts_anchor_time;
-	uint8_t raw_ts_anchor_valid;
+	uint32_t raw_ts_rebase_anchor_ts;
+	switch_time_t raw_ts_rebase_anchor_time;
+	uint8_t raw_ts_rebase_anchor_valid;
 	uint32_t raw_ts_rate;
 	uint32_t flags[SWITCH_RTP_FLAG_INVALID];
 	switch_memory_pool_t *pool;
@@ -3560,9 +3565,9 @@ static uint32_t raw_ts_offset(switch_rtp_t *rtp_session, uint32_t rate)
 
 static uint32_t rebase_raw_write_ts(switch_rtp_t *rtp_session, uint32_t src_ts, uint32_t rate, uint32_t *offset)
 {
-	uint8_t anchor_valid = rtp_session->raw_ts_rate == rate && rtp_session->raw_ts_anchor_valid;
+	uint8_t anchor_valid = rtp_session->raw_ts_rate == rate && rtp_session->raw_ts_rebase_anchor_valid;
 	uint32_t out = src_ts + raw_ts_offset(rtp_session, rate);
-	uint32_t ref = anchor_valid ? rtp_session->raw_ts_anchor_ts : rtp_session->last_write_ts;
+	uint32_t ref = anchor_valid ? rtp_session->raw_ts_rebase_anchor_ts : rtp_session->last_write_ts;
 	int64_t delta = (int32_t) (out - ref);
 	int64_t limit = (int64_t) rate * 2;
 
@@ -3573,7 +3578,7 @@ static uint32_t rebase_raw_write_ts(switch_rtp_t *rtp_session, uint32_t src_ts, 
 	}
 
 	if (delta > 0 && anchor_valid) {
-		switch_time_t elapsed_usec = switch_time_ref() - rtp_session->raw_ts_anchor_time;
+		switch_time_t elapsed_usec = switch_time_ref() - rtp_session->raw_ts_rebase_anchor_time;
 
 		if (elapsed_usec > 0) {
 			int64_t elapsed = (int64_t) elapsed_usec * rate / 1000000;
@@ -3593,6 +3598,55 @@ static uint32_t rebase_raw_write_ts(switch_rtp_t *rtp_session, uint32_t src_ts, 
 
 	out = ref + rtp_session->samples_per_interval;
 	*offset = out - src_ts;
+
+	return out;
+}
+
+/* RAW_WRITE audio: generated frames (ts 0) follow the time since the last forwarded frame (whole
+ * intervals, rounded down, at least one past the last ts sent); forwarded frames after them never go
+ * backwards. 0 means "no timestamp" further down: a result of 0 is sent as 0xffffffff and what follows
+ * is shifted by -1. The rebase on jump (raw_ts_offset()) is added after this, so compare with the last
+ * ts sent before it. */
+static uint32_t raw_write_audio_ts(switch_rtp_t *rtp_session, uint32_t ts)
+{
+	switch_time_t now = switch_mono_micro_time_now();
+	uint32_t last = rtp_session->last_write_ts - raw_ts_offset(rtp_session, rtp_session->samples_per_second);
+	uint32_t out;
+
+	if (!ts) {
+		uint32_t elapsed;
+
+		if (!rtp_session->raw_ts_forwarded) {
+			return 0;
+		}
+		rtp_session->raw_ts_generated = 1;
+		elapsed = (uint32_t) ((uint64_t) (now - rtp_session->raw_ts_anchor_time) * rtp_session->samples_per_second / 1000000);
+		out = rtp_session->raw_ts_anchor + elapsed / rtp_session->samples_per_interval * rtp_session->samples_per_interval;
+		if ((int32_t) (out - last) < (int32_t) rtp_session->samples_per_interval) {
+			out = last + rtp_session->samples_per_interval;
+		}
+		if (!out) {
+			rtp_session->raw_ts_offset--;
+			rtp_session->raw_ts_anchor--;
+			out = 0xffffffff;
+		}
+		return out;
+	}
+
+	if (rtp_session->raw_ts_generated) {
+		if ((int32_t) (ts + rtp_session->raw_ts_offset - last) <= 0) {
+			rtp_session->raw_ts_offset = last + rtp_session->samples_per_interval - ts;
+		}
+		rtp_session->raw_ts_generated = 0;
+	}
+	rtp_session->raw_ts_forwarded = 1;
+	out = ts + rtp_session->raw_ts_offset;
+	if (!out) {
+		rtp_session->raw_ts_offset--;
+		out = 0xffffffff;
+	}
+	rtp_session->raw_ts_anchor = out;
+	rtp_session->raw_ts_anchor_time = now;
 
 	return out;
 }
@@ -12458,7 +12512,7 @@ fork_done:
 
 		if (rtp_session->flags[SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP] && rtp_session->raw_ts_rate != raw_ts_rate) {
 			rtp_session->raw_ts_rebase_offset = 0;
-			rtp_session->raw_ts_anchor_valid = 0;
+			rtp_session->raw_ts_rebase_anchor_valid = 0;
 			rtp_session->raw_ts_rate = raw_ts_rate;
 		}
 
@@ -12467,9 +12521,9 @@ fork_done:
 		}
 
 		if (rtp_session->flags[SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP] && !rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] && !(flags && (*flags & SFF_RFC2833))) {
-			rtp_session->raw_ts_anchor_ts = this_ts;
-			rtp_session->raw_ts_anchor_time = switch_time_ref();
-			rtp_session->raw_ts_anchor_valid = 1;
+			rtp_session->raw_ts_rebase_anchor_ts = this_ts;
+			rtp_session->raw_ts_rebase_anchor_time = switch_time_ref();
+			rtp_session->raw_ts_rebase_anchor_valid = 1;
 		}
 
 		if (rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS) {
@@ -12859,6 +12913,9 @@ SWITCH_DECLARE(int) switch_rtp_write_frame(switch_rtp_t *rtp_session, switch_fra
 		data = frame->data;
 		len = frame->datalen;
 		ts = rtp_session->flags[SWITCH_RTP_FLAG_RAW_WRITE] ? (uint32_t) frame->timestamp : 0;
+		if (rtp_session->flags[SWITCH_RTP_FLAG_RAW_WRITE] && !rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
+			ts = raw_write_audio_ts(rtp_session, ts);
+		}
 	}
 
 	/*

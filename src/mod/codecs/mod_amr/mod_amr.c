@@ -287,6 +287,7 @@ static switch_status_t switch_amr_init(switch_codec_t *codec, switch_codec_flag_
 {
 #ifdef AMR_PASSTHROUGH
 	codec->flags |= SWITCH_CODEC_FLAG_PASSTHROUGH;
+	codec->flags |= SWITCH_CODEC_FLAG_NATIVE_DTX;
 	if (codec->fmtp_in) {
 		codec->fmtp_out = switch_core_strdup(codec->memory_pool, codec->fmtp_in);
 	}
@@ -475,6 +476,7 @@ static switch_status_t switch_amr_init(switch_codec_t *codec, switch_codec_flag_
 
 		switch_mutex_init(&context->mutex, SWITCH_MUTEX_UNNESTED, codec->memory_pool);
 
+		codec->flags |= SWITCH_CODEC_FLAG_NATIVE_DTX;
 		codec->private_info = context;
 
 		return SWITCH_STATUS_SUCCESS;

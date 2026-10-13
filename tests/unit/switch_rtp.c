@@ -52,7 +52,7 @@ static int make_udp_sink(switch_port_t *port)
 	return fd;
 }
 
-static switch_bool_t recv_rtp_pt_ts(int fd, switch_payload_t pt, uint32_t *ts, int timeout_ms)
+static switch_bool_t recv_rtp_pt_ts(int fd, switch_payload_t pt, uint32_t *ts, uint8_t *m, int timeout_ms)
 {
 	fd_set read_fds;
 	struct timeval timeout;
@@ -69,15 +69,16 @@ static switch_bool_t recv_rtp_pt_ts(int fd, switch_payload_t pt, uint32_t *ts, i
 
 	bytes = recvfrom(fd, packet, sizeof(packet), 0, NULL, NULL);
 	if (bytes < SWITCH_RTP_HEADER_LEN) return SWITCH_FALSE;
-	if ((packet[1] & 0x7f) != pt) return recv_rtp_pt_ts(fd, pt, ts, timeout_ms);
+	if ((packet[1] & 0x7f) != pt) return recv_rtp_pt_ts(fd, pt, ts, m, timeout_ms);
 
 	*ts = ((uint32_t)packet[4] << 24) | ((uint32_t)packet[5] << 16) | ((uint32_t)packet[6] << 8) | packet[7];
+	if (m) *m = packet[1] >> 7;
 	return SWITCH_TRUE;
 }
 
-static switch_bool_t recv_rtp_ts(int fd, uint32_t *ts, int timeout_ms)
+static switch_bool_t recv_rtp_ts(int fd, uint32_t *ts, uint8_t *m, int timeout_ms)
 {
-	return recv_rtp_pt_ts(fd, TEST_PT, ts, timeout_ms);
+	return recv_rtp_pt_ts(fd, TEST_PT, ts, m, timeout_ms);
 }
 
 static switch_bool_t raw_write_event_ts(switch_rtp_t *raw_rtp, int sink_fd, uint32_t src_ts, uint32_t *out_ts)
@@ -103,7 +104,7 @@ static switch_bool_t raw_write_event_ts(switch_rtp_t *raw_rtp, int sink_fd, uint
 
 	if (switch_rtp_write_frame(raw_rtp, &frame) <= 0) return SWITCH_FALSE;
 
-	return recv_rtp_pt_ts(sink_fd, 101, out_ts, 1000);
+	return recv_rtp_pt_ts(sink_fd, 101, out_ts, NULL, 1000);
 }
 
 static switch_bool_t raw_write_srtp_ts(switch_rtp_t *raw_rtp, int sink_fd, srtp_t srtp_rx, uint32_t src_ts, uint32_t *out_ts, uint16_t *out_seq)
@@ -232,7 +233,7 @@ static switch_bool_t payload_write_ts(switch_rtp_t *raw_rtp, int sink_fd, uint32
 
 	if (switch_rtp_write_frame(raw_rtp, &frame) <= 0) return SWITCH_FALSE;
 
-	return recv_rtp_ts(sink_fd, out_ts, 1000);
+	return recv_rtp_ts(sink_fd, out_ts, NULL, 1000);
 }
 
 static switch_rtp_t *new_raw_write_rtp(switch_memory_pool_t *test_pool, switch_port_t sink_port, switch_bool_t rebase)
@@ -279,7 +280,7 @@ static switch_bool_t raw_write_ts(switch_rtp_t *raw_rtp, int sink_fd, uint32_t s
 
 	if (switch_rtp_write_frame(raw_rtp, &frame) <= 0) return SWITCH_FALSE;
 
-	return recv_rtp_ts(sink_fd, out_ts, 1000);
+	return recv_rtp_ts(sink_fd, out_ts, NULL, 1000);
 }
 
 static switch_bool_t recv_rtp_hdr(int fd, switch_payload_t pt, uint32_t *ts, uint16_t *seq, uint8_t *m, int timeout_ms)
@@ -326,6 +327,42 @@ static switch_bool_t payload_write_hdr(switch_rtp_t *raw_rtp, int sink_fd, uint3
 	if (switch_rtp_write_frame(raw_rtp, &frame) <= 0) return SWITCH_FALSE;
 
 	return recv_rtp_hdr(sink_fd, event ? 101 : TEST_PT, out_ts, out_seq, out_m, 1000);
+}
+
+static switch_bool_t run_generated_after_rebase_case(const char **why)
+{
+	switch_memory_pool_t *test_pool = NULL;
+	switch_rtp_t *raw_rtp = NULL;
+	switch_port_t sink_port = 0;
+	uint32_t out = 0, prev;
+	int sink_fd = -1;
+	switch_bool_t ok = SWITCH_FALSE;
+
+	*why = "setup";
+	if (switch_core_new_memory_pool(&test_pool) != SWITCH_STATUS_SUCCESS) goto end;
+	if ((sink_fd = make_udp_sink(&sink_port)) < 0) goto end;
+	if (!(raw_rtp = new_raw_write_rtp(test_pool, sink_port, SWITCH_TRUE))) goto end;
+
+	*why = "first packet";
+	if (!payload_write_ts(raw_rtp, sink_fd, 1000, &out) || out != 1000) goto end;
+	*why = "jump not rebased";
+	if (!payload_write_ts(raw_rtp, sink_fd, 1000 + 48000, &out) || out != 1320) goto end;
+	prev = out;
+	/* generated frame (no timestamp) right after the rebased jump */
+	*why = "generated frame not sent after the last ts";
+	if (!payload_write_ts(raw_rtp, sink_fd, 0, &out) || (int32_t) (out - prev) <= 0) goto end;
+	prev = out;
+	*why = "forwarded frame not after the generated one";
+	if (!payload_write_ts(raw_rtp, sink_fd, 1000 + 48000 + 320, &out) || (int32_t) (out - prev) <= 0) goto end;
+
+	ok = SWITCH_TRUE;
+	*why = NULL;
+
+ end:
+	if (raw_rtp) switch_rtp_destroy(&raw_rtp);
+	if (sink_fd >= 0) close(sink_fd);
+	if (test_pool) switch_core_destroy_memory_pool(&test_pool);
+	return ok;
 }
 
 static switch_bool_t run_mapped_zero_case(int which, const char **why)
@@ -402,7 +439,8 @@ static switch_bool_t run_mapped_zero_case(int which, const char **why)
 
 	if (which == 4) {
 		if (!payload_write_hdr(raw_rtp, sink_fd, 0, SWITCH_FALSE, &out, &seq, &m)) goto end;
-		if (out == 0 || out == (uint32_t) (0xfffffec0 - 100000) || seq != (uint16_t)(prev_seq + 1)) goto end;
+		/* no timestamp: a generated frame, on the forwarded clock after the last ts sent */
+		if ((int32_t) (out - 0xfffffec0) <= 0 || (out - 0xfffffec0) % 320 || seq != (uint16_t)(prev_seq + 1)) goto end;
 	}
 
 	ok = SWITCH_TRUE;
@@ -414,6 +452,54 @@ static switch_bool_t run_mapped_zero_case(int which, const char **why)
 	if (test_pool) switch_core_destroy_memory_pool(&test_pool);
 	return ok;
 }
+
+/* write 20 ms audio frames on a RAW_WRITE session (timestamp 0: generated locally), collect the sent ts and M;
+ * delay_ms: optional pause before each frame */
+static switch_bool_t write_raw_audio_ts(const uint32_t *in, const int *delay_ms, int n, uint32_t *out, uint8_t *m)
+{
+	switch_memory_pool_t *test_pool = NULL;
+	switch_rtp_t *raw_rtp = NULL;
+	switch_rtp_flag_t raw_flags[SWITCH_RTP_FLAG_INVALID] = { 0 };
+	const char *raw_err = NULL;
+	switch_port_t local_port, sink_port = 0;
+	switch_frame_t frame = { 0 };
+	uint8_t payload[160];
+	switch_bool_t ok = SWITCH_TRUE;
+	int sink_fd, i;
+
+	if (switch_core_new_memory_pool(&test_pool) != SWITCH_STATUS_SUCCESS) return SWITCH_FALSE;
+	sink_fd = make_udp_sink(&sink_port);
+	local_port = switch_rtp_request_port(rx_host);
+	/* default for audio legs unless rtp_rewrite_timestamps is set */
+	raw_flags[SWITCH_RTP_FLAG_RAW_WRITE] = 1;
+	if (sink_fd < 0 || !local_port ||
+		!(raw_rtp = switch_rtp_new(rx_host, local_port, tx_host, sink_port, TEST_PT, 160, 20 * 1000, raw_flags, "soft", &raw_err, test_pool))) {
+		ok = SWITCH_FALSE;
+		goto end;
+	}
+	switch_rtp_clear_flag(raw_rtp, SWITCH_RTP_FLAG_PAUSE);
+	memset(payload, 0xd5, sizeof(payload));
+
+	for (i = 0; ok && i < n; i++) {
+		if (delay_ms && delay_ms[i]) {
+			switch_yield(delay_ms[i] * 1000);
+		}
+		memset(&frame, 0, sizeof(frame));
+		frame.data = payload;
+		frame.datalen = sizeof(payload);
+		frame.samples = 160;
+		frame.payload = TEST_PT;
+		frame.timestamp = in[i];
+		ok = switch_rtp_write_frame(raw_rtp, &frame) > 0 && recv_rtp_ts(sink_fd, &out[i], &m[i], 1000);
+	}
+
+end:
+	if (raw_rtp) switch_rtp_destroy(&raw_rtp);
+	if (sink_fd >= 0) close(sink_fd);
+	switch_core_destroy_memory_pool(&test_pool);
+	return ok;
+}
+
 
 static void show_event(switch_event_t *event) {
 	char *str;
@@ -670,6 +756,119 @@ FST_TEARDOWN_END()
 		switch_core_session_rwunlock(session);
 	}
 	FST_TEST_END()
+	/* DTX: forwarded SIDs (far-end ts) with generated fill (ts 0) between them */
+	FST_TEST_BEGIN(test_forwarded_and_generated_audio_frames_keep_rtp_timestamps_monotonic)
+	{
+		uint32_t in[24], out[24];
+		uint8_t m[24];
+		int i;
+
+		for (i = 0; i < 24; i++) in[i] = (i % 8 == 0) ? 0x40000000 + (uint32_t) i * 160 : 0;
+		fst_requires(write_raw_audio_ts(in, NULL, 24, out, m));
+		for (i = 0; i < 24; i++) {
+			fst_check_int_equals(out[i], 0x40000000 + (uint32_t) i * 160);
+		}
+		for (i = 1; i < 24; i++) {
+			fst_check_int_equals(m[i], 0);
+		}
+	}
+	FST_TEST_END()
+
+	/* locally generated audio before forwarding (e.g. ringback) leaves forwarded timestamps as they are */
+	FST_TEST_BEGIN(test_generated_audio_before_forwarding_keeps_forwarded_timestamps)
+	{
+		uint32_t in[9] = { 0, 0, 0, 0, 0, 0x40000000, 0x40000000 + 160, 0x40000000 + 1600, 0x40000000 + 1760 };
+		uint32_t out[9];
+		uint8_t m[9];
+		int i;
+
+		fst_requires(write_raw_audio_ts(in, NULL, 9, out, m));
+		for (i = 5; i < 9; i++) {
+			fst_check_int_equals(out[i], in[i]);
+		}
+	}
+	FST_TEST_END()
+
+	/* far end resumes before the generated fill caught up: forwarded ts shifted by a constant, spacing kept */
+	FST_TEST_BEGIN(test_forwarded_audio_after_fill_is_shifted_not_rewritten)
+	{
+		uint32_t in[11] = { 0x40000000, 0, 0, 0, 0, 0, 0, 0, 0x40000000 + 480, 0x40000000 + 640, 0x40000000 + 2240 };
+		uint32_t out[11];
+		uint8_t m[11];
+		int i;
+
+		fst_requires(write_raw_audio_ts(in, NULL, 11, out, m));
+		for (i = 1; i < 9; i++) {
+			fst_check_int_equals(out[i], out[0] + (uint32_t) i * 160);
+			fst_check_int_equals(m[i], 0);
+		}
+		fst_check_int_equals(out[9], out[8] + 160);
+		fst_check_int_equals(out[10], out[8] + 1760);
+	}
+	FST_TEST_END()
+	/* nothing sent for 480 ms, then generated frames: the gap shows as a forward jump with M=1 */
+	FST_TEST_BEGIN(test_generated_audio_after_a_gap_jumps_forward)
+	{
+		uint32_t in[4] = { 0x40000000, 0, 0, 0x40000000 + 4000 };
+		int delay_ms[4] = { 0, 480, 0, 0 };
+		uint32_t out[4];
+		uint8_t m[4];
+
+		fst_requires(write_raw_audio_ts(in, delay_ms, 4, out, m));
+		fst_check((out[1] - out[0]) % 160 == 0);
+		fst_check(out[1] - out[0] >= 1600 && out[1] - out[0] <= 4800);
+		fst_check_int_equals(m[1], 1);
+		fst_check_int_equals(out[2], out[1] + 160);
+		fst_check_int_equals(m[2], 0);
+		fst_check((int32_t) (out[3] - out[2]) > 0);
+	}
+	FST_TEST_END()
+
+	/* generated frames follow the elapsed time from the last forwarded frame, rounded down: no drift from jitter */
+	FST_TEST_BEGIN(test_generated_audio_timestamps_do_not_drift_with_jitter)
+	{
+		uint32_t in[4] = { 0x40000000, 0, 0, 0 };
+		int delay_ms[4] = { 0, 31, 9, 25 };
+		uint32_t out[4];
+		uint8_t m[4];
+		int i;
+
+		fst_requires(write_raw_audio_ts(in, delay_ms, 4, out, m));
+		for (i = 1; i < 4; i++) {
+			fst_check_int_equals(out[i] - out[0], (uint32_t) i * 160);
+			fst_check_int_equals(m[i], 0);
+		}
+	}
+	FST_TEST_END()
+
+	/* a computed ts of 0 at the 32-bit wrap is sent as 0xffffffff and what follows is shifted by -1:
+	 * no jump to the local clock, no marker, steps stay one interval */
+	FST_TEST_BEGIN(test_raw_write_audio_ts_wraps_through_zero)
+	{
+		/* generated frame landing on 0, then forwarded and generated after it */
+		uint32_t gen[4] = { 0xffffff60, 0, 160, 0 };
+		/* forwarded frame shifted onto 0, then forwarded and generated after it */
+		uint32_t in[7] = { 0xfffffd80, 0, 0, 0, 0xfffffe20, 0xfffffec0, 0 };
+		uint32_t out[7];
+		uint8_t m[7];
+		int i;
+
+		fst_requires(write_raw_audio_ts(gen, NULL, 4, out, m));
+		fst_check_int_equals(out[1], 0xffffffff);
+		for (i = 1; i < 4; i++) {
+			fst_check_int_equals(out[i] - out[i - 1], i == 1 ? 159 : 160);
+			fst_check_int_equals(m[i], 0);
+		}
+
+		fst_requires(write_raw_audio_ts(in, NULL, 7, out, m));
+		fst_check_int_equals(out[4], 0xffffffff);
+		for (i = 1; i < 7; i++) {
+			fst_check_int_equals(out[i] - out[i - 1], i == 4 ? 159 : 160);
+			fst_check_int_equals(m[i], 0);
+		}
+	}
+	FST_TEST_END()
+
 
 
 	FST_TEST_BEGIN(test_raw_write_ts_jump_is_rebased_once)
@@ -925,6 +1124,15 @@ FST_TEARDOWN_END()
 		switch_rtp_destroy(&raw_rtp);
 		close(sink_fd);
 		switch_core_destroy_memory_pool(&test_pool);
+	}
+	FST_TEST_END()
+
+	FST_TEST_BEGIN(test_raw_write_ts_generated_frame_after_rebase_moves_forward)
+	{
+		const char *why = NULL;
+		switch_bool_t ok = run_generated_after_rebase_case(&why);
+
+		fst_xcheck(ok, why ? why : "generated frame after rebase");
 	}
 	FST_TEST_END()
 

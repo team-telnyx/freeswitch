@@ -1313,6 +1313,16 @@ struct null_private_object {
 	switch_frame_t read_frame;
 	int16_t *null_buf;
 	int rate;
+	/* null_codec, default L16 */
+	char *codec_name;
+	uint8_t encoded_buf[SWITCH_RECOMMENDED_BUFFER_SIZE];
+	/* null_dtx_period: one frame, then period - 1 CNG frames */
+	uint32_t dtx_period;
+	uint32_t read_count;
+	/* null_count_frames: publish null_read_count / null_write_count (writes exclude CNG) */
+	int count_frames;
+	uint32_t frames_read;
+	uint32_t write_count;
 	/* pre answer the channel */
 	int pre_answer;
 	/* enable_auto_answer (enabled by default) */
@@ -1365,7 +1375,7 @@ static void set_mparams(null_private_t *tech_pvt)
 
 static switch_status_t null_tech_init(null_private_t *tech_pvt, switch_core_session_t *session)
 {
-	const char *iananame = "L16";
+	const char *iananame = tech_pvt->codec_name ? tech_pvt->codec_name : "L16";
 	uint32_t interval = 20;
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
 	switch_channel_t *channel = switch_core_session_get_channel(session);
@@ -1706,7 +1716,28 @@ static switch_status_t null_channel_read_frame(switch_core_session_t *session, s
 		tech_pvt->read_frame.samples = samples;
 		tech_pvt->read_frame.data = tech_pvt->null_buf;
 		switch_generate_sln_silence((int16_t *)tech_pvt->read_frame.data, tech_pvt->read_frame.samples, tech_pvt->read_codec.implementation->number_of_channels, 10000);
+
+		if (tech_pvt->dtx_period > 1 && (tech_pvt->read_count++ % tech_pvt->dtx_period) != 0) {
+			tech_pvt->read_frame.datalen = 0;
+			tech_pvt->read_frame.flags = SFF_CNG;
+		} else if (tech_pvt->read_codec.implementation->encoded_bytes_per_packet != tech_pvt->read_codec.implementation->decoded_bytes_per_packet) {
+			uint32_t encoded_len = sizeof(tech_pvt->encoded_buf);
+			uint32_t encoded_rate = tech_pvt->read_codec.implementation->actual_samples_per_second;
+			unsigned int flag = 0;
+
+			if (switch_core_codec_encode(&tech_pvt->read_codec, NULL, tech_pvt->read_frame.data, tech_pvt->read_frame.datalen,
+										 tech_pvt->read_codec.implementation->actual_samples_per_second,
+										 tech_pvt->encoded_buf, &encoded_len, &encoded_rate, &flag) != SWITCH_STATUS_SUCCESS) {
+				return SWITCH_STATUS_FALSE;
+			}
+			tech_pvt->read_frame.data = tech_pvt->encoded_buf;
+			tech_pvt->read_frame.datalen = encoded_len;
+		}
 		*frame = &tech_pvt->read_frame;
+
+		if (tech_pvt->count_frames) {
+			switch_channel_set_variable_printf(channel, "null_read_count", "%u", ++tech_pvt->frames_read);
+		}
 	}
 
 	if (*frame) {
@@ -1732,6 +1763,10 @@ static switch_status_t null_channel_write_frame(switch_core_session_t *session, 
 
 	tech_pvt = switch_core_session_get_private(session);
 	switch_assert(tech_pvt != NULL);
+
+	if (tech_pvt->count_frames && !switch_test_flag(frame, SFF_CNG)) {
+		switch_channel_set_variable_printf(switch_core_session_get_channel(session), "null_write_count", "%u", ++tech_pvt->write_count);
+	}
 
 	switch_core_timer_sync(&tech_pvt->timer);
 
@@ -1863,7 +1898,17 @@ static switch_call_cause_t null_channel_outgoing_channel(switch_core_session_t *
 		if ((tech_pvt = (null_private_t *) switch_core_session_alloc(*new_session, sizeof(null_private_t))) != 0) {
 			const char *rate_ = switch_event_get_header(var_event, "rate");
 			const char *video_codec = switch_event_get_header(var_event, "null_video_codec");
+			const char *codec = switch_event_get_header(var_event, "null_codec");
+			const char *dtx_period = switch_event_get_header(var_event, "null_dtx_period");
 			int rate = 0;
+
+			if (codec) {
+				tech_pvt->codec_name = switch_core_session_strdup(*new_session, codec);
+			}
+			if (dtx_period && atoi(dtx_period) > 1) {
+				tech_pvt->dtx_period = (uint32_t) atoi(dtx_period);
+			}
+			tech_pvt->count_frames = switch_true(switch_event_get_header(var_event, "null_count_frames"));
 
 			if (rate_) {
 				rate = atoi(rate_);

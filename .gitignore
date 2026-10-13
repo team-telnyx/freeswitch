@@ -264,6 +264,7 @@ src/mod/applications/mod_http_cache/test/test-suite.log
 src/mod/applications/mod_http_cache/test/test_aws
 src/mod/applications/mod_http_cache/test/test_aws.log
 src/mod/applications/mod_http_cache/test/test_aws.trs
+src/mod/applications/mod_spandsp/test/test_t38_gateway_cng
 src/mod/formats/mod_sndfile/test/test_sndfile
 src/mod/formats/mod_sndfile/test/test_sndfile_conf
 src/mod/formats/mod_ssml/test/test_tts_format
