@@ -6,6 +6,12 @@ They do not start or modify a FreeSWITCH service. Temporary keys and binaries
 are deleted on exit. Python 3, a C compiler, the OpenSSL CLI, headers and shared
 libraries are required. No network sockets are used by the peers.
 
+The dispatch tests also compile the current `do_dtls()` function extracted from
+`src/switch_rtp.c`. They exercise its packet/state-handler/output ordering with
+real OpenSSL peers, but replace FreeSWITCH setup, admission dependencies and
+socket sends with test doubles. They do not validate key installation, the
+packet-preserving BIO filter, ICE policy or audio/video receive-loop timing.
+
 From a configured build tree:
 
 ```sh
@@ -41,6 +47,9 @@ loader discovers the versioned libraries. The C helper is compiled with
 - Input queued during SETUP does not disable READY recovery. Terminal SSL
   results disable post-handshake processing once, without recreating the
   association or changing the established keys.
+- A server retry received in SETUP completes setup once and recovers using that
+  packet alone. Empty input, setup failure and admission rejection do not emit
+  a flight; existing READY, client SETUP and HANDSHAKE dispatch stay unchanged.
 - An authenticated renegotiation request does not start a new handshake.
 
 The optional SRTP test also creates the server's SRTP state **before recovery**
@@ -85,3 +94,7 @@ should repeat the loss-relay packet-capture test and verify bidirectional
 SRTP/SRTCP with muxed and separate RTCP before deployment. Retransmitted DTLS
 record sequence numbers change; compare Finished content and key continuity,
 not byte-identical UDP datagrams.
+
+Include a separate, non-BUNDLE video leg with retries arriving both during
+SETUP and after idle advancement to READY. Record state transitions, retry
+arrival and response timing; helper/dispatch tests do not measure that delay.

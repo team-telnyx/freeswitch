@@ -1,6 +1,7 @@
 EXTRA_DIST =
 EXTRA_DIST += src/include/private/switch_dtls_ready.h \
-	tests/dtls_ready/ready_shim.c tests/dtls_ready/test_ready.py tests/dtls_ready/README.md
+	tests/dtls_ready/ready_shim.c tests/dtls_ready/dispatch_shim.c \
+	tests/dtls_ready/test_ready.py tests/dtls_ready/README.md
 
 .PHONY: check-dtls-ready
 check-dtls-ready:

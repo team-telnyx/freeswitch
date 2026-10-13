@@ -232,6 +232,68 @@ class ReadyTests(unittest.TestCase):
         self.assertEqual(ret,1)
         self.assert_recovered(data)
 
+    def dispatch(self, packet, state=2, server=1, failure=0, reject=0):
+        ret=shim.dispatch_receive(self.server.s,self.server.r,self.server.w,
+                                  packet,len(packet),state,server,failure,reject)
+        output=C.create_string_buffer(4096)
+        size=shim.dispatch_output(output,len(output))
+        return ret,output.raw[:size]
+
+    def test_setup_first_retry_recovers_without_second_packet(self):
+        ret,data=self.dispatch(self.retry())
+        self.assertEqual(ret,0)
+        self.assertEqual(shim.dispatch_setup_calls(),1)
+        self.assertEqual(shim.dispatch_state(),3)
+        self.assertEqual(self.server.pending(),0)
+        self.assertEqual(shim.dispatch_responses(),1)
+        self.assertEqual(shim.dispatch_disabled(),0)
+        self.assert_recovered(data)
+
+    def test_setup_failure_does_not_process_retry(self):
+        ret,data=self.dispatch(self.retry(),failure=1)
+        self.assertEqual(ret,-1)
+        self.assertEqual(shim.dispatch_setup_calls(),1)
+        self.assertEqual(shim.dispatch_state(),4)
+        self.assertEqual(self.server.pending(),0)
+        self.assertEqual(data,b'')
+        self.assertEqual(shim.dispatch_responses(),0)
+
+    def test_setup_without_packet_does_not_retransmit(self):
+        ret,data=self.dispatch(b'')
+        self.assertEqual((ret,data),(0,b''))
+        self.assertEqual(shim.dispatch_setup_calls(),1)
+        self.assertEqual(shim.dispatch_state(),3)
+        self.assertEqual(shim.dispatch_responses(),0)
+
+    def test_ready_dispatch_does_not_repeat_setup(self):
+        ret,data=self.dispatch(self.retry(),state=3)
+        self.assertEqual(ret,0)
+        self.assertEqual(shim.dispatch_setup_calls(),0)
+        self.assert_recovered(data)
+
+    def test_setup_admission_rejection_precedes_transition(self):
+        ret,data=self.dispatch(self.retry(),reject=1)
+        self.assertEqual((ret,data),(0,b''))
+        self.assertEqual(shim.dispatch_setup_calls(),0)
+        self.assertEqual(shim.dispatch_state(),2)
+        self.assertEqual(self.server.pending(),0)
+
+    def test_client_setup_dispatch_is_unchanged(self):
+        packet=self.retry()
+        ret,data=self.dispatch(packet,server=0)
+        self.assertEqual((ret,data),(0,b''))
+        self.assertEqual(shim.dispatch_setup_calls(),1)
+        self.assertEqual(shim.dispatch_state(),3)
+        self.assertEqual(self.server.pending(),len(packet))
+        self.assertEqual(shim.dispatch_responses(),0)
+
+    def test_handshake_dispatch_does_not_run_setup_early(self):
+        ret,data=self.dispatch(b'',state=1)
+        self.assertEqual((ret,data),(0,b''))
+        self.assertEqual(shim.dispatch_setup_calls(),0)
+        self.assertEqual(shim.dispatch_state(),2)
+        self.assertEqual(shim.dispatch_responses(),0)
+
     def test_terminal_input_disables_once_without_reset(self):
         # A closed SSL association must not be driven repeatedly or recreated.
         retry=self.retry(); ssl.SSL_set_shutdown(self.server.s,2)
@@ -277,15 +339,23 @@ if __name__=='__main__':
         CERT_DIR=temp
         subprocess.run([os.environ.get('OPENSSL','openssl'),'req','-x509','-newkey','rsa:2048','-nodes','-keyout',temp+'/key.pem','-out',temp+'/cert.pem','-days','1','-subj','/CN=DTLS-ready-test'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True)
         target=temp+'/ready.'+libext
+        source=(here.parents[1]/'src/switch_rtp.c').read_text()
+        start=source.index('static int do_dtls(switch_rtp_t *rtp_session, switch_dtls_t *dtls)\n{')
+        end=source.index('\n}\n',start)+3
+        pathlib.Path(temp,'do_dtls.inc').write_text(source[start:end])
         flags=shlex.split(os.environ.get('OPENSSL_CFLAGS',''))
         libs=shlex.split(os.environ.get('OPENSSL_LIBS','-lssl -lcrypto'))
         if os.environ.get('SRTP_LIBS'):
             flags+=['-DTEST_SRTP','-I'+str(here.parents[1]/'libs/srtp/include')]
             libs+=shlex.split(os.environ['SRTP_LIBS'])
-        cmd=shlex.split(os.environ.get('CC','cc'))+['-std=gnu89','-Wall','-Wextra','-Werror','-Werror=declaration-after-statement','-fPIC','-shared','-I'+str(here.parents[1]/'src/include')]+flags+[str(here/'ready_shim.c'),'-o',target]+libs
+        cmd=shlex.split(os.environ.get('CC','cc'))+['-std=gnu89','-Wall','-Wextra','-Werror','-Werror=declaration-after-statement','-fPIC','-shared','-I'+temp,'-I'+str(here.parents[1]/'src/include')]+flags+[str(here/'ready_shim.c'),str(here/'dispatch_shim.c'),'-o',target]+libs
         subprocess.run(cmd,check=True)
         shim=C.CDLL(target)
         for name,ret,args in [('ready_new',P,[]),('ready_free',None,[P]),('ready_receive',I,[P,P,P,P,P,Z,Q]),('ready_responses',U,[P]),('ready_disabled',I,[P]),('ready_record',Z,[P,Z,P])]:
+            bind(shim,name,ret,args)
+        for name,ret,args in [('dispatch_receive',I,[P,P,P,P,Z,I,I,I,I]),
+                              ('dispatch_output',Z,[P,Z]),('dispatch_setup_calls',I,[]),
+                              ('dispatch_state',I,[]),('dispatch_disabled',I,[]),('dispatch_responses',U,[])]:
             bind(shim,name,ret,args)
         if os.environ.get('SRTP_LIBS'):
             for name,ret,args in [('ready_srtp_new',P,[P,I]),('ready_srtp_free',None,[P]),('ready_srtp_exchange',I,[P,P,I])]: bind(shim,name,ret,args)
