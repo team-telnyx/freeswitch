@@ -899,13 +899,34 @@ cnt_with_cng:
 		if (session->read_codec) {
 			if (session->read_resampler) {
 				short *data = read_frame->data;
+				uint32_t out_bytes;
+
 				switch_mutex_lock(session->resample_mutex);
 				switch_resample_process(session->read_resampler, data, (int) read_frame->datalen / 2 / session->read_resampler->channels);
-				memcpy(data, session->read_resampler->to, session->read_resampler->to_len * 2 * session->read_resampler->channels);
+				out_bytes = session->read_resampler->to_len * 2 * session->read_resampler->channels;
 				read_frame->samples = session->read_resampler->to_len;
 				read_frame->channels = session->read_resampler->channels;
-				read_frame->datalen = session->read_resampler->to_len * 2 * session->read_resampler->channels;
 				read_frame->rate = session->read_resampler->to_rate;
+
+				if (out_bytes > read_frame->buflen) {
+					/* more than the frame holds (a codec may decode several packets' worth, and upsampling multiplies
+					 * it): it cannot be a whole packet, so it goes to the read buffer below anyway; put it there directly */
+					if (!session->raw_read_buffer) {
+						switch_size_t bytes = session->read_impl.decoded_bytes_per_packet;
+						switch_buffer_create_dynamic(&session->raw_read_buffer, bytes * SWITCH_BUFFER_BLOCK_FRAMES, bytes * SWITCH_BUFFER_START_FRAMES, 0);
+					}
+
+					if (!switch_buffer_write(session->raw_read_buffer, session->read_resampler->to, out_bytes)) {
+						switch_mutex_unlock(session->resample_mutex);
+						status = SWITCH_STATUS_MEMERR;
+						goto done;
+					}
+
+					read_frame->datalen = 0;
+				} else {
+					memcpy(data, session->read_resampler->to, out_bytes);
+					read_frame->datalen = out_bytes;
+				}
 				switch_mutex_unlock(session->resample_mutex);
 			}
 
