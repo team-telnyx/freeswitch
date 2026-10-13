@@ -659,6 +659,21 @@
       </condition>
     </extension>
 
+    <!-- Blind transfer with confirm_blind_transfer: A calls B (SIPp on 5063); B sends REFER to
+         7878780002, which bridges A to the target C (SIPp on 5064). -->
+    <extension name="blind_transfer_confirm_call">
+      <condition field="destination_number" expression="^7878780001$">
+        <action application="bridge" data="{confirm_blind_transfer=true}sofia/external/7878780001@$${local_ip_v4}:5063"/>
+      </condition>
+    </extension>
+
+    <extension name="blind_transfer_confirm_target">
+      <condition field="destination_number" expression="^7878780002$">
+        <action application="set" data="hangup_after_bridge=true"/>
+        <action application="bridge" data="sofia/external/7878780002@$${local_ip_v4}:5064"/>
+      </condition>
+    </extension>
+
 	<extension name="sipp">
 		<condition>
 		   <action application="info"/>

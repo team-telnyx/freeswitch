@@ -984,6 +984,15 @@ SWITCH_DECLARE(void) switch_core_session_hangup_state(switch_core_session_t *ses
 	switch_channel_set_timestamps(session->channel);
 	switch_channel_set_callstate(session->channel, CCS_HANGUP);
 
+	/* A leg still waiting for blind-transfer confirmation is going away: tell the
+	   parked transferor the transfer failed, or it waits for park_timeout.
+	   switch_ivr_blind_transfer_ack() tests and clears the flag, so this fires at most once. */
+	if (switch_ivr_blind_transfer_ack(session, SWITCH_FALSE) == SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+						  "%s hung up with blind transfer confirmation pending, notified transferor of failure\n",
+						  switch_channel_get_name(session->channel));
+	}
+
 	/* Export JB stats before hangup handlers run, while JB still exists */
 	switch_core_media_export_jb_stats(session);
 
