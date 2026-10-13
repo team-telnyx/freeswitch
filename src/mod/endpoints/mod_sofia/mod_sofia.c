@@ -1849,9 +1849,14 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 			event = switch_channel_get_variable(channel, "sip_blind_transfer_event");
 			uuid = switch_channel_get_variable(channel, "blind_transfer_uuid");
 
-			if (event && uuid) {
+			/* Only a leg still parked for this result: if it left CS_PARK
+			   (moved by uuid_transfer or uuid_bridge), the result is stale. */
+			if (event && uuid && switch_channel_get_state(channel) == CS_PARK) {
+				/* Default failure sipfrag: also the one sent when the transferred
+				   leg is already down, because the locate below then fails. */
 				char payload_str[255] = "SIP/2.0 403 Forbidden\r\n";
 				const char *session_id_header = sofia_glue_session_id_header(session, tech_pvt->profile);
+				switch_bool_t peer_alive = SWITCH_FALSE;
 				if (msg->numeric_arg) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 							"%s Completing blind transfer with success\n", switch_channel_get_name(channel));
@@ -1862,6 +1867,8 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 						switch_channel_t *other_channel = switch_core_session_get_channel(other_session);
 						const char *invite_failure_status = switch_channel_get_variable(other_channel, "sip_invite_failure_status");
 						const char *invite_failure_str = switch_channel_get_variable(other_channel, "sip_invite_failure_phrase");
+						/* The locate refuses channels that are already down. */
+						peer_alive = SWITCH_TRUE;
 						if (!zstr(invite_failure_status) && !zstr(invite_failure_str)) {
 							snprintf(payload_str, sizeof(payload_str), "SIP/2.0 %s %s\r\n", invite_failure_status, invite_failure_str);
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
@@ -1882,9 +1889,23 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 
 
 				if (!msg->numeric_arg) {
-					xdest = switch_core_session_sprintf(session, "intercept:%s", uuid);
-					switch_ivr_session_transfer(session, xdest, "inline", NULL);
+					/* Re-bridge onto the transferred leg only while it is up. Otherwise
+					   the NOTIFY above has carried the failure: end this parked leg. */
+					if (peer_alive) {
+						xdest = switch_core_session_sprintf(session, "intercept:%s", uuid);
+						switch_ivr_session_transfer(session, xdest, "inline", NULL);
+					} else {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+								"%s blind transfer failed and transferee %s is down, hanging up\n",
+								switch_channel_get_name(channel), uuid);
+						switch_channel_hangup(channel, SWITCH_CAUSE_BLIND_TRANSFER);
+					}
 				}
+
+				/* The result is delivered: a later one finds nothing to answer.
+				   Cleared last, because event and uuid point into these variables. */
+				switch_channel_set_variable(channel, "sip_blind_transfer_event", NULL);
+				switch_channel_set_variable(channel, "blind_transfer_uuid", NULL);
 			}
 
 		}
