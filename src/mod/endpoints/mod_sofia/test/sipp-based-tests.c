@@ -239,6 +239,164 @@ static int stop_t38_sipp(pid_t *pid)
 	return wait_t38_sipp(pid, &status, 2000) == 1;
 }
 
+/* Blind transfer with confirm_blind_transfer (test dialplan 7878780001/7878780002): SIPp A calls B,
+   B sends REFER, C is the transfer target. The result sent to B is read from the endpoint's log. */
+static struct {
+	pthread_mutex_t mutex;
+	int results;
+	char status[64];
+	switch_time_t result_at;
+	switch_time_t target_answered_at;
+	int referrer_blind_transfer_hangup;
+} bt_watch = { PTHREAD_MUTEX_INITIALIZER, 0, "", 0, 0, 0 };
+
+static switch_status_t bt_watch_logger(const switch_log_node_t *node, switch_log_level_t level)
+{
+	const char *found;
+
+	if (!node->data) {
+		return SWITCH_STATUS_SUCCESS;
+	}
+	pthread_mutex_lock(&bt_watch.mutex);
+	if ((found = strstr(node->data, "Completing blind transfer with status: "))) {
+		if (!bt_watch.results++) {
+			switch_copy_string(bt_watch.status, found + strlen("Completing blind transfer with status: "), sizeof(bt_watch.status));
+			bt_watch.result_at = node->timestamp;
+		}
+	} else if (strstr(node->data, "/7878780002") && strstr(node->data, "entering state [") &&
+			   strstr(node->data, "][200]") && !bt_watch.target_answered_at) {
+		bt_watch.target_answered_at = node->timestamp;
+	} else if (strstr(node->data, "Hangup sofia/") && strstr(node->data, "/7878780001") && strstr(node->data, "[BLIND_TRANSFER]")) {
+		bt_watch.referrer_blind_transfer_hangup = 1;
+	}
+	pthread_mutex_unlock(&bt_watch.mutex);
+	return SWITCH_STATUS_SUCCESS;
+}
+
+typedef struct {
+	int started;
+	int a_ok;
+	int b_ok;
+	int c_ok;
+	int results;
+	char status[64];
+	switch_time_t result_at;
+	switch_time_t target_answered_at;
+	int referrer_blind_transfer_hangup;
+} bt_result_t;
+
+static int start_bt_sipp(const char *ip, const char *scenario, const char *port, const char *target, const char *hold_ms, pid_t *pid)
+{
+	char *remote = target ? switch_mprintf("%s:5080", ip) : NULL;
+	char *argv[32];
+	int i = 0, result;
+
+	argv[i++] = "sipp";
+	if (remote) {
+		argv[i++] = remote;
+		argv[i++] = "-s";
+		argv[i++] = (char *)target;
+		argv[i++] = "-d";
+		argv[i++] = (char *)hold_ms;
+	}
+	argv[i++] = "-i";
+	argv[i++] = (char *)ip;
+	argv[i++] = "-p";
+	argv[i++] = (char *)port;
+	argv[i++] = "-sf";
+	argv[i++] = (char *)scenario;
+	argv[i++] = "-m";
+	argv[i++] = "1";
+	argv[i++] = "-nr";
+	argv[i++] = "-recv_timeout";
+	argv[i++] = "20000";
+	argv[i++] = "-timeout";
+	argv[i++] = "25s";
+	argv[i++] = "-timeout_error";
+	argv[i++] = "-nostdin";
+	argv[i++] = "-trace_err";
+	argv[i] = NULL;
+	result = posix_spawnp(pid, "sipp", NULL, NULL, argv, environ);
+	if (result != 0) {
+		*pid = -1;
+	}
+	switch_safe_free(remote);
+	return result;
+}
+
+static int bt_sipp_ok(pid_t *pid, int timeout_ms)
+{
+	int status = 0;
+
+	return wait_t38_sipp(pid, &status, timeout_ms) == 1 && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+/* The profile finishes starting after its SIP socket already accepts calls: wait until the call path can use it. */
+static switch_bool_t bt_profile_ready(void)
+{
+	int loop_count = 100;
+	switch_bool_t ready = SWITCH_FALSE;
+
+	while (!ready && loop_count--) {
+		switch_stream_handle_t stream = { 0 };
+
+		SWITCH_STANDARD_STREAM(stream);
+		switch_api_execute("sofia", "status profile external", NULL, &stream);
+		ready = (stream.data && !strstr((char *)stream.data, "Invalid")) ? SWITCH_TRUE : SWITCH_FALSE;
+		switch_safe_free(stream.data);
+		if (!ready) {
+			switch_sleep(100 * 1000);
+		}
+	}
+	return ready;
+}
+
+/* C and B listen first; A calls and hangs up hold_ms after the answer. */
+static void blind_transfer_run(const char *ip, const char *target_scenario, const char *hold_ms, bt_result_t *r)
+{
+	pid_t a = -1, b = -1, c = -1;
+	int loop_count = 100;
+
+	pthread_mutex_lock(&bt_watch.mutex);
+	bt_watch.results = 0;
+	bt_watch.status[0] = '\0';
+	bt_watch.result_at = 0;
+	bt_watch.target_answered_at = 0;
+	bt_watch.referrer_blind_transfer_hangup = 0;
+	pthread_mutex_unlock(&bt_watch.mutex);
+	switch_log_bind_logger(bt_watch_logger, SWITCH_LOG_DEBUG, SWITCH_FALSE);
+
+	if (!bt_profile_ready() || start_bt_sipp(ip, target_scenario, "5064", NULL, NULL, &c) || start_bt_sipp(ip, "sipp-scenarios/uas_blind_transfer_referrer.xml", "5063", NULL, NULL, &b)) {
+		goto end;
+	}
+	switch_sleep(500 * 1000);
+	if (start_bt_sipp(ip, "sipp-scenarios/uac_blind_transfer_caller.xml", "5062", "7878780001", hold_ms, &a)) {
+		goto end;
+	}
+	r->started = 1;
+	r->a_ok = bt_sipp_ok(&a, 25000);
+	r->b_ok = bt_sipp_ok(&b, 15000);
+	r->c_ok = bt_sipp_ok(&c, 15000);
+
+	/* Let the last channels finish before the next test starts. */
+	while (loop_count-- && switch_core_session_count()) {
+		switch_sleep(50 * 1000);
+	}
+
+ end:
+	switch_log_unbind_logger(bt_watch_logger);
+	pthread_mutex_lock(&bt_watch.mutex);
+	r->results = bt_watch.results;
+	switch_copy_string(r->status, bt_watch.status, sizeof(r->status));
+	r->result_at = bt_watch.result_at;
+	r->target_answered_at = bt_watch.target_answered_at;
+	r->referrer_blind_transfer_hangup = bt_watch.referrer_blind_transfer_hangup;
+	pthread_mutex_unlock(&bt_watch.mutex);
+	stop_t38_sipp(&a);
+	stop_t38_sipp(&b);
+	stop_t38_sipp(&c);
+}
+
 static void show_event(switch_event_t *event) {
 	char *str;
 	/*print the event*/
@@ -305,7 +463,7 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 
 			switch_core_set_variable("spawn_instead_of_system", "true");
 
-			if (getenv("FST_T38_ONLY")) {
+			if (getenv("FST_T38_ONLY") || getenv("FST_BLIND_TRANSFER_ONLY")) {
 				fst_requires_module("mod_sofia");
 				fst_requires_module("mod_dialplan_xml");
 				fst_requires_module("mod_dptools");
@@ -473,6 +631,20 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 				}
 				switch_core_session_rwunlock(session);
 			}
+		}
+		FST_TEST_END()
+
+		/* A hangs up while the target rings: B gets one failure and is hung up. */
+		FST_TEST_BEGIN(blind_transfer_caller_hangup_while_ringing)
+		{
+			bt_result_t r = { 0 };
+
+			blind_transfer_run(switch_core_get_variable("local_ip_v4"), "sipp-scenarios/uas_blind_transfer_target_ring_cancel.xml", "4000", &r);
+			fst_xcheck(r.started, "Unable to start the SIPp peers");
+			fst_xcheck(r.results == 1, "the REFER sender did not get exactly one result");
+			fst_xcheck(strstr(r.status, "SIP/2.0 403 Forbidden") != NULL, "the result is not the failure 403 Forbidden");
+			fst_xcheck(r.referrer_blind_transfer_hangup, "the REFER sender was not hung up with BLIND_TRANSFER");
+			fst_xcheck(r.a_ok && r.b_ok && r.c_ok, "a SIPp peer failed; inspect the *_blind_transfer_*_errors.log files");
 		}
 		FST_TEST_END()
 
