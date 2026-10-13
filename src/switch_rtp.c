@@ -94,6 +94,7 @@
 #define RTP_MAGIC_NUMBER 42
 #define WARN_SRTP_ERRS 10
 #define MAX_SRTP_ERRS 100
+#define RTP_MAX_REJECTED_PACKETS_PER_READ 20
 #define RTP_MOS_PACKET_LOSS_PENALTY 2.5
 #define RTP_MOS_JITTER_PENALTY 2.0
 #define RTP_PUBLISH_STATS_INTERVAL_MS 5000
@@ -9135,7 +9136,7 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 	}
 
 	recv_again:
-	/* Retry below the capture to preserve the previous processed fork frame. */
+	/* Re-read after the previous fork frame was saved so skipped packets cannot overwrite it. */
 	*bytes = sizeof(rtp_msg_t);
 	rtp_session->has_rtp = 0;
 	rtp_session->has_ice = 0;
@@ -9246,7 +9247,7 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 									  ntohs(rtp_session->recv_msg.header.seq), ntohl(rtp_session->last_rtp_hdr.ts), rtp_session->last_rtp_hdr.pt);
 					*bytes = 0;
 					/* Bound rejection draining to packets already queued. */
-					if (++rejected_packets < 20 && rtp_session->read_pollfd &&
+					if (++rejected_packets < RTP_MAX_REJECTED_PACKETS_PER_READ && rtp_session->read_pollfd &&
 						switch_poll(rtp_session->read_pollfd, 1, &fdr, 0) == SWITCH_STATUS_SUCCESS) {
 						goto recv_again;
 					}
