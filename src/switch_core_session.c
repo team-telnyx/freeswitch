@@ -972,14 +972,12 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_perform_receive_message(swit
 			/* string_arg carries the bridge peer uuid (absent only for conference/
 			   eavesdrop, which keep the legacy success). A peer that can't be
 			   located is already at CS_HANGUP and never answered: defer. */
-			int peer_answered = zstr(message->string_arg) ? 1 : 0;
+			switch_core_session_t *peer_session;
+			int peer_answered = zstr(message->string_arg);
 
-			if (!zstr(message->string_arg)) {
-				switch_core_session_t *peer_session;
-				if ((peer_session = switch_core_session_locate(message->string_arg))) {
-					peer_answered = switch_channel_test_flag(switch_core_session_get_channel(peer_session), CF_ANSWERED);
-					switch_core_session_rwunlock(peer_session);
-				}
+			if (!peer_answered && (peer_session = switch_core_session_locate(message->string_arg))) {
+				peer_answered = switch_channel_test_flag(switch_core_session_get_channel(peer_session), CF_ANSWERED);
+				switch_core_session_rwunlock(peer_session);
 			}
 
 			if (!peer_answered) {

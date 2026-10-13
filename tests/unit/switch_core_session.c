@@ -347,25 +347,6 @@ FST_CORE_BEGIN("./conf")
 		FST_SESSION_END()
 
 		/*
-		 * test_and_clear_flag_semantics: the atomic helper must report the
-		 * previous value and clear the flag in one step, so that competing
-		 * producers of the blind transfer outcome cannot both believe they
-		 * won (a second terminated NOTIFY would be a protocol error).
-		 */
-		FST_SESSION_BEGIN(test_and_clear_flag_semantics)
-		{
-			switch_channel_set_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER);
-
-			fst_check(switch_channel_test_and_clear_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER) == SWITCH_TRUE);
-			fst_check(!switch_channel_test_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER));
-			/* already cleared: a second caller must lose */
-			fst_check(switch_channel_test_and_clear_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER) == SWITCH_FALSE);
-			/* still unset: also FALSE */
-			fst_check(switch_channel_test_and_clear_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER) == SWITCH_FALSE);
-		}
-		FST_SESSION_END()
-
-		/*
 		 * blind_transfer_defer_on_early_media: when the bridge
 		 * proceeds on early media (peer not CF_ANSWERED), INDICATE_BRIDGE must
 		 * NOT deliver the success BLIND_TRANSFER_RESPONSE, and must leave

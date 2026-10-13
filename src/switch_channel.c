@@ -1852,20 +1852,14 @@ SWITCH_DECLARE(uint32_t) switch_channel_test_flag(switch_channel_t *channel, swi
 
 SWITCH_DECLARE(switch_bool_t) switch_channel_test_and_clear_flag(switch_channel_t *channel, switch_channel_flag_t flag)
 {
-	switch_bool_t r = SWITCH_FALSE;
+	switch_bool_t r;
 
-	switch_assert(channel != NULL);
+	switch_assert(channel && channel->flag_mutex);
 
-	if (channel->flag_mutex) {
-		switch_mutex_lock(channel->flag_mutex);
-	}
-	if (channel->flags[flag]) {
-		channel->flags[flag] = 0;
-		r = SWITCH_TRUE;
-	}
-	if (channel->flag_mutex) {
-		switch_mutex_unlock(channel->flag_mutex);
-	}
+	switch_mutex_lock(channel->flag_mutex);
+	r = channel->flags[flag] ? SWITCH_TRUE : SWITCH_FALSE;
+	channel->flags[flag] = 0;
+	switch_mutex_unlock(channel->flag_mutex);
 
 	return r;
 }
