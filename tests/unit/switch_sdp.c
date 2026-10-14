@@ -1029,11 +1029,11 @@ FST_CORE_BEGIN("./conf_sdp")
 			fst_check(amrwb_reference_decode("mode-set=2", payload_be, len_be, expected, sizeof(expected), fst_pool) == sizeof(expected));
 			fst_check(audio.datalen == sizeof(expected) && !memcmp(audio.data, expected, sizeof(expected)));
 
-			/* framing changed: the read codec is re-created in place */
+			/* framing changed: the read codec is re-created in place. Checks only until the null endpoint is restored */
 			match = switch_core_media_negotiate_sdp(fst_session, offer_oa, &p, SDP_OFFER);
-			fst_requires(match == 1);
-			fst_requires(switch_core_codec_ready(read_codec));
-			fst_requires(read_codec->fmtp_in && strstr(read_codec->fmtp_in, "octet-align=1"));
+			fst_check(match == 1);
+			fst_check(switch_core_codec_ready(read_codec));
+			fst_check(read_codec->fmtp_in && strstr(read_codec->fmtp_in, "octet-align=1"));
 
 			frame.data = payload_oa;
 			frame.datalen = frame.buflen = len_oa;
