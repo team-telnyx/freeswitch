@@ -12968,7 +12968,7 @@ SWITCH_DECLARE(switch_rtp_stats_t *) switch_rtp_get_stats(switch_rtp_t *rtp_sess
 		return NULL;
 	}
 
-	switch_refresh_diag_mutex_lock(rtp_session->flag_mutex, SWITCH_RDIAG_LOCK_RTP_STATS);
+	SWITCH_REFRESH_DIAG_MUTEX_LOCK(rtp_session->flag_mutex, SWITCH_RDIAG_LOCK_RTP_STATS);
 	if (pool) {
 		s = switch_core_alloc(pool, sizeof(*s));
 		*s = rtp_session->stats;

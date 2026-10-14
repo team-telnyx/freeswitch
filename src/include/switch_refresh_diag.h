@@ -128,6 +128,25 @@ typedef struct {
 	uint32_t suppressed;
 } switch_refresh_diag_limit_t;
 
+/*!
+  \brief Count of refresh diag contexts currently pushed plus stall watches alive, process-wide.
+  While it is 0 no thread can have a current context or a bound watch, so hot paths call
+  SWITCH_REFRESH_TELEMETRY_IDLE() first and skip the thread-local lookups (one load instead of a TLS call; a macro so
+  it costs no call in builds without inlining).
+  A thread's own push, create or bind happens before its own reads of it, so the check never hides a context
+  the calling thread set up. A watch enabled from another thread counts before it is published to the session, so
+  once the session thread has loaded and bound it the check holds; until then a frame can still read 0 and the
+  thread picks the watch up on a later frame. The count is not a lifetime guard. Without atomic builtins it stays
+  at 1 and the lookups are always made.
+*/
+SWITCH_DECLARE_DATA extern uint32_t switch_refresh_telemetry_users;
+
+#if defined(__ATOMIC_RELAXED)
+#define SWITCH_REFRESH_TELEMETRY_IDLE() (__atomic_load_n(&switch_refresh_telemetry_users, __ATOMIC_RELAXED) == 0)
+#else
+#define SWITCH_REFRESH_TELEMETRY_IDLE() 0
+#endif
+
 /*! \brief Reset a context and set the lock-wait threshold in microseconds */
 SWITCH_DECLARE(void) switch_refresh_diag_init(switch_refresh_diag_t *diag, switch_time_t lock_threshold_us);
 
@@ -148,6 +167,16 @@ SWITCH_DECLARE(void) switch_refresh_diag_lock_wait(switch_refresh_diag_t *diag, 
 
 /*! \brief Lock a mutex, timing the acquisition when the calling thread has a current context */
 SWITCH_DECLARE(void) switch_refresh_diag_mutex_lock(switch_mutex_t *mutex, switch_refresh_diag_lock_t lock);
+
+/*! \brief Lock mutex; time the wait only when some thread may have a context (callers on hot paths use this) */
+#define SWITCH_REFRESH_DIAG_MUTEX_LOCK(mutex, lock) \
+	do { \
+		if (SWITCH_REFRESH_TELEMETRY_IDLE()) { \
+			switch_mutex_lock(mutex); \
+		} else { \
+			switch_refresh_diag_mutex_lock(mutex, lock); \
+		} \
+	} while (0)
 
 /*! \brief The longest recorded lock wait across all locks */
 SWITCH_DECLARE(switch_time_t) switch_refresh_diag_max_lock_wait(const switch_refresh_diag_t *diag);

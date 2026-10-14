@@ -160,6 +160,27 @@ static switch_bool_t slow_bug_callback(switch_media_bug_t *bug, void *user_data,
 	return SWITCH_TRUE;
 }
 
+#if defined(__ATOMIC_RELAXED)
+static uint32_t users(void)
+{
+	return __atomic_load_n(&switch_refresh_telemetry_users, __ATOMIC_RELAXED);
+}
+
+typedef struct {
+	const char *uuid;
+	switch_channel_t *channel;
+	switch_refresh_watch_t *watch;
+} other_create_t;
+
+static void *SWITCH_THREAD_FUNC create_on_other_thread(switch_thread_t *thread, void *obj)
+{
+	other_create_t *oc = (other_create_t *) obj;
+
+	oc->watch = switch_refresh_watch_create(oc->uuid, oc->channel, STALL_US);
+	return NULL;
+}
+#endif
+
 FST_CORE_BEGIN("./conf")
 {
 	FST_SUITE_BEGIN(switch_refresh_watch)
@@ -625,6 +646,93 @@ FST_CORE_BEGIN("./conf")
 			switch_refresh_watch_destroy(&w);
 		}
 		FST_SESSION_END()
+
+#if defined(__ATOMIC_RELAXED)
+		FST_SESSION_BEGIN(telemetry_users_count_contexts_and_watches)
+		{
+			const char *uuid = switch_core_session_get_uuid(fst_session);
+			switch_refresh_diag_t a, b;
+			switch_refresh_watch_t *w, *none = NULL;
+			other_create_t oc = { uuid, fst_channel, NULL };
+			switch_thread_t *thread;
+			switch_threadattr_t *attr;
+			switch_status_t st;
+
+			/* nothing in this suite leaves a context or a watch behind */
+			fst_check(users() == 0);
+			fst_check(SWITCH_REFRESH_TELEMETRY_IDLE());
+
+			switch_refresh_diag_init(&a, 1000);
+			switch_refresh_diag_init(&b, 1000);
+			switch_refresh_diag_push(&a);
+			fst_check(users() == 1);
+			fst_check(!SWITCH_REFRESH_TELEMETRY_IDLE());
+			switch_refresh_diag_push(&b);
+			fst_check(users() == 2);
+			switch_refresh_diag_pop(&b);
+			fst_check(users() == 1);
+
+			/* failed creates and NULL destroys leave the count alone */
+			fst_check(switch_refresh_watch_create(NULL, fst_channel, STALL_US) == NULL);
+			fst_check(switch_refresh_watch_create(uuid, NULL, STALL_US) == NULL);
+			fst_check(switch_refresh_watch_create(uuid, fst_channel, 0) == NULL);
+			switch_refresh_watch_destroy(NULL);
+			switch_refresh_watch_destroy(&none);
+			fst_check(users() == 1);
+
+			/* pop before any fatal check: a test that stops early must not leave its stack context pushed */
+			w = switch_refresh_watch_create(uuid, fst_channel, STALL_US);
+			fst_check(w != NULL);
+			fst_check(users() == (w ? 2 : 1));
+			switch_refresh_diag_pop(&a);
+			fst_requires(w);
+			fst_check(users() == 1);
+			switch_refresh_watch_destroy(&w);
+			switch_refresh_watch_destroy(&w);
+			fst_check(users() == 0);
+
+			/* a watch created on another thread counts here once that thread is joined */
+			switch_threadattr_create(&attr, fst_pool);
+			fst_requires(switch_thread_create(&thread, attr, create_on_other_thread, &oc, fst_pool) == SWITCH_STATUS_SUCCESS);
+			switch_thread_join(&st, thread);
+			fst_requires(oc.watch);
+			fst_check(users() == 1);
+			switch_refresh_watch_destroy(&oc.watch);
+			fst_check(users() == 0);
+			fst_check(SWITCH_REFRESH_TELEMETRY_IDLE());
+		}
+		FST_SESSION_END()
+
+		FST_SESSION_BEGIN(idle_count_skips_thread_local_lookups)
+		{
+			switch_refresh_diag_t d;
+			switch_refresh_watch_t *w = switch_refresh_watch_create(switch_core_session_get_uuid(fst_session), fst_channel, STALL_US);
+			uint32_t n;
+
+			fst_requires(w);
+			switch_refresh_watch_bind(w);
+			switch_refresh_diag_init(&d, 1000);
+			switch_refresh_diag_push(&d);
+			fst_check(switch_refresh_watch_current() == w);
+			fst_check(switch_refresh_diag_current() == &d);
+
+			/* with the count forced to 0 the accessors must not read the (valid) thread-local slots */
+			n = __atomic_exchange_n(&switch_refresh_telemetry_users, 0, __ATOMIC_RELAXED);
+			fst_check(n == 2);
+			fst_check(SWITCH_REFRESH_TELEMETRY_IDLE());
+			fst_check(switch_refresh_watch_current() == NULL);
+			fst_check(switch_refresh_diag_current() == NULL);
+			__atomic_store_n(&switch_refresh_telemetry_users, n, __ATOMIC_RELAXED);
+
+			fst_check(switch_refresh_watch_current() == w);
+			fst_check(switch_refresh_diag_current() == &d);
+			switch_refresh_diag_pop(&d);
+			switch_refresh_watch_bind(NULL);
+			switch_refresh_watch_destroy(&w);
+			fst_check(users() == 0);
+		}
+		FST_SESSION_END()
+#endif
 	}
 	FST_SUITE_END()
 }

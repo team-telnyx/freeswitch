@@ -1153,7 +1153,7 @@ cnt_with_cng:
 SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_session_t *session, switch_frame_t **frame, switch_io_flag_t flags,
 															   int stream_id)
 {
-	switch_refresh_watch_t *watch = switch_core_session_frame_watch(session);
+	switch_refresh_watch_t *watch = SWITCH_REFRESH_TELEMETRY_IDLE() ? NULL : switch_core_session_frame_watch(session);
 	switch_status_t status;
 	int handle;
 

@@ -352,9 +352,13 @@ void switch_core_memory_stop(void);
    here, so a watch enabled after the thread started is still used (switch_refresh_diag.h). */
 static inline switch_refresh_watch_t *switch_core_session_frame_watch(switch_core_session_t *session)
 {
-	switch_refresh_watch_t *watch = switch_refresh_watch_current();
+	switch_refresh_watch_t *watch;
 
-	if (watch) {
+	if (SWITCH_REFRESH_TELEMETRY_IDLE()) {
+		return NULL;
+	}
+
+	if ((watch = switch_refresh_watch_current())) {
 		return watch;
 	}
 
@@ -376,7 +380,7 @@ static inline switch_refresh_watch_t *switch_core_session_frame_watch(switch_cor
 /* Call a media bug's callback, timed as stage on the calling thread's stall watch (switch_refresh_diag.h) */
 static inline switch_bool_t switch_core_media_bug_invoke(switch_media_bug_t *bug, switch_abc_type_t type, switch_refresh_watch_stage_t stage)
 {
-	switch_refresh_watch_t *watch = switch_refresh_watch_current();
+	switch_refresh_watch_t *watch = SWITCH_REFRESH_TELEMETRY_IDLE() ? NULL : switch_refresh_watch_current();
 	switch_bool_t ok;
 	int handle;
 

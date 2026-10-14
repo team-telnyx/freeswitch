@@ -1217,7 +1217,7 @@ SWITCH_DECLARE(switch_event_header_t *) switch_channel_variable_first(switch_cha
 	switch_event_header_t *hi = NULL;
 
 	switch_assert(channel != NULL);
-	switch_refresh_diag_mutex_lock(channel->profile_mutex, SWITCH_RDIAG_LOCK_VARIABLE_ITER);
+	SWITCH_REFRESH_DIAG_MUTEX_LOCK(channel->profile_mutex, SWITCH_RDIAG_LOCK_VARIABLE_ITER);
 	if (channel->variables && (hi = channel->variables->headers)) {
 		channel->vi = 1;
 	} else {
@@ -1650,7 +1650,7 @@ SWITCH_DECLARE(switch_status_t) switch_channel_set_variable_var_check(switch_cha
 
 	switch_assert(channel != NULL);
 
-	switch_refresh_diag_mutex_lock(channel->profile_mutex, SWITCH_RDIAG_LOCK_SET_VARIABLE);
+	SWITCH_REFRESH_DIAG_MUTEX_LOCK(channel->profile_mutex, SWITCH_RDIAG_LOCK_SET_VARIABLE);
 	if (channel->variables && !zstr(varname)) {
 		if (zstr(value)) {
 			switch_event_del_header(channel->variables, varname);
@@ -1761,7 +1761,7 @@ SWITCH_DECLARE(switch_status_t) switch_channel_set_variable_printf(switch_channe
 
 	switch_assert(channel != NULL);
 
-	switch_refresh_diag_mutex_lock(channel->profile_mutex, SWITCH_RDIAG_LOCK_SET_VARIABLE);
+	SWITCH_REFRESH_DIAG_MUTEX_LOCK(channel->profile_mutex, SWITCH_RDIAG_LOCK_SET_VARIABLE);
 	if (channel->variables && !zstr(varname)) {
 		switch_event_del_header(channel->variables, varname);
 
@@ -4973,7 +4973,7 @@ SWITCH_DECLARE(switch_status_t) switch_channel_pass_callee_id(switch_channel_t *
 SWITCH_DECLARE(switch_status_t) switch_channel_get_variables(switch_channel_t *channel, switch_event_t **event)
 {
 	switch_status_t status;
-	switch_refresh_diag_mutex_lock(channel->profile_mutex, SWITCH_RDIAG_LOCK_GET_VARIABLES);
+	SWITCH_REFRESH_DIAG_MUTEX_LOCK(channel->profile_mutex, SWITCH_RDIAG_LOCK_GET_VARIABLES);
 	if (channel->variables) {
 		status = switch_event_dup(event, channel->variables);
 	} else {
