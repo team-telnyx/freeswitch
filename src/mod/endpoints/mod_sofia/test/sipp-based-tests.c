@@ -1091,6 +1091,47 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 		}
 		FST_TEST_END()
 
+		/* The target sends 183 with SDP and answers 2 s later: B gets one 200 OK, after the answer. */
+		FST_TEST_BEGIN(blind_transfer_early_media_then_answer)
+		{
+			bt_result_t r = { 0 };
+
+			blind_transfer_run(switch_core_get_variable("local_ip_v4"), "sipp-scenarios/uas_blind_transfer_target_early_answer.xml", "6000", &r);
+			fst_xcheck(r.started, "Unable to start the SIPp peers");
+			fst_xcheck(r.results == 1, "the REFER sender did not get exactly one result");
+			fst_xcheck(strstr(r.status, "SIP/2.0 200 OK") != NULL, "the result is not 200 OK");
+			fst_xcheck(r.target_answered_at && r.result_at >= r.target_answered_at, "200 OK was sent before the target answered");
+			fst_xcheck(r.a_ok && r.b_ok && r.c_ok, "a SIPp peer failed; inspect the *_blind_transfer_*_errors.log files");
+		}
+		FST_TEST_END()
+
+		/* The target sends 183 with SDP, then 486: B gets one result, the 486. */
+		FST_TEST_BEGIN(blind_transfer_early_media_then_busy)
+		{
+			bt_result_t r = { 0 };
+
+			blind_transfer_run(switch_core_get_variable("local_ip_v4"), "sipp-scenarios/uas_blind_transfer_target_early_busy.xml", "6000", &r);
+			fst_xcheck(r.started, "Unable to start the SIPp peers");
+			fst_xcheck(r.results == 1, "the REFER sender did not get exactly one result");
+			fst_xcheck(strstr(r.status, "SIP/2.0 486 Busy Here") != NULL, "the result is not 486 Busy Here");
+			fst_xcheck(r.a_ok && r.b_ok && r.c_ok, "a SIPp peer failed; inspect the *_blind_transfer_*_errors.log files");
+		}
+		FST_TEST_END()
+
+		/* A hangs up while the target is in early media: B gets one failure and is hung up. */
+		FST_TEST_BEGIN(blind_transfer_caller_hangup_during_early_media)
+		{
+			bt_result_t r = { 0 };
+
+			blind_transfer_run(switch_core_get_variable("local_ip_v4"), "sipp-scenarios/uas_blind_transfer_target_early_cancel.xml", "4000", &r);
+			fst_xcheck(r.started, "Unable to start the SIPp peers");
+			fst_xcheck(r.results == 1, "the REFER sender did not get exactly one result");
+			fst_xcheck(strstr(r.status, "SIP/2.0 403 Forbidden") != NULL, "the result is not the failure 403 Forbidden");
+			fst_xcheck(r.referrer_blind_transfer_hangup, "the REFER sender was not hung up with BLIND_TRANSFER");
+			fst_xcheck(r.a_ok && r.b_ok && r.c_ok, "a SIPp peer failed; inspect the *_blind_transfer_*_errors.log files");
+		}
+		FST_TEST_END()
+
 		/* A hangs up while the target rings: B gets one failure and is hung up. */
 		FST_TEST_BEGIN(blind_transfer_caller_hangup_while_ringing)
 		{

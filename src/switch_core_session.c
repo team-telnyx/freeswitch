@@ -969,18 +969,32 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_perform_receive_message(swit
 
 		if (message->message_id == SWITCH_MESSAGE_INDICATE_BRIDGE &&
 			switch_channel_test_flag(session->channel, CF_CONFIRM_BLIND_TRANSFER)) {
-			switch_core_session_t *other_session;
-			const char *uuid = switch_channel_get_variable(session->channel, "blind_transfer_uuid");
+			/* string_arg carries the bridge peer uuid (absent only for conference/
+			   eavesdrop, which keep the legacy success). A peer that can't be
+			   located is already at CS_HANGUP and never answered: defer. */
+			switch_core_session_t *peer_session;
+			int peer_answered = zstr(message->string_arg);
 
-			switch_channel_clear_flag(session->channel, CF_CONFIRM_BLIND_TRANSFER);
+			if (!peer_answered && (peer_session = switch_core_session_locate(message->string_arg))) {
+				switch_channel_t *peer_channel = switch_core_session_get_channel(peer_session);
 
-			if (!zstr(uuid) && (other_session = switch_core_session_locate(uuid))) {
-				switch_core_session_message_t msg = { 0 };
-				msg.message_id = SWITCH_MESSAGE_INDICATE_BLIND_TRANSFER_RESPONSE;
-				msg.from = __FILE__;
-				msg.numeric_arg = 1;
-				switch_core_session_receive_message(other_session, &msg);
-				switch_core_session_rwunlock(other_session);
+				/* tell the peer whom to confirm when it answers (bridge_to does not survive a
+				   hand-off of the bridge, for example to the T.38 gateway). Set it before the
+				   CF_ANSWERED test, so an answer between the two still finds it. */
+				switch_channel_set_variable(peer_channel, "blind_transfer_deferred_uuid", switch_core_session_get_uuid(session));
+				if ((peer_answered = switch_channel_test_flag(peer_channel, CF_ANSWERED))) {
+					switch_channel_set_variable(peer_channel, "blind_transfer_deferred_uuid", NULL);
+				}
+				switch_core_session_rwunlock(peer_session);
+			}
+
+			if (!peer_answered) {
+				/* early media only: defer; leave CF_CONFIRM_BLIND_TRANSFER set so the
+				   answer-time producer (mark_answered) or a failure producer fires later */
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+								  "Deferring blind transfer confirmation until the peer answers\n");
+			} else {
+				switch_ivr_blind_transfer_ack(session, SWITCH_TRUE);
 			}
 		}
 	}
