@@ -90,7 +90,8 @@ typedef struct {
 		uint8_t controlling_failover_attempts;
 		char controlling_failover_probe_id[13];
 		char controlling_failover_nomination_id[13];
-		switch_socket_t *controlling_failover_socket;
+		switch_socket_t *controlling_failover_receive_socket;
+		switch_socket_t *controlling_failover_send_socket;
 		switch_port_t controlling_failover_local_port;
 		int controlling_failover_local_family;
 		char selected_pair_check_ids[SWITCH_RTP_ICE_SELECTED_PAIR_CHECK_HISTORY][13];
@@ -236,6 +237,8 @@ SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_restart_prflx_allowed(switch_rtp_ic
 SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_controlling_failover_response_matches(switch_rtp_ice_t *ice,
 	switch_rtp_ice_controlling_failover_state_t expected_state, int candidate_idx, const char *transaction_id,
 	switch_bool_t authenticated, switch_socket_t *local_socket, switch_port_t local_port, int local_family);
+SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_controlling_failover_transport_matches(switch_rtp_ice_t *ice,
+	switch_socket_t *send_socket, switch_port_t local_port, int local_family);
 SWITCH_DECLARE(switch_rtp_ice_controlling_timer_action_t) switch_rtp_pvt_controlling_failover_timer_action(
 	switch_rtp_ice_controlling_failover_state_t state, switch_time_t started_us, switch_time_t sent_us,
 	uint8_t attempts, switch_time_t now);

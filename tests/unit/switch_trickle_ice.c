@@ -445,6 +445,104 @@ static void cleanup_session_media_and_sdp(switch_core_session_t *session, void *
 	cleanup_session_and_media(session);
 }
 
+typedef struct review_regression_session_owner_s {
+	switch_core_session_t *session;
+	void *sdp_session;
+	sdp_parser_t *parser;
+} review_regression_session_owner_t;
+
+#define REVIEW_REGRESSION_MAX_SESSIONS 2
+#define REVIEW_REGRESSION_MAX_SOCKETS 1
+#define REVIEW_REGRESSION_MAX_ALLOCATIONS 16
+
+typedef struct review_regression_owner_s {
+	review_regression_session_owner_t sessions[REVIEW_REGRESSION_MAX_SESSIONS];
+	switch_size_t session_count;
+	int sockets[REVIEW_REGRESSION_MAX_SOCKETS];
+	switch_size_t socket_count;
+	void *allocations[REVIEW_REGRESSION_MAX_ALLOCATIONS];
+	switch_size_t allocation_count;
+} review_regression_owner_t;
+
+static review_regression_owner_t review_regression_owner;
+static switch_bool_t review_regression_cleanup_observed = SWITCH_FALSE;
+
+static void review_regression_owner_adopt(switch_core_session_t *session, void *sdp_session,
+	sdp_parser_t *parser)
+{
+	review_regression_session_owner_t *owned;
+
+	switch_assert(review_regression_owner.session_count < REVIEW_REGRESSION_MAX_SESSIONS);
+	owned = &review_regression_owner.sessions[review_regression_owner.session_count++];
+	owned->session = session;
+	owned->sdp_session = sdp_session;
+	owned->parser = parser;
+}
+
+static void review_regression_owner_adopt_socket(int socket_fd)
+{
+	switch_assert(socket_fd >= 0);
+	switch_assert(review_regression_owner.socket_count < REVIEW_REGRESSION_MAX_SOCKETS);
+	review_regression_owner.sockets[review_regression_owner.socket_count++] = socket_fd;
+}
+
+static void review_regression_owner_adopt_allocation(void *allocation)
+{
+	if (!allocation) {
+		return;
+	}
+	switch_assert(review_regression_owner.allocation_count < REVIEW_REGRESSION_MAX_ALLOCATIONS);
+	review_regression_owner.allocations[review_regression_owner.allocation_count++] = allocation;
+}
+
+static switch_bool_t review_regression_owner_cleanup(void)
+{
+	switch_bool_t owned = review_regression_owner.session_count ||
+		review_regression_owner.socket_count || review_regression_owner.allocation_count ?
+		SWITCH_TRUE : SWITCH_FALSE;
+	const char *cleanup_stall = getenv("SWITCH_TRICKLE_ICE_INJECT_OWNER_CLEANUP_STALL");
+
+	if (owned && !zstr(cleanup_stall)) {
+		fprintf(stderr, "injected owner cleanup stall\n");
+		fflush(stderr);
+		switch_sleep(60000000);
+	}
+
+	while (review_regression_owner.socket_count) {
+		int socket_fd = review_regression_owner.sockets[--review_regression_owner.socket_count];
+
+		if (socket_fd >= 0) {
+			close(socket_fd);
+		}
+	}
+	while (review_regression_owner.session_count) {
+		review_regression_session_owner_t *session_owner =
+			&review_regression_owner.sessions[--review_regression_owner.session_count];
+
+		cleanup_session_media_and_sdp(session_owner->session, session_owner->sdp_session,
+			session_owner->parser);
+		memset(session_owner, 0, sizeof(*session_owner));
+	}
+	while (review_regression_owner.allocation_count) {
+		void *allocation = review_regression_owner.allocations[
+			--review_regression_owner.allocation_count];
+
+		switch_safe_free(allocation);
+	}
+	if (owned) {
+		review_regression_cleanup_observed = SWITCH_TRUE;
+	}
+	return owned;
+}
+
+static switch_bool_t review_regression_inject_post_alloc(const char *test_name)
+{
+	const char *injected_test = getenv("SWITCH_TRICKLE_ICE_INJECT_POST_ALLOC_FAILURE");
+
+	return !zstr(injected_test) && !zstr(test_name) && !strcmp(injected_test, test_name) ?
+		SWITCH_TRUE : SWITCH_FALSE;
+}
+
 static switch_status_t make_session_and_rtp_with_sdp_ex(switch_core_session_t **out_session,
                                                          switch_rtp_t **out_rtp,
                                                          void **out_sdp_session,
@@ -462,9 +560,14 @@ static switch_status_t make_session_and_rtp_with_sdp_ex(switch_core_session_t **
 	switch_core_media_params_t *mparams;
 	switch_status_t status;
 	switch_channel_t *chan = NULL;
+	switch_rtp_t *rtp = NULL;
+	sdp_parser_t *parser = NULL;
+	sdp_session_t *parsed_sdp_session = NULL;
 	char *r_sdp;
 	uint8_t match = 0, p = 0;
 	const char *selected_codec = zstr(codec_string) ? "PCMU" : codec_string;
+	const char *constructor_failure = getenv("SWITCH_TRICKLE_ICE_INJECT_CONSTRUCTOR_FAILURE");
+	switch_bool_t injected_constructor_failure = SWITCH_FALSE;
 
 	const char *br = "{"
 		"absolute_codec_string=PCMU,"
@@ -480,6 +583,18 @@ static switch_status_t make_session_and_rtp_with_sdp_ex(switch_core_session_t **
 		"rtp_trickle_ice=true"
 		"}loopback/9999";
 
+	if (!out_session || !out_rtp) {
+		return SWITCH_STATUS_FALSE;
+	}
+	*out_session = NULL;
+	*out_rtp = NULL;
+	if (out_sdp_session) {
+		*out_sdp_session = NULL;
+	}
+	if (out_parser) {
+		*out_parser = NULL;
+	}
+
 	st = switch_ivr_originate(
 			NULL,                  /* a-leg session */
 			&session,              /* out: b-leg */
@@ -492,7 +607,9 @@ static switch_status_t make_session_and_rtp_with_sdp_ex(switch_core_session_t **
 			&cancel,               /* out: cancel cause */
 			NULL);                 /* dial handle */
 
-	if (st != SWITCH_STATUS_SUCCESS || !session) return SWITCH_STATUS_FALSE;
+	if (st != SWITCH_STATUS_SUCCESS || !session) {
+		goto fail;
+	}
 
 	chan = switch_core_session_get_channel(session);
 
@@ -505,7 +622,7 @@ static switch_status_t make_session_and_rtp_with_sdp_ex(switch_core_session_t **
 	status = switch_media_handle_create(&media_handle, session, mparams);
 	if (status != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "switch_media_handle_create() failed\n");
-		return SWITCH_STATUS_FALSE;
+		goto fail;
 	}
 
 	switch_channel_set_variable(chan, "absolute_codec_string", selected_codec);
@@ -564,28 +681,20 @@ static switch_status_t make_session_and_rtp_with_sdp_ex(switch_core_session_t **
 	}
 
 	/* Parse SDP for trickle ICE */
-	if (out_sdp_session) {
-		sdp_parser_t *parser = sdp_parse(NULL, r_sdp, strlen(r_sdp), 0);
+	if (out_sdp_session && out_parser) {
+		parser = sdp_parse(NULL, r_sdp, strlen(r_sdp), 0);
 		if (parser) {
-			sdp_session_t *parsed_sdp = sdp_session(parser);
-			if (parsed_sdp) {
-				*out_sdp_session = (void*)parsed_sdp;
-				if (out_parser) {
-					*out_parser = parser;
-				}
-			} else {
-				*out_sdp_session = NULL;
+			parsed_sdp_session = sdp_session(parser);
+			if (!parsed_sdp_session) {
 				sdp_parser_free(parser);
-				if (out_parser) {
-					*out_parser = NULL;
-				}
-			}
-		} else {
-			*out_sdp_session = NULL;
-			if (out_parser) {
-				*out_parser = NULL;
+				parser = NULL;
 			}
 		}
+	}
+	if (parser && !zstr(constructor_failure) &&
+		!strcmp(constructor_failure, "after-sdp-parse")) {
+		injected_constructor_failure = SWITCH_TRUE;
+		goto fail;
 	}
 
 	if (switch_core_media_choose_ports(session, SWITCH_TRUE, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
@@ -597,18 +706,34 @@ static switch_status_t make_session_and_rtp_with_sdp_ex(switch_core_session_t **
 		goto fail;
 	}
 
-	*out_session = session;
-	*out_rtp = activate_rtp ? switch_core_media_get_rtp_session(session, SWITCH_MEDIA_TYPE_AUDIO) : NULL;
-	if (activate_rtp && !*out_rtp) {
+	rtp = activate_rtp ? switch_core_media_get_rtp_session(session, SWITCH_MEDIA_TYPE_AUDIO) : NULL;
+	if (activate_rtp && !rtp) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to get RTP session\n");
 		goto fail;
+	}
+	*out_session = session;
+	*out_rtp = rtp;
+	if (out_sdp_session && out_parser) {
+		*out_sdp_session = (void *)parsed_sdp_session;
+		*out_parser = parser;
 	}
 
 	return SWITCH_STATUS_SUCCESS;
 
 fail:
-	switch_channel_hangup(switch_core_session_get_channel(session), SWITCH_CAUSE_NORMAL_CLEARING);
-	switch_core_session_rwunlock(session);
+	if (parser) {
+		sdp_parser_free(parser);
+		parser = NULL;
+		parsed_sdp_session = NULL;
+	}
+	if (session) {
+		switch_channel_hangup(switch_core_session_get_channel(session), SWITCH_CAUSE_NORMAL_CLEARING);
+		switch_core_session_rwunlock(session);
+	}
+	if (injected_constructor_failure) {
+		fprintf(stderr, "injected constructor cleanup complete\n");
+		fflush(stderr);
+	}
 	return SWITCH_STATUS_FALSE;
 }
 
@@ -655,6 +780,7 @@ static switch_status_t run_dtls_restart_identity_case(const char *initial_sdp, c
 	status = make_session_and_rtp_with_sdp_ex(&session, &rtp, &sdp_session, &parser,
 		initial_sdp, "PCMU", SWITCH_TRUE, SWITCH_TRUE, NULL);
 	if (status != SWITCH_STATUS_SUCCESS || !session || !rtp) {
+		cleanup_session_media_and_sdp(session, sdp_session, parser);
 		return SWITCH_STATUS_FALSE;
 	}
 	channel = switch_core_session_get_channel(session);
@@ -1010,12 +1136,8 @@ static switch_status_t run_ready_invalid_identity_restart(const char *restart_sd
 	}
 
 done:
-	if (target_session) {
-		cleanup_session_media_and_sdp(target_session, target_sdp_session, target_parser);
-	}
-	if (peer_session) {
-		cleanup_session_media_and_sdp(peer_session, peer_sdp_session, peer_parser);
-	}
+	cleanup_session_media_and_sdp(target_session, target_sdp_session, target_parser);
+	cleanup_session_media_and_sdp(peer_session, peer_sdp_session, peer_parser);
 	switch_safe_free(target_sdp);
 	return status;
 }
@@ -1726,6 +1848,8 @@ FCT_BGN()
 		{
 			const char *confdir = "conf_trickle"; /* tests/unit/conf_trickle */
 			_silence_unused();
+			memset(&review_regression_owner, 0, sizeof(review_regression_owner));
+			review_regression_cleanup_observed = SWITCH_FALSE;
 
 			fct_req(switch_core_new_memory_pool(&telnyx_pool) == SWITCH_STATUS_SUCCESS);
 			switch_telnyx_init(telnyx_pool);
@@ -1742,11 +1866,48 @@ FCT_BGN()
 
 		FCT_TEARDOWN_BGN()
 		{
+			switch_bool_t cleaned_review_regression = review_regression_owner_cleanup();
+			if ((cleaned_review_regression || review_regression_cleanup_observed) &&
+				!zstr(getenv("SWITCH_TRICKLE_ICE_INJECT_POST_ALLOC_FAILURE"))) {
+				fprintf(stderr, "injected post-allocation cleanup complete\n");
+				fflush(stderr);
+			}
 			if (pool) { switch_core_destroy_memory_pool(&pool); pool = NULL; }
 			switch_telnyx_deinit();
 			if (telnyx_pool) { switch_core_destroy_memory_pool(&telnyx_pool); telnyx_pool = NULL; }
 		}
 		FCT_TEARDOWN_END();
+
+		FCT_TEST_BGN(controlling_failover_split_socket_tracks_receive_and_send_identity)
+		{
+			switch_rtp_ice_t ice;
+			uint8_t receive_socket_token = 0;
+			uint8_t send_socket_token = 0;
+			switch_socket_t *receive_socket = (switch_socket_t *)(void *)&receive_socket_token;
+			switch_socket_t *send_socket = (switch_socket_t *)(void *)&send_socket_token;
+			const char transaction_id[13] = "123456789012";
+
+			memset(&ice, 0, sizeof(ice));
+			ice.controlling_failover_state = SWITCH_RTP_ICE_CONTROLLING_FAILOVER_NOMINATING;
+			ice.controlling_failover_idx = 2;
+			memcpy(ice.controlling_failover_nomination_id, transaction_id, 12);
+			ice.controlling_failover_receive_socket = receive_socket;
+			ice.controlling_failover_send_socket = send_socket;
+			ice.controlling_failover_local_port = 19000;
+			ice.controlling_failover_local_family = AF_INET;
+
+			fst_check(switch_rtp_pvt_controlling_failover_response_matches(&ice,
+				SWITCH_RTP_ICE_CONTROLLING_FAILOVER_NOMINATING, 2, transaction_id,
+				SWITCH_TRUE, receive_socket, 19000, AF_INET) == SWITCH_TRUE);
+			fst_check(switch_rtp_pvt_controlling_failover_response_matches(&ice,
+				SWITCH_RTP_ICE_CONTROLLING_FAILOVER_NOMINATING, 2, transaction_id,
+				SWITCH_TRUE, send_socket, 19000, AF_INET) == SWITCH_FALSE);
+			fst_check(switch_rtp_pvt_controlling_failover_transport_matches(&ice,
+				send_socket, 19000, AF_INET) == SWITCH_TRUE);
+			fst_check(switch_rtp_pvt_controlling_failover_transport_matches(&ice,
+				receive_socket, 19000, AF_INET) == SWITCH_FALSE);
+		}
+		FCT_TEST_END();
 
 		FCT_TEST_BGN(same_generation_clear_preserves_credentials_and_rearms_unchanged_media)
 		{
@@ -1798,6 +1959,7 @@ FCT_BGN()
 				"a=mid:0\n";
 
 			status = make_session_and_rtp_with_sdp(&session, &rtp, &sdp_session, &parser);
+			review_regression_owner_adopt(session, sdp_session, parser);
 			fst_requires(status == SWITCH_STATUS_SUCCESS && session && rtp && sdp_session && parser);
 			channel = switch_core_session_get_channel(session);
 			smh = switch_core_session_get_media_handle(session);
@@ -1822,7 +1984,11 @@ FCT_BGN()
 			status = make_session_and_rtp_with_sdp_ex(&peer_session, &peer_rtp,
 				&peer_sdp_session, &peer_parser, peer_sdp, "PCMU", SWITCH_TRUE,
 				SWITCH_TRUE, NULL);
+			review_regression_owner_adopt(peer_session, peer_sdp_session, peer_parser);
 			fst_requires(status == SWITCH_STATUS_SUCCESS && peer_session && peer_rtp);
+			if (review_regression_inject_post_alloc("same-generation-ready")) {
+				fst_requires(SWITCH_FALSE);
+			}
 			fst_requires(drive_dtls_pair_ready(peer_rtp, rtp) == SWITCH_STATUS_SUCCESS);
 			fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP,
 				&ready_before) == SWITCH_STATUS_SUCCESS);
@@ -1870,8 +2036,7 @@ FCT_BGN()
 			fst_check(ready_after.srtp_recv_ready == SWITCH_TRUE);
 			fst_check(switch_rtp_pvt_srtp_round_trip(rtp, peer_rtp) == SWITCH_STATUS_SUCCESS);
 
-			cleanup_session_media_and_sdp(session, sdp_session, parser);
-			cleanup_session_media_and_sdp(peer_session, peer_sdp_session, peer_parser);
+			review_regression_owner_cleanup();
 		}
 		FCT_TEST_END();
 
@@ -1903,6 +2068,7 @@ FCT_BGN()
 			switch_port_t before_port = 0;
 			switch_port_t after_sdp_port = 0;
 			switch_port_t after_nomination_port = 0;
+			switch_time_t first_restart_deadline_us = 0;
 			switch_bool_t has_addr = SWITCH_FALSE;
 			uint8_t stun_packet[512];
 			uint8_t valid_nomination_packet[512];
@@ -1948,6 +2114,24 @@ FCT_BGN()
 				"a=sendrecv\n"
 				"a=fingerprint:sha-256 17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4\n"
 				"a=mid:0\n";
+			const char *second_restart_sdp =
+				"v=0\n"
+				"o=- 1683118194 1683118197 IN IP4 0.0.0.0\n"
+				"s=-\n"
+				"t=0 0\n"
+				"a=group:BUNDLE 0\n"
+				"m=audio 18217 UDP/TLS/RTP/SAVPF 0\n"
+				"c=IN IP4 127.0.0.1\n"
+				"a=ice-ufrag:secondRestartRemoteUfrag\n"
+				"a=ice-pwd:secondRestartRemotePassword123456\n"
+				"a=ice-options:trickle\n"
+				"a=candidate:3 1 udp 2130706429 127.0.0.1 18217 typ host\n"
+				"a=rtcp-mux\n"
+				"a=setup:active\n"
+				"a=rtpmap:0 PCMU/8000\n"
+				"a=sendrecv\n"
+				"a=fingerprint:sha-256 17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4\n"
+				"a=mid:0\n";
 
 			for (role_case = 0; role_case < 2; ++role_case) {
 				ice_role = role_case ? "controlled" : NULL;
@@ -1976,7 +2160,11 @@ FCT_BGN()
 
 				status = make_session_and_rtp_with_sdp_ex(&session, &rtp, &sdp_session, &parser,
 					initial_sdp, "PCMU", SWITCH_TRUE, SWITCH_TRUE, ice_role);
+				review_regression_owner_adopt(session, sdp_session, parser);
 				fst_requires(status == SWITCH_STATUS_SUCCESS && session && rtp && sdp_session && parser);
+				if (review_regression_inject_post_alloc("repeated-restart")) {
+					fst_requires(SWITCH_FALSE);
+				}
 				channel = switch_core_session_get_channel(session);
 				fst_requires(channel != NULL);
 				status = switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP, &before);
@@ -2013,8 +2201,32 @@ FCT_BGN()
 				fst_check(after_sdp.dtls_restart_migrated == SWITCH_FALSE);
 				fst_check(after_sdp.dtls_association_started_us == before.dtls_association_started_us);
 				fst_check(after_sdp.dtls_restart_deadline_us > after_sdp.dtls_association_started_us);
+				first_restart_deadline_us = after_sdp.dtls_restart_deadline_us;
 				status = copy_sockaddr_tuple(switch_rtp_session_get_remote_addr(rtp), after_sdp_host,
 					sizeof(after_sdp_host), &after_sdp_port);
+				fst_requires(status == SWITCH_STATUS_SUCCESS);
+				fst_check_string_equals(after_sdp_host, before_host);
+				fst_check(after_sdp_port == before_port);
+
+				switch_core_media_clear_ice(session);
+				switch_channel_set_flag(channel, CF_REINVITE);
+				proceed = 0;
+				match = switch_core_media_negotiate_sdp(session, second_restart_sdp,
+					&proceed, SDP_OFFER);
+				fst_requires(match != 0);
+				switch_core_media_gen_local_sdp(session, SDP_ANSWER, NULL, 0, NULL, 0);
+				status = switch_core_media_activate_rtp(session);
+				fst_requires(status == SWITCH_STATUS_SUCCESS);
+				status = switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP, &after_sdp);
+				fst_requires(status == SWITCH_STATUS_SUCCESS);
+				fst_check(after_sdp.dtls_state == DS_HANDSHAKE);
+				fst_check(after_sdp.dtls_context == before.dtls_context);
+				fst_check(after_sdp.dtls_ssl == before.dtls_ssl);
+				fst_check(after_sdp.dtls_restart_pending == SWITCH_TRUE);
+				fst_check(after_sdp.dtls_restart_migrated == SWITCH_FALSE);
+				fst_check(after_sdp.dtls_restart_deadline_us == first_restart_deadline_us);
+				status = copy_sockaddr_tuple(switch_rtp_session_get_remote_addr(rtp),
+					after_sdp_host, sizeof(after_sdp_host), &after_sdp_port);
 				fst_requires(status == SWITCH_STATUS_SUCCESS);
 				fst_check_string_equals(after_sdp_host, before_host);
 				fst_check(after_sdp_port == before_port);
@@ -2025,9 +2237,9 @@ FCT_BGN()
 				fst_requires(status == SWITCH_STATUS_SUCCESS);
 				fst_requires(reverse_ice_username(ice_user, incoming_user,
 					sizeof(incoming_user)) == SWITCH_STATUS_SUCCESS);
-				fst_check(!strncmp(ice_user, "restartRemoteUfrag:",
-					strlen("restartRemoteUfrag:")));
-				fst_check_string_equals(remote_pwd, "restartRemotePassword123456");
+				fst_check(!strncmp(ice_user, "secondRestartRemoteUfrag:",
+					strlen("secondRestartRemoteUfrag:")));
+				fst_check_string_equals(remote_pwd, "secondRestartRemotePassword123456");
 
 				if (after_sdp.ice_type & ICE_CONTROLLED) {
 					stun_len = build_authenticated_ice_request(stun_packet, sizeof(stun_packet),
@@ -2134,23 +2346,23 @@ FCT_BGN()
 						nomination_id, sizeof(nomination_id));
 					fst_requires(status == SWITCH_STATUS_SUCCESS);
 					stun_len = build_authenticated_ice_response(stun_packet, sizeof(stun_packet),
-						nomination_id, "wrong-current-generation-password", "127.0.0.1", 18216);
-					status = switch_rtp_pvt_handle_ice_from(rtp, IPR_RTP, "127.0.0.1", 18216,
+						nomination_id, "wrong-current-generation-password", "127.0.0.1", 18217);
+					status = switch_rtp_pvt_handle_ice_from(rtp, IPR_RTP, "127.0.0.1", 18217,
 						stun_packet, stun_len);
 					fst_requires(status == SWITCH_STATUS_SUCCESS);
 					stun_len = build_unauthenticated_ice_response(stun_packet, sizeof(stun_packet),
-						nomination_id, "127.0.0.1", 18216);
-					status = switch_rtp_pvt_handle_ice_from(rtp, IPR_RTP, "127.0.0.1", 18216,
+						nomination_id, "127.0.0.1", 18217);
+					status = switch_rtp_pvt_handle_ice_from(rtp, IPR_RTP, "127.0.0.1", 18217,
 						stun_packet, stun_len);
 					fst_requires(status == SWITCH_STATUS_SUCCESS);
 					stun_len = build_authenticated_ice_response(stun_packet, sizeof(stun_packet),
-						nomination_id, remote_pwd, "127.0.0.1", 18216);
+						nomination_id, remote_pwd, "127.0.0.1", 18217);
 					status = switch_rtp_pvt_handle_ice_from(rtp, IPR_RTP, "192.0.2.50", 18218,
 						stun_packet, stun_len);
 					fst_requires(status == SWITCH_STATUS_SUCCESS);
 					stun_len = build_authenticated_ice_response(stun_packet, sizeof(stun_packet),
-						invalid_nomination_id, remote_pwd, "127.0.0.1", 18216);
-					status = switch_rtp_pvt_handle_ice_from(rtp, IPR_RTP, "127.0.0.1", 18216,
+						invalid_nomination_id, remote_pwd, "127.0.0.1", 18217);
+					status = switch_rtp_pvt_handle_ice_from(rtp, IPR_RTP, "127.0.0.1", 18217,
 						stun_packet, stun_len);
 					fst_requires(status == SWITCH_STATUS_SUCCESS);
 					status = switch_rtp_pvt_get_controlling_nomination_id(rtp, IPR_RTP,
@@ -2166,14 +2378,13 @@ FCT_BGN()
 					fst_requires(status == SWITCH_STATUS_SUCCESS);
 					fst_check(!memcmp(pending_nomination_id, nomination_id, 12));
 					stun_len = build_authenticated_ice_response(stun_packet, sizeof(stun_packet),
-						nomination_id, remote_pwd, "127.0.0.1", 18216);
+						nomination_id, remote_pwd, "127.0.0.1", 18217);
 				}
 				memcpy(valid_nomination_packet, stun_packet, stun_len);
 				valid_nomination_len = stun_len;
 
 				status = switch_rtp_pvt_handle_ice_from(rtp, IPR_RTP,
-					(after_sdp.ice_type & ICE_CONTROLLED) ? "192.0.2.10" : "127.0.0.1",
-					(after_sdp.ice_type & ICE_CONTROLLED) ? 18217 : 18216,
+					(after_sdp.ice_type & ICE_CONTROLLED) ? "192.0.2.10" : "127.0.0.1", 18217,
 					stun_packet, stun_len);
 				fst_requires(status == SWITCH_STATUS_SUCCESS);
 
@@ -2194,7 +2405,7 @@ FCT_BGN()
 				fst_requires(status == SWITCH_STATUS_SUCCESS);
 				fst_check_string_equals(after_nomination_host,
 					(after_sdp.ice_type & ICE_CONTROLLED) ? "192.0.2.10" : "127.0.0.1");
-				fst_check(after_nomination_port == ((after_sdp.ice_type & ICE_CONTROLLED) ? 18217 : 18216));
+				fst_check(after_nomination_port == 18217);
 
 				stun_len = build_authenticated_ice_request_role(stun_packet, sizeof(stun_packet),
 					initial_incoming_user, initial_local_pwd, SWITCH_TRUE, SWITCH_TRUE);
@@ -2212,13 +2423,12 @@ FCT_BGN()
 				fst_requires(status == SWITCH_STATUS_SUCCESS);
 				fst_check_string_equals(after_nomination_host,
 					(after_sdp.ice_type & ICE_CONTROLLED) ? "192.0.2.10" : "127.0.0.1");
-				fst_check(after_nomination_port == ((after_sdp.ice_type & ICE_CONTROLLED) ? 18217 : 18216));
+				fst_check(after_nomination_port == 18217);
 
 				memcpy(stun_packet, valid_nomination_packet, valid_nomination_len);
 				stun_len = valid_nomination_len;
 				status = switch_rtp_pvt_handle_ice_from(rtp, IPR_RTP,
-					(after_sdp.ice_type & ICE_CONTROLLED) ? "192.0.2.10" : "127.0.0.1",
-					(after_sdp.ice_type & ICE_CONTROLLED) ? 18217 : 18216,
+					(after_sdp.ice_type & ICE_CONTROLLED) ? "192.0.2.10" : "127.0.0.1", 18217,
 					stun_packet, stun_len);
 				fst_requires(status == SWITCH_STATUS_SUCCESS);
 				status = switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP, &after_nomination);
@@ -2234,9 +2444,9 @@ FCT_BGN()
 				status = copy_sockaddr_tuple(switch_rtp_session_get_remote_addr(rtp), after_nomination_host,
 					sizeof(after_nomination_host), &after_nomination_port);
 				fst_requires(status == SWITCH_STATUS_SUCCESS);
-				fst_check(after_nomination_port == ((after_sdp.ice_type & ICE_CONTROLLED) ? 18217 : 18216));
+				fst_check(after_nomination_port == 18217);
 
-				cleanup_session_media_and_sdp(session, sdp_session, parser);
+				review_regression_owner_cleanup();
 			}
 		}
 		FCT_TEST_END();
@@ -2264,7 +2474,11 @@ FCT_BGN()
 				"preActivateRemotePassword1234562") == SWITCH_STATUS_SUCCESS);
 			status = make_session_and_rtp_with_sdp_ex(&session, &rtp, &sdp_session, &parser,
 				initial_sdp, "PCMU", SWITCH_TRUE, SWITCH_TRUE, "controlled");
+			review_regression_owner_adopt(session, sdp_session, parser);
 			fst_requires(status == SWITCH_STATUS_SUCCESS && session && rtp);
+			if (review_regression_inject_post_alloc("nomination-before-activation")) {
+				fst_requires(SWITCH_FALSE);
+			}
 			fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP,
 				&before) == SWITCH_STATUS_SUCCESS);
 			fst_requires(before.dtls_state == DS_HANDSHAKE);
@@ -2286,7 +2500,7 @@ FCT_BGN()
 			fst_check_string_equals(remote_host, "127.0.0.1");
 			fst_check(remote_port == 18219);
 
-			cleanup_session_media_and_sdp(session, sdp_session, parser);
+			review_regression_owner_cleanup();
 		}
 		FCT_TEST_END();
 
@@ -2314,7 +2528,11 @@ FCT_BGN()
 				"fatalRemotePassword1234562") == SWITCH_STATUS_SUCCESS);
 			status = make_session_and_rtp_with_sdp_ex(&session, &rtp, &sdp_session, &parser,
 				initial_sdp, "PCMU", SWITCH_TRUE, SWITCH_TRUE, "controlled");
+			review_regression_owner_adopt(session, sdp_session, parser);
 			fst_requires(status == SWITCH_STATUS_SUCCESS && session && rtp);
+			if (review_regression_inject_post_alloc("terminal-openssl-failure")) {
+				fst_requires(SWITCH_FALSE);
+			}
 			status = restart_and_nominate_controlled_dtls(session, rtp, restart_sdp, 18229,
 				&migrated);
 			fst_requires(status == SWITCH_STATUS_SUCCESS);
@@ -2331,7 +2549,7 @@ FCT_BGN()
 			fst_check(failed.dtls_restart_migrated == SWITCH_FALSE);
 			fst_check(failed.dtls_restart_deadline_us == 0);
 
-			cleanup_session_media_and_sdp(session, sdp_session, parser);
+			review_regression_owner_cleanup();
 		}
 		FCT_TEST_END();
 
@@ -2461,17 +2679,23 @@ FCT_BGN()
 					role_case ? "targetClientPassword1234563" : "targetServerPassword1234563") == SWITCH_STATUS_SUCCESS);
 				replay_sink_fd = bind_udp_sink_fd(restart_port);
 				fst_requires(replay_sink_fd >= 0);
+				review_regression_owner_adopt_socket(replay_sink_fd);
 
 				status = make_session_and_rtp_with_sdp_ex(&target_session, &target_rtp,
 					&target_sdp_session, &target_parser, target_sdp, "PCMU", SWITCH_TRUE,
 					SWITCH_TRUE, "controlled");
+				review_regression_owner_adopt(target_session, target_sdp_session, target_parser);
 				fst_requires(status == SWITCH_STATUS_SUCCESS && target_session && target_rtp);
 				target_channel = switch_core_session_get_channel(target_session);
 				fst_requires(target_channel != NULL);
 				status = make_session_and_rtp_with_sdp_ex(&peer_session, &peer_rtp,
 					&peer_sdp_session, &peer_parser, peer_sdp, "PCMU", SWITCH_TRUE,
 					SWITCH_TRUE, NULL);
+				review_regression_owner_adopt(peer_session, peer_sdp_session, peer_parser);
 				fst_requires(status == SWITCH_STATUS_SUCCESS && peer_session && peer_rtp);
+				if (review_regression_inject_post_alloc("real-dtls-flights")) {
+					fst_requires(SWITCH_FALSE);
+				}
 
 				if (role_case == 0) {
 					status = switch_rtp_pvt_dtls_step(peer_rtp, DTLS_TYPE_RTP, NULL, 0,
@@ -2713,11 +2937,9 @@ FCT_BGN()
 					target_failover.dtls_destroy_count + 1);
 				fst_check(target_ready_restart.srtp_send_ready == SWITCH_FALSE);
 				fst_check(target_ready_restart.srtp_recv_ready == SWITCH_FALSE);
-				close(replay_sink_fd);
-
-				cleanup_session_media_and_sdp(target_session, target_sdp_session, target_parser);
-				cleanup_session_media_and_sdp(peer_session, peer_sdp_session, peer_parser);
+				review_regression_owner_cleanup();
 			}
+			review_regression_owner_cleanup();
 			}
 		}
 		FCT_TEST_END();
@@ -2777,12 +2999,24 @@ FCT_BGN()
 			same_generation_empty_fingerprint_sdp = same_generation_session_fingerprint_sdp ?
 				switch_string_replace(same_generation_session_fingerprint_sdp, fingerprint,
 					"a=fingerprint:\n") : NULL;
+			review_regression_owner_adopt_allocation(conflicting_tls_id_sdp);
+			review_regression_owner_adopt_allocation(empty_tls_id_sdp);
+			review_regression_owner_adopt_allocation(session_fingerprint_sdp);
+			review_regression_owner_adopt_allocation(empty_fingerprint_override_sdp);
+			review_regression_owner_adopt_allocation(fingerprint_overflow_sdp);
+			review_regression_owner_adopt_allocation(same_generation_changed_tls_id_sdp);
+			review_regression_owner_adopt_allocation(same_generation_empty_tls_id_sdp);
+			review_regression_owner_adopt_allocation(same_generation_session_fingerprint_sdp);
+			review_regression_owner_adopt_allocation(same_generation_empty_fingerprint_sdp);
 			fst_requires(conflicting_tls_id_sdp != NULL && empty_tls_id_sdp != NULL &&
 				session_fingerprint_sdp != NULL && empty_fingerprint_override_sdp != NULL &&
 				fingerprint_overflow_sdp != NULL && same_generation_changed_tls_id_sdp != NULL &&
 				same_generation_empty_tls_id_sdp != NULL &&
 				same_generation_session_fingerprint_sdp != NULL &&
 				same_generation_empty_fingerprint_sdp != NULL);
+			if (review_regression_inject_post_alloc("ambiguous-identity-matrix")) {
+				fst_requires(SWITCH_FALSE);
+			}
 			fst_check(run_ready_invalid_identity_restart(conflicting_tls_id_sdp) ==
 				SWITCH_STATUS_SUCCESS);
 			fst_check(run_ready_invalid_identity_restart(empty_tls_id_sdp) ==
@@ -2797,15 +3031,7 @@ FCT_BGN()
 				SWITCH_STATUS_SUCCESS);
 			fst_check(run_ready_invalid_identity_restart(same_generation_empty_fingerprint_sdp) ==
 				SWITCH_STATUS_SUCCESS);
-			switch_safe_free(conflicting_tls_id_sdp);
-			switch_safe_free(empty_tls_id_sdp);
-			switch_safe_free(session_fingerprint_sdp);
-			switch_safe_free(empty_fingerprint_override_sdp);
-			switch_safe_free(fingerprint_overflow_sdp);
-			switch_safe_free(same_generation_changed_tls_id_sdp);
-			switch_safe_free(same_generation_empty_tls_id_sdp);
-			switch_safe_free(same_generation_session_fingerprint_sdp);
-			switch_safe_free(same_generation_empty_fingerprint_sdp);
+			review_regression_owner_cleanup();
 		}
 		FCT_TEST_END();
 
@@ -2837,10 +3063,17 @@ FCT_BGN()
 				18511, "passive", "timeoutRemoteUfrag2", "timeoutRemotePassword1234562") ==
 				SWITCH_STATUS_SUCCESS);
 			timeout_sink_fd = bind_udp_sink_fd(18511);
+			if (timeout_sink_fd >= 0) {
+				review_regression_owner_adopt_socket(timeout_sink_fd);
+			}
 			fst_requires(timeout_sink_fd >= 0);
 			status = make_session_and_rtp_with_sdp_ex(&session, &rtp, &sdp_session, &parser,
 				initial_sdp, "PCMU", SWITCH_TRUE, SWITCH_FALSE, "controlled");
+			review_regression_owner_adopt(session, sdp_session, parser);
 			fst_requires(status == SWITCH_STATUS_SUCCESS && session && !rtp);
+			if (review_regression_inject_post_alloc("no-duplicate-flight")) {
+				fst_requires(SWITCH_FALSE);
+			}
 			channel = switch_core_session_get_channel(session);
 			fst_requires(channel != NULL);
 			switch_channel_set_variable(channel, "media_dtls_setup_timeout", "2500");
@@ -2878,9 +3111,7 @@ FCT_BGN()
 			fst_check(expired.dtls_restart_pending == SWITCH_FALSE);
 			fst_check(expired.dtls_restart_migrated == SWITCH_FALSE);
 			fst_check(output_len == 0);
-			close(timeout_sink_fd);
-
-			cleanup_session_media_and_sdp(session, sdp_session, parser);
+			review_regression_owner_cleanup();
 		}
 		FCT_TEST_END();
 
@@ -2917,7 +3148,11 @@ FCT_BGN()
 				SWITCH_STATUS_SUCCESS);
 			status = make_session_and_rtp_with_sdp_ex(&session, &rtp, &sdp_session, &parser,
 				initial_sdp, "PCMU", SWITCH_TRUE, SWITCH_TRUE, "controlled");
+			review_regression_owner_adopt(session, sdp_session, parser);
 			fst_requires(status == SWITCH_STATUS_SUCCESS && session && rtp);
+			if (review_regression_inject_post_alloc("expired-prepared-restart")) {
+				fst_requires(SWITCH_FALSE);
+			}
 			fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP, &before) ==
 				SWITCH_STATUS_SUCCESS);
 			fst_requires(before.dtls_state == DS_HANDSHAKE && before.dtls_context && before.dtls_ssl);
@@ -2969,7 +3204,7 @@ FCT_BGN()
 			fst_check_string_equals(active_remote_pwd, old_remote_pwd);
 			fst_check(has_addr == SWITCH_TRUE);
 
-			cleanup_session_media_and_sdp(session, sdp_session, parser);
+			review_regression_owner_cleanup();
 		}
 		FCT_TEST_END();
 
@@ -3010,7 +3245,11 @@ FCT_BGN()
 				SWITCH_STATUS_SUCCESS);
 			status = make_session_and_rtp_with_sdp_ex(&session, &rtp, &sdp_session, &parser,
 				initial_sdp, "PCMU", SWITCH_TRUE, SWITCH_TRUE, "controlled");
+			review_regression_owner_adopt(session, sdp_session, parser);
 			fst_requires(status == SWITCH_STATUS_SUCCESS && session && rtp);
+			if (review_regression_inject_post_alloc("datawait-activation")) {
+				fst_requires(SWITCH_FALSE);
+			}
 			fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP, &before) ==
 				SWITCH_STATUS_SUCCESS);
 			fst_requires(before.dtls_state == DS_HANDSHAKE && before.dtls_context && before.dtls_ssl);
@@ -3108,7 +3347,7 @@ FCT_BGN()
 			fst_check(started == 1);
 			fst_check(failure_reader_started == SWITCH_TRUE);
 
-			cleanup_session_media_and_sdp(session, sdp_session, parser);
+			review_regression_owner_cleanup();
 			bounded_test_watchdog_stop(&watchdog, watchdog_thread);
 		}
 		FCT_TEST_END();
@@ -3180,6 +3419,7 @@ FCT_BGN()
 			race.activation_status = SWITCH_STATUS_FALSE;
 			status = make_session_and_rtp_with_sdp_ex(&session, &rtp, &sdp_session, &parser,
 				nonmux_sdp, "PCMU", SWITCH_FALSE, SWITCH_TRUE, "controlled");
+			review_regression_owner_adopt(session, sdp_session, parser);
 			fst_requires(status == SWITCH_STATUS_SUCCESS && session && rtp);
 			switch_rtp_set_media_timeout(rtp, 0);
 			fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTCP, &snapshot) ==
@@ -3220,7 +3460,13 @@ FCT_BGN()
 			local_rtp_port = switch_rtp_get_local_port(rtp);
 			local_rtcp_port = local_rtp_port + 1;
 			sender_fd = bind_udp_sink_fd(19681);
+			if (sender_fd >= 0) {
+				review_regression_owner_adopt_socket(sender_fd);
+			}
 			fst_requires(sender_fd >= 0 && local_rtp_port > 0 && local_rtcp_port > 1);
+			if (review_regression_inject_post_alloc("nonmux-rtcp-activation")) {
+				fst_requires(SWITCH_FALSE);
+			}
 			stun_len = build_authenticated_ice_request(stun_packet, sizeof(stun_packet),
 				incoming_user, local_pwd);
 			if (bounded_test_watchdog_start(&watchdog, thread_attr, pool, 30000000,
@@ -3360,9 +3606,7 @@ FCT_BGN()
 			fst_check(snapshot.dtls_context == NULL);
 			fst_check(reader_thread_status == SWITCH_STATUS_SUCCESS);
 
-			close(sender_fd);
-
-			cleanup_session_media_and_sdp(session, sdp_session, parser);
+			review_regression_owner_cleanup();
 			bounded_test_watchdog_stop(&watchdog, watchdog_thread);
 		}
 		FCT_TEST_END();
@@ -3410,6 +3654,7 @@ FCT_BGN()
 				2130706430, 19691) == SWITCH_STATUS_SUCCESS);
 			status = make_session_and_rtp_with_sdp_ex(&session, &rtp, &sdp_session, &parser,
 				initial_sdp, "PCMU", SWITCH_TRUE, SWITCH_TRUE, "controlled");
+			review_regression_owner_adopt(session, sdp_session, parser);
 			fst_requires(status == SWITCH_STATUS_SUCCESS && session && rtp);
 			fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP, &before) ==
 				SWITCH_STATUS_SUCCESS);
@@ -3431,7 +3676,13 @@ FCT_BGN()
 				&race.identity) == SWITCH_STATUS_SUCCESS);
 			local_rtp_port = switch_rtp_get_local_port(rtp);
 			sender_fd = bind_udp_sink_fd(19691);
+			if (sender_fd >= 0) {
+				review_regression_owner_adopt_socket(sender_fd);
+			}
 			fst_requires(sender_fd >= 0 && local_rtp_port > 0);
+			if (review_regression_inject_post_alloc("nominated-destination")) {
+				fst_requires(SWITCH_FALSE);
+			}
 			if (bounded_test_watchdog_start(&watchdog, thread_attr, pool, 15000000,
 					"DTLS destination lifecycle", &watchdog_thread) != SWITCH_STATUS_SUCCESS) {
 				_exit(1);
@@ -3480,7 +3731,6 @@ FCT_BGN()
 				_exit(1);
 			}
 			switch_rtp_pvt_set_lock_test_hooks(rtp, NULL, NULL, NULL, NULL, NULL);
-			close(sender_fd);
 			if (switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP, &after) !=
 					SWITCH_STATUS_SUCCESS) {
 				_exit(1);
@@ -3493,7 +3743,7 @@ FCT_BGN()
 			fst_check(reader_thread_status == SWITCH_STATUS_SUCCESS);
 			fst_check(after.rtp_remote_port == 19691);
 
-			cleanup_session_media_and_sdp(session, sdp_session, parser);
+			review_regression_owner_cleanup();
 			bounded_test_watchdog_stop(&watchdog, watchdog_thread);
 		}
 		FCT_TEST_END();
@@ -3587,7 +3837,11 @@ FCT_BGN()
 				SWITCH_STATUS_SUCCESS);
 			status = make_session_and_rtp_with_sdp_ex(&session, &rtp, &sdp_session, &parser,
 				initial_sdp, "PCMU", SWITCH_TRUE, SWITCH_FALSE, "controlled");
+			review_regression_owner_adopt(session, sdp_session, parser);
 			fst_requires(status == SWITCH_STATUS_SUCCESS && session && !rtp);
+			if (review_regression_inject_post_alloc("concurrent-timeout-teardown")) {
+				fst_requires(SWITCH_FALSE);
+			}
 			channel = switch_core_session_get_channel(session);
 			fst_requires(channel != NULL);
 			switch_channel_set_variable(channel, "media_dtls_setup_timeout", "100");
@@ -3617,7 +3871,7 @@ FCT_BGN()
 				_exit(1);
 			}
 
-			/* Serialize all transport operations through teardown. */
+			/* Expire the preserved deadline before releasing competing transport workers. */
 			switch_sleep(150000);
 			create_status = dtls_restart_teardown_start_workers(&race, thread_attr, pool,
 				threads, -1, &started);
@@ -3698,10 +3952,7 @@ FCT_BGN()
 			}
 			fst_check(destroyed_again.dtls_context == NULL);
 			fst_check(destroyed_again.dtls_destroy_count == destroyed.dtls_destroy_count);
-			if (parser) {
-				sdp_parser_free(parser);
-			}
-			switch_core_session_rwunlock(session);
+			review_regression_owner_cleanup();
 			bounded_test_watchdog_stop(&watchdog, watchdog_thread);
 		}
 		FCT_TEST_END();
@@ -3854,19 +4105,27 @@ FCT_BGN()
 
 			no_mux_sdp = switch_string_replace(same_identity_sdp, "a=rtcp-mux\n", "");
 			no_bundle_sdp = switch_string_replace(same_identity_sdp, "a=group:BUNDLE 0\n", "");
+			review_regression_owner_adopt_allocation(no_mux_sdp);
+			review_regression_owner_adopt_allocation(no_bundle_sdp);
+			fst_requires(no_mux_sdp != NULL && no_bundle_sdp != NULL);
 			component_changed_sdp = switch_string_replace(no_mux_sdp,
 				"a=candidate:2 1 udp 2130706430 127.0.0.1 18226 typ host\n",
 				"a=candidate:2 1 udp 2130706430 127.0.0.1 18226 typ host\n"
 				"a=candidate:3 2 udp 2130706429 127.0.0.1 18227 typ host\n"
 				"a=rtcp:18227 IN IP4 127.0.0.1\n");
+			review_regression_owner_adopt_allocation(component_changed_sdp);
 			bundle_group_sdp = switch_string_replace(same_identity_sdp,
 				"a=group:BUNDLE 0\n", "a=group:BUNDLE 0 1\n");
+			review_regression_owner_adopt_allocation(bundle_group_sdp);
+			fst_requires(bundle_group_sdp != NULL);
 			bundle_membership_changed_sdp = switch_mprintf("%s%s", bundle_group_sdp, bundled_video_tail);
-			switch_safe_free(bundle_group_sdp);
+			review_regression_owner_adopt_allocation(bundle_membership_changed_sdp);
 			bundle_group_sdp = switch_string_replace(same_identity_sdp,
 				"a=group:BUNDLE 0\n", "a=group:BUNDLE 1 0\n");
+			review_regression_owner_adopt_allocation(bundle_group_sdp);
+			fst_requires(bundle_group_sdp != NULL);
 			bundle_tag_changed_sdp = switch_mprintf("%s%s", bundle_group_sdp, bundled_video_tail);
-			switch_safe_free(bundle_group_sdp);
+			review_regression_owner_adopt_allocation(bundle_tag_changed_sdp);
 			fingerprint_algorithm_changed_sdp = switch_string_replace(same_identity_sdp, "sha-384", "sha-512");
 			tls_id_removed_sdp = switch_string_replace(same_identity_sdp,
 				"a=tls-id:association-1\n", "");
@@ -3876,10 +4135,18 @@ FCT_BGN()
 				"identityRemoteUfrag2", "identityRemoteUfrag1");
 			stale_pwd_sdp = switch_string_replace(same_identity_sdp,
 				"identityRemotePassword1234562", "identityRemotePassword1234561");
+			review_regression_owner_adopt_allocation(fingerprint_algorithm_changed_sdp);
+			review_regression_owner_adopt_allocation(tls_id_removed_sdp);
+			review_regression_owner_adopt_allocation(initial_without_tls_id_sdp);
+			review_regression_owner_adopt_allocation(stale_ufrag_sdp);
+			review_regression_owner_adopt_allocation(stale_pwd_sdp);
 			fst_requires(no_mux_sdp != NULL && no_bundle_sdp != NULL && component_changed_sdp != NULL &&
 				bundle_membership_changed_sdp != NULL && bundle_tag_changed_sdp != NULL &&
 				fingerprint_algorithm_changed_sdp != NULL && tls_id_removed_sdp != NULL &&
 				initial_without_tls_id_sdp != NULL && stale_ufrag_sdp != NULL && stale_pwd_sdp != NULL);
+			if (review_regression_inject_post_alloc("exact-identity-matrix")) {
+				fst_requires(SWITCH_FALSE);
+			}
 			fst_requires(build_dtls_pair_sdp_ex(non_bundle_initial_sdp,
 				sizeof(non_bundle_initial_sdp), 1683118260, 18810, "active",
 				"nonBundleIdentityUfrag1", "nonBundleIdentityPassword1234561", SWITCH_FALSE) ==
@@ -3983,16 +4250,250 @@ FCT_BGN()
 				SWITCH_FALSE, &result);
 			fst_requires(status == SWITCH_STATUS_SUCCESS);
 			fst_check(result.preserved == SWITCH_FALSE);
-			switch_safe_free(no_mux_sdp);
-			switch_safe_free(no_bundle_sdp);
-			switch_safe_free(component_changed_sdp);
-			switch_safe_free(bundle_membership_changed_sdp);
-			switch_safe_free(bundle_tag_changed_sdp);
-			switch_safe_free(fingerprint_algorithm_changed_sdp);
-			switch_safe_free(tls_id_removed_sdp);
-			switch_safe_free(initial_without_tls_id_sdp);
-			switch_safe_free(stale_ufrag_sdp);
-			switch_safe_free(stale_pwd_sdp);
+			review_regression_owner_cleanup();
+		}
+		FCT_TEST_END();
+
+		FCT_TEST_BGN(candidate_less_restart_validates_dtls_identity_before_late_trickle)
+		{
+			switch_core_session_t *session = NULL;
+			switch_channel_t *channel = NULL;
+			switch_media_handle_t *smh = NULL;
+			switch_rtp_t *rtp = NULL;
+			void *sdp_session = NULL;
+			sdp_parser_t *parser = NULL;
+			switch_rtp_pvt_transport_snapshot_t before;
+			switch_rtp_pvt_transport_snapshot_t after_sdp;
+			switch_rtp_pvt_transport_snapshot_t after_trickle;
+			switch_rtp_pvt_dtls_identity_t identity;
+			switch_status_t status;
+			uint8_t match;
+			uint8_t proceed = 0;
+			const char *initial_sdp =
+				"v=0\n"
+				"o=- 1683118194 1683118290 IN IP4 0.0.0.0\n"
+				"s=-\n"
+				"t=0 0\n"
+				"a=group:BUNDLE 0\n"
+				"m=audio 19010 UDP/TLS/RTP/SAVPF 0\n"
+				"c=IN IP4 127.0.0.1\n"
+				"a=ice-ufrag:candidateLessIdentityUfrag1\n"
+				"a=ice-pwd:candidateLessIdentityPassword1234561\n"
+				"a=ice-options:trickle\n"
+				"a=candidate:1 1 udp 2130706431 127.0.0.1 19010 typ host\n"
+				"a=rtcp-mux\n"
+				"a=setup:active\n"
+				"a=tls-id:candidate-less-association-1\n"
+				"a=fingerprint:sha-256 17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4\n"
+				"a=rtpmap:0 PCMU/8000\n"
+				"a=sendrecv\n"
+				"a=mid:0\n";
+			const char *restart_sdp =
+				"v=0\n"
+				"o=- 1683118194 1683118291 IN IP4 0.0.0.0\n"
+				"s=-\n"
+				"t=0 0\n"
+				"a=group:BUNDLE 0\n"
+				"m=audio 19011 UDP/TLS/RTP/SAVPF 0\n"
+				"c=IN IP4 127.0.0.1\n"
+				"a=ice-ufrag:candidateLessIdentityUfrag2\n"
+				"a=ice-pwd:candidateLessIdentityPassword1234562\n"
+				"a=ice-options:trickle\n"
+				"a=rtcp-mux\n"
+				"a=setup:active\n"
+				"a=tls-id:candidate-less-association-2\n"
+				"a=fingerprint:sha-256 17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4\n"
+				"a=rtpmap:0 PCMU/8000\n"
+				"a=sendrecv\n"
+				"a=mid:0\n";
+
+			memset(&identity, 0, sizeof(identity));
+			status = make_session_and_rtp_with_sdp_ex(&session, &rtp, &sdp_session, &parser,
+				initial_sdp, "PCMU", SWITCH_TRUE, SWITCH_TRUE, NULL);
+			review_regression_owner_adopt(session, sdp_session, parser);
+			fst_requires(status == SWITCH_STATUS_SUCCESS && session && rtp && sdp_session && parser);
+			if (review_regression_inject_post_alloc("candidate-less")) {
+				fst_requires(SWITCH_FALSE);
+			}
+			channel = switch_core_session_get_channel(session);
+			smh = switch_core_session_get_media_handle(session);
+			fst_requires(channel != NULL && smh != NULL);
+			fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP, &before) ==
+				SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_rtp_pvt_get_dtls_association_identity(rtp, DTLS_TYPE_RTP,
+				&identity) == SWITCH_STATUS_SUCCESS);
+			fst_check_string_equals(identity.tls_id, "candidate-less-association-1");
+
+			switch_core_media_clear_ice(session);
+			switch_channel_set_flag(channel, CF_REINVITE);
+			match = switch_core_media_negotiate_sdp(session, restart_sdp, &proceed, SDP_OFFER);
+			fst_requires(match != 0);
+			switch_core_media_gen_local_sdp(session, SDP_ANSWER, NULL, 0, NULL, 0);
+			fst_requires(switch_core_media_activate_rtp(session) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP, &after_sdp) ==
+				SWITCH_STATUS_SUCCESS);
+			fst_check(after_sdp.dtls_destroy_count == before.dtls_destroy_count + 1);
+			fst_check(after_sdp.dtls_context != before.dtls_context);
+			memset(&identity, 0, sizeof(identity));
+			fst_requires(switch_rtp_pvt_get_dtls_association_identity(rtp, DTLS_TYPE_RTP,
+				&identity) == SWITCH_STATUS_SUCCESS);
+			fst_check_string_equals(identity.tls_id, "candidate-less-association-2");
+
+			status = switch_core_media_trickle_remote_candidate_and_recheck(session, smh,
+				sdp_session, SDP_TYPE_REQUEST, "0", 0,
+				"candidate:2 1 udp 1685921533 192.0.2.39 19011 typ srflx raddr 127.0.0.1 rport 19011", 0);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP, &after_trickle) ==
+				SWITCH_STATUS_SUCCESS);
+			fst_check(after_trickle.dtls_context == after_sdp.dtls_context);
+			fst_check(after_trickle.dtls_destroy_count == after_sdp.dtls_destroy_count);
+			memset(&identity, 0, sizeof(identity));
+			fst_requires(switch_rtp_pvt_get_dtls_association_identity(rtp, DTLS_TYPE_RTP,
+				&identity) == SWITCH_STATUS_SUCCESS);
+			fst_check_string_equals(identity.tls_id, "candidate-less-association-2");
+
+			review_regression_owner_cleanup();
+		}
+		FCT_TEST_END();
+
+		FCT_TEST_BGN(unbundled_video_restart_defers_sdp_tuple_until_authenticated_nomination)
+		{
+			switch_core_session_t *session = NULL;
+			switch_channel_t *channel = NULL;
+			switch_rtp_t *audio_rtp = NULL;
+			switch_rtp_t *video_rtp = NULL;
+			void *sdp_session = NULL;
+			sdp_parser_t *parser = NULL;
+			switch_rtp_pvt_transport_snapshot_t before;
+			switch_rtp_pvt_transport_snapshot_t after_sdp;
+			switch_rtp_pvt_transport_snapshot_t after_nomination;
+			switch_status_t status;
+			char ice_user[513] = "";
+			char incoming_user[513] = "";
+			char local_pwd[256] = "";
+			char remote_pwd[256] = "";
+			char remote_host[80] = "";
+			switch_port_t remote_port = 0;
+			switch_bool_t has_addr = SWITCH_FALSE;
+			uint8_t stun_packet[512];
+			switch_size_t stun_len;
+			uint8_t match;
+			uint8_t proceed = 0;
+			const char *initial_sdp =
+				"v=0\n"
+				"o=- 1683118194 1683118292 IN IP4 0.0.0.0\n"
+				"s=-\n"
+				"t=0 0\n"
+				"m=audio 19110 UDP/TLS/RTP/SAVPF 0\n"
+				"c=IN IP4 127.0.0.1\n"
+				"a=ice-ufrag:videoGuardAudioUfrag\n"
+				"a=ice-pwd:videoGuardAudioPassword123456\n"
+				"a=candidate:1 1 udp 2130706431 127.0.0.1 19110 typ host\n"
+				"a=rtcp-mux\n"
+				"a=setup:active\n"
+				"a=tls-id:video-guard-audio\n"
+				"a=fingerprint:sha-256 17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4\n"
+				"a=rtpmap:0 PCMU/8000\n"
+				"a=sendrecv\n"
+				"a=mid:audio\n"
+				"m=video 19120 UDP/TLS/RTP/SAVPF 96\n"
+				"c=IN IP4 127.0.0.1\n"
+				"a=ice-ufrag:videoGuardUfrag1\n"
+				"a=ice-pwd:videoGuardPassword1234561\n"
+				"a=candidate:2 1 udp 2130706430 127.0.0.1 19120 typ host\n"
+				"a=rtcp-mux\n"
+				"a=setup:active\n"
+				"a=tls-id:video-guard-association\n"
+				"a=fingerprint:sha-256 17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4\n"
+				"a=rtpmap:96 VP8/90000\n"
+				"a=sendrecv\n"
+				"a=mid:video\n";
+			const char *restart_sdp =
+				"v=0\n"
+				"o=- 1683118194 1683118293 IN IP4 0.0.0.0\n"
+				"s=-\n"
+				"t=0 0\n"
+				"m=audio 19110 UDP/TLS/RTP/SAVPF 0\n"
+				"c=IN IP4 127.0.0.1\n"
+				"a=ice-ufrag:videoGuardAudioUfrag\n"
+				"a=ice-pwd:videoGuardAudioPassword123456\n"
+				"a=candidate:1 1 udp 2130706431 127.0.0.1 19110 typ host\n"
+				"a=rtcp-mux\n"
+				"a=setup:active\n"
+				"a=tls-id:video-guard-audio\n"
+				"a=fingerprint:sha-256 17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4\n"
+				"a=rtpmap:0 PCMU/8000\n"
+				"a=sendrecv\n"
+				"a=mid:audio\n"
+				"m=video 19121 UDP/TLS/RTP/SAVPF 96\n"
+				"c=IN IP4 127.0.0.1\n"
+				"a=ice-ufrag:videoGuardUfrag2\n"
+				"a=ice-pwd:videoGuardPassword1234562\n"
+				"a=candidate:3 1 udp 2130706429 127.0.0.1 19121 typ host\n"
+				"a=rtcp-mux\n"
+				"a=setup:active\n"
+				"a=tls-id:video-guard-association\n"
+				"a=fingerprint:sha-256 17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4\n"
+				"a=rtpmap:96 VP8/90000\n"
+				"a=sendrecv\n"
+				"a=mid:video\n";
+
+			status = make_session_and_rtp_with_sdp_ex(&session, &audio_rtp, &sdp_session,
+				&parser, initial_sdp, "PCMU,VP8", SWITCH_FALSE, SWITCH_TRUE, "controlled");
+			review_regression_owner_adopt(session, sdp_session, parser);
+			fst_requires(status == SWITCH_STATUS_SUCCESS && session && audio_rtp && sdp_session && parser);
+			if (review_regression_inject_post_alloc("video")) {
+				fst_requires(SWITCH_FALSE);
+			}
+			channel = switch_core_session_get_channel(session);
+			video_rtp = switch_core_media_get_rtp_session(session, SWITCH_MEDIA_TYPE_VIDEO);
+			fst_requires(channel != NULL && video_rtp != NULL && video_rtp != audio_rtp);
+			fst_requires(switch_rtp_pvt_get_transport_snapshot(video_rtp, IPR_RTP, &before) ==
+				SWITCH_STATUS_SUCCESS);
+			fst_requires(before.dtls_state == DS_HANDSHAKE && before.dtls_context && before.dtls_ssl);
+			fst_requires(copy_sockaddr_tuple(switch_rtp_session_get_remote_addr(video_rtp),
+				remote_host, sizeof(remote_host), &remote_port) == SWITCH_STATUS_SUCCESS);
+			fst_check(remote_port == 19120);
+
+			switch_core_media_clear_ice(session);
+			switch_channel_set_flag(channel, CF_REINVITE);
+			match = switch_core_media_negotiate_sdp(session, restart_sdp, &proceed, SDP_OFFER);
+			fst_requires(match != 0);
+			(void)switch_core_media_proxy_remote_addr(session, restart_sdp);
+			fst_requires(copy_sockaddr_tuple(switch_rtp_session_get_remote_addr(video_rtp),
+				remote_host, sizeof(remote_host), &remote_port) == SWITCH_STATUS_SUCCESS);
+			fst_check(remote_port == 19120);
+			switch_core_media_gen_local_sdp(session, SDP_ANSWER, NULL, 0, NULL, 0);
+			fst_requires(switch_core_media_activate_rtp(session) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_rtp_pvt_get_transport_snapshot(video_rtp, IPR_RTP, &after_sdp) ==
+				SWITCH_STATUS_SUCCESS);
+			fst_check(after_sdp.dtls_context == before.dtls_context);
+			fst_check(after_sdp.dtls_ssl == before.dtls_ssl);
+			fst_check(after_sdp.dtls_restart_pending == SWITCH_TRUE);
+			fst_requires(copy_sockaddr_tuple(switch_rtp_session_get_remote_addr(video_rtp),
+				remote_host, sizeof(remote_host), &remote_port) == SWITCH_STATUS_SUCCESS);
+			fst_check(remote_port == 19120);
+
+			fst_requires(switch_rtp_pvt_get_ice_state(video_rtp, IPR_RTP,
+				ice_user, sizeof(ice_user), local_pwd, sizeof(local_pwd), remote_pwd,
+				sizeof(remote_pwd), &has_addr) == SWITCH_STATUS_SUCCESS);
+			fst_requires(reverse_ice_username(ice_user, incoming_user, sizeof(incoming_user)) ==
+				SWITCH_STATUS_SUCCESS);
+			stun_len = build_authenticated_ice_request(stun_packet, sizeof(stun_packet),
+				incoming_user, local_pwd);
+			fst_requires(switch_rtp_pvt_handle_ice_from(video_rtp, IPR_RTP, "127.0.0.1",
+				19121, stun_packet, stun_len) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_rtp_pvt_get_transport_snapshot(video_rtp, IPR_RTP,
+				&after_nomination) == SWITCH_STATUS_SUCCESS);
+			fst_check(after_nomination.dtls_context == before.dtls_context);
+			fst_check(after_nomination.dtls_ssl == before.dtls_ssl);
+			fst_check(after_nomination.dtls_restart_pending == SWITCH_FALSE);
+			fst_check(after_nomination.dtls_restart_migrated == SWITCH_TRUE);
+			fst_requires(copy_sockaddr_tuple(switch_rtp_session_get_remote_addr(video_rtp),
+				remote_host, sizeof(remote_host), &remote_port) == SWITCH_STATUS_SUCCESS);
+			fst_check(remote_port == 19121);
+
+			review_regression_owner_cleanup();
 		}
 		FCT_TEST_END();
 
@@ -4173,6 +4674,7 @@ FCT_BGN()
 
 			status = make_session_and_rtp_with_sdp_ex(&session, &rtp, &sdp_session, &parser,
 				NULL, "PCMU", SWITCH_TRUE, SWITCH_FALSE, NULL);
+			review_regression_owner_adopt(session, sdp_session, parser);
 			fst_requires(status == SWITCH_STATUS_SUCCESS && session && !rtp && sdp_session && parser);
 			channel = switch_core_session_get_channel(session);
 			smh = switch_core_session_get_media_handle(session);
@@ -4307,7 +4809,11 @@ FCT_BGN()
 			status = make_session_and_rtp_with_sdp_ex(&peer_session, &peer_rtp,
 				&peer_sdp_session, &peer_parser, peer_sdp, "PCMU", SWITCH_TRUE,
 				SWITCH_TRUE, NULL);
+			review_regression_owner_adopt(peer_session, peer_sdp_session, peer_parser);
 			fst_requires(status == SWITCH_STATUS_SUCCESS && peer_session && peer_rtp);
+			if (review_regression_inject_post_alloc("prflx-late-srflx")) {
+				fst_requires(SWITCH_FALSE);
+			}
 			fst_requires(drive_dtls_pair_ready(peer_rtp, rtp) == SWITCH_STATUS_SUCCESS);
 			fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP,
 				&ready_restart) == SWITCH_STATUS_SUCCESS);
@@ -4338,8 +4844,7 @@ FCT_BGN()
 			fst_check(ready_restart.srtp_send_ready == SWITCH_FALSE);
 			fst_check(ready_restart.srtp_recv_ready == SWITCH_FALSE);
 
-			cleanup_session_media_and_sdp(session, sdp_session, parser);
-			cleanup_session_media_and_sdp(peer_session, peer_sdp_session, peer_parser);
+			review_regression_owner_cleanup();
 		}
 		FCT_TEST_END();
 

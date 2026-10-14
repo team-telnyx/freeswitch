@@ -6812,6 +6812,7 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 	switch_bool_t restart_credentials_complete = SWITCH_FALSE;
 	switch_bool_t restart_generation_changed = SWITCH_FALSE;
 	switch_bool_t restart_generation_unchanged = SWITCH_FALSE;
+	switch_bool_t restart_identity_preservable = SWITCH_FALSE;
 	switch_rtp_pvt_dtls_restart_result_t dtls_restart_result = SWITCH_RTP_PVT_DTLS_RESTART_RESET;
 	switch_status_t ice_activation_status;
 	switch_core_media_ice_type_t restart_ice_type = ICE_VANILLA;
@@ -7136,6 +7137,37 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 	if (!is_trickle_recheck) {
 		finalize_dtls_identity(engine);
 	}
+	if (engine->ice_restart_pending) {
+		const char *timeout_value = switch_channel_get_variable(smh->session->channel, "media_dtls_setup_timeout");
+		int configured_timeout = timeout_value ? atoi(timeout_value) : 0;
+
+		if (configured_timeout > 0) {
+			dtls_setup_timeout_ms = (uint32_t)configured_timeout;
+		}
+		if (zstr(engine->ice_out.ufrag) || zstr(engine->ice_out.pwd)) {
+			gen_ice(smh->session, type, NULL, 0);
+		}
+		restart_credentials_complete = !zstr(engine->ice_restart_remote_ufrag) &&
+			!zstr(engine->ice_restart_remote_pwd) && !zstr(engine->ice_in.ufrag) &&
+			!zstr(engine->ice_in.pwd) ? SWITCH_TRUE : SWITCH_FALSE;
+		restart_generation_changed = restart_credentials_complete &&
+			strcmp(engine->ice_restart_remote_ufrag, engine->ice_in.ufrag) &&
+			strcmp(engine->ice_restart_remote_pwd, engine->ice_in.pwd) ? SWITCH_TRUE : SWITCH_FALSE;
+		restart_generation_unchanged = restart_credentials_complete &&
+			!strcmp(engine->ice_restart_remote_ufrag, engine->ice_in.ufrag) &&
+			!strcmp(engine->ice_restart_remote_pwd, engine->ice_in.pwd) ? SWITCH_TRUE : SWITCH_FALSE;
+		if (restart_generation_unchanged) {
+			engine->new_dtls = switch_rtp_pvt_dtls_association_identity_matches(
+				engine->rtp_session, &engine->dtls_identity) ? 0 : 1;
+		} else if (!restart_generation_changed || check_ice_dtls_state == DS_READY ||
+			!switch_rtp_pvt_dtls_association_identity_matches(engine->rtp_session,
+				&engine->dtls_identity)) {
+			engine->new_dtls = 1;
+		} else {
+			restart_identity_preservable = SWITCH_TRUE;
+			engine->new_dtls = 0;
+		}
+	}
 
 	if (trickle_on) {
 		int merged = 0;
@@ -7414,49 +7446,17 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 	}
 
 
-	if (!is_trickle_recheck) {
-		const char *timeout_value = switch_channel_get_variable(smh->session->channel, "media_dtls_setup_timeout");
-		int configured_timeout = timeout_value ? atoi(timeout_value) : 0;
-
-		if (configured_timeout > 0) {
-			dtls_setup_timeout_ms = (uint32_t)configured_timeout;
+	if (restart_identity_preservable) {
+		dtls_restart_result = switch_rtp_pvt_prepare_dtls_ice_restart(engine->rtp_session,
+			&engine->dtls_identity, dtls_setup_timeout_ms, restart_ice_type,
+			engine->ice_in.ufrag, engine->ice_out.ufrag, engine->ice_out.pwd,
+			engine->ice_in.pwd);
+		if (dtls_restart_result == SWITCH_RTP_PVT_DTLS_RESTART_EXPIRED) {
+			return SWITCH_STATUS_FALSE;
 		}
-		if (engine->ice_restart_pending) {
-			if (zstr(engine->ice_out.ufrag) || zstr(engine->ice_out.pwd)) {
-				gen_ice(smh->session, type, NULL, 0);
-			}
-			restart_credentials_complete = !zstr(engine->ice_restart_remote_ufrag) &&
-				!zstr(engine->ice_restart_remote_pwd) && !zstr(engine->ice_in.ufrag) &&
-				!zstr(engine->ice_in.pwd) ? SWITCH_TRUE : SWITCH_FALSE;
-			restart_generation_changed = restart_credentials_complete &&
-				strcmp(engine->ice_restart_remote_ufrag, engine->ice_in.ufrag) &&
-				strcmp(engine->ice_restart_remote_pwd, engine->ice_in.pwd) ? SWITCH_TRUE : SWITCH_FALSE;
-			restart_generation_unchanged = restart_credentials_complete &&
-				!strcmp(engine->ice_restart_remote_ufrag, engine->ice_in.ufrag) &&
-				!strcmp(engine->ice_restart_remote_pwd, engine->ice_in.pwd) ? SWITCH_TRUE : SWITCH_FALSE;
-			if (restart_generation_unchanged) {
-				engine->new_dtls = switch_rtp_pvt_dtls_association_identity_matches(
-					engine->rtp_session, &engine->dtls_identity) ? 0 : 1;
-			} else if (!restart_generation_changed) {
-				engine->new_dtls = 1;
-			} else if (check_ice_dtls_state == DS_READY) {
-				engine->new_dtls = 1;
-			} else if (!switch_rtp_pvt_dtls_association_identity_matches(engine->rtp_session,
-				&engine->dtls_identity)) {
-				engine->new_dtls = 1;
-			} else {
-				dtls_restart_result = switch_rtp_pvt_prepare_dtls_ice_restart(engine->rtp_session,
-					&engine->dtls_identity, dtls_setup_timeout_ms, restart_ice_type,
-					engine->ice_in.ufrag, engine->ice_out.ufrag, engine->ice_out.pwd,
-					engine->ice_in.pwd);
-				if (dtls_restart_result == SWITCH_RTP_PVT_DTLS_RESTART_EXPIRED) {
-					return SWITCH_STATUS_FALSE;
-				}
-				preserve_dtls_restart = dtls_restart_result == SWITCH_RTP_PVT_DTLS_RESTART_PRESERVE ?
-					SWITCH_TRUE : SWITCH_FALSE;
-				engine->new_dtls = dtls_restart_result == SWITCH_RTP_PVT_DTLS_RESTART_RESET ? 1 : 0;
-			}
-		}
+		preserve_dtls_restart = dtls_restart_result == SWITCH_RTP_PVT_DTLS_RESTART_PRESERVE ?
+			SWITCH_TRUE : SWITCH_FALSE;
+		engine->new_dtls = dtls_restart_result == SWITCH_RTP_PVT_DTLS_RESTART_RESET ? 1 : 0;
 	}
 
 	if (engine->ice_in.is_chosen[0]) {
@@ -7473,7 +7473,9 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 		}
 	}
 
-	if (switch_rtp_pvt_should_preserve_trickle_dtls(engine->new_ice ? SWITCH_TRUE : SWITCH_FALSE,
+	if (switch_rtp_pvt_dtls_association_identity_matches(engine->rtp_session,
+		&engine->dtls_identity) &&
+		switch_rtp_pvt_should_preserve_trickle_dtls(engine->new_ice ? SWITCH_TRUE : SWITCH_FALSE,
 		engine->rtp_session && switch_rtp_ready(engine->rtp_session) ? SWITCH_TRUE : SWITCH_FALSE,
 		&check_ice_rtp_tuple, engine->rtcp_mux > 0 ? SWITCH_TRUE : SWITCH_FALSE,
 		check_ice_active_remote_ufrag, check_ice_active_remote_pwd,
@@ -13113,7 +13115,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_proxy_remote_addr(switch_core_
 
 				if (!scm_should_use_m_port(session, v_engine)) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Trickle ICE on: deferring video remote address from m= line\n");
-				} else if (switch_rtp_set_remote_address(v_engine->rtp_session, v_engine->cur_payload_map->remote_sdp_ip,
+				} else if (switch_rtp_pvt_set_remote_sdp_address(v_engine->rtp_session, v_engine->cur_payload_map->remote_sdp_ip,
 												  v_engine->cur_payload_map->remote_sdp_port, remote_rtcp_port, SWITCH_TRUE, &err) != SWITCH_STATUS_SUCCESS) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "VIDEO RTP REPORTS ERROR: [%s]\n", err);
 				} else {
@@ -15281,8 +15283,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 					}
 				}
 
-				if (switch_rtp_set_remote_address
-					(v_engine->rtp_session, v_engine->cur_payload_map->remote_sdp_ip, v_engine->cur_payload_map->remote_sdp_port, remote_rtcp_port, SWITCH_TRUE,
+				if (switch_rtp_pvt_set_remote_sdp_address
+						(v_engine->rtp_session, v_engine->cur_payload_map->remote_sdp_ip, v_engine->cur_payload_map->remote_sdp_port, remote_rtcp_port, SWITCH_TRUE,
 					 &err) != SWITCH_STATUS_SUCCESS) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "VIDEO RTP REPORTS ERROR: [%s]\n", err);
 				} else {

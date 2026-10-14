@@ -1488,7 +1488,8 @@ static void ice_controlling_failover_reset(switch_rtp_ice_t *ice, switch_bool_t 
 	ice->controlling_failover_started_us = 0;
 	ice->controlling_failover_sent_us = 0;
 	ice->controlling_failover_attempts = 0;
-	ice->controlling_failover_socket = NULL;
+	ice->controlling_failover_receive_socket = NULL;
+	ice->controlling_failover_send_socket = NULL;
 	ice->controlling_failover_local_port = 0;
 	ice->controlling_failover_local_family = SWITCH_UNSPEC;
 	memset(ice->controlling_failover_probe_id, 0, sizeof(ice->controlling_failover_probe_id));
@@ -1608,7 +1609,7 @@ SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_controlling_failover_response_match
 
 	if (!ice || !transaction_id || !authenticated || candidate_idx < 0 ||
 		ice->controlling_failover_state != expected_state || ice->controlling_failover_idx != candidate_idx ||
-		!local_socket || ice->controlling_failover_socket != local_socket ||
+		!local_socket || ice->controlling_failover_receive_socket != local_socket ||
 		!ice->controlling_failover_local_port || ice->controlling_failover_local_port != local_port ||
 		ice->controlling_failover_local_family == SWITCH_UNSPEC ||
 		ice->controlling_failover_local_family != local_family) {
@@ -1625,6 +1626,19 @@ SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_controlling_failover_response_match
 	}
 
 	return memcmp(transaction_id, expected_id, 12) ? SWITCH_FALSE : SWITCH_TRUE;
+}
+
+SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_controlling_failover_transport_matches(switch_rtp_ice_t *ice,
+	switch_socket_t *send_socket, switch_port_t local_port, int local_family)
+{
+	if (!ice || !send_socket || ice->controlling_failover_send_socket != send_socket ||
+		!ice->controlling_failover_local_port || ice->controlling_failover_local_port != local_port ||
+		ice->controlling_failover_local_family == SWITCH_UNSPEC ||
+		ice->controlling_failover_local_family != local_family) {
+		return SWITCH_FALSE;
+	}
+
+	return SWITCH_TRUE;
 }
 
 SWITCH_DECLARE(switch_rtp_ice_controlling_timer_action_t) switch_rtp_pvt_controlling_failover_timer_action(
@@ -1807,10 +1821,11 @@ static switch_status_t ice_send_controlling_check(switch_rtp_t *rtp_session, swi
 		transaction_id[12] = '\0';
 		ice->controlling_failover_local_port = switch_sockaddr_get_port(local_addr);
 		ice->controlling_failover_local_family = switch_sockaddr_get_family(local_addr);
-		ice->controlling_failover_socket = ice == &rtp_session->rtcp_ice && rtp_session->rtcp_sock_input ?
+		ice->controlling_failover_send_socket = sock_output;
+		ice->controlling_failover_receive_socket = ice == &rtp_session->rtcp_ice && rtp_session->rtcp_sock_input ?
 			rtp_session->rtcp_sock_input : rtp_session->sock_input;
-		if (!ice->controlling_failover_socket) {
-			ice->controlling_failover_socket = sock_output;
+		if (!ice->controlling_failover_receive_socket) {
+			ice->controlling_failover_receive_socket = sock_output;
 		}
 	}
 
@@ -1847,7 +1862,7 @@ static void ice_controlling_failover_tick(switch_rtp_t *rtp_session, switch_rtp_
 	uint64_t candidate_age_ms;
 	switch_rtp_ice_controlling_timer_action_t timer_action;
 	switch_sockaddr_t *local_addr;
-	switch_socket_t *local_socket;
+	switch_socket_t *send_socket;
 	char *transaction_id;
 	switch_bool_t use_candidate;
 
@@ -1858,10 +1873,9 @@ static void ice_controlling_failover_tick(switch_rtp_t *rtp_session, switch_rtp_
 		}
 
 		local_addr = rtp_session->local_addr;
-		local_socket = rtp_session->sock_output;
-		if (!local_addr || !local_socket || ice->controlling_failover_socket != local_socket ||
-			ice->controlling_failover_local_port != switch_sockaddr_get_port(local_addr) ||
-			ice->controlling_failover_local_family != switch_sockaddr_get_family(local_addr)) {
+		send_socket = rtp_session->sock_output;
+		if (!local_addr || !switch_rtp_pvt_controlling_failover_transport_matches(ice,
+			send_socket, switch_sockaddr_get_port(local_addr), switch_sockaddr_get_family(local_addr))) {
 			ice_controlling_failover_reset(ice, SWITCH_TRUE);
 			return;
 		}
@@ -1894,11 +1908,10 @@ static void ice_controlling_failover_tick(switch_rtp_t *rtp_session, switch_rtp_
 	if (ice && dtls && dtls->preserve_restart_pending &&
 		ice->controlling_failover_state == SWITCH_RTP_ICE_CONTROLLING_FAILOVER_NOMINATING) {
 		local_addr = rtp_session->local_addr;
-		local_socket = rtp_session->sock_output;
+		send_socket = rtp_session->sock_output;
 		if (!dtls->restart_deadline_us || now >= dtls->restart_deadline_us ||
-			!local_addr || !local_socket || ice->controlling_failover_socket != local_socket ||
-			ice->controlling_failover_local_port != switch_sockaddr_get_port(local_addr) ||
-			ice->controlling_failover_local_family != switch_sockaddr_get_family(local_addr)) {
+			!local_addr || !switch_rtp_pvt_controlling_failover_transport_matches(ice,
+				send_socket, switch_sockaddr_get_port(local_addr), switch_sockaddr_get_family(local_addr))) {
 			dtls_preserved_restart_fail(rtp_session, dtls);
 			ice_controlling_failover_reset(ice, SWITCH_TRUE);
 			return;
@@ -1937,11 +1950,10 @@ static void ice_controlling_failover_tick(switch_rtp_t *rtp_session, switch_rtp_
 	if (ice->controlling_failover_state != SWITCH_RTP_ICE_CONTROLLING_FAILOVER_IDLE) {
 		local_addr = ice == &rtp_session->rtcp_ice && rtp_session->rtcp_local_addr ?
 			rtp_session->rtcp_local_addr : rtp_session->local_addr;
-		local_socket = ice == &rtp_session->rtcp_ice && rtp_session->rtcp_sock_output ?
+		send_socket = ice == &rtp_session->rtcp_ice && rtp_session->rtcp_sock_output ?
 			rtp_session->rtcp_sock_output : rtp_session->sock_output;
-		if (!local_addr || !local_socket || ice->controlling_failover_socket != local_socket ||
-			ice->controlling_failover_local_port != switch_sockaddr_get_port(local_addr) ||
-			ice->controlling_failover_local_family != switch_sockaddr_get_family(local_addr)) {
+		if (!local_addr || !switch_rtp_pvt_controlling_failover_transport_matches(ice,
+			send_socket, switch_sockaddr_get_port(local_addr), switch_sockaddr_get_family(local_addr))) {
 			ice_controlling_failover_reset(ice, SWITCH_TRUE);
 			return;
 		}
@@ -2674,7 +2686,10 @@ SWITCH_DECLARE(switch_rtp_pvt_dtls_restart_result_t) switch_rtp_pvt_prepare_dtls
 		return SWITCH_RTP_PVT_DTLS_RESTART_RESET;
 	}
 	dtls = rtp_session->dtls;
-	if (!dtls || rtp_session->rtcp_dtls != dtls || dtls->preserve_restart_pending ||
+	if (!dtls || rtp_session->rtcp_dtls != dtls ||
+		(dtls->preserve_restart_pending &&
+		 (!dtls->restart_deadline_us || zstr(dtls->restart_active_ice_user) ||
+		  zstr(dtls->restart_active_local_pwd) || zstr(dtls->restart_active_remote_pwd))) ||
 		(dtls->state != DS_SETUP && dtls->state != DS_HANDSHAKE) ||
 		(dtls->state == DS_SETUP &&
 		 (dtls->last_flight_capture_failed || !dtls->last_flight_packet_count)) ||
@@ -2693,11 +2708,17 @@ SWITCH_DECLARE(switch_rtp_pvt_dtls_restart_result_t) switch_rtp_pvt_prepare_dtls
 		return SWITCH_RTP_PVT_DTLS_RESTART_RESET;
 	}
 
-	effective_timeout_ms = dtls->setup_timeout_ms && dtls->setup_timeout_ms < setup_timeout_ms ?
-		dtls->setup_timeout_ms : setup_timeout_ms;
-	started = rtp_session->dtls_checks_started ?
-		rtp_session->dtls_checks_started : dtls->association_started_us;
-	deadline = started + (switch_time_t)effective_timeout_ms * 1000;
+	if ((dtls->preserve_restart_pending || dtls->preserve_restart_migrated) &&
+		dtls->restart_deadline_us) {
+		started = dtls->association_started_us;
+		deadline = dtls->restart_deadline_us;
+	} else {
+		effective_timeout_ms = dtls->setup_timeout_ms && dtls->setup_timeout_ms < setup_timeout_ms ?
+			dtls->setup_timeout_ms : setup_timeout_ms;
+		started = rtp_session->dtls_checks_started ?
+			rtp_session->dtls_checks_started : dtls->association_started_us;
+		deadline = started + (switch_time_t)effective_timeout_ms * 1000;
+	}
 	if (!started || deadline <= started || now >= deadline) {
 		dtls_preserved_restart_fail(rtp_session, dtls);
 		dtls_lifetime_unlock(rtp_session);
@@ -2730,7 +2751,8 @@ SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_dtls_ice_restart_transport_authorit
 		dtls_lifetime_unlock(rtp_session);
 		return SWITCH_FALSE;
 	}
-	if (rtp_session->dtls && (rtp_session->dtls->preserve_restart_pending ||
+	if (rtp_session->dtls && (rtp_session->dtls->preserve_restart_prepared ||
+		rtp_session->dtls->preserve_restart_pending ||
 		rtp_session->dtls->preserve_restart_migrated ||
 		rtp_session->dtls->restart_tuple_authoritative)) {
 		pending = SWITCH_TRUE;
@@ -2755,7 +2777,8 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_set_remote_sdp_address(switch_rtp
 		dtls_lifetime_unlock(rtp_session);
 		return SWITCH_STATUS_FALSE;
 	}
-	if (rtp_session->dtls && (rtp_session->dtls->preserve_restart_pending ||
+	if (rtp_session->dtls && (rtp_session->dtls->preserve_restart_prepared ||
+		rtp_session->dtls->preserve_restart_pending ||
 		rtp_session->dtls->preserve_restart_migrated ||
 		rtp_session->dtls->restart_tuple_authoritative)) {
 		*err = "Authenticated ICE nomination owns remote address";
@@ -3213,7 +3236,7 @@ static switch_bool_t ice_controlling_failover_handle_response(switch_rtp_t *rtp_
 			"local_port=%u/%u family=%d/%d\n",
 			candidate_idx, authenticated_response,
 			transaction_id && !memcmp(transaction_id, ice->controlling_failover_nomination_id, 12),
-			local_socket == ice->controlling_failover_socket,
+			local_socket == ice->controlling_failover_receive_socket,
 			(unsigned)local_port, (unsigned)ice->controlling_failover_local_port,
 			local_family, ice->controlling_failover_local_family);
 		response_matches = switch_rtp_pvt_controlling_failover_response_matches(ice,
