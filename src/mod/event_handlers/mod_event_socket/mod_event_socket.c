@@ -129,6 +129,7 @@ static struct {
 	char *ip;
 	uint16_t port;
 	char *password;
+	char *password2;	/* TELCORE-655: optional secondary password for rotation */
 	int done;
 	int threads;
 	char *acl[MAX_ACL];
@@ -168,6 +169,16 @@ static uint32_t next_id(void)
 
 SWITCH_DECLARE_GLOBAL_STRING_FUNC(set_pref_ip, prefs.ip);
 SWITCH_DECLARE_GLOBAL_STRING_FUNC(set_pref_pass, prefs.password);
+SWITCH_DECLARE_GLOBAL_STRING_FUNC(set_pref_pass2, prefs.password2); /* TELCORE-655 */
+
+/* TELCORE-655: accept either the primary or the optional secondary ESL password */
+static switch_bool_t auth_check_password(const char *pass)
+{
+	if (zstr(pass)) return SWITCH_FALSE;
+	if (prefs.password && !strcmp(prefs.password, pass)) return SWITCH_TRUE;
+	if (!zstr(prefs.password2) && !strcmp(prefs.password2, pass)) return SWITCH_TRUE;
+	return SWITCH_FALSE;
+}
 
 static void *SWITCH_THREAD_FUNC listener_run(switch_thread_t *thread, void *obj);
 static switch_status_t launch_listener_thread(listener_t *listener);
@@ -699,6 +710,7 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_event_socket_shutdown)
 
 	switch_safe_free(prefs.ip);
 	switch_safe_free(prefs.password);
+	switch_safe_free(prefs.password2);	/* TELCORE-655 */
 
 	return SWITCH_STATUS_SUCCESS;
 }
@@ -1866,10 +1878,12 @@ static switch_status_t parse_command(listener_t *listener, switch_event_t **even
 
 			pass = cmd + 5;
 
-			if (!strcmp(prefs.password, pass)) {
+			if (auth_check_password(pass)) {
 				switch_set_flag_locked(listener, LFLAG_AUTHED);
 				switch_snprintf(reply, reply_len, "+OK accepted");
 			} else {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+					"ESL auth failure from %s\n", listener->remote_ip);
 				switch_snprintf(reply, reply_len, "-ERR invalid");
 				switch_clear_flag_locked(listener, LFLAG_RUNNING);
 			}
@@ -3016,6 +3030,8 @@ static int config(void)
 					prefs.port = (uint16_t) atoi(val);
 				} else if (!strcmp(var, "password")) {
 					set_pref_pass(val);
+				} else if (!strcmp(var, "secondary-password")) {	/* TELCORE-655 */
+					if (!zstr(val)) { set_pref_pass2(val); }
 				} else if (!strcasecmp(var, "apply-inbound-acl") && ! zstr(val)) {
 					if (prefs.acl_count < MAX_ACL) {
 						prefs.acl[prefs.acl_count++] = strdup(val);
