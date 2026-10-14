@@ -976,7 +976,15 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_perform_receive_message(swit
 			int peer_answered = zstr(message->string_arg);
 
 			if (!peer_answered && (peer_session = switch_core_session_locate(message->string_arg))) {
-				peer_answered = switch_channel_test_flag(switch_core_session_get_channel(peer_session), CF_ANSWERED);
+				switch_channel_t *peer_channel = switch_core_session_get_channel(peer_session);
+
+				/* tell the peer whom to confirm when it answers (bridge_to does not survive a
+				   hand-off of the bridge, for example to the T.38 gateway). Set it before the
+				   CF_ANSWERED test, so an answer between the two still finds it. */
+				switch_channel_set_variable(peer_channel, "blind_transfer_deferred_uuid", switch_core_session_get_uuid(session));
+				if ((peer_answered = switch_channel_test_flag(peer_channel, CF_ANSWERED))) {
+					switch_channel_set_variable(peer_channel, "blind_transfer_deferred_uuid", NULL);
+				}
 				switch_core_session_rwunlock(peer_session);
 			}
 

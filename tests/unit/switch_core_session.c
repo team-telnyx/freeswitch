@@ -437,10 +437,12 @@ FST_CORE_BEGIN("./conf")
 
 		/*
 		 * blind_transfer_answer_time_producer: after an early-media bridge
-		 * defers the confirmation, the answer of the leg bridged to the
-		 * transferred leg delivers exactly one success. A leg that the
-		 * transferred leg originated but has not bridged yet (for example
-		 * a group_confirm leg) must not report success when it answers.
+		 * defers the confirmation, the answer of the bridge peer delivers
+		 * exactly one success, also when bridge_to is already gone (the
+		 * bridge was handed off, for example to the T.38 gateway). A leg
+		 * that the transferred leg originated but has not bridged yet (for
+		 * example a group_confirm leg) must not report success when it
+		 * answers.
 		 */
 		FST_SESSION_BEGIN(blind_transfer_answer_time_producer)
 		{
@@ -449,6 +451,7 @@ FST_CORE_BEGIN("./conf")
 			switch_core_session_t *t_session = NULL; /* transfer target bridged on early media */
 			switch_channel_t *o_channel;
 			switch_channel_t *t_channel;
+			switch_core_session_message_t msg = { 0 };
 
 			fst_requires((r_session = start_peer()));
 			fst_requires((o_session = start_peer()));
@@ -468,13 +471,21 @@ FST_CORE_BEGIN("./conf")
 			fst_check(switch_atomic_read(&blind_transfer_response_count) == 0);
 			fst_check(switch_channel_test_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER));
 
-			/* the target bridged on early media answers */
-			switch_channel_set_variable(t_channel, SWITCH_BRIDGE_VARIABLE, switch_core_session_get_uuid(fst_session));
+			/* bridge to the target on early media: deferred */
+			msg.message_id = SWITCH_MESSAGE_INDICATE_BRIDGE;
+			msg.from = __FILE__;
+			msg.string_arg = switch_core_session_strdup(fst_session, switch_core_session_get_uuid(t_session));
+			fst_requires(switch_core_session_receive_message(fst_session, &msg) == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_atomic_read(&blind_transfer_response_count) == 0);
+
+			/* the target answers with no bridge_to left (bridge handed off) */
+			fst_check(switch_channel_get_variable(t_channel, SWITCH_BRIDGE_VARIABLE) == NULL);
 			switch_channel_mark_answered(t_channel);
 
 			fst_check(switch_atomic_read(&blind_transfer_response_count) == 1);
 			fst_check(blind_transfer_response_numeric_arg == 1);
 			fst_check(!switch_channel_test_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER));
+			fst_check(switch_channel_get_variable(t_channel, "blind_transfer_deferred_uuid") == NULL);
 
 			stop_peer(r_session);
 			stop_peer(o_session);
