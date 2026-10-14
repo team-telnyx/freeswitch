@@ -486,6 +486,8 @@ cnt_with_cng:
 
 	if (switch_test_flag(session, SSF_READ_CODEC_RESET)) {
 		switch_core_codec_reset(session->read_codec);
+		/* with media bugs the frames are decoded by a copy of the read codec, reset it as well */
+		switch_core_session_refresh_bug_codec(session);
 		switch_clear_flag(session, SSF_READ_CODEC_RESET);
 	}
 

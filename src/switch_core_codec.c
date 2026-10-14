@@ -92,6 +92,18 @@ SWITCH_DECLARE(void) switch_core_session_unset_write_codec(switch_core_session_t
 	switch_mutex_unlock(session->codec_write_mutex);
 }
 
+void switch_core_session_refresh_bug_codec(switch_core_session_t *session)
+{
+	/* force media bugs to copy the read codec from the next frame */
+	switch_thread_rwlock_wrlock(session->bug_rwlock);
+	if (switch_core_codec_ready(&session->bug_codec)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Destroying BUG Codec %s:%d\n",
+			session->bug_codec.implementation->iananame, session->bug_codec.implementation->ianacode);
+		switch_core_codec_destroy(&session->bug_codec);
+	}
+	switch_thread_rwlock_unlock(session->bug_rwlock);
+}
+
 SWITCH_DECLARE(switch_status_t) switch_core_session_set_real_read_codec(switch_core_session_t *session, switch_codec_t *codec)
 {
 	switch_event_t *event;
@@ -151,15 +163,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_set_real_read_codec(switch_c
 			}
 		}
 
-		/* force media bugs to copy the read codec from the next frame */
-		switch_thread_rwlock_wrlock(session->bug_rwlock);
-		if (switch_core_codec_ready(&session->bug_codec)) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Destroying BUG Codec %s:%d\n",
-				session->bug_codec.implementation->iananame, session->bug_codec.implementation->ianacode);
-			switch_core_codec_destroy(&session->bug_codec);
-		}
-
-		switch_thread_rwlock_unlock(session->bug_rwlock);
+		switch_core_session_refresh_bug_codec(session);
 	} else {
 		status = SWITCH_STATUS_FALSE;
 		goto end;

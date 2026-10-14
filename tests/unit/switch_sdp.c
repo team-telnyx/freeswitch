@@ -333,6 +333,79 @@ static switch_status_t collect_remote_sdp_info_from_session(switch_core_session_
 	return SWITCH_STATUS_SUCCESS;
 }
 
+/* the null endpoint's read_frame, replaced for reads that return a given frame */
+static switch_io_read_frame_t null_read_frame = NULL;
+static switch_frame_t *next_frame = NULL;
+
+static switch_status_t next_frame_read(switch_core_session_t *session, switch_frame_t **frame, switch_io_flag_t flags, int stream_id)
+{
+	if (next_frame) {
+		*frame = next_frame;
+		next_frame = NULL;
+		return SWITCH_STATUS_SUCCESS;
+	}
+
+	return null_read_frame(session, frame, flags, stream_id);
+}
+
+/* the audio a media bug was given last */
+struct bug_audio {
+	int16_t data[SWITCH_RECOMMENDED_BUFFER_SIZE / 2];
+	uint32_t datalen;
+};
+
+static switch_bool_t read_bug_callback(switch_media_bug_t *bug, void *user_data, switch_abc_type_t type)
+{
+	struct bug_audio *audio = user_data;
+	switch_frame_t *frame;
+
+	if (type == SWITCH_ABC_TYPE_READ_REPLACE && (frame = switch_core_media_bug_get_read_replace_frame(bug)) && frame->datalen <= sizeof(audio->data)) {
+		memcpy(audio->data, frame->data, frame->datalen);
+		audio->datalen = frame->datalen;
+	}
+
+	return SWITCH_TRUE;
+}
+
+/* one AMR-WB payload of a sawtooth, encoded with the given fmtp */
+static uint32_t amrwb_test_payload(const char *fmtp, uint8_t *out, uint32_t out_size, switch_memory_pool_t *pool)
+{
+	switch_codec_t codec = { 0 };
+	int16_t pcm[320];
+	uint32_t out_len = out_size, rate = 16000, flag = 0;
+	int i;
+
+	for (i = 0; i < 320; i++) {
+		pcm[i] = (int16_t) ((i * 409) % 16000 - 8000);
+	}
+	if (switch_core_codec_init(&codec, "AMR-WB", NULL, fmtp, 16000, 20, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, NULL, pool) != SWITCH_STATUS_SUCCESS) {
+		return 0;
+	}
+	if (switch_core_codec_encode(&codec, NULL, pcm, sizeof(pcm), 16000, out, &out_len, &rate, &flag) != SWITCH_STATUS_SUCCESS) {
+		out_len = 0;
+	}
+	switch_core_codec_destroy(&codec);
+
+	return out_len;
+}
+
+/* a payload decoded by a new codec with the given fmtp */
+static uint32_t amrwb_reference_decode(const char *fmtp, uint8_t *payload, uint32_t len, int16_t *out, uint32_t out_size, switch_memory_pool_t *pool)
+{
+	switch_codec_t codec = { 0 };
+	uint32_t out_len = out_size, rate = 16000, flag = 0;
+
+	if (switch_core_codec_init(&codec, "AMR-WB", NULL, fmtp, 16000, 20, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, NULL, pool) != SWITCH_STATUS_SUCCESS) {
+		return 0;
+	}
+	if (switch_core_codec_decode(&codec, NULL, payload, len, 16000, out, &out_len, &rate, &flag) != SWITCH_STATUS_SUCCESS) {
+		out_len = 0;
+	}
+	switch_core_codec_destroy(&codec);
+
+	return out_len;
+}
+
 FST_CORE_BEGIN("./conf_sdp")
 {
 	FST_SUITE_BEGIN(switch_sdp)
@@ -865,6 +938,120 @@ FST_CORE_BEGIN("./conf_sdp")
 			local_sdp = switch_channel_get_variable(fst_channel, "rtp_local_sdp_str");
 			fst_requires(local_sdp);
 			fst_xcheck(strstr(local_sdp, "a=fmtp:104") != NULL, "hold answer still carries the AMR-WB fmtp");
+		}
+		FST_SESSION_END()
+
+		/*
+		 * With a media bug (here the session recording), frames are decoded by a copy of
+		 * the read codec. A re-offer that only changes the framing re-creates the read
+		 * codec in place; the copy has to follow, or the call is decoded in the old
+		 * framing from then on.
+		 */
+		FST_SESSION_BEGIN(sdp_amrwb_framing_reset_refreshes_media_bug_codec)
+		{
+			switch_status_t status;
+			switch_media_handle_t *media_handle;
+			switch_core_media_params_t *mparams;
+			switch_codec_t *read_codec;
+			switch_endpoint_interface_t *endpoint;
+			switch_frame_t frame = { 0 }, *read_frame = NULL;
+			switch_media_bug_t *bug = NULL;
+			struct bug_audio audio = { { 0 } };
+			uint8_t payload_be[64], payload_oa[64];
+			uint32_t len_be, len_oa;
+			int16_t expected[320];
+			uint8_t match = 0, p = 0;
+
+			const char *offer_be =
+				"v=0\r\n"
+				"o=- 6 1 IN IP4 198.51.100.1\r\n"
+				"s=-\r\n"
+				"t=0 0\r\n"
+				"m=audio 56210 RTP/AVP 104\r\n"
+				"c=IN IP4 198.51.100.1\r\n"
+				"a=rtpmap:104 AMR-WB/16000\r\n"
+				"a=fmtp:104 mode-set=2\r\n"
+				"a=sendrecv\r\n";
+
+			const char *offer_oa =
+				"v=0\r\n"
+				"o=- 6 2 IN IP4 198.51.100.1\r\n"
+				"s=-\r\n"
+				"t=0 0\r\n"
+				"m=audio 56210 RTP/AVP 104\r\n"
+				"c=IN IP4 198.51.100.1\r\n"
+				"a=rtpmap:104 AMR-WB/16000\r\n"
+				"a=fmtp:104 octet-align=1; mode-set=2\r\n"
+				"a=sendrecv\r\n";
+
+			len_be = amrwb_test_payload("mode-set=2", payload_be, sizeof(payload_be), fst_pool);
+			len_oa = amrwb_test_payload("octet-align=1; mode-set=2", payload_oa, sizeof(payload_oa), fst_pool);
+			fst_requires(len_be && len_oa);
+
+			switch_channel_set_variable(fst_channel, "telnyx-strict-codec-match", "true");
+
+			mparams = switch_core_session_alloc(fst_session, sizeof(switch_core_media_params_t));
+			mparams->inbound_codec_string = switch_core_session_strdup(fst_session, "AMR-WB");
+			mparams->outbound_codec_string = switch_core_session_strdup(fst_session, "AMR-WB");
+			mparams->rtpip = switch_core_session_strdup(fst_session, (char *)rx_host);
+
+			status = switch_media_handle_create(&media_handle, fst_session, mparams);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+
+			status = switch_core_media_prepare_codecs(fst_session, SWITCH_FALSE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+
+			match = switch_core_media_negotiate_sdp(fst_session, offer_be, &p, SDP_OFFER);
+			fst_requires(match == 1);
+			read_codec = switch_core_session_get_read_codec(fst_session);
+			fst_requires(read_codec && switch_core_codec_ready(read_codec) && !strcasecmp(read_codec->implementation->iananame, "AMR-WB"));
+			/* the null endpoint keeps reading with its own L16 codec; a SIP channel reads with the negotiated one */
+			fst_requires(switch_core_session_set_read_codec(fst_session, read_codec) == SWITCH_STATUS_SUCCESS);
+
+			fst_requires(switch_core_media_bug_add(fst_session, "bug_codec_test", NULL, read_bug_callback, &audio, 0, SMBF_READ_REPLACE, &bug) == SWITCH_STATUS_SUCCESS);
+
+			fst_requires((endpoint = switch_loadable_module_get_endpoint_interface("null")));
+			fst_requires(endpoint->io_routines && endpoint->io_routines->read_frame);
+			null_read_frame = endpoint->io_routines->read_frame;
+			endpoint->io_routines->read_frame = next_frame_read;
+
+			frame.codec = read_codec;
+			frame.samples = 320;
+			frame.rate = 16000;
+			frame.channels = 1;
+
+			/* the first read with the bug copies the read codec */
+			frame.data = payload_be;
+			frame.datalen = frame.buflen = len_be;
+			next_frame = &frame;
+			status = switch_core_session_read_frame(fst_session, &read_frame, SWITCH_IO_FLAG_NONE, 0);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			fst_check(amrwb_reference_decode("mode-set=2", payload_be, len_be, expected, sizeof(expected), fst_pool) == sizeof(expected));
+			fst_check(audio.datalen == sizeof(expected) && !memcmp(audio.data, expected, sizeof(expected)));
+
+			/* framing changed: the read codec is re-created in place */
+			match = switch_core_media_negotiate_sdp(fst_session, offer_oa, &p, SDP_OFFER);
+			fst_requires(match == 1);
+			fst_requires(switch_core_codec_ready(read_codec));
+			fst_requires(read_codec->fmtp_in && strstr(read_codec->fmtp_in, "octet-align=1"));
+
+			frame.data = payload_oa;
+			frame.datalen = frame.buflen = len_oa;
+			frame.timestamp = 320;
+			next_frame = &frame;
+			audio.datalen = 0;
+			status = switch_core_session_read_frame(fst_session, &read_frame, SWITCH_IO_FLAG_NONE, 0);
+
+			endpoint->io_routines->read_frame = null_read_frame;
+			next_frame = NULL;
+			UNPROTECT_INTERFACE(endpoint);
+			switch_core_media_bug_remove(fst_session, &bug);
+			switch_core_session_set_read_codec(fst_session, NULL);
+
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			fst_check(amrwb_reference_decode("octet-align=1; mode-set=2", payload_oa, len_oa, expected, sizeof(expected), fst_pool) == sizeof(expected));
+			fst_xcheck(audio.datalen == sizeof(expected) && !memcmp(audio.data, expected, sizeof(expected)),
+					   "the media bug gets an octet-aligned payload after the re-offer decoded as octet-aligned");
 		}
 		FST_SESSION_END()
 
