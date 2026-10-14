@@ -942,10 +942,10 @@ FST_CORE_BEGIN("./conf_sdp")
 		FST_SESSION_END()
 
 		/*
-		 * With a media bug (here the session recording), frames are decoded by a copy of
-		 * the read codec. A re-offer that only changes the framing re-creates the read
-		 * codec in place; the copy has to follow, or the call is decoded in the old
-		 * framing from then on.
+		 * With a media bug on the read stream, the bugs get the frames decoded by a copy
+		 * of the read codec. A re-offer that only changes the framing re-creates the read
+		 * codec in place; the copy has to follow, or the bugs get the audio decoded in the
+		 * old framing from then on.
 		 */
 		FST_SESSION_BEGIN(sdp_amrwb_framing_reset_refreshes_media_bug_codec)
 		{
