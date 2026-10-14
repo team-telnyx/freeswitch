@@ -2134,6 +2134,10 @@ SWITCH_DECLARE(void) switch_channel_set_flag_value(switch_channel_t *channel, sw
 		switch_core_session_request_video_refresh(channel->session);
 	}
 
+	if (flag == CF_ANSWERED && value && just_set) {
+		switch_core_session_refresh_watch_arm(channel->session);
+	}
+
 	if (flag == CF_ORIGINATOR && switch_channel_test_flag(channel, CF_ANSWERED) && switch_channel_up_nosig(channel)) {
 		switch_channel_set_callstate(channel, CCS_RING_WAIT);
 	}

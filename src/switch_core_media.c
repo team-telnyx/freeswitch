@@ -9887,7 +9887,7 @@ static switch_status_t perform_write(switch_core_session_t *session, switch_fram
 				if (switch_test_flag(bp, SMBF_TAP_NATIVE_WRITE)) {
 					if (bp->callback) {
 						bp->native_write_frame = frame;
-						ok = bp->callback(bp, bp->user_data, SWITCH_ABC_TYPE_TAP_NATIVE_WRITE);
+						ok = switch_core_media_bug_invoke(bp, SWITCH_ABC_TYPE_TAP_NATIVE_WRITE, SWITCH_RWATCH_STAGE_BUG_TAP_NATIVE_WRITE);
 						bp->native_write_frame = NULL;
 					}
 				}
@@ -19724,8 +19724,8 @@ SWITCH_DECLARE(switch_msrp_session_t *) switch_core_media_get_msrp_session(switc
 }
 
 
-SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_session_t *session, switch_frame_t *frame, switch_io_flag_t flags,
-																int stream_id)
+static switch_status_t core_session_write_frame(switch_core_session_t *session, switch_frame_t *frame, switch_io_flag_t flags,
+												int stream_id)
 {
 
 	switch_status_t status = SWITCH_STATUS_FALSE;
@@ -20108,7 +20108,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 				switch_mutex_unlock(bp->write_mutex);
 
 				if (bp->callback) {
-					ok = bp->callback(bp, bp->user_data, SWITCH_ABC_TYPE_WRITE);
+					ok = switch_core_media_bug_invoke(bp, SWITCH_ABC_TYPE_WRITE, SWITCH_RWATCH_STAGE_BUG_WRITE);
 				}
 			}
 
@@ -20117,7 +20117,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 				if (bp->callback) {
 					bp->write_replace_frame_in = write_frame;
 					bp->write_replace_frame_out = write_frame;
-					if ((ok = bp->callback(bp, bp->user_data, SWITCH_ABC_TYPE_WRITE_REPLACE)) == SWITCH_TRUE) {
+					if ((ok = switch_core_media_bug_invoke(bp, SWITCH_ABC_TYPE_WRITE_REPLACE, SWITCH_RWATCH_STAGE_BUG_WRITE_REPLACE)) == SWITCH_TRUE) {
 						write_frame = bp->write_replace_frame_out;
 					}
 				}
@@ -20523,6 +20523,25 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 	switch_mutex_unlock(frame_codec_mutex);
 	switch_mutex_unlock(write_codec_mutex);
 	switch_mutex_unlock(session->codec_write_mutex);
+
+	return status;
+}
+
+/* Times the whole call on the calling thread's stall watch (switch_refresh_diag.h); the implementation is unchanged. */
+SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_session_t *session, switch_frame_t *frame, switch_io_flag_t flags,
+																int stream_id)
+{
+	switch_refresh_watch_t *watch = switch_core_session_frame_watch(session);
+	switch_status_t status;
+	int handle;
+
+	if (!watch) {
+		return core_session_write_frame(session, frame, flags, stream_id);
+	}
+
+	handle = switch_refresh_watch_begin(watch, SWITCH_RWATCH_STAGE_WRITE, session);
+	status = core_session_write_frame(session, frame, flags, stream_id);
+	switch_refresh_watch_end(watch, handle);
 
 	return status;
 }

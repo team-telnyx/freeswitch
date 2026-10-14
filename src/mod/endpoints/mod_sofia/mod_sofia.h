@@ -882,6 +882,7 @@ struct sofia_profile {
 	uint8_t refresh_work_telemetry;
 	uint32_t refresh_work_slow_ms;
 	uint32_t refresh_work_lock_ms;
+	uint32_t refresh_work_stall_ms;
 };
 
 

@@ -1919,6 +1919,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_init(switch_core_flag_t flags, switc
 	switch_thread_rwlock_create(&runtime.global_var_rwlock, runtime.memory_pool);
 	switch_core_set_globals();
 	switch_core_session_init(runtime.memory_pool);
+	switch_refresh_watch_init(runtime.memory_pool);
 	switch_event_create_plain(&runtime.global_vars, SWITCH_EVENT_CHANNEL_DATA);
 	switch_core_hash_init_case(&runtime.mime_types, SWITCH_FALSE);
 	switch_core_hash_init_case(&runtime.mime_type_exts, SWITCH_FALSE);
@@ -3195,6 +3196,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_destroy(void)
 		runtime.ares_dns_channel = NULL;
 	}
 #endif
+	switch_refresh_watch_shutdown();
 	switch_rtp_shutdown();
 	switch_msrp_destroy();
 

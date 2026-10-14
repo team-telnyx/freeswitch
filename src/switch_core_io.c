@@ -66,8 +66,8 @@ SWITCH_DECLARE(void) switch_core_gen_encoded_silence(unsigned char *data, const 
 
 }
 
-SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_session_t *session, switch_frame_t **frame, switch_io_flag_t flags,
-															   int stream_id)
+static switch_status_t core_session_read_frame(switch_core_session_t *session, switch_frame_t **frame, switch_io_flag_t flags,
+											   int stream_id)
 {
 	switch_io_event_hook_read_frame_t *ptr;
 	switch_status_t status = SWITCH_STATUS_FALSE;
@@ -334,7 +334,7 @@ cnt_with_cng:
 					}
 					if (bp->callback) {
 						bp->native_read_frame = *frame;
-						ok = bp->callback(bp, bp->user_data, SWITCH_ABC_TYPE_TAP_NATIVE_READ);
+						ok = switch_core_media_bug_invoke(bp, SWITCH_ABC_TYPE_TAP_NATIVE_READ, SWITCH_RWATCH_STAGE_BUG_TAP_NATIVE_READ);
 						bp->native_read_frame = NULL;
 					}
 				}
@@ -405,7 +405,7 @@ cnt_with_cng:
 							switch_core_gen_encoded_silence(data, (*frame)->codec->implementation, tmp_frame.datalen);
 
 							bp->native_read_frame = &tmp_frame;
-							ok = bp->callback(bp, bp->user_data, SWITCH_ABC_TYPE_TAP_NATIVE_READ);
+							ok = switch_core_media_bug_invoke(bp, SWITCH_ABC_TYPE_TAP_NATIVE_READ, SWITCH_RWATCH_STAGE_BUG_TAP_NATIVE_READ);
 							bp->native_read_frame = NULL;
 						}
 					}
@@ -772,7 +772,7 @@ cnt_with_cng:
 						bp->read_replace_frame_in = read_frame;
 						bp->read_replace_frame_out = read_frame;
 						bp->read_demux_frame = NULL;
-						if ((ok = bp->callback(bp, bp->user_data, SWITCH_ABC_TYPE_READ_REPLACE)) == SWITCH_TRUE) {
+						if ((ok = switch_core_media_bug_invoke(bp, SWITCH_ABC_TYPE_READ_REPLACE, SWITCH_RWATCH_STAGE_BUG_READ_REPLACE)) == SWITCH_TRUE) {
 							read_frame = bp->read_replace_frame_out;
 						}
 					}
@@ -875,7 +875,7 @@ cnt_with_cng:
 					}
 
 					if (bp->callback) {
-						ok = bp->callback(bp, bp->user_data, SWITCH_ABC_TYPE_READ);
+						ok = switch_core_media_bug_invoke(bp, SWITCH_ABC_TYPE_READ, SWITCH_RWATCH_STAGE_BUG_READ);
 					}
 					switch_mutex_unlock(bp->read_mutex);
 				}
@@ -1096,7 +1096,7 @@ cnt_with_cng:
 					switch_mutex_lock(bp->read_mutex);
 					bp->ping_frame = *frame;
 					if (bp->callback) {
-						if (bp->callback(bp, bp->user_data, SWITCH_ABC_TYPE_READ_PING) == SWITCH_FALSE
+						if (switch_core_media_bug_invoke(bp, SWITCH_ABC_TYPE_READ_PING, SWITCH_RWATCH_STAGE_BUG_READ_PING) == SWITCH_FALSE
 							|| (bp->stop_time && bp->stop_time <= switch_epoch_time_now(NULL))) {
 							ok = SWITCH_FALSE;
 						}
@@ -1145,6 +1145,25 @@ cnt_with_cng:
 		switch_channel_set_callstate(session->channel, CCS_ACTIVE);
 	}
 
+
+	return status;
+}
+
+/* Times the whole call on the calling thread's stall watch (switch_refresh_diag.h); the implementation is unchanged. */
+SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_session_t *session, switch_frame_t **frame, switch_io_flag_t flags,
+															   int stream_id)
+{
+	switch_refresh_watch_t *watch = switch_core_session_frame_watch(session);
+	switch_status_t status;
+	int handle;
+
+	if (!watch) {
+		return core_session_read_frame(session, frame, flags, stream_id);
+	}
+
+	handle = switch_refresh_watch_begin(watch, SWITCH_RWATCH_STAGE_READ, session);
+	status = core_session_read_frame(session, frame, flags, stream_id);
+	switch_refresh_watch_end(watch, handle);
 
 	return status;
 }

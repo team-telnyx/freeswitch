@@ -5593,9 +5593,11 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 							switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
 											  "Invalid value for %s on profile %s, telemetry disabled\n", var, profile->name);
 						}
-					} else if (!strcasecmp(var, "sip-refresh-work-slow-ms") || !strcasecmp(var, "sip-refresh-work-lock-ms")) {
+					} else if (!strcasecmp(var, "sip-refresh-work-slow-ms") || !strcasecmp(var, "sip-refresh-work-lock-ms") ||
+							   !strcasecmp(var, "sip-refresh-work-stall-ms")) {
 						int ms = zstr(val) ? 0 : atoi(val);
-						uint32_t *dst = !strcasecmp(var, "sip-refresh-work-slow-ms") ? &profile->refresh_work_slow_ms : &profile->refresh_work_lock_ms;
+						uint32_t *dst = !strcasecmp(var, "sip-refresh-work-slow-ms") ? &profile->refresh_work_slow_ms :
+							!strcasecmp(var, "sip-refresh-work-lock-ms") ? &profile->refresh_work_lock_ms : &profile->refresh_work_stall_ms;
 
 						if (zstr(val) || strspn(val, "0123456789") != strlen(val) || strlen(val) > 5 || ms < 1 || ms > 60000) {
 							*dst = 0;

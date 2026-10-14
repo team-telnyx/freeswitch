@@ -276,6 +276,10 @@ void sofia_glue_attach_private(switch_core_session_t *session, sofia_profile_t *
 		sofia_glue_set_name(tech_pvt, channame);
 	}
 
+	if (tech_pvt->refresh_diag_enabled) {
+		switch_core_session_refresh_watch_enable(session, (switch_time_t) (profile->refresh_work_stall_ms ? profile->refresh_work_stall_ms : 100) * 1000);
+	}
+
 }
 
 

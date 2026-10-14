@@ -173,6 +173,101 @@ SWITCH_DECLARE(uint32_t) switch_refresh_diag_limit_drain_suppressed(switch_refre
 
 #define switch_refresh_diag_now() switch_mono_micro_time_now()
 
+/*!
+  \brief Session-thread stall observer
+
+  A watch belongs to one session. While it is bound to that session's thread, the audio read/write
+  frame calls and the audio media-bug callbacks made on the thread are timed, but only once the
+  owner channel is answered (the watch is armed). Timing an operation costs clock reads and a few
+  atomic stores on the calling thread; it never locks, allocates or logs. An operation that takes
+  longer than the stall threshold is published to a fixed-size per-watch ring (full ring: the record
+  is dropped and counted). A single observer thread logs completed records and also reports an
+  operation that is still running past the threshold, once per operation. Without a bound watch the
+  callback paths only read a thread-local pointer, and the frame calls also read the session's watch
+  pointer.
+*/
+typedef struct switch_refresh_watch_s switch_refresh_watch_t;
+
+typedef enum {
+	SWITCH_RWATCH_STAGE_READ,
+	SWITCH_RWATCH_STAGE_WRITE,
+	SWITCH_RWATCH_STAGE_BUG_TAP_NATIVE_READ,
+	SWITCH_RWATCH_STAGE_BUG_READ_REPLACE,
+	SWITCH_RWATCH_STAGE_BUG_READ,
+	SWITCH_RWATCH_STAGE_BUG_READ_PING,
+	SWITCH_RWATCH_STAGE_BUG_TAP_NATIVE_WRITE,
+	SWITCH_RWATCH_STAGE_BUG_WRITE,
+	SWITCH_RWATCH_STAGE_BUG_WRITE_REPLACE,
+	SWITCH_RWATCH_STAGE_MAX
+} switch_refresh_watch_stage_t;
+
+/*! \brief Set up the watch registry; called once at core start */
+SWITCH_DECLARE(void) switch_refresh_watch_init(switch_memory_pool_t *pool);
+
+/*! \brief Stop the observer thread; called at core shutdown */
+SWITCH_DECLARE(void) switch_refresh_watch_shutdown(void);
+
+/*! \brief Start the observer thread if it is not running */
+SWITCH_DECLARE(switch_status_t) switch_refresh_watch_observer_start(void);
+
+/*!
+  \brief Allocate and register a watch for the session with this uuid and channel
+  \return NULL when the watch cannot be allocated or the build has no lock-free 64-bit atomics
+
+  The watch is not allocated from a session pool: it lives until switch_refresh_watch_destroy.
+*/
+SWITCH_DECLARE(switch_refresh_watch_t *) switch_refresh_watch_create(const char *uuid, switch_channel_t *channel, switch_time_t stall_us);
+
+/*! \brief Unregister and free a watch; records still in its ring are logged by the next observer pass */
+SWITCH_DECLARE(void) switch_refresh_watch_destroy(switch_refresh_watch_t **watch);
+
+/*! \brief Make watch the calling thread's watch (NULL unbinds) */
+SWITCH_DECLARE(void) switch_refresh_watch_bind(switch_refresh_watch_t *watch);
+
+/*! \brief The calling thread's watch, or NULL */
+SWITCH_DECLARE(switch_refresh_watch_t *) switch_refresh_watch_current(void);
+
+/*!
+  \brief Start timing an operation on the calling thread's watch
+  \param target the session the operation works on, when it is not the watch's owner (or NULL)
+  \return a handle for switch_refresh_watch_end, or -1 when nothing is timed
+*/
+SWITCH_DECLARE(int) switch_refresh_watch_begin(switch_refresh_watch_t *watch, switch_refresh_watch_stage_t stage, switch_core_session_t *target);
+
+/*! \brief Finish the operation begun with handle; a handle of -1 is ignored */
+SWITCH_DECLARE(void) switch_refresh_watch_end(switch_refresh_watch_t *watch, int handle);
+
+typedef struct {
+	uint32_t watches;
+	uint64_t lost;
+	uint64_t overflow;
+	uint64_t suppressed_call;
+	uint64_t suppressed_process;
+	uint64_t orphan_dropped;
+} switch_refresh_watch_totals_t;
+
+/*! \brief Process-wide counts of records lost or suppressed so far (the figures of the stall_health line) */
+SWITCH_DECLARE(void) switch_refresh_watch_totals(switch_refresh_watch_totals_t *totals);
+
+/*! \brief Run one observer pass on the calling thread (the observer thread runs these every 20 ms) */
+SWITCH_DECLARE(void) switch_refresh_watch_poll(void);
+
+/*! \brief Start timing on a watch; operations begun before this are not timed */
+SWITCH_DECLARE(void) switch_refresh_watch_arm(switch_refresh_watch_t *watch);
+
+/*!
+  \brief Enable the stall watch for a session
+  Called on the session's own thread, the watch is bound at once; otherwise the session thread binds it when it
+  starts, or at its next read/write frame call if it is already running.
+*/
+SWITCH_DECLARE(switch_status_t) switch_core_session_refresh_watch_enable(switch_core_session_t *session, switch_time_t stall_us);
+
+/*! \brief The session's stall watch, or NULL */
+SWITCH_DECLARE(switch_refresh_watch_t *) switch_core_session_get_refresh_watch(switch_core_session_t *session);
+
+/*! \brief Arm the session's stall watch, if it has one (called when the channel is answered) */
+SWITCH_DECLARE(void) switch_core_session_refresh_watch_arm(switch_core_session_t *session);
+
 SWITCH_END_EXTERN_C
 #endif
 /* For Emacs:
