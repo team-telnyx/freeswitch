@@ -1743,6 +1743,183 @@ static switch_status_t sofia_early_offer_gen_sdp(private_object_t *tech_pvt)
 	return SWITCH_STATUS_SUCCESS;
 }
 
+typedef struct {
+	nua_event_t event;
+	uint32_t cseq;
+	uint8_t has_cseq;
+	switch_time_t created;
+	switch_time_t handoff;
+	switch_time_t lock_start;
+	switch_time_t dispatched;
+	switch_time_t done;
+	uint8_t baseline_bit;
+	uint32_t suppressed_call;
+} sofia_refresh_diag_dispatch_t;
+
+#define SOFIA_REFRESH_DIAG_CALL_WINDOW_US 5000000
+#define SOFIA_REFRESH_DIAG_CALL_MAX 3
+#define SOFIA_REFRESH_DIAG_PROCESS_WINDOW_US 1000000
+#define SOFIA_REFRESH_DIAG_PROCESS_MAX 100
+
+static int sofia_refresh_diag_begin(switch_channel_t *channel, private_object_t *tech_pvt, sofia_dispatch_event_t *de,
+									switch_refresh_diag_t *diag, sofia_refresh_diag_dispatch_t *rd)
+{
+	nua_event_t event;
+
+	if (!tech_pvt->refresh_diag_enabled || !de || !de->data || !switch_channel_test_flag(channel, CF_ANSWERED)) {
+		return 0;
+	}
+
+	event = de->data->e_event;
+
+	switch (event) {
+	case nua_i_invite:
+		rd->baseline_bit = 1;
+		break;
+	case nua_i_ack:
+		rd->baseline_bit = 2;
+		break;
+	case nua_i_state:
+		rd->baseline_bit = 4;
+		break;
+	default:
+		return 0;
+	}
+
+	rd->event = event;
+	rd->created = de->diag_created;
+	rd->handoff = de->diag_handoff;
+
+	if (de->sip && de->sip->sip_cseq) {
+		rd->cseq = de->sip->sip_cseq->cs_seq;
+		rd->has_cseq = 1;
+	}
+
+	switch_refresh_diag_init(diag, tech_pvt->refresh_diag_lock_us);
+
+	return 1;
+}
+
+/* Called with sofia_mutex held: decides whether this dispatch is reported and takes the per-call allowance. */
+static int sofia_refresh_diag_decide(private_object_t *tech_pvt, switch_refresh_diag_t *diag, sofia_refresh_diag_dispatch_t *rd, char *reason, switch_size_t reason_len)
+{
+	switch_time_t total = rd->done - rd->lock_start;
+	const char *sep = "";
+
+	*reason = '\0';
+
+	if (rd->handoff && rd->lock_start >= rd->handoff) {
+		total += rd->lock_start - rd->handoff;
+	}
+
+	if (!(tech_pvt->refresh_diag_baseline & rd->baseline_bit)) {
+		tech_pvt->refresh_diag_baseline |= rd->baseline_bit;
+		switch_snprintf(reason, reason_len, "baseline");
+		sep = ",";
+	}
+
+	if (total > tech_pvt->refresh_diag_slow_us) {
+		switch_snprintf(reason + strlen(reason), reason_len - strlen(reason), "%sslow", sep);
+		sep = ",";
+	}
+
+	if (switch_refresh_diag_max_lock_wait(diag) > diag->lock_threshold_us) {
+		switch_snprintf(reason + strlen(reason), reason_len - strlen(reason), "%slock", sep);
+	}
+
+	if (zstr(reason)) {
+		return 0;
+	}
+
+	if (!switch_refresh_diag_limit_take(&tech_pvt->refresh_diag_limit, rd->done, SOFIA_REFRESH_DIAG_CALL_WINDOW_US, SOFIA_REFRESH_DIAG_CALL_MAX)) {
+		return 0;
+	}
+
+	rd->suppressed_call = switch_refresh_diag_limit_drain_suppressed(&tech_pvt->refresh_diag_limit);
+
+	return 1;
+}
+
+static void sofia_refresh_diag_emit(const char *uuid, switch_refresh_diag_t *diag, sofia_refresh_diag_dispatch_t *rd, const char *reason)
+{
+	char fields[2048];
+	char timing[256] = "";
+	char cseq[32] = "";
+	uint32_t suppressed_process;
+	int allowed;
+
+	switch_mutex_lock(mod_sofia_globals.refresh_diag_mutex);
+	allowed = switch_refresh_diag_limit_take(&mod_sofia_globals.refresh_diag_limit, switch_refresh_diag_now(),
+											 SOFIA_REFRESH_DIAG_PROCESS_WINDOW_US, SOFIA_REFRESH_DIAG_PROCESS_MAX);
+	suppressed_process = allowed ? switch_refresh_diag_limit_drain_suppressed(&mod_sofia_globals.refresh_diag_limit) : 0;
+	switch_mutex_unlock(mod_sofia_globals.refresh_diag_mutex);
+
+	if (!allowed) {
+		return;
+	}
+
+	if (rd->has_cseq) {
+		switch_snprintf(cseq, sizeof(cseq), " cseq=%u", rd->cseq);
+	}
+
+	if (rd->created && rd->handoff && rd->handoff >= rd->created && rd->lock_start >= rd->handoff) {
+		switch_snprintf(timing, sizeof(timing), " handoff_us=%" SWITCH_TIME_T_FMT " queue_us=%" SWITCH_TIME_T_FMT,
+						rd->handoff - rd->created, rd->lock_start - rd->handoff);
+	}
+
+	switch_refresh_diag_format(diag, fields, sizeof(fields));
+
+	switch_log_printf(SWITCH_CHANNEL_UUID_LOG(uuid), SWITCH_LOG_NOTICE,
+					  "SIP_REFRESH_WORK schema=1 kind=dispatch event=%s%s reason=%s%s sofia_lock_us=%" SWITCH_TIME_T_FMT
+					  " handler_us=%" SWITCH_TIME_T_FMT "%s%s suppressed_call=%u suppressed_process=%u\n",
+					  nua_event_name(rd->event), cseq, reason, timing, rd->dispatched - rd->lock_start, rd->done - rd->dispatched,
+					  zstr(fields) ? "" : " ", fields, rd->suppressed_call, suppressed_process);
+}
+
+/* Dispatches one queued Sofia event for this session under its sofia_mutex. With refresh telemetry enabled on the
+   call, times the queue, the lock wait and the handler, and logs the record after the lock is released. dispatch
+   owns de and may free it; nothing here reads de after the call. */
+void sofia_dispatch_signal_data(switch_core_session_t *session, private_object_t *tech_pvt, sofia_dispatch_event_t *de,
+								sofia_dispatch_fn_t dispatch)
+{
+	switch_channel_t *channel = switch_core_session_get_channel(session);
+	switch_refresh_diag_t diag;
+	sofia_refresh_diag_dispatch_t rd = { 0 };
+	char reason[32] = "";
+	int diag_on = sofia_refresh_diag_begin(channel, tech_pvt, de, &diag, &rd);
+	int diag_emit = 0;
+
+	if (diag_on) {
+		rd.lock_start = switch_refresh_diag_now();
+	}
+
+	switch_mutex_lock(tech_pvt->sofia_mutex);
+
+	if (diag_on) {
+		rd.dispatched = switch_refresh_diag_now();
+		switch_refresh_diag_lock_wait(&diag, SWITCH_RDIAG_LOCK_SOFIA, rd.dispatched - rd.lock_start);
+		switch_refresh_diag_push(&diag);
+	}
+
+	if (switch_core_session_in_thread(session)) {
+		de->session = session;
+	}
+
+	dispatch(&de);
+
+	if (diag_on) {
+		switch_refresh_diag_pop(&diag);
+		rd.done = switch_refresh_diag_now();
+		diag_emit = sofia_refresh_diag_decide(tech_pvt, &diag, &rd, reason, sizeof(reason));
+	}
+
+	switch_mutex_unlock(tech_pvt->sofia_mutex);
+
+	if (diag_emit) {
+		sofia_refresh_diag_emit(switch_core_session_get_uuid(session), &diag, &rd, reason);
+	}
+}
+
 static switch_status_t sofia_receive_message(switch_core_session_t *session, switch_core_session_message_t *msg)
 {
 	switch_channel_t *channel = switch_core_session_get_channel(session);
@@ -1752,16 +1929,7 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 	switch_assert(tech_pvt != NULL);
 
 	if (msg->message_id == SWITCH_MESSAGE_INDICATE_SIGNAL_DATA) {
-		sofia_dispatch_event_t *de = (sofia_dispatch_event_t *) msg->pointer_arg;
-		switch_mutex_lock(tech_pvt->sofia_mutex);
-		if (switch_core_session_in_thread(session)) {
-			de->session = session;
-		}
-
-		sofia_process_dispatch_event(&de);
-
-
-		switch_mutex_unlock(tech_pvt->sofia_mutex);
+		sofia_dispatch_signal_data(session, tech_pvt, (sofia_dispatch_event_t *) msg->pointer_arg, sofia_process_dispatch_event);
 		goto end;
 	}
 
@@ -7449,6 +7617,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_sofia_load)
 	mod_sofia_globals.keep_private.is_static = 1;
 	mod_sofia_globals.pool = pool;
 	switch_mutex_init(&mod_sofia_globals.mutex, SWITCH_MUTEX_NESTED, mod_sofia_globals.pool);
+	switch_mutex_init(&mod_sofia_globals.refresh_diag_mutex, SWITCH_MUTEX_NESTED, mod_sofia_globals.pool);
 	switch_core_hash_init(&mod_sofia_globals.profile_hash);
 	switch_core_hash_init(&mod_sofia_globals.gateway_hash);
 	switch_mutex_init(&mod_sofia_globals.hash_mutex, SWITCH_MUTEX_NESTED, mod_sofia_globals.pool);

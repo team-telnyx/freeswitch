@@ -1700,6 +1700,8 @@ SWITCH_DECLARE(int) switch_core_session_sync_clock(void)
 
 }
 
+static switch_refresh_watch_t *session_refresh_watch(switch_core_session_t *session);
+
 SWITCH_DECLARE(void) switch_core_session_perform_destroy(switch_core_session_t **session, const char *file, const char *func, int line)
 {
 	switch_memory_pool_t *pool;
@@ -1731,6 +1733,18 @@ SWITCH_DECLARE(void) switch_core_session_perform_destroy(switch_core_session_t *
 
 	switch_core_media_bug_remove_all(*session);
 	switch_ivr_deactivate_unicast(*session);
+
+	if (session_refresh_watch(*session)) {
+		switch_refresh_watch_t *watch;
+
+#if defined(__ATOMIC_ACQUIRE)
+		watch = __atomic_exchange_n(&(*session)->refresh_watch, NULL, __ATOMIC_ACQ_REL);
+#else
+		watch = (*session)->refresh_watch;
+		(*session)->refresh_watch = NULL;
+#endif
+		switch_refresh_watch_destroy(&watch);
+	}
 
 	switch_scheduler_del_task_group((*session)->uuid_str);
 
@@ -1893,6 +1907,68 @@ SWITCH_DECLARE(switch_bool_t) switch_core_session_in_thread(switch_core_session_
 	return switch_thread_equal(switch_thread_self(), session->thread_id) ? SWITCH_TRUE : SWITCH_FALSE;
 }
 
+static switch_refresh_watch_t *session_refresh_watch(switch_core_session_t *session)
+{
+#if defined(__ATOMIC_ACQUIRE)
+	return __atomic_load_n(&session->refresh_watch, __ATOMIC_ACQUIRE);
+#else
+	return session->refresh_watch;
+#endif
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_session_refresh_watch_enable(switch_core_session_t *session, switch_time_t stall_us)
+{
+	switch_refresh_watch_t *watch, *expected = NULL;
+
+	if (session_refresh_watch(session)) {
+		return SWITCH_STATUS_SUCCESS;
+	}
+
+	if (!(watch = switch_refresh_watch_create(session->uuid_str, session->channel, stall_us))) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Stall telemetry unavailable for this call\n");
+		return SWITCH_STATUS_FALSE;
+	}
+
+#if defined(__ATOMIC_ACQUIRE)
+	if (!__atomic_compare_exchange_n(&session->refresh_watch, &expected, watch, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+		switch_refresh_watch_destroy(&watch);
+		return SWITCH_STATUS_SUCCESS;
+	}
+#else
+	(void) expected;
+	session->refresh_watch = watch;
+#endif
+
+	/* An answer before the watch existed did not arm it (switch_channel_set_flag_value arms an existing watch). */
+	if (switch_channel_test_flag(session->channel, CF_ANSWERED)) {
+		switch_refresh_watch_arm(watch);
+	}
+
+	if (switch_refresh_watch_observer_start() != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Stall telemetry observer did not start\n");
+	}
+
+	if (switch_core_session_in_thread(session)) {
+		switch_refresh_watch_bind(watch);
+	}
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(switch_refresh_watch_t *) switch_core_session_get_refresh_watch(switch_core_session_t *session)
+{
+	return session ? session_refresh_watch(session) : NULL;
+}
+
+SWITCH_DECLARE(void) switch_core_session_refresh_watch_arm(switch_core_session_t *session)
+{
+	switch_refresh_watch_t *watch;
+
+	if (session && (watch = session_refresh_watch(session))) {
+		switch_refresh_watch_arm(watch);
+	}
+}
+
 static void *SWITCH_THREAD_FUNC switch_core_session_thread(switch_thread_t *thread, void *obj)
 {
 	switch_core_session_t *session = obj;
@@ -1902,6 +1978,9 @@ static void *SWITCH_THREAD_FUNC switch_core_session_thread(switch_thread_t *thre
 
 	session->thread = thread;
 	session->thread_id = switch_thread_self();
+
+	/* Also clears a watch left on a pooled thread by its previous session. */
+	switch_refresh_watch_bind(session_refresh_watch(session));
 
 	switch_core_session_run(session);
 	switch_core_media_bug_remove_all(session);
@@ -1942,6 +2021,7 @@ static void *SWITCH_THREAD_FUNC switch_core_session_thread(switch_thread_t *thre
 					  session->id, switch_channel_get_name(session->channel));
 
 	switch_set_flag(session, SSF_DESTROYABLE);
+	switch_refresh_watch_bind(NULL);
 	switch_core_session_destroy(&session);
 	return NULL;
 }

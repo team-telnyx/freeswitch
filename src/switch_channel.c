@@ -34,6 +34,7 @@
 #include <switch.h>
 #include <switch_channel.h>
 #include <switch_telnyx.h>
+#include <switch_refresh_diag.h>
 #include <pcre.h>
 
 struct switch_cause_table {
@@ -1216,7 +1217,7 @@ SWITCH_DECLARE(switch_event_header_t *) switch_channel_variable_first(switch_cha
 	switch_event_header_t *hi = NULL;
 
 	switch_assert(channel != NULL);
-	switch_mutex_lock(channel->profile_mutex);
+	SWITCH_REFRESH_DIAG_MUTEX_LOCK(channel->profile_mutex, SWITCH_RDIAG_LOCK_VARIABLE_ITER);
 	if (channel->variables && (hi = channel->variables->headers)) {
 		channel->vi = 1;
 	} else {
@@ -1649,7 +1650,7 @@ SWITCH_DECLARE(switch_status_t) switch_channel_set_variable_var_check(switch_cha
 
 	switch_assert(channel != NULL);
 
-	switch_mutex_lock(channel->profile_mutex);
+	SWITCH_REFRESH_DIAG_MUTEX_LOCK(channel->profile_mutex, SWITCH_RDIAG_LOCK_SET_VARIABLE);
 	if (channel->variables && !zstr(varname)) {
 		if (zstr(value)) {
 			switch_event_del_header(channel->variables, varname);
@@ -1760,7 +1761,7 @@ SWITCH_DECLARE(switch_status_t) switch_channel_set_variable_printf(switch_channe
 
 	switch_assert(channel != NULL);
 
-	switch_mutex_lock(channel->profile_mutex);
+	SWITCH_REFRESH_DIAG_MUTEX_LOCK(channel->profile_mutex, SWITCH_RDIAG_LOCK_SET_VARIABLE);
 	if (channel->variables && !zstr(varname)) {
 		switch_event_del_header(channel->variables, varname);
 
@@ -2131,6 +2132,10 @@ SWITCH_DECLARE(void) switch_channel_set_flag_value(switch_channel_t *channel, sw
 
 	if (flag == CF_VIDEO_READY && just_set) {
 		switch_core_session_request_video_refresh(channel->session);
+	}
+
+	if (flag == CF_ANSWERED && value && just_set) {
+		switch_core_session_refresh_watch_arm(channel->session);
 	}
 
 	if (flag == CF_ORIGINATOR && switch_channel_test_flag(channel, CF_ANSWERED) && switch_channel_up_nosig(channel)) {
@@ -4140,13 +4145,26 @@ SWITCH_DECLARE(switch_status_t) switch_channel_api_on(switch_channel_t *channel,
 	switch_event_header_t *hp;
 	switch_event_t *event;
 	int x = 0;
+	switch_refresh_diag_t *diag = switch_refresh_diag_current();
+	switch_time_t t0 = 0, t1 = 0;
+	uint32_t seen = 0;
 
+	if (diag) {
+		t0 = switch_refresh_diag_now();
+	}
 
 	switch_channel_get_variables(channel, &event);
+
+	if (diag) {
+		t1 = switch_refresh_diag_now();
+		diag->hook_channel_us += t1 - t0;
+	}
 
 	for (hp = event->headers; hp; hp = hp->next) {
 		char *var = hp->name;
 		char *val = hp->value;
+
+		seen++;
 
 		if (!strncasecmp(var, variable_prefix, strlen(variable_prefix))) {
 			if (hp->idx) {
@@ -4163,6 +4181,13 @@ SWITCH_DECLARE(switch_status_t) switch_channel_api_on(switch_channel_t *channel,
 	}
 
 	switch_event_destroy(&event);
+
+	if (diag) {
+		diag->hook_searches++;
+		diag->hook_seen += seen;
+		diag->hook_matched += x;
+		diag->hook_exec_us += switch_refresh_diag_now() - t1;
+	}
 
 	return x ? SWITCH_STATUS_SUCCESS : SWITCH_STATUS_FALSE;
 }
@@ -4218,14 +4243,40 @@ SWITCH_DECLARE(switch_status_t) switch_channel_execute_on(switch_channel_t *chan
 	switch_event_header_t *hp;
 	switch_event_t *event, *cevent;
 	int x = 0;
+	switch_refresh_diag_t *diag = switch_refresh_diag_current();
+	switch_time_t t0 = 0, t1 = 0, t2 = 0, t3 = 0;
+	uint32_t seen = 0;
+
+	if (diag) {
+		t0 = switch_refresh_diag_now();
+	}
 
 	switch_core_get_variables(&event);
+
+	if (diag) {
+		t1 = switch_refresh_diag_now();
+	}
+
 	switch_channel_get_variables(channel, &cevent);
+
+	if (diag) {
+		t2 = switch_refresh_diag_now();
+	}
+
 	switch_event_merge(event, cevent);
+
+	if (diag) {
+		t3 = switch_refresh_diag_now();
+		diag->hook_globals_us += t1 - t0;
+		diag->hook_channel_us += t2 - t1;
+		diag->hook_merge_us += t3 - t2;
+	}
 
 	for (hp = event->headers; hp; hp = hp->next) {
 		char *var = hp->name;
 		char *val = hp->value;
+
+		seen++;
 
 		if (!strncasecmp(var, variable_prefix, strlen(variable_prefix))) {
 			if (hp->idx) {
@@ -4243,6 +4294,13 @@ SWITCH_DECLARE(switch_status_t) switch_channel_execute_on(switch_channel_t *chan
 
 	switch_event_destroy(&event);
 	switch_event_destroy(&cevent);
+
+	if (diag) {
+		diag->hook_searches++;
+		diag->hook_seen += seen;
+		diag->hook_matched += x;
+		diag->hook_exec_us += switch_refresh_diag_now() - t3;
+	}
 
 	return x ? SWITCH_STATUS_SUCCESS : SWITCH_STATUS_FALSE;
 }
@@ -4915,7 +4973,7 @@ SWITCH_DECLARE(switch_status_t) switch_channel_pass_callee_id(switch_channel_t *
 SWITCH_DECLARE(switch_status_t) switch_channel_get_variables(switch_channel_t *channel, switch_event_t **event)
 {
 	switch_status_t status;
-	switch_mutex_lock(channel->profile_mutex);
+	SWITCH_REFRESH_DIAG_MUTEX_LOCK(channel->profile_mutex, SWITCH_RDIAG_LOCK_GET_VARIABLES);
 	if (channel->variables) {
 		status = switch_event_dup(event, channel->variables);
 	} else {

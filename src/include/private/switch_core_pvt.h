@@ -33,6 +33,7 @@
  *
  */
 #include "switch_profile.h"
+#include <switch_refresh_diag.h>
 
 #ifndef WIN32
 #include <switch_private.h>
@@ -184,6 +185,7 @@ struct switch_core_session {
 	switch_buffer_t *text_line_buffer;
 	switch_mutex_t *text_mutex;
 	const char *external_id;
+	struct switch_refresh_watch_s *refresh_watch;	/* set once, accessed atomically; see switch_refresh_diag.h */
 };
 
 struct switch_media_bug {
@@ -345,3 +347,50 @@ void switch_core_session_uninit(void);
 void switch_core_state_machine_init(switch_memory_pool_t *pool);
 switch_memory_pool_t *switch_core_memory_init(void);
 void switch_core_memory_stop(void);
+
+/* The calling thread's stall watch for a frame call on session. A session thread without one binds its session's watch
+   here, so a watch enabled after the thread started is still used (switch_refresh_diag.h). */
+static inline switch_refresh_watch_t *switch_core_session_frame_watch(switch_core_session_t *session)
+{
+	switch_refresh_watch_t *watch;
+
+	if (SWITCH_REFRESH_TELEMETRY_IDLE()) {
+		return NULL;
+	}
+
+	if ((watch = switch_refresh_watch_current())) {
+		return watch;
+	}
+
+#if defined(__ATOMIC_ACQUIRE)
+	watch = __atomic_load_n(&session->refresh_watch, __ATOMIC_ACQUIRE);
+#else
+	watch = session->refresh_watch;
+#endif
+
+	if (!watch || !switch_core_session_in_thread(session)) {
+		return NULL;
+	}
+
+	switch_refresh_watch_bind(watch);
+
+	return watch;
+}
+
+/* Call a media bug's callback, timed as stage on the calling thread's stall watch (switch_refresh_diag.h) */
+static inline switch_bool_t switch_core_media_bug_invoke(switch_media_bug_t *bug, switch_abc_type_t type, switch_refresh_watch_stage_t stage)
+{
+	switch_refresh_watch_t *watch = SWITCH_REFRESH_TELEMETRY_IDLE() ? NULL : switch_refresh_watch_current();
+	switch_bool_t ok;
+	int handle;
+
+	if (!watch) {
+		return bug->callback(bug, bug->user_data, type);
+	}
+
+	handle = switch_refresh_watch_begin(watch, stage, bug->session);
+	ok = bug->callback(bug, bug->user_data, type);
+	switch_refresh_watch_end(watch, handle);
+
+	return ok;
+}

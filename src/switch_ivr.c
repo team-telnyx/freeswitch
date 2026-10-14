@@ -37,6 +37,7 @@
 
 #include <switch.h>
 #include <switch_ivr.h>
+#include <switch_refresh_diag.h>
 
 SWITCH_DECLARE(switch_status_t) switch_ivr_sound_test(switch_core_session_t *session)
 {
@@ -2833,6 +2834,7 @@ SWITCH_DECLARE(int) switch_ivr_set_xml_call_stats(switch_xml_t xml, switch_core_
 	int loff = 0;
 	switch_rtp_stats_t *stats = switch_core_media_get_stats(session, type, NULL);
 	char var_val[35] = "";
+	switch_refresh_diag_t *diag = switch_refresh_diag_current();
 	switch_bool_t exclude_error_log_from_xml_cdr = switch_true(switch_core_get_variable("exclude_error_log_from_xml_cdr"));
 
 	if (!stats) return off;
@@ -2888,7 +2890,15 @@ SWITCH_DECLARE(int) switch_ivr_set_xml_call_stats(switch_xml_t xml, switch_core_
 
 		for(ep = stats->inbound.error_log; ep; ep = ep->next) {
 
+			if (diag) {
+				diag->xml_err_seen++;
+			}
+
 			if (!(ep->start && ep->stop)) continue;
+
+			if (diag) {
+				diag->xml_err_emitted++;
+			}
 
 			if (!(x_err = switch_xml_add_child_d(x_err_log, "error-period", eoff++))) {
 				abort();
@@ -2958,11 +2968,16 @@ SWITCH_DECLARE(int) switch_ivr_set_xml_chan_vars(switch_xml_t xml, switch_channe
 {
 
 	switch_event_header_t *hi = switch_channel_variable_first(channel);
+	switch_refresh_diag_t *diag = switch_refresh_diag_current();
 
 	if (!hi)
 		return off;
 
 	for (; hi; hi = hi->next) {
+		if (diag) {
+			diag->xml_vars++;
+			diag->xml_var_values += hi->idx ? hi->idx : 1;
+		}
 		if (hi->idx) {
 			int i;
 
@@ -2978,6 +2993,19 @@ SWITCH_DECLARE(int) switch_ivr_set_xml_chan_vars(switch_xml_t xml, switch_channe
 	return off;
 }
 
+static void rdiag_lap(switch_refresh_diag_t *diag, switch_time_t *mark, switch_time_t *acc)
+{
+	switch_time_t now;
+
+	if (!diag) {
+		return;
+	}
+
+	now = switch_refresh_diag_now();
+	*acc += now - *mark;
+	*mark = now;
+}
+
 SWITCH_DECLARE(switch_status_t) switch_ivr_generate_xml_cdr(switch_core_session_t *session, switch_xml_t *xml_cdr)
 {
 	switch_channel_t *channel = switch_core_session_get_channel(session);
@@ -2989,6 +3017,13 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_generate_xml_cdr(switch_core_session_
 	int cdr_off = 0, cd_off = 0;
 	switch_hold_record_t *hold_record = switch_channel_get_hold_record(channel), *hr;
 	const char *text_buffer = NULL;
+	switch_refresh_diag_t *diag = switch_refresh_diag_current();
+	switch_time_t mark = 0;
+
+	if (diag) {
+		diag->xml_builds++;
+		mark = switch_refresh_diag_now();
+	}
 
 	if (*xml_cdr) {
 		cdr = *xml_cdr;
@@ -3033,6 +3068,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_generate_xml_cdr(switch_core_session_
 		free(f);
 	}
 
+	rdiag_lap(diag, &mark, diag ? &diag->xml_channel_us : NULL);
+
 	if (!(call_stats = switch_xml_add_child_d(cdr, "call-stats", cdr_off++))) {
 		goto error;
 	}
@@ -3040,12 +3077,15 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_generate_xml_cdr(switch_core_session_
 	switch_ivr_set_xml_call_stats(call_stats, session, 0, SWITCH_MEDIA_TYPE_AUDIO);
 	switch_ivr_set_xml_call_stats(call_stats, session, 0, SWITCH_MEDIA_TYPE_VIDEO);
 
+	rdiag_lap(diag, &mark, diag ? &diag->xml_stats_us : NULL);
 
 	if (!(variables = switch_xml_add_child_d(cdr, "variables", cdr_off++))) {
 		goto error;
 	}
 
 	switch_ivr_set_xml_chan_vars(variables, channel, 0);
+
+	rdiag_lap(diag, &mark, diag ? &diag->xml_vars_us : NULL);
 
 
 	if ((app_log = switch_core_session_get_app_log(session))) {
@@ -3057,6 +3097,10 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_generate_xml_cdr(switch_core_session_
 		}
 		for (ap = app_log; ap; ap = ap->next) {
 			char tmp[128];
+
+			if (diag) {
+				diag->xml_apps++;
+			}
 
 			if (!(x_application = switch_xml_add_child_d(x_apps, "application", app_off++))) {
 				goto error;
@@ -3079,6 +3123,9 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_generate_xml_cdr(switch_core_session_
 
 		for (hr = hold_record; hr; hr = hr->next) {
 			char *t = tmp;
+			if (diag) {
+				diag->xml_holds++;
+			}
 			if (!(x_hold = switch_xml_add_child_d(xhr, "hold", cf_off++))) {
 				goto error;
 			}
@@ -3101,11 +3148,17 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_generate_xml_cdr(switch_core_session_
 
 
 
+	rdiag_lap(diag, &mark, diag ? &diag->xml_history_us : NULL);
+
 	caller_profile = switch_channel_get_caller_profile(channel);
 
 	while (caller_profile) {
 		int cf_off = 0;
 		int cp_off = 0;
+
+		if (diag) {
+			diag->xml_profiles++;
+		}
 
 		if (!(x_callflow = switch_xml_add_child_d(cdr, "callflow", cdr_off++))) {
 			goto error;
@@ -3142,6 +3195,9 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_generate_xml_cdr(switch_core_session_
 			}
 
 			for (ap = caller_profile->caller_extension->applications; ap; ap = ap->next) {
+				if (diag) {
+					diag->xml_ext_apps++;
+				}
 				if (!(x_application = switch_xml_add_child_d(x_caller_extension, "application", app_off++))) {
 					goto error;
 				}
@@ -3175,6 +3231,9 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_generate_xml_cdr(switch_core_session_
 					}
 
 					for (ap = cp->caller_extension->applications; ap; ap = ap->next) {
+						if (diag) {
+							diag->xml_ext_apps++;
+						}
 						if (!(x_application = switch_xml_add_child_d(x_caller_extension, "application", i_app_off++))) {
 							goto error;
 						}
@@ -3325,6 +3384,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_generate_xml_cdr(switch_core_session_
 
 		caller_profile = caller_profile->next;
 	}
+
+	rdiag_lap(diag, &mark, diag ? &diag->xml_callflow_us : NULL);
 
 	*xml_cdr = cdr;
 
