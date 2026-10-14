@@ -139,6 +139,12 @@ typedef struct private_object private_object_t;
 
 #include <switch_stun.h>
 #include <switch_refresh_diag.h>
+
+/* SIP refresh telemetry defaults (profile params sip-refresh-work-*-ms). The slow default sits above the normal wait for
+   the session thread, up to one media frame of queue time, so ordinary dispatches are not reported as slow. */
+#define SOFIA_REFRESH_WORK_SLOW_MS_DEFAULT 50
+#define SOFIA_REFRESH_WORK_LOCK_MS_DEFAULT 1
+#define SOFIA_REFRESH_WORK_STALL_MS_DEFAULT 100
 #include <sofia-sip/nua.h>
 #include <sofia-sip/sip_status.h>
 #include <sofia-sip/sdp.h>
@@ -1064,6 +1070,7 @@ switch_status_t sofia_media_activate_rtp_unlocked(private_object_t *tech_pvt);
 const char *sofia_media_get_codec_string(private_object_t *tech_pvt);
 
 void sofia_glue_attach_private(switch_core_session_t *session, sofia_profile_t *profile, private_object_t *tech_pvt, const char *channame);
+void sofia_glue_copy_refresh_diag_settings(private_object_t *tech_pvt, sofia_profile_t *profile);
 
 switch_status_t sofia_glue_do_invite(switch_core_session_t *session);
 
