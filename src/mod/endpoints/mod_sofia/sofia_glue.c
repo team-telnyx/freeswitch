@@ -149,6 +149,10 @@ void sofia_glue_attach_private(switch_core_session_t *session, sofia_profile_t *
 
 	tech_pvt->profile = profile;
 
+	tech_pvt->refresh_diag_enabled = profile->refresh_work_telemetry;
+	tech_pvt->refresh_diag_slow_us = (switch_time_t) (profile->refresh_work_slow_ms ? profile->refresh_work_slow_ms : 10) * 1000;
+	tech_pvt->refresh_diag_lock_us = (switch_time_t) (profile->refresh_work_lock_ms ? profile->refresh_work_lock_ms : 1) * 1000;
+
 	if (!zstr(profile->rtpip[profile->rtpip_next])) {
 		tech_pvt->mparams.rtpip4 = switch_core_session_strdup(session, profile->rtpip[profile->rtpip_next++]);
 		tech_pvt->mparams.rtpip = tech_pvt->mparams.rtpip4;

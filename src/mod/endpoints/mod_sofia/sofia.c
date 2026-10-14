@@ -44,6 +44,19 @@
 #include "prometheus_metrics.h"
 #include "switch_telnyx.h"
 
+static void sofia_rdiag_lap(switch_refresh_diag_t *diag, switch_refresh_diag_stage_t stage, switch_time_t *mark)
+{
+	switch_time_t now;
+
+	if (!diag) {
+		return;
+	}
+
+	now = switch_refresh_diag_now();
+	switch_refresh_diag_stage(diag, stage, now - *mark);
+	*mark = now;
+}
+
 
 extern su_log_t tport_log[];
 extern su_log_t iptsec_log[];
@@ -1803,8 +1816,11 @@ static void our_sofia_event_callback(nua_event_t event,
 		{
 			if (channel && sip) {
 				const char *r_sdp = NULL;
+				switch_refresh_diag_t *rdiag = switch_refresh_diag_current();
+				switch_time_t rmark = rdiag ? switch_refresh_diag_now() : 0;
 				
 				sofia_glue_store_session_id(session, profile, sip, 0);
+				sofia_rdiag_lap(rdiag, SWITCH_RDIAG_STAGE_SESSION_ID, &rmark);
 
 				if (sip->sip_payload && sip->sip_payload->pl_data) {
 					if (sofia_test_flag(tech_pvt, TFLAG_PASS_ACK)) {
@@ -1851,8 +1867,11 @@ static void our_sofia_event_callback(nua_event_t event,
 				}
 
 				switch_channel_set_variable(channel, "sip_invite_transaction_type", "uas");
+				sofia_rdiag_lap(rdiag, SWITCH_RDIAG_STAGE_SET_VARS, &rmark);
 				extract_header_vars(profile, sip, session, nh);
+				sofia_rdiag_lap(rdiag, SWITCH_RDIAG_STAGE_HEADER_VARS, &rmark);
 				switch_core_recovery_track(session);
+				sofia_rdiag_lap(rdiag, SWITCH_RDIAG_STAGE_RECOVERY, &rmark);
 				sofia_set_flag(tech_pvt, TFLAG_GOT_ACK);
 
 				if (switch_channel_test_flag(tech_pvt->channel, CF_PROXY_MEDIA) && r_sdp) {
@@ -2828,6 +2847,9 @@ void sofia_event_callback(nua_event_t event,
 
 	de = su_alloc(nua_handle_get_home(nh), sizeof(*de));
 	memset(de, 0, sizeof(*de));
+	if (profile->refresh_work_telemetry) {
+		de->diag_created = switch_refresh_diag_now();
+	}
 	nua_save_event(nua, de->event);
 	de->nh = nh ? nua_handle_ref(nh) : NULL;
 	de->data = nua_event_data(de->event);
@@ -2971,6 +2993,9 @@ void sofia_event_callback(nua_event_t event,
 		switch_core_session_t *session;
 
 		if ((session = switch_core_session_locate(sofia_private->uuid))) {
+			if (de->diag_created) {
+				de->diag_handoff = switch_refresh_diag_now();
+			}
 			switch_core_session_queue_signal_data(session, de);
 			switch_core_session_rwunlock(session);
 			goto end;
@@ -5557,6 +5582,27 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 					} else if (!strcasecmp(var, "track-calls")) {
 						if (switch_true(val)) {
 							sofia_set_pflag(profile, PFLAG_TRACK_CALLS);
+						}
+					} else if (!strcasecmp(var, "sip-refresh-work-telemetry")) {
+						if (switch_true(val)) {
+							profile->refresh_work_telemetry = 1;
+						} else if (switch_false(val)) {
+							profile->refresh_work_telemetry = 0;
+						} else {
+							profile->refresh_work_telemetry = 0;
+							switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+											  "Invalid value for %s on profile %s, telemetry disabled\n", var, profile->name);
+						}
+					} else if (!strcasecmp(var, "sip-refresh-work-slow-ms") || !strcasecmp(var, "sip-refresh-work-lock-ms")) {
+						int ms = zstr(val) ? 0 : atoi(val);
+						uint32_t *dst = !strcasecmp(var, "sip-refresh-work-slow-ms") ? &profile->refresh_work_slow_ms : &profile->refresh_work_lock_ms;
+
+						if (zstr(val) || strspn(val, "0123456789") != strlen(val) || strlen(val) > 5 || ms < 1 || ms > 60000) {
+							*dst = 0;
+							switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+											  "Invalid value for %s on profile %s (1-60000), using the default\n", var, profile->name);
+						} else {
+							*dst = (uint32_t) ms;
 						}
 					} else if (!strcasecmp(var, "NDLB-received-in-nat-reg-contact")) {
 						if (switch_true(val)) {
@@ -9086,6 +9132,9 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 
 			duplicate_sdp = (is_same_sdp && !zstr(tech_pvt->mparams.remote_sdp_str) && !zstr(tech_pvt->mparams.local_sdp_str));
 			if (duplicate_sdp) {
+				switch_refresh_diag_t *rdiag = switch_refresh_diag_current();
+				switch_time_t rmark = rdiag ? switch_refresh_diag_now() : 0;
+
 				if (sofia_use_soa(tech_pvt)) {
 					nua_respond(tech_pvt->nh, SIP_200_OK,
 								SIPTAG_CONTACT_STR(tech_pvt->reply_contact),
@@ -9101,6 +9150,7 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 								SIPTAG_CONTACT_STR(tech_pvt->reply_contact),
 								SIPTAG_CONTENT_TYPE_STR("application/sdp"), SIPTAG_PAYLOAD_STR(tech_pvt->mparams.local_sdp_str), TAG_END());
 				}
+				sofia_rdiag_lap(rdiag, SWITCH_RDIAG_STAGE_DUP_RESPONSE, &rmark);
 				goto done;
 			}
 			
@@ -11510,8 +11560,11 @@ void sofia_handle_sip_i_reinvite(switch_core_session_t *session,
 	char *call_info = NULL;
 	switch_channel_t *channel = NULL;
 	private_object_t *tech_pvt = NULL;
+	switch_refresh_diag_t *rdiag = switch_refresh_diag_current();
+	switch_time_t rmark = rdiag ? switch_refresh_diag_now() : 0;
 
 	nua_respond(nh, SIP_100_TRYING, TAG_END());
+	sofia_rdiag_lap(rdiag, SWITCH_RDIAG_STAGE_RESPOND_100, &rmark);
 
 	if (session) {
 		channel = switch_core_session_get_channel(session);
@@ -11532,6 +11585,7 @@ void sofia_handle_sip_i_reinvite(switch_core_session_t *session,
 		char branch[16] = "";
 
 		sofia_glue_store_session_id(session, profile, sip, 0);
+		sofia_rdiag_lap(rdiag, SWITCH_RDIAG_STAGE_SESSION_ID, &rmark);
 
 		sofia_clear_flag(tech_pvt, TFLAG_GOT_ACK);
 
@@ -11543,8 +11597,10 @@ void sofia_handle_sip_i_reinvite(switch_core_session_t *session,
 		switch_channel_set_variable_printf(channel, "sip_network_port", "%d", network_port);
 		switch_channel_set_variable_printf(channel, "sip_recieved_port", "%d", network_port);
 		switch_channel_set_variable_printf(channel, "sip_via_rport", "%d", network_port);
+		sofia_rdiag_lap(rdiag, SWITCH_RDIAG_STAGE_SET_VARS, &rmark);
 
 		switch_core_recovery_track(session);
+		sofia_rdiag_lap(rdiag, SWITCH_RDIAG_STAGE_RECOVERY, &rmark);
 	}
 
 	if (profile && sofia_test_pflag(profile, PFLAG_MANAGE_SHARED_APPEARANCE)) {
@@ -11577,8 +11633,11 @@ void sofia_handle_sip_i_reinvite(switch_core_session_t *session,
 			}
 		}
 
+		sofia_rdiag_lap(rdiag, SWITCH_RDIAG_STAGE_SET_VARS, &rmark);
 		sofia_glue_set_extra_headers(session, sip, SOFIA_SIP_HEADER_PREFIX);
+		sofia_rdiag_lap(rdiag, SWITCH_RDIAG_STAGE_EXTRA_HEADERS, &rmark);
 		switch_channel_execute_on(channel, "execute_on_sip_reinvite");
+		sofia_rdiag_lap(rdiag, SWITCH_RDIAG_STAGE_REINVITE_HOOK, &rmark);
 	}
 
 }

@@ -138,6 +138,7 @@ typedef struct private_object private_object_t;
 #define AUDIO_ACTIVITY_INTERVAL_MSEQ 60000
 
 #include <switch_stun.h>
+#include <switch_refresh_diag.h>
 #include <sofia-sip/nua.h>
 #include <sofia-sip/sip_status.h>
 #include <sofia-sip/sdp.h>
@@ -175,6 +176,8 @@ typedef struct sofia_dispatch_event_s {
 	switch_core_session_t *init_session;
 	switch_memory_pool_t *pool;
 	struct sofia_dispatch_event_s *next;
+	switch_time_t diag_created;
+	switch_time_t diag_handoff;
 } sofia_dispatch_event_t;
 
 struct sofia_private {
@@ -412,6 +415,8 @@ struct mod_sofia_globals {
 	int cpu_count;
 	int max_msg_queues;
 	switch_mutex_t *mutex;
+	switch_mutex_t *refresh_diag_mutex;
+	switch_refresh_diag_limit_t refresh_diag_limit;
 	char guess_ip[80];
 	char hostname[512];
 	switch_queue_t *presence_queue;
@@ -874,6 +879,9 @@ struct sofia_profile {
 	char *redirect_no_lookup_domains;
 	char **redirect_no_lookup_domains_list;
 	int redirect_no_lookup_domains_count;
+	uint8_t refresh_work_telemetry;
+	uint32_t refresh_work_slow_ms;
+	uint32_t refresh_work_lock_ms;
 };
 
 
@@ -962,6 +970,12 @@ struct private_object {
 	switch_mutex_t *prack_mutex;
 	switch_thread_cond_t *prack_cond;
 	switch_thread_id_t early_offer_completer;
+
+	uint8_t refresh_diag_enabled;
+	uint8_t refresh_diag_baseline;
+	switch_time_t refresh_diag_slow_us;
+	switch_time_t refresh_diag_lock_us;
+	switch_refresh_diag_limit_t refresh_diag_limit;
 };
 
 
@@ -1345,6 +1359,9 @@ char *sofia_glue_gen_contact_str(sofia_profile_t *profile, sip_t const *sip, nua
 void sofia_glue_pause_jitterbuffer(switch_core_session_t *session, switch_bool_t on);
 void sofia_process_dispatch_event(sofia_dispatch_event_t **dep);
 void sofia_process_dispatch_event_in_thread(sofia_dispatch_event_t **dep);
+typedef void (*sofia_dispatch_fn_t)(sofia_dispatch_event_t **dep);
+void sofia_dispatch_signal_data(switch_core_session_t *session, private_object_t *tech_pvt, sofia_dispatch_event_t *de,
+								sofia_dispatch_fn_t dispatch);
 char *sofia_glue_get_host(const char *str, switch_memory_pool_t *pool);
 char *sofia_glue_get_host_from_cfg(const char *str, switch_memory_pool_t *pool);
 void sofia_presence_check_subscriptions(sofia_profile_t *profile, time_t now);
