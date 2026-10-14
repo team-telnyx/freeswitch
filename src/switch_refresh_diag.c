@@ -38,6 +38,14 @@
 
 static RDIAG_THREAD_LOCAL switch_refresh_diag_t *rdiag_current = NULL;
 
+#if defined(__ATOMIC_RELAXED)
+SWITCH_DECLARE_DATA uint32_t switch_refresh_telemetry_users = 0;
+#define RDIAG_USERS_ADD(n) __atomic_add_fetch(&switch_refresh_telemetry_users, (n), __ATOMIC_RELAXED)
+#else
+SWITCH_DECLARE_DATA uint32_t switch_refresh_telemetry_users = 1;
+#define RDIAG_USERS_ADD(n)
+#endif
+
 static const char *rdiag_stage_names[SWITCH_RDIAG_STAGE_MAX] = {
 	"respond_100",
 	"session_id",
@@ -73,6 +81,7 @@ SWITCH_DECLARE(void) switch_refresh_diag_init(switch_refresh_diag_t *diag, switc
 
 SWITCH_DECLARE(void) switch_refresh_diag_push(switch_refresh_diag_t *diag)
 {
+	RDIAG_USERS_ADD(1);
 	diag->prev = rdiag_current;
 	rdiag_current = diag;
 }
@@ -81,11 +90,12 @@ SWITCH_DECLARE(void) switch_refresh_diag_pop(switch_refresh_diag_t *diag)
 {
 	rdiag_current = diag->prev;
 	diag->prev = NULL;
+	RDIAG_USERS_ADD(-1);
 }
 
 SWITCH_DECLARE(switch_refresh_diag_t *) switch_refresh_diag_current(void)
 {
-	return rdiag_current;
+	return SWITCH_REFRESH_TELEMETRY_IDLE() ? NULL : rdiag_current;
 }
 
 SWITCH_DECLARE(void) switch_refresh_diag_stage(switch_refresh_diag_t *diag, switch_refresh_diag_stage_t stage, switch_time_t elapsed_us)
@@ -116,7 +126,7 @@ SWITCH_DECLARE(void) switch_refresh_diag_lock_wait(switch_refresh_diag_t *diag, 
 
 SWITCH_DECLARE(void) switch_refresh_diag_mutex_lock(switch_mutex_t *mutex, switch_refresh_diag_lock_t lock)
 {
-	switch_refresh_diag_t *diag = rdiag_current;
+	switch_refresh_diag_t *diag = SWITCH_REFRESH_TELEMETRY_IDLE() ? NULL : rdiag_current;
 	switch_time_t start;
 
 	if (!diag) {
@@ -402,7 +412,7 @@ SWITCH_DECLARE(void) switch_refresh_watch_bind(switch_refresh_watch_t *watch)
 
 SWITCH_DECLARE(switch_refresh_watch_t *) switch_refresh_watch_current(void)
 {
-	return rwatch_current;
+	return SWITCH_REFRESH_TELEMETRY_IDLE() ? NULL : rwatch_current;
 }
 
 #if RWATCH_SUPPORTED
@@ -496,6 +506,7 @@ SWITCH_DECLARE(switch_refresh_watch_t *) switch_refresh_watch_create(const char 
 	rwatch.head = watch;
 	rwatch.count++;
 	switch_mutex_unlock(rwatch.mutex);
+	RDIAG_USERS_ADD(1);
 
 	return watch;
 }
@@ -700,6 +711,7 @@ SWITCH_DECLARE(void) switch_refresh_watch_destroy(switch_refresh_watch_t **watch
 	}
 	rwatch.count--;
 	switch_mutex_unlock(rwatch.mutex);
+	RDIAG_USERS_ADD(-1);
 
 	free(watch);
 }
