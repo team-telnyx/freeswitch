@@ -6679,6 +6679,11 @@ SWITCH_DECLARE(int16_t) switch_core_media_validate_common_audio_sdp(switch_core_
 							/* ptime does not match */
 							match = 0;
 
+							/* as in negotiation: no more near matches than the array holds */
+							if (nm_idx >= MAX_MATCHES) {
+								continue;
+							}
+
 							near_matches[nm_idx].codec_idx = i;
 							near_matches[nm_idx].rate = remote_codec_rate;
 							near_matches[nm_idx].imp = imp;
