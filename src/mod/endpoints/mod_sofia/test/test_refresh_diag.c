@@ -336,6 +336,42 @@ FST_CORE_BEGIN("./conf-refresh-diag")
 		}
 		FST_SESSION_END()
 
+		FST_SESSION_BEGIN(default_slow_threshold_skips_one_frame_queue_wait)
+		{
+			fake_dispatch_t st = { 0 };
+			sofia_profile_t *profile = switch_core_session_alloc(fst_session, sizeof(*profile));
+			private_object_t *pvt = fake_pvt(fst_session, 0, 0);
+
+			profile->refresh_work_telemetry = 1;
+			sofia_glue_copy_refresh_diag_settings(pvt, profile);
+			fst_check(pvt->refresh_diag_enabled == 1);
+			fst_check(pvt->refresh_diag_slow_us == SOFIA_REFRESH_WORK_SLOW_MS_DEFAULT * 1000);
+			fst_check(pvt->refresh_diag_lock_us == SOFIA_REFRESH_WORK_LOCK_MS_DEFAULT * 1000);
+			fst_check(SOFIA_REFRESH_WORK_SLOW_MS_DEFAULT * 1000 > 2 * 20000);
+
+			fake_dispatch_state = &st;
+			switch_channel_set_flag(fst_channel, CF_ANSWERED);
+			pvt->refresh_diag_baseline = 7;
+
+			/* a state event that waited one 20 ms frame (plus scheduling) for the session thread: not slow */
+			sofia_dispatch_signal_data(fst_session, pvt, &fake_event(nua_i_state, 3, 25000)->de, fake_process);
+			fst_check(settled_records() == 0);
+			/* one that waited past the default: reported, attributed to queue time */
+			sofia_dispatch_signal_data(fst_session, pvt, &fake_event(nua_i_state, 3, SOFIA_REFRESH_WORK_SLOW_MS_DEFAULT * 1000 + 20000)->de,
+									   fake_process);
+			fst_check(settled_records() == 1);
+			fst_check(strstr(record(0), "event=nua_i_state cseq=3 reason=slow ") != NULL);
+			fst_check(field_us(record(0), " queue_us=") > SOFIA_REFRESH_WORK_SLOW_MS_DEFAULT * 1000);
+
+			/* an explicit profile value still wins */
+			profile->refresh_work_slow_ms = 20;
+			profile->refresh_work_lock_ms = 5;
+			sofia_glue_copy_refresh_diag_settings(pvt, profile);
+			fst_check(pvt->refresh_diag_slow_us == 20000);
+			fst_check(pvt->refresh_diag_lock_us == 5000);
+		}
+		FST_SESSION_END()
+
 		FST_SESSION_BEGIN(sofia_lock_wait_is_attributed)
 		{
 			fake_dispatch_t st = { 0 };
