@@ -342,6 +342,8 @@ switch_status_t switch_core_sqldb_start(switch_memory_pool_t *pool, switch_bool_
 void switch_core_sqldb_stop(void);
 void switch_core_session_init(switch_memory_pool_t *pool);
 void switch_core_session_uninit(void);
+/* drop the media bugs' copy of the read codec; the next frame copies the current read codec */
+void switch_core_session_refresh_bug_codec(switch_core_session_t *session);
 void switch_core_state_machine_init(switch_memory_pool_t *pool);
 switch_memory_pool_t *switch_core_memory_init(void);
 void switch_core_memory_stop(void);
