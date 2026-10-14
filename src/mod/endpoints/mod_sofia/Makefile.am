@@ -15,7 +15,7 @@ mod_sofia_la_SOURCES = prometheus_metrics.cpp prometheus_metrics.h
 mod_sofia_la_LIBADD = $(switch_builddir)/libfreeswitch.la libsofiamod.la
 mod_sofia_la_LDFLAGS = -avoid-version -module -no-undefined -shared -lstdc++ $(SOFIA_SIP_LIBS) $(STIRSHAKEN_LIBS)
 
-noinst_PROGRAMS = test/test_sofia_funcs test/test_nuafail test/sipp-based-tests test/test_string_stream_mem_leak
+noinst_PROGRAMS = test/test_sofia_funcs test/test_nuafail test/sipp-based-tests test/test_string_stream_mem_leak test/test_refresh_diag
 
 test_test_sofia_funcs_SOURCES = test/test_sofia_funcs.c
 test_test_sofia_funcs_CFLAGS = $(AM_CFLAGS) $(SOFIA_SIP_CFLAGS) $(STIRSHAKEN_CFLAGS) -DSWITCH_TEST_BASE_DIR_FOR_CONF=\"${abs_builddir}/test\" -DSWITCH_TEST_BASE_DIR_OVERRIDE=\"${abs_builddir}/test\"
@@ -46,7 +46,15 @@ endif
 test_test_string_stream_mem_leak_LDFLAGS = $(AM_LDFLAGS) -avoid-version -no-undefined $(freeswitch_LDFLAGS) $(switch_builddir)/libfreeswitch.la $(CORE_LIBS) $(APR_LIBS) $(STIRSHAKEN_LIBS)
 test_test_string_stream_mem_leak_LDADD = libsofiamod.la $(SOFIA_SIP_LIBS) $(STIRSHAKEN_LIBS)
 
-TESTS = test/test_sofia_funcs.sh test/test_nuafail test/test_string_stream_mem_leak
+test_test_refresh_diag_SOURCES = test/test_refresh_diag.c
+test_test_refresh_diag_CFLAGS = $(AM_CFLAGS) $(SOFIA_SIP_CFLAGS) $(STIRSHAKEN_CFLAGS) -DSWITCH_TEST_BASE_DIR_FOR_CONF=\"${abs_builddir}/test\" -DSWITCH_TEST_BASE_DIR_OVERRIDE=\"${abs_builddir}/test\"
+if HAVE_STIRSHAKEN
+test_test_refresh_diag_CFLAGS += -DHAVE_STIRSHAKEN
+endif
+test_test_refresh_diag_LDFLAGS = $(AM_LDFLAGS) -avoid-version -no-undefined $(freeswitch_LDFLAGS) -lstdc++ $(switch_builddir)/libfreeswitch.la $(CORE_LIBS) $(APR_LIBS) $(STIRSHAKEN_LIBS)
+test_test_refresh_diag_LDADD = libsofiamod.la prometheus_metrics.o $(SOFIA_SIP_LIBS) $(STIRSHAKEN_LIBS)
+
+TESTS = test/test_sofia_funcs.sh test/test_nuafail test/test_string_stream_mem_leak test/test_refresh_diag
 #TESTS += test/test_run_sipp.sh
 TESTS += test/test_t38_session_refresh.sh
 TESTS += test/test_delayed_offer_media_race.sh
