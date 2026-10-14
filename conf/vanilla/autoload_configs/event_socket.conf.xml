@@ -4,6 +4,8 @@
     <param name="listen-ip" value="::"/>
     <param name="listen-port" value="8021"/>
     <param name="password" value="ClueCon"/>
+    <!-- Optional secondary password accepted alongside the primary during credential rotation -->
+    <!--<param name="secondary-password" value="ClueCon2"/>-->
     <!--<param name="apply-inbound-acl" value="loopback.auto"/>-->
     <!--<param name="stop-on-bind-error" value="true"/>-->
   </settings>
