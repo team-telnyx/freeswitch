@@ -188,6 +188,11 @@ SWITCH_DECLARE(void *) switch_core_media_bug_get_user_data(switch_media_bug_t *b
 	return bug->user_data;
 }
 
+SWITCH_DECLARE(void) switch_core_media_bug_set_user_data(switch_media_bug_t *bug, void *user_data)
+{
+	bug->user_data = user_data;
+}
+
 SWITCH_DECLARE(void) switch_core_media_bug_flush(switch_media_bug_t *bug)
 {
 
@@ -1152,6 +1157,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_transfer_callback(switch_c
 		bp = bp->next;
 
 		if (cur->callback == callback) {
+			void *new_user_data;
+
 			if (last) {
 				old_last_next = last->next;
 				last->next = cur->next;
@@ -1163,8 +1170,10 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_transfer_callback(switch_c
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(orig_session), SWITCH_LOG_DEBUG, "Transfering %s from %s to %s\n", cur->target,
 							  switch_core_session_get_name(orig_session), switch_core_session_get_name(new_session));
 
+			new_user_data = user_data_dup_func(new_session, cur->user_data);
+
 			if ((switch_core_media_bug_add(new_session, cur->function, cur->target, cur->callback,
-										   user_data_dup_func(new_session, cur->user_data),
+										   new_user_data,
 										   cur->stop_time, cur->flags, &new_bug) == SWITCH_STATUS_SUCCESS)) {
 				/* Move the channel-private handle along with the bug. The old
 				 * bug is destroyed below, so a handle left on the old channel
@@ -1175,6 +1184,13 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_transfer_callback(switch_c
 					switch_channel_set_private(orig_session->channel, cur->target, NULL);
 					switch_channel_set_private(new_session->channel, cur->target, new_bug);
 				}
+				/* A sharing dup moved ownership to new_bug, whose session may
+				 * release the object before we destroy this one. A copying dup
+				 * keeps its own and still needs DESTROY_USER_DATA. */
+				if (new_user_data == cur->user_data) {
+					switch_core_media_bug_set_user_data(cur, NULL);
+				}
+
 				switch_core_media_bug_destroy(&cur);
 				total++;
 			} else {
