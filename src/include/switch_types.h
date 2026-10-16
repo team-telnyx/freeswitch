@@ -886,6 +886,7 @@ typedef enum {
 	SWITCH_RTP_FLAG_ICE_NO_RESPONSE_IGNORED,
 	SWITCH_RTP_FLAG_ICE_FAILED,
 	SWITCH_RTP_FLAG_IGNORE_RTP_DURING_DTMF,
+	SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP,
 	SWITCH_RTP_FLAG_INVALID
 } switch_rtp_flag_t;
 
@@ -1713,6 +1714,9 @@ typedef enum {
 	CF_REMOTE_RECOVERED,
 	CF_OBSERVE_INITIATOR,
 	CF_BUNDLE_MEDIA,
+	/* set while the endpoint negotiates an SDP offer from the far end that is not a re-INVITE (an early-dialog UPDATE):
+	 * the core cannot tell it from an early media answer, which comes as SDP_OFFER too */
+	CF_REMOTE_SDP_OFFER,
 	/* WARNING: DO NOT ADD ANY FLAGS BELOW THIS LINE */
 	/* IF YOU ADD NEW ONES CHECK IF THEY SHOULD PERSIST OR ZERO THEM IN switch_core_session.c switch_core_session_request_xml() */
 	CF_FLAG_MAX

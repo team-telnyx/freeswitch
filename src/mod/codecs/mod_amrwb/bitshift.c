@@ -38,16 +38,16 @@
 /*
  * LEFT shift of an entire array of N bits, with N included between 0 and 8
  */
-extern int switch_amr_array_lshift(uint8_t lshift, uint8_t *buf, int a_len)
+extern int amrwb_array_lshift(uint8_t lshift, uint8_t *buf, int a_len)
 {
 	int i = 0;
 	uint8_t first_byte;
 	uint8_t second_byte;
 
-	if (!buf || !a_len)
+	if (!buf || a_len <= 0)
 		return (-1);
 
-	if ((lshift < 0) || (lshift > 8))
+	if (lshift > 8)
 		return (-1);
 
 	first_byte = 0xFF >> lshift;
