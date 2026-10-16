@@ -1905,7 +1905,7 @@ static void ice_controlling_failover_tick(switch_rtp_t *rtp_session, switch_rtp_
 
 static switch_status_t ice_out(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, switch_bool_t force)
 {
-	uint8_t buf[RTP_STUN_PACKET_SIZE] = { 0 };
+	uint8_t buf[RTP_STUN_PACKET_SIZE];
 	switch_stun_packet_t *packet;
 	unsigned int elapsed;
 	switch_size_t bytes;
