@@ -8116,6 +8116,9 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice(switch_rtp_t *rtp_sessio
 	ice->user_ice = switch_core_strdup(rtp_session->pool, user_ice);
 	ice->luser_ice = switch_core_strdup(rtp_session->pool, luser_ice);
 	ice->type = type;
+	if (ice->ice_params != ice_params) {
+		ice->pending_trickle_candidates = 0;
+	}
 	ice->ice_params = ice_params;
 	ice->pass = "";
 	ice->rpass = "";
@@ -14887,6 +14890,8 @@ static switch_status_t switch_rtp_internal_add_remote_candidate(switch_rtp_t *rt
 	ice->ice_params->cand_idx[ice->proto]++;
 	ice->ice_params->cands[idx][ice->proto].con_addr = switch_core_strdup(rtp_session->pool, cand->ip);
 	ice->ice_params->cands[idx][ice->proto].con_port = (switch_port_t)cand->port;
+	ice->ice_params->cands[idx][ice->proto].component_id = cand->component_id;
+	ice->ice_params->cands[idx][ice->proto].ready = 0;
 	ice->ice_params->cands[idx][ice->proto].priority = cand->priority;
 
 	if (cand->foundation[0]) {
@@ -14908,6 +14913,7 @@ static switch_status_t switch_rtp_internal_add_remote_candidate(switch_rtp_t *rt
 	if (cand->rel_port) {
 		ice->ice_params->cands[idx][ice->proto].rport = (switch_port_t)cand->rel_port;
 	}
+	ice->pending_trickle_candidates++;
 
 	switch_mutex_unlock(rtp_session->ice_mutex);
 
@@ -15227,6 +15233,9 @@ SWITCH_DECLARE(void) switch_rtp_prepare_trickle_ice(switch_rtp_t *rtp_session,  
 		ice = &rtp_session->rtcp_ice;
 	}
 
+	if (ice->ice_params != ice_params) {
+		ice->pending_trickle_candidates = 0;
+	}
 	ice->proto = proto;
 	ice->ice_params = ice_params;
 	ice->remote_eoc_received = 0;
@@ -15236,7 +15245,7 @@ SWITCH_DECLARE(void) switch_rtp_prepare_trickle_ice(switch_rtp_t *rtp_session,  
 
 SWITCH_DECLARE(int) switch_rtp_merge_remote_ice_candidates_into_engine(switch_rtp_t *rtp, switch_core_session_t *session, ice_t *ice_in)
 {
-	const switch_rtp_ice_t *ices[2] = { NULL, NULL };
+	switch_rtp_ice_t *ices[2] = { NULL, NULL };
 	const int comp_id_for_ice[2] = { 1, 2 };
 	int added = 0;
 	int i, cid;
@@ -15260,7 +15269,7 @@ SWITCH_DECLARE(int) switch_rtp_merge_remote_ice_candidates_into_engine(switch_rt
 	}
 
 	for (i = 0; i < 2; ++i) {
-		const switch_rtp_ice_t *ice = ices[i];
+		switch_rtp_ice_t *ice = ices[i];
 		int comp_id = comp_id_for_ice[i];
 		uint32_t n, ii;
 
@@ -15320,11 +15329,33 @@ SWITCH_DECLARE(int) switch_rtp_merge_remote_ice_candidates_into_engine(switch_rt
 		next_merge_cand:
 			;
 		}
+
+		if (ice->ice_params == ice_in) {
+			added += ice->pending_trickle_candidates;
+			ice->pending_trickle_candidates = 0;
+		}
 	}
 
 	switch_mutex_unlock(rtp->ice_mutex);
 
 	return added;
+}
+
+SWITCH_DECLARE(void) switch_rtp_invalidate_remote_ice_candidates(switch_rtp_t *rtp, ice_t *ice_params)
+{
+	if (!rtp || !ice_params) {
+		return;
+	}
+
+	switch_mutex_lock(rtp->ice_mutex);
+	if (rtp->ice.ice_params == ice_params) {
+		rtp->ice.pending_trickle_candidates = 0;
+	}
+	if (rtp->rtcp_ice.ice_params == ice_params) {
+		rtp->rtcp_ice.pending_trickle_candidates = 0;
+	}
+	memset(ice_params, 0, sizeof(*ice_params));
+	switch_mutex_unlock(rtp->ice_mutex);
 }
 static inline switch_channel_t *cand_get_channel(const switch_rtp_t *rtp_session)
 {

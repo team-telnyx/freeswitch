@@ -6084,15 +6084,13 @@ static void clear_ice(switch_core_session_t *session, switch_media_type_t type)
 
 	engine = &smh->engines[type];
 
-	engine->ice_in.chosen[0] = 0;
-	engine->ice_in.chosen[1] = 0;
-	engine->ice_in.is_chosen[0] = 0;
-	engine->ice_in.is_chosen[1] = 0;
-	engine->ice_in.cand_idx[0] = 0;
-	engine->ice_in.cand_idx[1] = 0;
 	engine->ice_restart_remote_ufrag = engine->ice_in.ufrag;
 	engine->ice_restart_remote_pwd = engine->ice_in.pwd;
-	memset(&engine->ice_in, 0, sizeof(engine->ice_in));
+	if (engine->rtp_session) {
+		switch_rtp_invalidate_remote_ice_candidates(engine->rtp_session, &engine->ice_in);
+	} else {
+		memset(&engine->ice_in, 0, sizeof(engine->ice_in));
+	}
 	engine->remote_rtcp_port = 0;
 
 	if (engine->rtp_session) {
