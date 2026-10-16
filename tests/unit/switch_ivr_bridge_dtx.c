@@ -249,6 +249,68 @@ FST_SUITE_BEGIN(switch_ivr_bridge_dtx)
 	}
 	FST_TEST_END()
 }
+	/* same codec, but leg B's mode-set lacks leg A's mode: transcoded, and mod_amr's encoder sends no SIDs: fill is kept */
+	FST_TEST_BEGIN(test_native_dtx_refused_passthrough_keeps_generated_fill_amr)
+	{
+		uint32_t read_from_a, written_to_b;
+
+		fst_requires(measure_bridge_ex("null_codec=AMR,rate=8000,null_fmtp=mode-set=7", "null_codec=AMR,rate=8000,null_fmtp=mode-set=2", DTX_PERIOD,
+									   &read_from_a, &written_to_b));
+		fst_requires(read_from_a >= DTX_PERIOD * 2);
+		fst_xcheck(written_to_b * 4 >= read_from_a * 3, "generated fill keeps leg B continuous");
+	}
+	FST_TEST_END()
+
+	/* the same for AMR-WB, whose encoder relays the SIDs: no fill */
+	FST_TEST_BEGIN(test_native_dtx_refused_passthrough_relaying_sids_forwards_without_fill)
+	{
+		uint32_t read_from_a, written_to_b;
+
+		fst_requires(measure_bridge_ex("null_codec=AMR-WB,rate=16000,null_fmtp=mode-set=8", "null_codec=AMR-WB,rate=16000,null_fmtp=mode-set=2", DTX_PERIOD,
+									   &read_from_a, &written_to_b));
+		fst_requires(read_from_a >= DTX_PERIOD * 2);
+		fst_check(written_to_b > 0);
+		fst_xcheck(written_to_b * DTX_PERIOD <= read_from_a * 2, "only the forwarded frames reach leg B, no generated fill");
+	}
+	FST_TEST_END()
+
+	/* leg B takes no SIDs: transcoded without them, fill is kept */
+	FST_TEST_BEGIN(test_native_dtx_to_a_leg_without_sids_keeps_generated_fill)
+	{
+		uint32_t read_from_a, written_to_b;
+
+		fst_requires(measure_bridge_ex("null_codec=AMR-WB,rate=16000", "null_codec=AMR-WB,rate=16000,suppress_cng=true", DTX_PERIOD,
+									   &read_from_a, &written_to_b));
+		fst_requires(read_from_a >= DTX_PERIOD * 2);
+		fst_xcheck(written_to_b * 4 >= read_from_a * 3, "generated fill keeps leg B continuous");
+	}
+	FST_TEST_END()
+
+	/* framings differ: transcoded, mod_amr's encoder sends no SIDs: fill is kept */
+	FST_TEST_BEGIN(test_native_dtx_framing_change_keeps_generated_fill_amr)
+	{
+		uint32_t read_from_a, written_to_b;
+
+		fst_requires(measure_bridge_ex("null_codec=AMR,rate=8000,null_fmtp=octet-align=1", "null_codec=AMR,rate=8000,null_fmtp=octet-align=0", DTX_PERIOD,
+									   &read_from_a, &written_to_b));
+		fst_requires(read_from_a >= DTX_PERIOD * 2);
+		fst_xcheck(written_to_b * 4 >= read_from_a * 3, "generated fill keeps leg B continuous");
+	}
+	FST_TEST_END()
+
+	/* the same for AMR-WB, whose encoder relays the SIDs: no fill */
+	FST_TEST_BEGIN(test_native_dtx_framing_change_relaying_sids_forwards_without_fill)
+	{
+		uint32_t read_from_a, written_to_b;
+
+		fst_requires(measure_bridge_ex("null_codec=AMR-WB,rate=16000,null_fmtp=octet-align=1", "null_codec=AMR-WB,rate=16000,null_fmtp=octet-align=0", DTX_PERIOD,
+									   &read_from_a, &written_to_b));
+		fst_requires(read_from_a >= DTX_PERIOD * 2);
+		fst_check(written_to_b > 0);
+		fst_xcheck(written_to_b * DTX_PERIOD <= read_from_a * 2, "only the forwarded frames reach leg B, no generated fill");
+	}
+	FST_TEST_END()
+
 FST_SUITE_END()
 }
 FST_CORE_END()
