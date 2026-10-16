@@ -52,6 +52,10 @@ SWITCH_DECLARE(void) switch_core_session_unset_read_codec(switch_core_session_t 
 	if (mutex) switch_mutex_lock(mutex);
 	session->real_read_codec = session->read_codec = NULL;
 	session->raw_read_frame.codec = session->read_codec;
+	/* audio left for the previous read codec */
+	if (session->raw_read_buffer) {
+		switch_buffer_zero(session->raw_read_buffer);
+	}
 	session->raw_write_frame.codec = session->read_codec;
 	session->enc_read_frame.codec = session->read_codec;
 	session->enc_write_frame.codec = session->read_codec;
@@ -185,6 +189,10 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_set_real_read_codec(switch_c
 		switch_channel_set_variable(channel, "original_read_rate", tmp);
 
 		session->raw_read_frame.codec = session->read_codec;
+		/* audio left for the previous read codec */
+		if (session->raw_read_buffer) {
+			switch_buffer_zero(session->raw_read_buffer);
+		}
 		session->raw_write_frame.codec = session->read_codec;
 		session->enc_read_frame.codec = session->read_codec;
 		session->enc_write_frame.codec = session->read_codec;
@@ -294,6 +302,10 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_set_read_codec(switch_core_s
 		switch_channel_set_variable(channel, "read_rate", tmp);
 
 		session->raw_read_frame.codec = session->read_codec;
+		/* audio left for the previous read codec */
+		if (session->raw_read_buffer) {
+			switch_buffer_zero(session->raw_read_buffer);
+		}
 		session->raw_write_frame.codec = session->read_codec;
 		session->enc_read_frame.codec = session->read_codec;
 		session->enc_write_frame.codec = session->read_codec;
