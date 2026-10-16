@@ -1159,22 +1159,20 @@ static switch_bool_t amr_sid_suppressed(switch_codec_t *codec)
 	return ((smh = switch_core_session_get_media_handle(codec->session)) && switch_media_handle_test_media_flag(smh, SCMF_SUPPRESS_CNG)) ? SWITCH_TRUE : SWITCH_FALSE;
 }
 
-/* "passes_to": payloads from this codec's peer pass untranscoded to other's peer (same implementation) if every
- * mode we answered is in other's mode-set, and other takes SID frames or this peer sends none. Else "false_no_dtx":
- * the encoder sends no SID frames */
-static const char *amr_passes_to(switch_codec_t *codec, struct amr_context *context, switch_codec_t *other)
+/* payloads from this codec's peer pass untranscoded to other's peer (same implementation): every mode we
+ * answered is in other's mode-set, and other takes SID frames or this peer sends none */
+static switch_bool_t amr_passes_to(switch_codec_t *codec, struct amr_context *context, switch_codec_t *other)
 {
 	struct amr_context *other_context = other->private_info;
 
 	if (!other_context || other_context->destroyed) {
-		return "true";
+		return SWITCH_TRUE;
 	}
-	if ((other_context->peer_modes && (context->framing.answer_modes & ~other_context->peer_modes)) ||
-		(amr_sid_suppressed(other) && !amr_sid_suppressed(codec))) {
-		return "false_no_dtx";
+	if (other_context->peer_modes && (context->framing.answer_modes & ~other_context->peer_modes)) {
+		return SWITCH_FALSE;
 	}
 
-	return "true";
+	return (amr_sid_suppressed(other) && !amr_sid_suppressed(codec)) ? SWITCH_FALSE : SWITCH_TRUE;
 }
 
 static switch_status_t switch_amr_control(switch_codec_t *codec,
@@ -1214,7 +1212,11 @@ static switch_status_t switch_amr_control(switch_codec_t *codec,
 									   framing.period != context->framing.period || framing.returned != context->framing.returned) ? "true" : "false");
 			} else if (!zstr(command) && !strcasecmp(command, "passes_to") && cmd_arg && rtype && ret_data) {
 				*rtype = SCCT_STRING;
-				*ret_data = (void *) amr_passes_to(codec, context, (switch_codec_t *) cmd_arg);
+				*ret_data = (void *) (amr_passes_to(codec, context, (switch_codec_t *) cmd_arg) ? "true" : "false");
+			} else if (!zstr(command) && !strcasecmp(command, "transcodes_dtx_to") && rtype && ret_data) {
+				/* the encoder sends no SID frames */
+				*rtype = SCCT_STRING;
+				*ret_data = (void *) "false";
 			}
 		}
 		break;

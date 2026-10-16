@@ -280,10 +280,10 @@ SWITCH_DECLARE(uint32_t) switch_core_media_bug_count(switch_core_session_t *orig
 SWITCH_DECLARE(switch_bool_t) switch_core_media_bug_tap_only(switch_core_session_t *orig_session);
 
 /*!
-  \brief Check whether the session's last write transcoded a frame of its own codec without its silence descriptors
+  \brief Check whether the session's writes lose the silence descriptors of the frames they transcode
   \param session the session to check
-  \return SWITCH_TRUE when the frame's codec refused to pass it unchanged (SWITCH_CODEC_FLAG_CHECK_PASSTHROUGH) and
-          the re-encoded stream carries no silence descriptors
+  \return SWITCH_TRUE when the last frame transcoded between two codecs with SWITCH_CODEC_FLAG_CHECK_PASSTHROUGH
+          was re-encoded without its silence descriptors ("transcodes_dtx_to")
 */
 SWITCH_DECLARE(switch_bool_t) switch_core_session_write_drops_native_dtx(switch_core_session_t *session);
 SWITCH_DECLARE(void) switch_media_bug_set_spy_fmt(switch_media_bug_t *bug, switch_vid_spy_fmt_t spy_fmt);

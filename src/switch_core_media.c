@@ -19750,21 +19750,14 @@ SWITCH_DECLARE(switch_msrp_session_t *) switch_core_media_get_msrp_session(switc
 }
 
 
-/* payloads of one codec may pass untranscoded to another of the same implementation, unless the codec says otherwise */
-static switch_bool_t codec_passes_to(switch_codec_t *from, switch_codec_t *to, int *drops_native_dtx)
+/* SWITCH_CODEC_FLAG_CHECK_PASSTHROUGH: the codec's answer to command about to, FALSE only if it says "false" */
+static switch_bool_t codec_answers_true(switch_codec_t *from, switch_codec_t *to, const char *command)
 {
 	switch_codec_control_type_t rtype = SCCT_NONE;
 	void *ret = NULL;
 
-	*drops_native_dtx = 0;
-	if (from == to || !switch_test_flag(from, SWITCH_CODEC_FLAG_CHECK_PASSTHROUGH) ||
-		switch_core_codec_control(from, SCC_CODEC_SPECIFIC, SCCT_STRING, (void *) "passes_to", SCCT_NONE, to, &rtype, &ret) != SWITCH_STATUS_SUCCESS ||
-		rtype != SCCT_STRING || !ret || strncmp((const char *) ret, "false", 5)) {
-		return SWITCH_TRUE;
-	}
-	*drops_native_dtx = !strcmp((const char *) ret, "false_no_dtx");
-
-	return SWITCH_FALSE;
+	return (switch_core_codec_control(from, SCC_CODEC_SPECIFIC, SCCT_STRING, (void *) command, SCCT_NONE, to, &rtype, &ret) == SWITCH_STATUS_SUCCESS &&
+			rtype == SCCT_STRING && ret && !strcmp((const char *) ret, "false")) ? SWITCH_FALSE : SWITCH_TRUE;
 }
 
 SWITCH_DECLARE(switch_bool_t) switch_core_session_write_drops_native_dtx(switch_core_session_t *session)
@@ -19884,8 +19877,14 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 			}
 		}
 		need_codec = TRUE;
-	} else if (frame->codec && !codec_passes_to(frame->codec, session->write_codec, &session->write_drops_native_dtx)) {
+	} else if (frame->codec && frame->codec != session->write_codec && switch_test_flag(frame->codec, SWITCH_CODEC_FLAG_CHECK_PASSTHROUGH) &&
+			   !codec_answers_true(frame->codec, session->write_codec, "passes_to")) {
 		need_codec = TRUE;
+	}
+
+	if (frame->codec && frame->codec != session->write_codec && switch_test_flag(frame->codec, SWITCH_CODEC_FLAG_CHECK_PASSTHROUGH) &&
+		switch_test_flag(session->write_codec, SWITCH_CODEC_FLAG_CHECK_PASSTHROUGH)) {
+		session->write_drops_native_dtx = need_codec && !codec_answers_true(frame->codec, session->write_codec, "transcodes_dtx_to");
 	}
 
 	if (session->write_codec && !frame->codec) {

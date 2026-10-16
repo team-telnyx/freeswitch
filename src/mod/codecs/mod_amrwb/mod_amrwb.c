@@ -470,23 +470,20 @@ static switch_bool_t amrwb_sid_suppressed(switch_codec_t *codec)
 	return ((smh = switch_core_session_get_media_handle(codec->session)) && switch_media_handle_test_media_flag(smh, SCMF_SUPPRESS_CNG)) ? SWITCH_TRUE : SWITCH_FALSE;
 }
 
-/* "passes_to": payloads from this codec's peer pass untranscoded to other's peer (same implementation) if every
- * mode we answered is in other's mode-set, and other takes SID frames or this peer sends none. Else "false" (the
- * encoder relays the SID frames), or "false_no_dtx" when other takes none */
-static const char *amrwb_passes_to(switch_codec_t *codec, struct amrwb_context *context, switch_codec_t *other)
+/* payloads from this codec's peer pass untranscoded to other's peer (same implementation): every mode we
+ * answered is in other's mode-set, and other takes SID frames or this peer sends none */
+static switch_bool_t amrwb_passes_to(switch_codec_t *codec, struct amrwb_context *context, switch_codec_t *other)
 {
 	struct amrwb_context *other_context = other->private_info;
-	switch_bool_t other_sid_suppressed;
 
 	if (!other_context || other_context->destroyed) {
-		return "true";
+		return SWITCH_TRUE;
 	}
-	other_sid_suppressed = amrwb_sid_suppressed(other);
 	if (other_context->peer_modes && (context->framing.answer_modes & ~other_context->peer_modes)) {
-		return other_sid_suppressed ? "false_no_dtx" : "false";
+		return SWITCH_FALSE;
 	}
 
-	return (other_sid_suppressed && !amrwb_sid_suppressed(codec)) ? "false_no_dtx" : "true";
+	return (amrwb_sid_suppressed(other) && !amrwb_sid_suppressed(codec)) ? SWITCH_FALSE : SWITCH_TRUE;
 }
 
 /* the SID the other leg decoded into decoded_data replaces frame (storage format) */
@@ -1250,7 +1247,13 @@ static switch_status_t switch_amrwb_control(switch_codec_t *codec,
 									   framing.period != context->framing.period || framing.returned != context->framing.returned) ? "true" : "false");
 			} else if (!zstr(command) && !strcasecmp(command, "passes_to") && cmd_arg && rtype && ret_data) {
 				*rtype = SCCT_STRING;
-				*ret_data = (void *) amrwb_passes_to(codec, context, (switch_codec_t *) cmd_arg);
+				*ret_data = (void *) (amrwb_passes_to(codec, context, (switch_codec_t *) cmd_arg) ? "true" : "false");
+			} else if (!zstr(command) && !strcasecmp(command, "transcodes_dtx_to") && cmd_arg && rtype && ret_data) {
+				switch_codec_t *other = (switch_codec_t *) cmd_arg;
+
+				/* the encoder of an AMR-WB leg that takes SID frames relays ours */
+				*rtype = SCCT_STRING;
+				*ret_data = (void *) ((other->implementation->init == codec->implementation->init && !amrwb_sid_suppressed(other)) ? "true" : "false");
 			}
 		}
 		break;

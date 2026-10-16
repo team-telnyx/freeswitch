@@ -144,7 +144,7 @@ struct switch_core_session {
 	 * bit under bug_rwlock could concurrently clobber flags written under the
 	 * session rwlock (e.g. SSF_DESTROYED). */
 	int bug_tap_only;
-	/* the last frame of the write codec's own implementation was transcoded without its silence descriptors */
+	/* the last frame transcoded between two codecs with SWITCH_CODEC_FLAG_CHECK_PASSTHROUGH lost its silence descriptors */
 	int write_drops_native_dtx;
 	switch_app_log_t *app_log;
 	uint32_t stack_count;

@@ -697,6 +697,15 @@ static const char *amr_passes_to(switch_codec_t *codec, switch_codec_t *other)
 	return rtype == SCCT_STRING ? (const char *) ret : NULL;
 }
 
+static const char *amr_transcodes_dtx_to(switch_codec_t *codec, switch_codec_t *other)
+{
+	switch_codec_control_type_t rtype = SCCT_NONE;
+	void *ret = NULL;
+
+	switch_core_codec_control(codec, SCC_CODEC_SPECIFIC, SCCT_STRING, (void *) "transcodes_dtx_to", SCCT_NONE, other, &rtype, &ret);
+	return rtype == SCCT_STRING ? (const char *) ret : NULL;
+}
+
 static switch_io_write_frame_t amr_null_write = NULL;
 static unsigned char amr_written[SWITCH_RECOMMENDED_BUFFER_SIZE];
 static uint32_t amr_written_len = 0;
@@ -2505,7 +2514,7 @@ FST_CORE_BEGIN(".")
 		{
 			switch_codec_t from = { 0 }, to = { 0 };
 			const char *to_fmtps[] = { "octet-align=1; mode-set=2", "octet-align=1; mode-set=2,7", "octet-align=1" };
-			const char *expected[] = { "false_no_dtx", "true", "true" };
+			const char *expected[] = { "false", "true", "true" };
 			int i;
 
 			fst_requires(amr_init(&from, "octet-align=1; mode-set=7", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
@@ -2541,8 +2550,10 @@ FST_CORE_BEGIN(".")
 			fst_requires(amr_init(&to, "octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
 								  switch_core_session_get_pool(fst_session)) == SWITCH_STATUS_SUCCESS);
 			fst_check_string_equals(amr_passes_to(&from, &to), "true");
+			fst_check_string_equals(amr_transcodes_dtx_to(&from, &to), "false");
 			switch_channel_set_variable(switch_core_session_get_channel(fst_session), "suppress_cng", "true");
-			fst_check_string_equals(amr_passes_to(&from, &to), "false_no_dtx");
+			fst_check_string_equals(amr_passes_to(&from, &to), "false");
+			fst_check_string_equals(amr_transcodes_dtx_to(&from, &to), "false");
 			fst_check_string_equals(amr_passes_to(&to, &from), "true");
 			switch_channel_set_variable(switch_core_session_get_channel(fst_session), "suppress_cng", NULL);
 			switch_core_codec_destroy(&to);
