@@ -47,12 +47,10 @@ void refuses(const char* doc)
 	}
 }
 
-// A policy site written with an escape decodes to the same name written
-// plainly. This is the case the fix exists for: the pool policy is authored
-// outside this codebase, and a \u is what a careful generator emits.
+// A name written with an escape decodes to the same name written plainly.
 void test_an_escape_decodes_to_the_plain_name()
 {
-	decodes("{\"k\":\"\\u0064a1\"}", "da1");
+	decodes("{\"k\":\"\\u0078y1\"}", "xy1");
 	decodes("{\"k\":\"\\u0041\"}", "A");
 	decodes("{\"k\":\"\\u0043\\u0041\"}", "CA");
 }
@@ -96,6 +94,27 @@ void test_a_malformed_escape_is_refused()
 	refuses("{\"k\":\"\\q\"}");
 }
 
+// An embedded NUL would cut the value short for a C caller.
+void test_an_escaped_nul_is_refused()
+{
+	refuses("{\"k\":\"ab\\u0000x\"}");
+}
+
+// A decoded control character is escaped again on write, so the output stays JSON.
+void test_a_control_character_round_trips()
+{
+	decodes("{\"k\":\"a\\u0001b\\u001fc\"}", "a\x01" "b\x1f" "c");
+
+	Telnyx::JSON::Object obj;
+	obj["k"] = Telnyx::JSON::String("a\x01" "b\x1f" "c\n");
+	std::stringstream out;
+	Telnyx::JSON::Writer::Write(obj, out);
+	if (out.str().find("\"a\\u0001b\\u001fc\\n\"") == std::string::npos) {
+		std::fprintf(stderr, "unexpected write: %s\n", out.str().c_str());
+		assert(false);
+	}
+}
+
 // The other escapes are untouched by the fix.
 void test_the_other_escapes_still_decode()
 {
@@ -116,6 +135,8 @@ int main()
 	test_a_broken_pair_is_refused();
 	test_a_malformed_escape_is_refused();
 	test_the_other_escapes_still_decode();
+	test_an_escaped_nul_is_refused();
+	test_a_control_character_round_trips();
 	std::printf("telnyx_json: OK\n");
 	return 0;
 }

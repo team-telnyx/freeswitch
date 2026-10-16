@@ -278,10 +278,8 @@ inline void Reader::MatchExpectedString(const std::string& sExpected, InputStrea
 }
 
 
-// Telnyx fork of upstream CAJUN. Upstream left \u unimplemented -- the case
-// label fell through to the throwing default -- so a document carrying one was
-// refused whatever it decoded to, which is a legal document every conforming
-// parser reads.
+// Fork of upstream CAJUN, which left \u unimplemented and refused any document
+// carrying one.
 
 inline int Utf16HexDigit(char c)
 {
@@ -374,6 +372,11 @@ inline void Reader::MatchString(std::string& string, InputStream& inputStream)
                }
                else if (cp >= 0xdc00UL && cp <= 0xdfffUL) {
                   throw ScanException("Unpaired UTF-16 low surrogate in string",
+                                      inputStream.GetLocation());
+               }
+               else if (cp == 0) {
+                  // an embedded NUL would cut the value short for any C caller
+                  throw ScanException("Escaped NUL in string",
                                       inputStream.GetLocation());
                }
                AppendUtf8(string, cp);
