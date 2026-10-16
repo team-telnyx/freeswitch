@@ -154,6 +154,8 @@ struct switch_core_session {
 	uint8_t enc_write_buf[SWITCH_RECOMMENDED_BUFFER_SIZE];
 
 	switch_buffer_t *raw_read_buffer;
+	/* the read codec the audio in raw_read_buffer is for */
+	switch_codec_t *raw_read_buffer_codec;
 	switch_frame_t raw_read_frame;
 	switch_frame_t enc_read_frame;
 	switch_frame_t fork_enc_read_frame;

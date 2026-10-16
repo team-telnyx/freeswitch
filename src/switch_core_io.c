@@ -71,7 +71,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 {
 	switch_io_event_hook_read_frame_t *ptr;
 	switch_status_t status = SWITCH_STATUS_FALSE;
-	int need_codec, perfect, do_bugs = 0, do_resample = 0, is_cng = 0, tap_only = 0, is_inuse = 0;
+	int need_codec, perfect, do_bugs = 0, do_resample = 0, is_cng = 0, tap_only = 0, is_inuse = 0, drain = 0;
 	switch_codec_implementation_t codec_impl;
 	switch_frame_t *fork_frame = NULL;
 	unsigned int flag = 0;
@@ -184,6 +184,21 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 		}
 	}
 
+
+	/* a packet decoded to more than one packet's worth of audio: hand out the rest before reading the next one */
+	if (session->raw_read_buffer && switch_buffer_inuse(session->raw_read_buffer) >= session->read_impl.decoded_bytes_per_packet) {
+		if (session->raw_read_buffer_codec == session->read_codec) {
+			session->raw_read_frame.datalen = 0;
+			session->raw_read_frame.timestamp = 0;
+			session->raw_read_frame.m = SWITCH_FALSE;
+			session->raw_read_frame.flags = 0;
+			*frame = &session->raw_read_frame;
+			status = SWITCH_STATUS_SUCCESS;
+			drain = 1;
+			goto drain;
+		}
+		switch_buffer_zero(session->raw_read_buffer);
+	}
 
 	if (switch_channel_test_flag(session->channel, CF_HOLD)) {
 		switch_yield(session->read_impl.microseconds_per_packet);
@@ -491,7 +506,9 @@ cnt_with_cng:
 
 
 	if (status == SWITCH_STATUS_SUCCESS && need_codec) {
-		switch_frame_t *enc_frame, *read_frame = *frame;
+		switch_frame_t *enc_frame, *read_frame;
+
+		read_frame = *frame;
 
 		switch_set_flag(session, SSF_READ_TRANSCODE);
 
@@ -896,8 +913,13 @@ cnt_with_cng:
 			goto done;
 		}
 
+	  drain:
+		if (drain) {
+			read_frame = *frame;
+		}
+
 		if (session->read_codec) {
-			if (session->read_resampler) {
+			if (session->read_resampler && !drain) {
 				short *data = read_frame->data;
 				uint32_t out_bytes;
 
@@ -944,6 +966,7 @@ cnt_with_cng:
 					status = SWITCH_STATUS_MEMERR;
 					goto done;
 				}
+				session->raw_read_buffer_codec = session->read_codec;
 			}
 
 			if (perfect || switch_buffer_inuse(session->raw_read_buffer) >= session->read_impl.decoded_bytes_per_packet) {
