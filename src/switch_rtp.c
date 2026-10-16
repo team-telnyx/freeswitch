@@ -8116,7 +8116,9 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice(switch_rtp_t *rtp_sessio
 	ice->user_ice = switch_core_strdup(rtp_session->pool, user_ice);
 	ice->luser_ice = switch_core_strdup(rtp_session->pool, luser_ice);
 	ice->type = type;
-	ice->pending_trickle_candidates = 0;
+	if (ice->ice_params != ice_params) {
+		ice->pending_trickle_candidates = 0;
+	}
 	ice->ice_params = ice_params;
 	ice->pass = "";
 	ice->rpass = "";
@@ -15330,8 +15332,8 @@ SWITCH_DECLARE(int) switch_rtp_merge_remote_ice_candidates_into_engine(switch_rt
 
 		if (ice->ice_params == ice_in) {
 			added += ice->pending_trickle_candidates;
+			ice->pending_trickle_candidates = 0;
 		}
-		ice->pending_trickle_candidates = 0;
 	}
 
 	switch_mutex_unlock(rtp->ice_mutex);

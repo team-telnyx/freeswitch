@@ -1732,6 +1732,56 @@ FCT_BGN()
 		}
 		FCT_TEST_END();
 
+		FCT_TEST_BGN(remote_candidate_activation_preserves_same_list_publication)
+		{
+			switch_core_session_t *session = NULL;
+			switch_memory_pool_t *rtp_pool = NULL;
+			switch_rtp_t *rtp = NULL;
+			const char *err = NULL;
+			ice_t candidates;
+			switch_status_t status;
+			int added;
+
+			memset(&candidates, 0, sizeof(candidates));
+			candidates.chosen[0] = candidates.chosen[1] = -1;
+			session = switch_core_session_request_by_name("null", SWITCH_CALL_DIRECTION_OUTBOUND, NULL);
+			fst_requires(session != NULL);
+			fst_requires(switch_core_new_memory_pool(&rtp_pool) == SWITCH_STATUS_SUCCESS);
+			switch_core_memory_pool_set_data(rtp_pool, "__session", session);
+			fst_requires(make_real_rtp(rtp_pool, &rtp, &err) == SWITCH_STATUS_SUCCESS && rtp != NULL);
+			switch_rtp_prepare_trickle_ice(rtp, IPR_RTP, &candidates);
+
+			status = switch_rtp_add_trickle_remote_candidate(rtp, 0, "0",
+				"candidate:rtp 1 udp 1900000001 192.0.2.30 43000 typ host");
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			fst_check(candidates.cand_idx[0] == 1);
+			added = switch_rtp_merge_remote_ice_candidates_into_engine(rtp, session, &candidates);
+			fst_check(added == 1);
+			status = switch_rtp_add_trickle_remote_candidate(rtp, 0, "0",
+				"candidate:rtp2 1 udp 1900000000 192.0.2.31 43002 typ host");
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			fst_check(candidates.cand_idx[0] == 2);
+
+			candidates.chosen[0] = 0;
+			candidates.is_chosen[0] = 1;
+			candidates.cands[0][0].ready = 1;
+
+			status = switch_rtp_activate_ice(rtp, "localUfrag", "remoteUfrag",
+				"test-local-ice-password", "test-remote-ice-password", IPR_RTP,
+				ICE_VANILLA, &candidates);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			added = switch_rtp_merge_remote_ice_candidates_into_engine(rtp, session, &candidates);
+			fst_check(added == 1);
+			fst_check(candidates.cand_idx[0] == 2);
+			added = switch_rtp_merge_remote_ice_candidates_into_engine(rtp, session, &candidates);
+			fst_check(added == 0);
+
+			cleanup_rtp(&rtp);
+			switch_core_destroy_memory_pool(&rtp_pool);
+			switch_core_session_destroy(&session);
+		}
+		FCT_TEST_END();
+
 		FCT_TEST_BGN(remote_candidate_reset_discards_pending_publication)
 		{
 			switch_core_session_t *session = NULL;
@@ -1781,7 +1831,7 @@ FCT_BGN()
 		}
 		FCT_TEST_END();
 
-		FCT_TEST_BGN(remote_candidate_merge_copies_distinct_list_once)
+		FCT_TEST_BGN(remote_candidate_distinct_copy_preserves_owner_publication)
 		{
 			switch_core_session_t *session = NULL;
 			switch_memory_pool_t *rtp_pool = NULL;
@@ -1823,6 +1873,12 @@ FCT_BGN()
 			added = switch_rtp_merge_remote_ice_candidates_into_engine(rtp, session, &target);
 			fst_check(added == 0);
 			fst_check(target.cand_idx[0] == 26);
+			added = switch_rtp_merge_remote_ice_candidates_into_engine(rtp, session, &source);
+			fst_check(added == 26);
+			fst_check(source.cand_idx[0] == 26);
+			fst_check(source.cands[25][0].ready == 0);
+			added = switch_rtp_merge_remote_ice_candidates_into_engine(rtp, session, &source);
+			fst_check(added == 0);
 
 			cleanup_rtp(&rtp);
 			switch_core_destroy_memory_pool(&rtp_pool);
