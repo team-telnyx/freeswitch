@@ -103,6 +103,7 @@ private:
 
    void EatWhiteSpace(InputStream& inputStream);
    void MatchString(std::string& sValue, InputStream& inputStream);
+   unsigned long MatchHex4(InputStream& inputStream);
    void MatchNumber(std::string& sNumber, InputStream& inputStream);
    void MatchExpectedString(const std::string& sExpected, InputStream& inputStream);
 
