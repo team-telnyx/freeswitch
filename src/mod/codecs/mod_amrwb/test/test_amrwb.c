@@ -2672,13 +2672,14 @@ FST_CORE_BEGIN(".")
 			amrwb_check_int(amrwb_stub_reads, 3);
 			amrwb_check_int(total, 9 * 640);
 
-			/* what is left for one read codec is dropped when another one is set */
+			/* what is left for one read codec is dropped when another one is set: the next read reads a packet */
 			fst_check(switch_core_session_read_frame(fst_session, &read, SWITCH_IO_FLAG_NONE, 0) == SWITCH_STATUS_SUCCESS);
-			fst_requires(switch_core_codec_init(&other, "L16", NULL, NULL, 16000, 20, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
+			fst_requires(switch_core_codec_init(&other, "L16", NULL, NULL, 8000, 20, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
 												NULL, switch_core_session_get_pool(fst_session)) == SWITCH_STATUS_SUCCESS);
 			fst_requires(switch_core_session_set_read_codec(fst_session, &other) == SWITCH_STATUS_SUCCESS);
-			fst_check(switch_core_session_read_frame(fst_session, &read, SWITCH_IO_FLAG_NONE, 0) == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_core_session_read_frame(fst_session, &read, SWITCH_IO_FLAG_NONE, 0) == SWITCH_STATUS_SUCCESS && read);
 			amrwb_check_int(amrwb_stub_reads, 5);
+			amrwb_check_int(read ? read->datalen : 0, 320);
 			switch_core_session_set_read_codec(fst_session, NULL);
 			switch_core_codec_destroy(&other);
 

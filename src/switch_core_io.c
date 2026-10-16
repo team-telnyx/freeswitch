@@ -72,7 +72,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 	switch_io_event_hook_read_frame_t *ptr;
 	switch_status_t status = SWITCH_STATUS_FALSE;
 	int need_codec, perfect, do_bugs = 0, do_resample = 0, is_cng = 0, tap_only = 0, is_inuse = 0, drain = 0;
-	switch_codec_implementation_t codec_impl;
+	switch_codec_implementation_t codec_impl = { 0 };
 	switch_frame_t *fork_frame = NULL;
 	unsigned int flag = 0;
 	int i;
@@ -185,25 +185,22 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 	}
 
 
-	/* a packet decoded to more than one packet's worth of audio: hand out the rest before reading the next one */
-	if (session->raw_read_buffer && switch_buffer_inuse(session->raw_read_buffer) >= session->read_impl.decoded_bytes_per_packet) {
-		if (session->raw_read_buffer_codec == session->read_codec) {
-			session->raw_read_frame.datalen = 0;
-			session->raw_read_frame.timestamp = 0;
-			session->raw_read_frame.m = SWITCH_FALSE;
-			session->raw_read_frame.flags = 0;
-			*frame = &session->raw_read_frame;
-			status = SWITCH_STATUS_SUCCESS;
-			drain = 1;
-			goto drain;
-		}
-		switch_buffer_zero(session->raw_read_buffer);
-	}
-
 	if (switch_channel_test_flag(session->channel, CF_HOLD)) {
 		switch_yield(session->read_impl.microseconds_per_packet);
 		status = SWITCH_STATUS_BREAK;
 		goto even_more_done;
+	}
+
+	/* a packet decoded to more than one packet's worth of audio: hand out the rest before reading the next one */
+	if (session->raw_read_buffer && switch_buffer_inuse(session->raw_read_buffer) >= session->read_impl.decoded_bytes_per_packet) {
+		session->raw_read_frame.datalen = 0;
+		session->raw_read_frame.timestamp = 0;
+		session->raw_read_frame.m = SWITCH_FALSE;
+		session->raw_read_frame.flags = 0;
+		*frame = &session->raw_read_frame;
+		status = SWITCH_STATUS_SUCCESS;
+		drain = 1;
+		goto drain;
 	}
 
 	if (session->endpoint_interface->io_routines->read_frame) {
@@ -966,7 +963,6 @@ cnt_with_cng:
 					status = SWITCH_STATUS_MEMERR;
 					goto done;
 				}
-				session->raw_read_buffer_codec = session->read_codec;
 			}
 
 			if (perfect || switch_buffer_inuse(session->raw_read_buffer) >= session->read_impl.decoded_bytes_per_packet) {
@@ -1044,6 +1040,10 @@ cnt_with_cng:
 						session->enc_read_frame.seq = read_frame->seq;
 						session->enc_read_frame.m = read_frame->m;
 						session->enc_read_frame.payload = session->read_impl.ianacode;
+					} else {
+						/* not one packet's audio: the writer stamps it */
+						session->enc_read_frame.timestamp = 0;
+						session->enc_read_frame.m = SWITCH_FALSE;
 					}
 					*frame = &session->enc_read_frame;
 					if (!fork_frame) fork_frame = &session->enc_read_frame;
