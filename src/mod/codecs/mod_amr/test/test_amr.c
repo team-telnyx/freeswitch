@@ -2505,7 +2505,7 @@ FST_CORE_BEGIN(".")
 		{
 			switch_codec_t from = { 0 }, to = { 0 };
 			const char *to_fmtps[] = { "octet-align=1; mode-set=2", "octet-align=1; mode-set=2,7", "octet-align=1" };
-			const char *expected[] = { "false", "true", "true" };
+			const char *expected[] = { "false_no_dtx", "true", "true" };
 			int i;
 
 			fst_requires(amr_init(&from, "octet-align=1; mode-set=7", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
@@ -2542,7 +2542,7 @@ FST_CORE_BEGIN(".")
 								  switch_core_session_get_pool(fst_session)) == SWITCH_STATUS_SUCCESS);
 			fst_check_string_equals(amr_passes_to(&from, &to), "true");
 			switch_channel_set_variable(switch_core_session_get_channel(fst_session), "suppress_cng", "true");
-			fst_check_string_equals(amr_passes_to(&from, &to), "false");
+			fst_check_string_equals(amr_passes_to(&from, &to), "false_no_dtx");
 			fst_check_string_equals(amr_passes_to(&to, &from), "true");
 			switch_channel_set_variable(switch_core_session_get_channel(fst_session), "suppress_cng", NULL);
 			switch_core_codec_destroy(&to);

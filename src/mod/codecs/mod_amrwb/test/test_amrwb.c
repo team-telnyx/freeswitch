@@ -2769,7 +2769,7 @@ FST_CORE_BEGIN(".")
 									switch_core_session_get_pool(fst_session)) == SWITCH_STATUS_SUCCESS);
 			fst_check_string_equals(amrwb_passes_to(&from, &to), "true");
 			switch_channel_set_variable(switch_core_session_get_channel(fst_session), "suppress_cng", "true");
-			fst_check_string_equals(amrwb_passes_to(&from, &to), "false");
+			fst_check_string_equals(amrwb_passes_to(&from, &to), "false_no_dtx");
 			fst_check_string_equals(amrwb_passes_to(&to, &from), "true");
 			switch_channel_set_variable(switch_core_session_get_channel(fst_session), "suppress_cng", NULL);
 			switch_core_codec_destroy(&to);
