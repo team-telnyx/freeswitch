@@ -129,7 +129,7 @@ static struct {
 	char *ip;
 	uint16_t port;
 	char *password;
-	char *secondary_password;	/* optional secondary password accepted during credential rotation */
+	char *secondary_password;	/* optional secondary password for rotation */
 	int done;
 	int threads;
 	char *acl[MAX_ACL];
@@ -171,9 +171,7 @@ SWITCH_DECLARE_GLOBAL_STRING_FUNC(set_pref_ip, prefs.ip);
 SWITCH_DECLARE_GLOBAL_STRING_FUNC(set_pref_pass, prefs.password);
 SWITCH_DECLARE_GLOBAL_STRING_FUNC(set_pref_secondary_pass, prefs.secondary_password);
 
-/* Accept either the primary or the optional secondary ESL password.
-   Guarded by globals.listener_mutex because reload_passwords() can swap the
-   strings at runtime on reloadxml. */
+/* Accept the primary or optional secondary password; locked against reloadxml swaps */
 static switch_bool_t auth_check_password(const char *pass)
 {
 	switch_bool_t ok = SWITCH_FALSE;
@@ -191,10 +189,7 @@ static switch_bool_t auth_check_password(const char *pass)
 	return ok;
 }
 
-/* Re-read only the password params on reloadxml so credential rotation does
-   not require a module reload (which would drop every connected ESL client).
-   Socket settings (listen-ip/port/acl) still require a module reload because
-   the listen socket is already bound. */
+/* Re-read password params on reloadxml so rotation needs no module reload */
 static void reload_passwords(void)
 {
 	char *cf = "event_socket.conf";
@@ -223,7 +218,7 @@ static void reload_passwords(void)
 	if (!zstr(new_primary)) {
 		set_pref_pass(new_primary);
 	}
-	/* Secondary is optional: removing it from config disables it. */
+	/* removing secondary-password from config disables it */
 	if (!zstr(new_secondary)) {
 		set_pref_secondary_pass(new_secondary);
 	} else {

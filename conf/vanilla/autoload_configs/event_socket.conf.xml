@@ -4,10 +4,7 @@
     <param name="listen-ip" value="::"/>
     <param name="listen-port" value="8021"/>
     <param name="password" value="ClueCon"/>
-    <!-- Optional secondary password accepted alongside the primary during credential rotation.
-         "password" and "secondary-password" are re-read on "reloadxml" (existing
-         connections stay up; removing this param disables the secondary).
-         Other settings (listen-ip/port/acl) still require a module reload. -->
+    <!-- Optional secondary password for rotation; passwords are re-read on reloadxml -->
     <!--<param name="secondary-password" value="ClueCon2"/>-->
     <!--<param name="apply-inbound-acl" value="loopback.auto"/>-->
     <!--<param name="stop-on-bind-error" value="true"/>-->
