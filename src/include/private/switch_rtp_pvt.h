@@ -28,6 +28,8 @@ typedef struct {
 		switch_time_t next_run;
 		switch_core_media_ice_type_t type;
 		ice_t *ice_params;
+		ice_t *saved_ice_params;
+		ice_t *saved_ice_source;
 		ice_proto_t proto;
 		uint8_t sending;
 		uint8_t ready;
@@ -122,6 +124,8 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_handle_ice_from(switch_rtp_t *rtp
 SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_get_ice_state(switch_rtp_t *rtp_session, ice_proto_t proto,
 	char *ice_user, switch_size_t ice_user_len, char *local_pwd, switch_size_t local_pwd_len,
 	char *remote_pwd, switch_size_t remote_pwd_len, switch_bool_t *has_addr);
+SWITCH_DECLARE(void) switch_rtp_pvt_clear_ice_params(switch_rtp_t *rtp_session, ice_t *shared_params,
+	char **remote_ufrag, char **remote_pwd);
 SWITCH_DECLARE(void) switch_rtp_pvt_reset_ice(switch_rtp_t *rtp_session, ice_t *shared_params);
 SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_ice_restart_pending(switch_rtp_t *rtp_session);
 
