@@ -171,13 +171,71 @@ SWITCH_DECLARE_GLOBAL_STRING_FUNC(set_pref_ip, prefs.ip);
 SWITCH_DECLARE_GLOBAL_STRING_FUNC(set_pref_pass, prefs.password);
 SWITCH_DECLARE_GLOBAL_STRING_FUNC(set_pref_secondary_pass, prefs.secondary_password);
 
-/* Accept either the primary or the optional secondary ESL password */
+/* Accept either the primary or the optional secondary ESL password.
+   Guarded by globals.listener_mutex because reload_passwords() can swap the
+   strings at runtime on reloadxml. */
 static switch_bool_t auth_check_password(const char *pass)
 {
+	switch_bool_t ok = SWITCH_FALSE;
+
 	if (zstr(pass)) return SWITCH_FALSE;
-	if (prefs.password && !strcmp(prefs.password, pass)) return SWITCH_TRUE;
-	if (!zstr(prefs.secondary_password) && !strcmp(prefs.secondary_password, pass)) return SWITCH_TRUE;
-	return SWITCH_FALSE;
+
+	switch_mutex_lock(globals.listener_mutex);
+	if (prefs.password && !strcmp(prefs.password, pass)) {
+		ok = SWITCH_TRUE;
+	} else if (!zstr(prefs.secondary_password) && !strcmp(prefs.secondary_password, pass)) {
+		ok = SWITCH_TRUE;
+	}
+	switch_mutex_unlock(globals.listener_mutex);
+
+	return ok;
+}
+
+/* Re-read only the password params on reloadxml so credential rotation does
+   not require a module reload (which would drop every connected ESL client).
+   Socket settings (listen-ip/port/acl) still require a module reload because
+   the listen socket is already bound. */
+static void reload_passwords(void)
+{
+	char *cf = "event_socket.conf";
+	switch_xml_t cfg, xml, settings, param;
+	const char *new_primary = NULL, *new_secondary = NULL;
+
+	if (!(xml = switch_xml_open_cfg(cf, &cfg, NULL))) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Open of %s failed, passwords unchanged\n", cf);
+		return;
+	}
+
+	if ((settings = switch_xml_child(cfg, "settings"))) {
+		for (param = switch_xml_child(settings, "param"); param; param = param->next) {
+			const char *var = switch_xml_attr_soft(param, "name");
+			const char *val = switch_xml_attr_soft(param, "value");
+
+			if (!strcmp(var, "password")) {
+				new_primary = val;
+			} else if (!strcmp(var, "secondary-password")) {
+				new_secondary = val;
+			}
+		}
+	}
+
+	switch_mutex_lock(globals.listener_mutex);
+	if (!zstr(new_primary)) {
+		set_pref_pass(new_primary);
+	}
+	/* Secondary is optional: removing it from config disables it. */
+	if (!zstr(new_secondary)) {
+		set_pref_secondary_pass(new_secondary);
+	} else {
+		switch_safe_free(prefs.secondary_password);
+	}
+	switch_mutex_unlock(globals.listener_mutex);
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+		"event_socket passwords re-read from config (secondary %s)\n",
+		zstr(new_secondary) ? "disabled" : "enabled");
+
+	switch_xml_free(xml);
 }
 
 static void *SWITCH_THREAD_FUNC listener_run(switch_thread_t *thread, void *obj);
@@ -372,6 +430,10 @@ static void event_handler(switch_event_t *event)
 	switch_status_t qstatus;
 
 	switch_assert(event != NULL);
+
+	if (event->event_id == SWITCH_EVENT_RELOADXML) {
+		reload_passwords();
+	}
 
 	if (!listen_list.ready) {
 		return;
