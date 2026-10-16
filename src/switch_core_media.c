@@ -7113,7 +7113,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 	switch_port_t audio_port = 0, video_port = 0;
 	int amrwb_offerings_n = 0, amr_offerings_n = 0;
 	//int amrwb_offerings_rejected_n = 0,
-	int amr_offerings_rejected_n = 0;
+	int amr_offerings_seen = 0, amr_offerings_matched = 0;
 
 	switch_assert(session);
 
@@ -7579,6 +7579,8 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 			 */
 			int partner_driven = switch_channel_test_flag(session->channel, CF_AWAITING_STREAM_CHANGE);
 
+			/* invite-prefer: AMR payload types of this m-line */
+			amr_offerings_n = amr_offerings_seen = amr_offerings_matched = 0;
 			nm_idx = 0;
 			m_idx = 0;
 			memset(matches, 0, sizeof(matches[0]) * MAX_MATCHES);
@@ -7934,6 +7936,21 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 				fmtp_remote_codec_rate = 0;
 				memset(&codec_fmtp, 0, sizeof(codec_fmtp));
 
+				/* AMR payload types without an fmtp count as well */
+				if (!strcasecmp(map->rm_encoding, "AMR")) {
+					if (!amr_offerings_n) {
+						sdp_rtpmap_t *mp = NULL;
+						for (mp = m->m_rtpmaps; mp; mp = mp->rm_next) {
+							if (!strcasecmp(mp->rm_encoding, "AMR")) {
+								++amr_offerings_n;
+							}
+						}
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "There is %d AMR rtpmap%s\n",
+								amr_offerings_n, amr_offerings_n == 1 ? "" : "s");
+					}
+					amr_offerings_seen++;
+				}
+
 				/*
 				 * AMR / AMR-WB answer to our offer that leaves out octet-align: it is the one we offered on that
 				 * payload type, as our last SDP states it (RFC 4867 8.3.1 wants it returned unmodified; many
@@ -7980,17 +7997,6 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 								amrwb_offerings_n, amrwb_offerings_n == 1 ? "" : "s");
 					}
 
-					if (!strcasecmp(map->rm_encoding, "AMR") && !amr_offerings_n) {
-						sdp_rtpmap_t *mp = NULL;
-						for (mp = m->m_rtpmaps; mp; mp = mp->rm_next) {
-							if (!strcasecmp(mp->rm_encoding, "AMR")) {
-								++amr_offerings_n;
-							}
-						}
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "There is %d AMR rtpmap%s\n",
-								amr_offerings_n, amr_offerings_n == 1 ? "" : "s");
-					}
-
 					s = switch_core_codec_parse_fmtp(map->rm_encoding, map->rm_fmtp, map->rm_rate, &codec_fmtp);
 					if (s == SWITCH_STATUS_SUCCESS) {
 						if (codec_fmtp.bits_per_second) {
@@ -8018,6 +8024,8 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 					const switch_codec_implementation_t *imp = codec_array[i];
 					uint32_t bit_rate = imp->bits_per_second;
 					uint32_t codec_rate = imp->samples_per_second;
+					/* the AMR checks below decide alone: the generic fmtp check must not match again what they refused */
+					int amr_decided = 0;
 
 					if (imp->codec_type != SWITCH_CODEC_TYPE_AUDIO) {
 						continue;
@@ -8057,9 +8065,27 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 							}
 						}
 					} else if (!strcasecmp(map->rm_encoding, "AMR")) {
-						if (amr_offerings_n > 1) {
-							if (amr_offerings_rejected_n + 1 < amr_offerings_n) {
-								if (SWITCH_STATUS_IGNORE == switch_core_codec_parse_fmtp(map->rm_encoding, map->rm_fmtp, map->rm_rate, &codec_fmtp)) {
+						amr_decided = 1;
+						if (!strcasecmp(imp->iananame, "AMR") && imp->matches_fmtp) {
+							/* the offered framing and options decide the implementation, as for AMR-WB; so a
+							 * dynamic payload type below 96 is matched as well */
+							if (!match && map->rm_pt < 96 &&
+								(remote_codec_rate == codec_rate || fmtp_remote_codec_rate == imp->actual_samples_per_second)) {
+								match = 1;
+							}
+							if (match && SWITCH_STATUS_SUCCESS != imp->matches_fmtp(map->rm_fmtp, imp->fmtp)) {
+								match = 0;
+							}
+							/*
+							 * invite-prefer-oa/-be: the codec skips (IGNORE) payload types of the other framing,
+							 * unless this is the last AMR one and none matched before
+							 */
+							if (match && amr_offerings_n > 1 && (amr_offerings_seen < amr_offerings_n || amr_offerings_matched)) {
+								switch_codec_fmtp_t prefer_fmtp = { 0 };
+
+								/* a payload type without an fmtp is offered too: the codec gets an empty parameter list */
+								if (SWITCH_STATUS_IGNORE == switch_core_codec_parse_fmtp(map->rm_encoding, zstr(map->rm_fmtp) ? ";" : map->rm_fmtp,
+																						 map->rm_rate, &prefer_fmtp)) {
 									match = 0;
 								}
 							}
@@ -8069,7 +8095,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 					/*
 					 * Check codec fmtp compatibility.
 					 */
-					if (!match && imp->matches_fmtp && !strcasecmp(map->rm_encoding, imp->iananame)) {
+					if (!match && !amr_decided && imp->matches_fmtp && !strcasecmp(map->rm_encoding, imp->iananame)) {
 						if (SWITCH_STATUS_SUCCESS != imp->matches_fmtp(map->rm_fmtp, imp->fmtp)) {
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 								"Codec Match FAILED: fmtp mismatch [%s:%d] remote_fmtp=[%s] local_fmtp=[%s]\n",
@@ -8144,6 +8170,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 
 						if (!strcasecmp(map->rm_encoding, "AMR")) {
 							amr_matched = 1;
+							amr_offerings_matched = 1;
 						}
 
 						if (m_idx >= MAX_MATCHES) {
@@ -8163,7 +8190,6 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 
 				// Count rejected AMR-WB offerings
 				if (!amr_matched && !strcasecmp(map->rm_encoding, "AMR")) {
-					++amr_offerings_rejected_n;
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "AMR codec [%s:%d:%u:%d] rejected\n",
 							rm_encoding, map->rm_pt, (int) remote_codec_rate, codec_ms);
 				}

@@ -1,19 +1,31 @@
 <configuration name="amr.conf">
 	<settings>
-	<!-- AMR modes (supported bitrates) :
-                 mode   0     AMR 4.75  kbps
-                 mode   1     AMR 5.15  kbps
-                 mode   2     AMR 5.9 kbps
-                 mode   3     AMR 6.7 kbps
-                 mode   4     AMR 7.4  kbps
-                 mode   5     AMR 7.95 kbps 
-                 mode   6     AMR 10.2 kbps 
-                 mode   7     AMR 12.2 kbps
-        -->
-	<param name="default-bitrate" value="7"/> 
-	<!-- Enable VoLTE specific FMTP -->
-	<param name="volte" value="0"/>
-	<!-- Enable automatic bitrate variation during the call based on RTCP feedback -->
-	<param name="adjust-bitrate" value="0"/> 
-  </settings>
+		<!-- AMR modes:
+			mode 0  4.75 kbit/s      mode 4   7.40 kbit/s
+			mode 1  5.15 kbit/s      mode 5   7.95 kbit/s
+			mode 2  5.90 kbit/s      mode 6  10.2  kbit/s
+			mode 3  6.70 kbit/s      mode 7  12.2  kbit/s
+		     on/off values: true/false, on/off, yes/no, 1/0
+		     every parameter is described at the top of mod_amr.c -->
+		<!-- offered, and answered to offers without mode-set, when no mode-set is configured -->
+		<param name="default-bitrate" value="7"/>
+		<!--param name="mode-set" value="0,1,2"/-->
+		<!-- answer our mode-set instead of the offered one (not RFC 4867) -->
+		<!--param name="mode-set-overwrite" value="0"/-->
+		<!--param name="mode-set-overwrite-with-default-bitrate" value="1"/-->
+		<!-- VoLTE parameters in the fmtp: max-red=0; mode-change-capability=2 -->
+		<param name="volte" value="0"/>
+		<!-- vary the bitrate within the mode-set according to RTCP feedback -->
+		<param name="adjust-bitrate" value="0"/>
+		<!-- octet aligned when the far end does not state octet-align, in offers and answers (interop only) -->
+		<!--param name="force-oa" value="0"/-->
+		<!--param name="force-be" value="0"/-->
+		<!-- of an offer with several AMR payload types, skip the other framing -->
+		<!--param name="invite-prefer-oa" value="0"/-->
+		<!--param name="invite-prefer-be" value="0"/-->
+		<!--param name="debug" value="0"/-->
+		<!-- appended to the fmtp; for a=silenceSupp:off use silence-supp-off -->
+		<!--param name="fmtp-extra" value=""/-->
+		<!--param name="silence-supp-off" value="0"/-->
+	</settings>
 </configuration>
