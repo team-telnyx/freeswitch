@@ -19750,6 +19750,20 @@ SWITCH_DECLARE(switch_msrp_session_t *) switch_core_media_get_msrp_session(switc
 }
 
 
+/* payloads of one codec may pass untranscoded to another of the same implementation, unless the codec says otherwise */
+static switch_bool_t codec_passes_to(switch_codec_t *from, switch_codec_t *to)
+{
+	switch_codec_control_type_t rtype = SCCT_NONE;
+	void *ret = NULL;
+
+	if (from == to || !switch_test_flag(from, SWITCH_CODEC_FLAG_CHECK_PASSTHROUGH)) {
+		return SWITCH_TRUE;
+	}
+
+	return !(switch_core_codec_control(from, SCC_CODEC_SPECIFIC, SCCT_STRING, (void *) "passes_to", SCCT_NONE, to, &rtype, &ret) == SWITCH_STATUS_SUCCESS &&
+			 rtype == SCCT_STRING && ret && !strcmp((const char *) ret, "false"));
+}
+
 SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_session_t *session, switch_frame_t *frame, switch_io_flag_t flags,
 																int stream_id)
 {
@@ -19861,6 +19875,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 				switch_core_session_start_audio_write_thread(session);
 			}
 		}
+		need_codec = TRUE;
+	} else if (frame->codec && !codec_passes_to(frame->codec, session->write_codec)) {
 		need_codec = TRUE;
 	}
 

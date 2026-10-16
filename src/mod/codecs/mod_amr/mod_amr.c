@@ -49,7 +49,9 @@
  * a mode-set without a mode 0-7, are not matched; other entries of a mode-set are dropped. Answers
  * always state octet-align, return crc and robust-sorting as offered (0), and leave out other
  * offered parameters. A codec runs on the implementation of the format it uses, so the core
- * transcodes between legs whose formats differ. Built without opencore-amrnb (AMR_PASSTHROUGH),
+ * transcodes between legs whose formats differ. Legs on the same implementation pass payloads as they
+ * are, unless the other leg's mode-set lacks a mode we answered, or it takes no SID frames and this one
+ * may send them: then they are transcoded. Built without opencore-amrnb (AMR_PASSTHROUGH),
  * the module only relays payloads: one payload type is offered and amr.conf is not read.
  *
  * A payload may carry up to 12 frames (240 ms, the maxptime TS 26.114 offers; RFC 4867 sets no
@@ -908,7 +910,7 @@ static switch_status_t switch_amr_init(switch_codec_t *codec, switch_codec_flag_
 		amr_fmtp_framing(codec->fmtp_in, &context->framing);
 		context->cur_mode = SWITCH_AMR_CMR_NONE;
 		context->destroyed = SWITCH_FALSE;
-		codec->flags |= SWITCH_CODEC_FLAG_NATIVE_DTX;
+		codec->flags |= SWITCH_CODEC_FLAG_NATIVE_DTX | SWITCH_CODEC_FLAG_CHECK_PASSTHROUGH;
 		codec->private_info = context;
 
 		/* after a reset the encoder goes on from the mode it sent (mode-change-neighbor and
@@ -1139,6 +1141,40 @@ decode_error:
 }
 
 #ifndef AMR_PASSTHROUGH
+/* SID frames not wanted toward this codec's peer: silence-supp-off, or suppress_cng on its session */
+static switch_bool_t amr_sid_suppressed(switch_codec_t *codec)
+{
+	switch_media_handle_t *smh;
+
+	if (globals.silence_supp_off) {
+		return SWITCH_TRUE;
+	}
+	if (!codec->session) {
+		return SWITCH_FALSE;
+	}
+	if (switch_channel_var_true(switch_core_session_get_channel(codec->session), "suppress_cng")) {
+		return SWITCH_TRUE;
+	}
+
+	return ((smh = switch_core_session_get_media_handle(codec->session)) && switch_media_handle_test_media_flag(smh, SCMF_SUPPRESS_CNG)) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
+/* payloads from this codec's peer pass untranscoded to other's peer (same implementation): every mode we
+ * answered is in other's mode-set, and other takes SID frames or this peer sends none */
+static switch_bool_t amr_passes_to(switch_codec_t *codec, struct amr_context *context, switch_codec_t *other)
+{
+	struct amr_context *other_context = other->private_info;
+
+	if (!other_context || other_context->destroyed) {
+		return SWITCH_TRUE;
+	}
+	if (other_context->peer_modes && (context->framing.answer_modes & ~other_context->peer_modes)) {
+		return SWITCH_FALSE;
+	}
+
+	return (amr_sid_suppressed(other) && !amr_sid_suppressed(codec)) ? SWITCH_FALSE : SWITCH_TRUE;
+}
+
 static switch_status_t switch_amr_control(switch_codec_t *codec,
 										   switch_codec_control_command_t cmd,
 										   switch_codec_control_type_t ctype,
@@ -1174,6 +1210,9 @@ static switch_status_t switch_amr_control(switch_codec_t *codec,
 				*ret_data = (void *) ((framing.octet_align != context->framing.octet_align || framing.answer_modes != context->framing.answer_modes ||
 									   framing.enc_modes != context->framing.enc_modes || framing.neighbor != context->framing.neighbor ||
 									   framing.period != context->framing.period || framing.returned != context->framing.returned) ? "true" : "false");
+			} else if (!zstr(command) && !strcasecmp(command, "passes_to") && cmd_arg && rtype && ret_data) {
+				*rtype = SCCT_STRING;
+				*ret_data = (void *) (amr_passes_to(codec, context, (switch_codec_t *) cmd_arg) ? "true" : "false");
 			}
 		}
 		break;
