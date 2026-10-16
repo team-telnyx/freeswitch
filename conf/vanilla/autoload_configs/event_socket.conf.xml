@@ -4,7 +4,10 @@
     <param name="listen-ip" value="::"/>
     <param name="listen-port" value="8021"/>
     <param name="password" value="ClueCon"/>
-    <!-- Optional secondary password accepted alongside the primary during credential rotation -->
+    <!-- Optional secondary password accepted alongside the primary during credential rotation.
+         Note: this config is read only at module load; changes require
+         "reload mod_event_socket" (disconnects all connected ESL clients) or a restart.
+         "reloadxml" alone has no effect. -->
     <!--<param name="secondary-password" value="ClueCon2"/>-->
     <!--<param name="apply-inbound-acl" value="loopback.auto"/>-->
     <!--<param name="stop-on-bind-error" value="true"/>-->
