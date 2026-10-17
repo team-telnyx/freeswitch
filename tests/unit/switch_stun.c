@@ -174,7 +174,7 @@ FST_TEARDOWN_END()
 		ice.controlling_failover_state = SWITCH_RTP_ICE_CONTROLLING_FAILOVER_PROBING;
 		ice.controlling_failover_local_port = 27018;
 		ice.controlling_failover_local_family = AF_INET;
-		ice.controlling_failover_socket = local_socket;
+		ice.controlling_failover_receive_socket = local_socket;
 		memcpy(ice.controlling_failover_probe_id, probe_id, 12);
 		memcpy(ice.controlling_failover_nomination_id, nomination_id, 12);
 
@@ -289,7 +289,7 @@ FST_TEARDOWN_END()
 		ice.controlling_failover_idx = 1;
 		ice.controlling_failover_local_port = 27018;
 		ice.controlling_failover_local_family = AF_INET;
-		ice.controlling_failover_socket = local_socket;
+		ice.controlling_failover_receive_socket = local_socket;
 		memcpy(ice.controlling_failover_probe_id, probe_id, 12);
 		fst_check(!switch_rtp_pvt_ice_role_conflict_response_matches(&ice, alternative_addr, 1,
 			probe_id, SWITCH_TRUE, local_socket, 27019, AF_INET, &sent_controlling));
