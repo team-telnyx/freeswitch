@@ -6811,8 +6811,8 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 	switch_bool_t preserve_dtls_restart = SWITCH_FALSE;
 	switch_bool_t restart_credentials_complete = SWITCH_FALSE;
 	switch_bool_t restart_generation_changed = SWITCH_FALSE;
-	switch_bool_t restart_generation_unchanged = SWITCH_FALSE;
 	switch_bool_t restart_identity_preservable = SWITCH_FALSE;
+	switch_bool_t reset_dtls_restart_transport = SWITCH_FALSE;
 	switch_rtp_pvt_dtls_restart_result_t dtls_restart_result = SWITCH_RTP_PVT_DTLS_RESTART_RESET;
 	switch_status_t ice_activation_status;
 	switch_core_media_ice_type_t restart_ice_type = ICE_VANILLA;
@@ -6828,7 +6828,6 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 		*check_ice_active_ufrag_separator = '\0';
 		check_ice_active_remote_ufrag = check_ice_active_ice_user;
 	}
-
 	if (switch_true(switch_channel_get_variable_dup(smh->session->channel, "ignore_sdp_ice", SWITCH_FALSE, -1))) {
 		return SWITCH_STATUS_BREAK;
 	}
@@ -7153,19 +7152,20 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 		restart_generation_changed = restart_credentials_complete &&
 			strcmp(engine->ice_restart_remote_ufrag, engine->ice_in.ufrag) &&
 			strcmp(engine->ice_restart_remote_pwd, engine->ice_in.pwd) ? SWITCH_TRUE : SWITCH_FALSE;
-		restart_generation_unchanged = restart_credentials_complete &&
-			!strcmp(engine->ice_restart_remote_ufrag, engine->ice_in.ufrag) &&
-			!strcmp(engine->ice_restart_remote_pwd, engine->ice_in.pwd) ? SWITCH_TRUE : SWITCH_FALSE;
-		if (restart_generation_unchanged) {
-			engine->new_dtls = switch_rtp_pvt_dtls_association_identity_matches(
-				engine->rtp_session, &engine->dtls_identity) ? 0 : 1;
-		} else if (!restart_generation_changed || check_ice_dtls_state == DS_READY ||
-			!switch_rtp_pvt_dtls_association_identity_matches(engine->rtp_session,
+		if (restart_generation_changed &&
+			(check_ice_dtls_state == DS_SETUP || check_ice_dtls_state == DS_HANDSHAKE)) {
+			if (switch_rtp_pvt_dtls_association_identity_matches(engine->rtp_session,
 				&engine->dtls_identity)) {
+				restart_identity_preservable = SWITCH_TRUE;
+				engine->new_dtls = 0;
+			} else {
+				engine->new_dtls = 1;
+			}
+		} else if (check_ice_dtls_state != DS_READY && (!restart_credentials_complete ||
+			(strcmp(engine->ice_restart_remote_ufrag, engine->ice_in.ufrag) != 0) !=
+			(strcmp(engine->ice_restart_remote_pwd, engine->ice_in.pwd) != 0))) {
+			/* Partial credential changes are not a valid ICE generation. */
 			engine->new_dtls = 1;
-		} else {
-			restart_identity_preservable = SWITCH_TRUE;
-			engine->new_dtls = 0;
 		}
 	}
 
@@ -7200,7 +7200,9 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 	}
 
 	/* A controlled candidate-less generation becomes authoritative only after authenticated nomination. */
-	if (is_trickle_recheck && (restart_ice_type & ICE_CONTROLLED) && !check_ice_active_has_addr &&
+	if (engine->ice_restart_pending &&
+		(check_ice_dtls_state == DS_SETUP || check_ice_dtls_state == DS_HANDSHAKE) &&
+		is_trickle_recheck && (restart_ice_type & ICE_CONTROLLED) && !check_ice_active_has_addr &&
 		!switch_rtp_pvt_ice_selection_complete(&engine->ice_in,
 			engine->rtcp_mux > 0 ? SWITCH_TRUE : SWITCH_FALSE)) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
@@ -7446,19 +7448,6 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 	}
 
 
-	if (restart_identity_preservable) {
-		dtls_restart_result = switch_rtp_pvt_prepare_dtls_ice_restart(engine->rtp_session,
-			&engine->dtls_identity, dtls_setup_timeout_ms, restart_ice_type,
-			engine->ice_in.ufrag, engine->ice_out.ufrag, engine->ice_out.pwd,
-			engine->ice_in.pwd);
-		if (dtls_restart_result == SWITCH_RTP_PVT_DTLS_RESTART_EXPIRED) {
-			return SWITCH_STATUS_FALSE;
-		}
-		preserve_dtls_restart = dtls_restart_result == SWITCH_RTP_PVT_DTLS_RESTART_PRESERVE ?
-			SWITCH_TRUE : SWITCH_FALSE;
-		engine->new_dtls = dtls_restart_result == SWITCH_RTP_PVT_DTLS_RESTART_RESET ? 1 : 0;
-	}
-
 	if (engine->ice_in.is_chosen[0]) {
 		selected_rtp_ice_candidate = &engine->ice_in.cands[engine->ice_in.chosen[0]][0];
 		check_ice_rtp_tuple.selected = SWITCH_TRUE;
@@ -7471,6 +7460,45 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 				check_ice_rtp_tuple.selected_addr = NULL;
 			}
 		}
+	}
+
+	if (restart_identity_preservable &&
+		(!check_ice_rtp_tuple.selected_addr ||
+		 !switch_rtp_pvt_dtls_ice_restart_socket_compatible(engine->rtp_session,
+			check_ice_rtp_tuple.selected_addr))) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_INFO,
+			"Resetting %s DTLS for ICE restart because the selected candidate requires a new output-socket family\n",
+			type2str(type));
+		restart_identity_preservable = SWITCH_FALSE;
+		reset_dtls_restart_transport = SWITCH_TRUE;
+		engine->new_dtls = 1;
+	}
+
+	if (restart_identity_preservable) {
+		switch_rtp_pvt_run_dtls_restart_prepare_test_hook(engine->rtp_session);
+		dtls_restart_result = switch_rtp_pvt_prepare_dtls_ice_restart(engine->rtp_session,
+			&engine->dtls_identity, dtls_setup_timeout_ms, restart_ice_type,
+			engine->ice_in.ufrag, engine->ice_out.ufrag, engine->ice_out.pwd,
+			engine->ice_in.pwd);
+		if (dtls_restart_result == SWITCH_RTP_PVT_DTLS_RESTART_EXPIRED) {
+			return SWITCH_STATUS_FALSE;
+		}
+		if (dtls_restart_result == SWITCH_RTP_PVT_DTLS_RESTART_READY) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_INFO,
+				"Preserving READY %s DTLS after ICE-restart preparation race\n", type2str(type));
+			restart_identity_preservable = SWITCH_FALSE;
+			engine->new_dtls = 0;
+		} else {
+			preserve_dtls_restart = dtls_restart_result == SWITCH_RTP_PVT_DTLS_RESTART_PRESERVE ?
+				SWITCH_TRUE : SWITCH_FALSE;
+			engine->new_dtls = dtls_restart_result == SWITCH_RTP_PVT_DTLS_RESTART_RESET ? 1 : 0;
+		}
+	}
+
+	if (restart_generation_changed && engine->new_dtls &&
+		(check_ice_dtls_state == DS_SETUP || check_ice_dtls_state == DS_HANDSHAKE)) {
+		/* Retire inherited tuple authority after any decision to replace an in-progress association. */
+		reset_dtls_restart_transport = SWITCH_TRUE;
 	}
 
 	if (switch_rtp_pvt_dtls_association_identity_matches(engine->rtp_session,
@@ -7498,22 +7526,48 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 		if (switch_rtp_ready(engine->rtp_session) && engine->ice_in.cands[engine->ice_in.chosen[0]][0].ready) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_INFO, "RE-Activating %s ICE\n", type2str(type));
 
-			/* Update RTP session remote address when trickle ICE chooses a candidate */
-			if (trickle_on && !preserve_dtls_restart) {
+			/* A rejected preservation must install its transport even when trickle is disabled. */
+			if ((reset_dtls_restart_transport || trickle_on) && !preserve_dtls_restart) {
 				const char *err = NULL;
 				switch_port_t rtcp_port = engine->ice_in.cands[engine->ice_in.chosen[1]][1].con_port;
+				switch_status_t remote_address_status;
 
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_INFO,
-					"Updating %s RTP remote address for trickle ICE: %s:%d\n", type2str(type),
+					"Updating %s RTP remote address for ICE: %s:%d\n", type2str(type),
 					engine->ice_in.cands[engine->ice_in.chosen[0]][0].con_addr,
 					engine->ice_in.cands[engine->ice_in.chosen[0]][0].con_port);
 
-				if (switch_rtp_pvt_set_remote_sdp_address(engine->rtp_session,
+				if (reset_dtls_restart_transport) {
+					remote_address_status = switch_rtp_pvt_reset_dtls_ice_restart_transport(
+						engine->rtp_session, &engine->dtls_identity,
 						engine->ice_in.cands[engine->ice_in.chosen[0]][0].con_addr,
 						engine->ice_in.cands[engine->ice_in.chosen[0]][0].con_port,
-						rtcp_port, SWITCH_TRUE, &err) != SWITCH_STATUS_SUCCESS) {
+						rtcp_port, SWITCH_TRUE, &dtls_restart_result, &err);
+					if (remote_address_status == SWITCH_STATUS_SUCCESS &&
+						dtls_restart_result == SWITCH_RTP_PVT_DTLS_RESTART_READY) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_INFO,
+							"Preserving READY %s DTLS at ICE transport-reset boundary\n",
+							type2str(type));
+						engine->new_dtls = 0;
+						reset_dtls_restart_transport = SWITCH_FALSE;
+					}
+				} else {
+					remote_address_status = switch_rtp_pvt_set_remote_sdp_address(
+						engine->rtp_session,
+						engine->ice_in.cands[engine->ice_in.chosen[0]][0].con_addr,
+						engine->ice_in.cands[engine->ice_in.chosen[0]][0].con_port,
+						rtcp_port, SWITCH_TRUE, &err);
+				}
+				if (remote_address_status != SWITCH_STATUS_SUCCESS) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_ERROR,
 						"%s RTP REPORTS ERROR: [%s]\n", type2str(type), err);
+					if (reset_dtls_restart_transport) {
+						engine->new_dtls = 0;
+						if (video_topology_lock_held) {
+							switch_thread_rwlock_unlock(engine->dtls_init_rwlock);
+						}
+						return SWITCH_STATUS_FALSE;
+					}
 				}
 			}
 

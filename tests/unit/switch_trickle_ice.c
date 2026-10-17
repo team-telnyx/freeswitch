@@ -150,6 +150,36 @@ static switch_size_t build_unauthenticated_ice_response(uint8_t *buf, switch_siz
 	return switch_stun_packet_length(packet);
 }
 
+static switch_size_t build_authenticated_ice_role_conflict_response(uint8_t *buf,
+	switch_size_t buflen, const char transaction_id[13], const char *password)
+{
+	switch_stun_packet_attribute_t *attribute;
+	switch_stun_packet_t *packet;
+	switch_size_t bytes;
+
+	switch_assert(buf);
+	switch_assert(buflen >= 128);
+	switch_assert(transaction_id);
+	switch_assert(password);
+	memset(buf, 0, buflen);
+	packet = switch_stun_packet_build_header(SWITCH_STUN_BINDING_ERROR_RESPONSE,
+		(char *)transaction_id, buf);
+	attribute = (switch_stun_packet_attribute_t *)(buf + switch_stun_packet_length(packet));
+	attribute->type = htons(SWITCH_STUN_ATTR_ERROR_CODE);
+	attribute->length = htons(4);
+	attribute->value[0] = 0;
+	attribute->value[1] = 0;
+	attribute->value[2] = 4;
+	attribute->value[3] = 87;
+	packet->header.length += htons((uint16_t)(sizeof(*attribute) + 4));
+	switch_stun_packet_attribute_add_integrity(packet, password);
+	switch_stun_packet_attribute_add_fingerprint(packet);
+	bytes = switch_stun_packet_length(packet);
+	switch_assert(bytes <= buflen);
+
+	return bytes;
+}
+
 static switch_status_t reverse_ice_username(const char *ice_user, char *incoming, switch_size_t incoming_len)
 {
 	const char *colon;
@@ -453,7 +483,7 @@ typedef struct review_regression_session_owner_s {
 
 #define REVIEW_REGRESSION_MAX_SESSIONS 2
 #define REVIEW_REGRESSION_MAX_SOCKETS 1
-#define REVIEW_REGRESSION_MAX_ALLOCATIONS 16
+#define REVIEW_REGRESSION_MAX_ALLOCATIONS 21
 
 typedef struct review_regression_owner_s {
 	review_regression_session_owner_t sessions[REVIEW_REGRESSION_MAX_SESSIONS];
@@ -637,21 +667,21 @@ static switch_status_t make_session_and_rtp_with_sdp_ex(switch_core_session_t **
 
 	r_sdp = switch_core_session_sprintf(session,
 			"v=0\n"
-			"o=- 1683118194 1683118195 IN IP4 0.0.0.0\n"
+			"o=- 1000 1001 IN IP4 0.0.0.0\n"
 			"s=-\n"
 			"t=0 0\n"
 			"a=group:BUNDLE 0\n"
 			"a=extmap-allow-mixed\n"
 			"m=audio 9 UDP/TLS/RTP/SAVPF 0\n"
 			"c=IN IP4 0.0.0.0\n"
-			"a=ice-ufrag:aZJpsl00bYnjrOZtkCFMtKhFC/CHAfcv\n"
-			"a=ice-pwd:aNniSnLLp43SSsJrz6TNPty1zPrxZNzh\n"
+			"a=ice-ufrag:sameGenerationRemoteUfrag1\n"
+			"a=ice-pwd:sameGenerationRemotePassword1234561\n"
 			"a=ice-options:trickle\n"
 			"a=rtcp-mux\n"
 			"a=setup:active\n"
 			"a=rtpmap:0 PCMU/8000\n"
-			"a=ssrc:2588681350 msid:user199999@host-a1132918 webrtctransceiver0\n"
-			"a=ssrc:2588681350 cname:user19999@host-a1132918\n"
+			"a=ssrc:42424242 msid:synthetic-user@invalid synthetic-stream\n"
+			"a=ssrc:42424242 cname:synthetic-user@invalid\n"
 			"a=sendrecv\n"
 			"a=fingerprint:sha-256 17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4\n"
 			"a=mid:0\n"
@@ -749,11 +779,34 @@ static switch_status_t make_session_and_rtp_with_sdp(switch_core_session_t **out
 typedef struct dtls_restart_case_result_s {
 	switch_bool_t preserved;
 	switch_bool_t failed_closed;
+	switch_bool_t first_restart_migrated;
+	switch_bool_t tuple_authority_retired;
+	switch_bool_t output_socket_changed;
+	switch_bool_t output_socket_split;
 	switch_port_t before_port;
 	switch_port_t after_port;
+	int before_family;
+	int after_family;
 	switch_core_media_ice_type_t before_ice_type;
 	switch_core_media_ice_type_t after_ice_type;
 } dtls_restart_case_result_t;
+
+#define TEST_DTLS_FINGERPRINT "17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4"
+
+static switch_status_t use_runtime_dtls_fingerprint(char *sdp)
+{
+	dtls_fingerprint_t fingerprint = { 0 };
+	char *value;
+
+	fingerprint.type = "sha-256";
+	if (zstr(sdp) || !switch_core_cert_gen_fingerprint(DTLS_SRTP_FNAME, &fingerprint) ||
+		zstr(fingerprint.str) || strlen(fingerprint.str) != strlen(TEST_DTLS_FINGERPRINT) ||
+		!(value = strstr(sdp, TEST_DTLS_FINGERPRINT))) {
+		return SWITCH_STATUS_FALSE;
+	}
+	memcpy(value, fingerprint.str, strlen(TEST_DTLS_FINGERPRINT));
+	return SWITCH_STATUS_SUCCESS;
+}
 
 static switch_status_t run_dtls_restart_identity_case(const char *initial_sdp, const char *restart_sdp,
 	uint32_t setup_timeout_ms, uint32_t delay_us, switch_bool_t change_local_identity,
@@ -761,6 +814,8 @@ static switch_status_t run_dtls_restart_identity_case(const char *initial_sdp, c
 {
 	switch_core_session_t *session = NULL;
 	switch_channel_t *channel;
+	switch_media_handle_t *smh;
+	switch_core_media_params_t *mparams;
 	switch_rtp_t *rtp = NULL;
 	void *sdp_session = NULL;
 	sdp_parser_t *parser = NULL;
@@ -784,14 +839,18 @@ static switch_status_t run_dtls_restart_identity_case(const char *initial_sdp, c
 		return SWITCH_STATUS_FALSE;
 	}
 	channel = switch_core_session_get_channel(session);
+	smh = switch_core_session_get_media_handle(session);
+	mparams = smh ? switch_core_media_get_mparams(smh) : NULL;
 	status = switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP, &before);
-	if (!channel || status != SWITCH_STATUS_SUCCESS || !before.dtls_context || !before.dtls_ssl ||
+	if (!channel || !mparams || status != SWITCH_STATUS_SUCCESS || !before.dtls_context || !before.dtls_ssl ||
 		copy_sockaddr_tuple(switch_rtp_session_get_remote_addr(rtp), host, sizeof(host),
 			&result->before_port) != SWITCH_STATUS_SUCCESS) {
 		cleanup_session_media_and_sdp(session, sdp_session, parser);
 		return SWITCH_STATUS_FALSE;
 	}
 	result->before_ice_type = before.ice_type;
+	result->before_family = switch_sockaddr_get_family(
+		switch_rtp_session_get_remote_addr(rtp));
 	if (change_local_identity) {
 		memset(&association_identity, 0, sizeof(association_identity));
 		if (switch_rtp_pvt_get_dtls_association_identity(rtp, DTLS_TYPE_RTP,
@@ -809,6 +868,10 @@ static switch_status_t run_dtls_restart_identity_case(const char *initial_sdp, c
 	}
 	if (delay_us) {
 		switch_rtp_session_set_dtls_checks_started(rtp, switch_micro_time_now() - delay_us);
+	}
+	if (strstr(restart_sdp, "c=IN IP6 ")) {
+		mparams->rtpip6 = switch_core_session_strdup(session, "::1");
+		switch_channel_set_variable(channel, "apply-candidate-acl", "any_v6.auto");
 	}
 
 	switch_core_media_clear_ice(session);
@@ -838,6 +901,105 @@ static switch_status_t run_dtls_restart_identity_case(const char *initial_sdp, c
 	result->preserved = after.dtls_state == DS_HANDSHAKE &&
 		after.dtls_context == before.dtls_context && after.dtls_ssl == before.dtls_ssl ?
 		SWITCH_TRUE : SWITCH_FALSE;
+	result->output_socket_changed = after.output_socket != before.output_socket ?
+		SWITCH_TRUE : SWITCH_FALSE;
+	result->output_socket_split = after.output_socket != after.socket ?
+		SWITCH_TRUE : SWITCH_FALSE;
+	result->after_family = switch_sockaddr_get_family(
+		switch_rtp_session_get_remote_addr(rtp));
+	result->after_ice_type = after.ice_type;
+	cleanup_session_media_and_sdp(session, sdp_session, parser);
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static switch_status_t restart_and_nominate_controlled_dtls(switch_core_session_t *session,
+	switch_rtp_t *rtp, const char *restart_sdp, switch_port_t nominated_port,
+	switch_rtp_pvt_transport_snapshot_t *snapshot);
+
+static switch_status_t run_dtls_restart_migration_then_family_reset_case(const char *initial_sdp,
+	const char *preserved_sdp, switch_port_t preserved_port, const char *incompatible_sdp,
+	switch_bool_t enable_trickle, dtls_restart_case_result_t *result)
+{
+	switch_core_session_t *session = NULL;
+	switch_channel_t *channel;
+	switch_media_handle_t *smh;
+	switch_core_media_params_t *mparams;
+	switch_rtp_t *rtp = NULL;
+	void *sdp_session = NULL;
+	sdp_parser_t *parser = NULL;
+	switch_rtp_pvt_transport_snapshot_t before;
+	switch_rtp_pvt_transport_snapshot_t migrated;
+	switch_rtp_pvt_transport_snapshot_t after;
+	switch_status_t status;
+	uint8_t match;
+	uint8_t proceed = 0;
+	char host[80] = "";
+
+	if (!result || zstr(initial_sdp) || zstr(preserved_sdp) || zstr(incompatible_sdp)) {
+		return SWITCH_STATUS_FALSE;
+	}
+	memset(result, 0, sizeof(*result));
+	status = make_session_and_rtp_with_sdp_ex(&session, &rtp, &sdp_session, &parser,
+		initial_sdp, "PCMU", SWITCH_TRUE, SWITCH_TRUE, "controlled");
+	if (status != SWITCH_STATUS_SUCCESS || !session || !rtp) {
+		cleanup_session_media_and_sdp(session, sdp_session, parser);
+		return SWITCH_STATUS_FALSE;
+	}
+	channel = switch_core_session_get_channel(session);
+	smh = switch_core_session_get_media_handle(session);
+	mparams = smh ? switch_core_media_get_mparams(smh) : NULL;
+	if (!channel || !mparams ||
+		switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP, &before) != SWITCH_STATUS_SUCCESS ||
+		copy_sockaddr_tuple(switch_rtp_session_get_remote_addr(rtp), host, sizeof(host),
+			&result->before_port) != SWITCH_STATUS_SUCCESS) {
+		cleanup_session_media_and_sdp(session, sdp_session, parser);
+		return SWITCH_STATUS_FALSE;
+	}
+	if (!enable_trickle) {
+		switch_channel_set_variable(channel, "rtp_trickle_ice", "false");
+		switch_channel_set_variable(channel, "sip_trickle_accept", "false");
+	}
+	result->before_family = switch_sockaddr_get_family(switch_rtp_session_get_remote_addr(rtp));
+	result->before_ice_type = before.ice_type;
+	status = restart_and_nominate_controlled_dtls(session, rtp, preserved_sdp, preserved_port,
+		&migrated);
+	if (status != SWITCH_STATUS_SUCCESS || migrated.dtls_restart_pending ||
+		!migrated.dtls_restart_migrated || !migrated.dtls_tuple_authoritative ||
+		migrated.dtls_context != before.dtls_context || migrated.dtls_ssl != before.dtls_ssl) {
+		cleanup_session_media_and_sdp(session, sdp_session, parser);
+		return SWITCH_STATUS_FALSE;
+	}
+	result->first_restart_migrated = SWITCH_TRUE;
+
+	if (strstr(incompatible_sdp, "c=IN IP6 ")) {
+		mparams->rtpip6 = switch_core_session_strdup(session, "::1");
+		switch_channel_set_variable(channel, "apply-candidate-acl", "any_v6.auto");
+	}
+	switch_core_media_clear_ice(session);
+	switch_channel_set_flag(channel, CF_REINVITE);
+	match = switch_core_media_negotiate_sdp(session, incompatible_sdp, &proceed, SDP_OFFER);
+	if (!match) {
+		cleanup_session_media_and_sdp(session, sdp_session, parser);
+		return SWITCH_STATUS_FALSE;
+	}
+	switch_core_media_gen_local_sdp(session, SDP_ANSWER, NULL, 0, NULL, 0);
+	if (switch_core_media_activate_rtp(session) != SWITCH_STATUS_SUCCESS ||
+		switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP, &after) != SWITCH_STATUS_SUCCESS ||
+		copy_sockaddr_tuple(switch_rtp_session_get_remote_addr(rtp), host, sizeof(host),
+			&result->after_port) != SWITCH_STATUS_SUCCESS) {
+		cleanup_session_media_and_sdp(session, sdp_session, parser);
+		return SWITCH_STATUS_FALSE;
+	}
+
+	result->preserved = after.dtls_context == before.dtls_context && after.dtls_ssl == before.dtls_ssl ?
+		SWITCH_TRUE : SWITCH_FALSE;
+	result->tuple_authority_retired = !after.dtls_restart_pending && !after.dtls_restart_migrated &&
+		!after.dtls_tuple_authoritative ? SWITCH_TRUE : SWITCH_FALSE;
+	result->output_socket_changed = after.output_socket != migrated.output_socket ?
+		SWITCH_TRUE : SWITCH_FALSE;
+	result->output_socket_split = after.output_socket != after.socket ?
+		SWITCH_TRUE : SWITCH_FALSE;
+	result->after_family = switch_sockaddr_get_family(switch_rtp_session_get_remote_addr(rtp));
 	result->after_ice_type = after.ice_type;
 	cleanup_session_media_and_sdp(session, sdp_session, parser);
 	return SWITCH_STATUS_SUCCESS;
@@ -869,7 +1031,7 @@ static switch_status_t build_dtls_pair_sdp_ex(char *buf, switch_size_t buf_len, 
 		"a=setup:%s\n"
 		"a=rtpmap:0 PCMU/8000\n"
 		"a=sendrecv\n"
-		"a=fingerprint:sha-256 17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4\n"
+		"a=fingerprint:sha-256 " TEST_DTLS_FINGERPRINT "\n"
 		"a=mid:0\n",
 		version, bundle ? "a=group:BUNDLE 0\n" : "", (unsigned)port, ufrag, pwd,
 		(unsigned)port, setup);
@@ -881,6 +1043,38 @@ static switch_status_t build_dtls_pair_sdp(char *buf, switch_size_t buf_len, uin
 	switch_port_t port, const char *setup, const char *ufrag, const char *pwd)
 {
 	return build_dtls_pair_sdp_ex(buf, buf_len, version, port, setup, ufrag, pwd, SWITCH_TRUE);
+}
+
+static switch_status_t build_dtls_ready_transition_restart_sdp(char *buf, switch_size_t buf_len,
+	uint32_t version, switch_port_t port, const char *setup, switch_bool_t ice_lite,
+	switch_bool_t ipv6, switch_bool_t trickle)
+{
+	const char *family = ipv6 ? "IP6" : "IP4";
+	const char *address = ipv6 ? "::1" : "127.0.0.1";
+	int written;
+
+	written = switch_snprintf(buf, buf_len,
+		"v=0\n"
+		"o=- 1683118194 %u IN IP4 0.0.0.0\n"
+		"s=-\n"
+		"t=0 0\n"
+		"%s"
+		"m=audio %u UDP/TLS/RTP/SAVPF 0\n"
+		"c=IN %s %s\n"
+		"a=ice-ufrag:readyBoundaryTargetUfrag2\n"
+		"a=ice-pwd:readyBoundaryTargetPassword1234562\n"
+		"%s"
+		"a=candidate:2 1 udp 2130706430 %s %u typ host\n"
+		"a=rtcp-mux\n"
+		"a=setup:%s\n"
+		"a=rtpmap:0 PCMU/8000\n"
+		"a=sendrecv\n"
+		"a=fingerprint:sha-256 " TEST_DTLS_FINGERPRINT "\n"
+		"a=mid:0\n",
+		version, ice_lite ? "a=ice-lite\n" : "", (unsigned)port, family, address,
+		trickle ? "a=ice-options:trickle\n" : "", address, (unsigned)port, setup);
+
+	return written > 0 && (switch_size_t)written < buf_len ? SWITCH_STATUS_SUCCESS : SWITCH_STATUS_FALSE;
 }
 
 static switch_status_t add_rtp_candidate_to_sdp(char *sdp, switch_size_t sdp_len,
@@ -1070,7 +1264,359 @@ static switch_status_t drive_dtls_pair_ready(switch_rtp_t *client_rtp, switch_rt
 	return SWITCH_STATUS_TIMEOUT;
 }
 
-static switch_status_t run_ready_invalid_identity_restart(const char *restart_sdp)
+typedef struct dtls_ready_transition_race_s {
+	switch_rtp_t *client_rtp;
+	switch_rtp_t *server_rtp;
+	switch_rtp_t *target_rtp;
+	uint8_t client_to_server[32768];
+	switch_size_t client_to_server_len;
+	switch_rtp_pvt_transport_snapshot_t in_progress;
+	switch_rtp_pvt_transport_snapshot_t ready;
+	switch_status_t completion_status;
+} dtls_ready_transition_race_t;
+
+static switch_status_t dtls_ready_transition_prime(dtls_ready_transition_race_t *race,
+	switch_rtp_t *client_rtp, switch_rtp_t *server_rtp, switch_rtp_t *target_rtp)
+{
+	uint8_t server_to_client[32768];
+	switch_size_t server_to_client_len = 0;
+	switch_status_t status;
+
+	if (!race || !client_rtp || !server_rtp || !target_rtp) {
+		return SWITCH_STATUS_FALSE;
+	}
+	memset(race, 0, sizeof(*race));
+	race->client_rtp = client_rtp;
+	race->server_rtp = server_rtp;
+	race->target_rtp = target_rtp;
+	race->completion_status = SWITCH_STATUS_FALSE;
+	status = switch_rtp_pvt_dtls_step(client_rtp, DTLS_TYPE_RTP, NULL, 0,
+		race->client_to_server, sizeof(race->client_to_server),
+		&race->client_to_server_len);
+	if (status != SWITCH_STATUS_SUCCESS || !race->client_to_server_len) {
+		return SWITCH_STATUS_FALSE;
+	}
+	if (target_rtp == server_rtp) {
+		status = switch_rtp_pvt_dtls_step(server_rtp, DTLS_TYPE_RTP,
+			race->client_to_server, race->client_to_server_len, server_to_client,
+			sizeof(server_to_client), &server_to_client_len);
+		if (status != SWITCH_STATUS_SUCCESS || !server_to_client_len) {
+			return SWITCH_STATUS_FALSE;
+		}
+		status = switch_rtp_pvt_get_transport_snapshot(target_rtp, IPR_RTP,
+			&race->in_progress);
+		if (status != SWITCH_STATUS_SUCCESS) {
+			return SWITCH_STATUS_FALSE;
+		}
+		race->client_to_server_len = 0;
+		status = switch_rtp_pvt_dtls_step(client_rtp, DTLS_TYPE_RTP,
+			server_to_client, server_to_client_len, race->client_to_server,
+			sizeof(race->client_to_server), &race->client_to_server_len);
+		if (status != SWITCH_STATUS_SUCCESS || !race->client_to_server_len) {
+			return SWITCH_STATUS_FALSE;
+		}
+	} else if (switch_rtp_pvt_get_transport_snapshot(target_rtp, IPR_RTP,
+		&race->in_progress) != SWITCH_STATUS_SUCCESS) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	return race->in_progress.dtls_state == DS_SETUP ||
+		race->in_progress.dtls_state == DS_HANDSHAKE ? SWITCH_STATUS_SUCCESS : SWITCH_STATUS_FALSE;
+}
+
+static void dtls_ready_transition_complete(void *data)
+{
+	dtls_ready_transition_race_t *race = data;
+	uint8_t server_to_client[32768];
+	switch_size_t server_to_client_len;
+	switch_rtp_pvt_transport_snapshot_t client_snapshot;
+	switch_rtp_pvt_transport_snapshot_t server_snapshot;
+	switch_status_t status;
+	int step;
+
+	if (!race || !race->client_rtp || !race->server_rtp || !race->target_rtp) {
+		return;
+	}
+	for (step = 0; step < 32; ++step) {
+		server_to_client_len = 0;
+		status = switch_rtp_pvt_dtls_step(race->server_rtp, DTLS_TYPE_RTP,
+			race->client_to_server, race->client_to_server_len, server_to_client,
+			sizeof(server_to_client), &server_to_client_len);
+		if (status != SWITCH_STATUS_SUCCESS) {
+			return;
+		}
+		race->client_to_server_len = 0;
+		status = switch_rtp_pvt_dtls_step(race->client_rtp, DTLS_TYPE_RTP,
+			server_to_client, server_to_client_len, race->client_to_server,
+			sizeof(race->client_to_server), &race->client_to_server_len);
+		if (status != SWITCH_STATUS_SUCCESS ||
+			switch_rtp_pvt_get_transport_snapshot(race->client_rtp, IPR_RTP,
+				&client_snapshot) != SWITCH_STATUS_SUCCESS ||
+			switch_rtp_pvt_get_transport_snapshot(race->server_rtp, IPR_RTP,
+				&server_snapshot) != SWITCH_STATUS_SUCCESS) {
+			return;
+		}
+		if (client_snapshot.dtls_state == DS_READY && server_snapshot.dtls_state == DS_READY) {
+			race->ready = race->target_rtp == race->client_rtp ? client_snapshot : server_snapshot;
+			race->completion_status = SWITCH_STATUS_SUCCESS;
+			return;
+		}
+	}
+	race->completion_status = SWITCH_STATUS_TIMEOUT;
+}
+
+static switch_status_t run_dtls_restart_prepare_after_ready_transition_case(
+	switch_bool_t target_is_client)
+{
+	switch_core_session_t *target_session = NULL;
+	switch_core_session_t *peer_session = NULL;
+	switch_rtp_t *target_rtp = NULL;
+	switch_rtp_t *peer_rtp = NULL;
+	switch_rtp_t *client_rtp;
+	switch_rtp_t *server_rtp;
+	dtls_ready_transition_race_t race;
+	void *target_sdp_session = NULL;
+	void *peer_sdp_session = NULL;
+	sdp_parser_t *target_parser = NULL;
+	sdp_parser_t *peer_parser = NULL;
+	switch_rtp_pvt_transport_snapshot_t after;
+	switch_status_t status = SWITCH_STATUS_FALSE;
+	switch_channel_t *target_channel = NULL;
+	char target_sdp[2048];
+	char peer_sdp[2048];
+	char restart_sdp[2048];
+	const char *target_setup = target_is_client ? "passive" : "active";
+	const char *peer_setup = target_is_client ? "active" : "passive";
+	uint8_t match;
+	uint8_t proceed = 0;
+	switch_bool_t hook_set = SWITCH_FALSE;
+
+	memset(&race, 0, sizeof(race));
+	memset(&after, 0, sizeof(after));
+	if (build_dtls_pair_sdp_ex(target_sdp, sizeof(target_sdp), 1683118290, 18930,
+		target_setup, "readyRaceTargetUfrag1", "readyRaceTargetPassword1234561",
+		SWITCH_FALSE) != SWITCH_STATUS_SUCCESS ||
+		build_dtls_pair_sdp_ex(peer_sdp, sizeof(peer_sdp), 1683118291, 18940,
+		peer_setup, "readyRacePeerUfrag1", "readyRacePeerPassword1234561",
+		SWITCH_FALSE) != SWITCH_STATUS_SUCCESS ||
+		build_dtls_pair_sdp_ex(restart_sdp, sizeof(restart_sdp), 1683118292, 18931,
+			target_setup, "readyRaceTargetUfrag2", "readyRaceTargetPassword1234562",
+			SWITCH_FALSE) != SWITCH_STATUS_SUCCESS ||
+		use_runtime_dtls_fingerprint(target_sdp) != SWITCH_STATUS_SUCCESS ||
+		use_runtime_dtls_fingerprint(peer_sdp) != SWITCH_STATUS_SUCCESS ||
+		use_runtime_dtls_fingerprint(restart_sdp) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+	if (make_session_and_rtp_with_sdp_ex(&target_session, &target_rtp,
+		&target_sdp_session, &target_parser, target_sdp, "PCMU", SWITCH_FALSE,
+		SWITCH_TRUE, NULL) != SWITCH_STATUS_SUCCESS || !target_session || !target_rtp ||
+		make_session_and_rtp_with_sdp_ex(&peer_session, &peer_rtp,
+		&peer_sdp_session, &peer_parser, peer_sdp, "PCMU", SWITCH_FALSE,
+		SWITCH_TRUE, NULL) != SWITCH_STATUS_SUCCESS || !peer_session || !peer_rtp) {
+		goto done;
+	}
+	client_rtp = target_is_client ? target_rtp : peer_rtp;
+	server_rtp = target_is_client ? peer_rtp : target_rtp;
+	if (dtls_ready_transition_prime(&race, client_rtp, server_rtp, target_rtp) !=
+		SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+	target_channel = switch_core_session_get_channel(target_session);
+	if (!target_channel) {
+		goto done;
+	}
+	switch_rtp_pvt_set_dtls_restart_prepare_test_hook(target_rtp,
+		dtls_ready_transition_complete, &race);
+	hook_set = SWITCH_TRUE;
+	switch_core_media_clear_ice(target_session);
+	switch_channel_set_flag(target_channel, CF_REINVITE);
+	match = switch_core_media_negotiate_sdp(target_session, restart_sdp, &proceed, SDP_OFFER);
+	switch_rtp_pvt_set_dtls_restart_prepare_test_hook(target_rtp, NULL, NULL);
+	hook_set = SWITCH_FALSE;
+	if (!match || race.completion_status != SWITCH_STATUS_SUCCESS ||
+		race.ready.dtls_state != DS_READY || !race.ready.dtls_context ||
+		!race.ready.dtls_ssl || !race.ready.srtp_send_ready || !race.ready.srtp_recv_ready) {
+		goto done;
+	}
+	switch_core_media_gen_local_sdp(target_session, SDP_ANSWER, NULL, 0, NULL, 0);
+	if (switch_core_media_activate_rtp(target_session) != SWITCH_STATUS_SUCCESS ||
+		switch_rtp_pvt_get_transport_snapshot(target_rtp, IPR_RTP, &after) !=
+			SWITCH_STATUS_SUCCESS ||
+		after.dtls_state != DS_READY || after.dtls_context != race.ready.dtls_context ||
+		after.dtls_ssl != race.ready.dtls_ssl ||
+		after.dtls_destroy_count != race.ready.dtls_destroy_count ||
+		!after.srtp_send_ready || !after.srtp_recv_ready ||
+		switch_rtp_pvt_srtp_round_trip(client_rtp, server_rtp) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+	status = SWITCH_STATUS_SUCCESS;
+
+done:
+	if (hook_set && target_rtp) {
+		switch_rtp_pvt_set_dtls_restart_prepare_test_hook(target_rtp, NULL, NULL);
+	}
+	cleanup_session_media_and_sdp(target_session, target_sdp_session, target_parser);
+	cleanup_session_media_and_sdp(peer_session, peer_sdp_session, peer_parser);
+	return status;
+}
+
+static switch_status_t run_dtls_restart_reset_after_ready_transition_case(
+	switch_bool_t target_is_client, switch_bool_t enable_trickle,
+	switch_bool_t family_rejection, switch_bool_t complete_ready,
+	switch_bool_t inject_failure)
+{
+	switch_core_session_t *target_session = NULL;
+	switch_core_session_t *peer_session = NULL;
+	switch_rtp_t *target_rtp = NULL;
+	switch_rtp_t *peer_rtp = NULL;
+	switch_rtp_t *client_rtp;
+	switch_rtp_t *server_rtp;
+	dtls_ready_transition_race_t race;
+	void *target_sdp_session = NULL;
+	void *peer_sdp_session = NULL;
+	sdp_parser_t *target_parser = NULL;
+	sdp_parser_t *peer_parser = NULL;
+	switch_rtp_pvt_transport_snapshot_t after;
+	switch_status_t status = SWITCH_STATUS_FALSE;
+	switch_channel_t *target_channel = NULL;
+	switch_media_handle_t *target_smh = NULL;
+	switch_core_media_params_t *target_mparams = NULL;
+	switch_sockaddr_t *after_addr = NULL;
+	char target_sdp[2048];
+	char peer_sdp[2048];
+	char restart_sdp[2048];
+	const char *target_setup = target_is_client ? "passive" : "active";
+	const char *peer_setup = target_is_client ? "active" : "passive";
+	uint8_t match;
+	uint8_t proceed = 0;
+	switch_bool_t hook_set = SWITCH_FALSE;
+	switch_bool_t failure_set = SWITCH_FALSE;
+
+	memset(&race, 0, sizeof(race));
+	memset(&after, 0, sizeof(after));
+	if (build_dtls_pair_sdp_ex(target_sdp, sizeof(target_sdp), 1683118300, 18950,
+		target_setup, "readyBoundaryTargetUfrag1", "readyBoundaryTargetPassword1234561",
+		SWITCH_FALSE) != SWITCH_STATUS_SUCCESS ||
+		build_dtls_pair_sdp_ex(peer_sdp, sizeof(peer_sdp), 1683118301, 18960,
+		peer_setup, "readyBoundaryPeerUfrag1", "readyBoundaryPeerPassword1234561",
+		SWITCH_FALSE) != SWITCH_STATUS_SUCCESS ||
+		build_dtls_ready_transition_restart_sdp(restart_sdp, sizeof(restart_sdp),
+		1683118302, family_rejection ? 18952 : 18951, target_setup,
+		family_rejection ? SWITCH_FALSE : SWITCH_TRUE, family_rejection,
+		enable_trickle) != SWITCH_STATUS_SUCCESS ||
+		use_runtime_dtls_fingerprint(target_sdp) != SWITCH_STATUS_SUCCESS ||
+		use_runtime_dtls_fingerprint(peer_sdp) != SWITCH_STATUS_SUCCESS ||
+		use_runtime_dtls_fingerprint(restart_sdp) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+	if (make_session_and_rtp_with_sdp_ex(&target_session, &target_rtp,
+		&target_sdp_session, &target_parser, target_sdp, "PCMU", SWITCH_FALSE,
+		SWITCH_TRUE, NULL) != SWITCH_STATUS_SUCCESS || !target_session || !target_rtp ||
+		make_session_and_rtp_with_sdp_ex(&peer_session, &peer_rtp,
+		&peer_sdp_session, &peer_parser, peer_sdp, "PCMU", SWITCH_FALSE,
+		SWITCH_TRUE, NULL) != SWITCH_STATUS_SUCCESS || !peer_session || !peer_rtp) {
+		goto done;
+	}
+	client_rtp = target_is_client ? target_rtp : peer_rtp;
+	server_rtp = target_is_client ? peer_rtp : target_rtp;
+	if (dtls_ready_transition_prime(&race, client_rtp, server_rtp, target_rtp) !=
+		SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+	target_channel = switch_core_session_get_channel(target_session);
+	target_smh = switch_core_session_get_media_handle(target_session);
+	target_mparams = target_smh ? switch_core_media_get_mparams(target_smh) : NULL;
+	if (!target_channel || !target_mparams) {
+		goto done;
+	}
+	if (!enable_trickle) {
+		switch_channel_set_variable(target_channel, "rtp_trickle_ice", "false");
+		switch_channel_set_variable(target_channel, "sip_trickle_accept", "false");
+	}
+	if (family_rejection) {
+		target_mparams->rtpip6 = switch_core_session_strdup(target_session, "::1");
+		switch_channel_set_variable(target_channel, "apply-candidate-acl", "any_v6.auto");
+	}
+	if (complete_ready) {
+		switch_rtp_pvt_set_dtls_restart_transport_test_hook(target_rtp,
+			dtls_ready_transition_complete, &race);
+		hook_set = SWITCH_TRUE;
+	}
+	if (inject_failure) {
+		switch_rtp_pvt_set_dtls_restart_transport_test_failure(target_rtp, SWITCH_TRUE);
+		failure_set = SWITCH_TRUE;
+	}
+	switch_core_media_clear_ice(target_session);
+	switch_channel_set_flag(target_channel, CF_REINVITE);
+	match = switch_core_media_negotiate_sdp(target_session, restart_sdp, &proceed, SDP_OFFER);
+	switch_rtp_pvt_set_dtls_restart_transport_test_hook(target_rtp, NULL, NULL);
+	hook_set = SWITCH_FALSE;
+	switch_rtp_pvt_set_dtls_restart_transport_test_failure(target_rtp, SWITCH_FALSE);
+	failure_set = SWITCH_FALSE;
+	if (inject_failure) {
+		if (match ||
+			(complete_ready && (race.completion_status != SWITCH_STATUS_SUCCESS ||
+			 race.ready.dtls_state != DS_READY || !race.ready.dtls_context ||
+			 !race.ready.dtls_ssl || !race.ready.srtp_send_ready ||
+			 !race.ready.srtp_recv_ready)) ||
+			switch_core_media_activate_rtp(target_session) != SWITCH_STATUS_SUCCESS ||
+			switch_rtp_pvt_get_transport_snapshot(target_rtp, IPR_RTP, &after) !=
+			 SWITCH_STATUS_SUCCESS) {
+			goto done;
+		}
+		if (complete_ready) {
+			if (after.dtls_state != DS_READY || after.dtls_context != race.ready.dtls_context ||
+				after.dtls_ssl != race.ready.dtls_ssl ||
+				after.dtls_destroy_count != race.ready.dtls_destroy_count ||
+				!after.srtp_send_ready || !after.srtp_recv_ready ||
+				switch_rtp_pvt_srtp_round_trip(client_rtp, server_rtp) != SWITCH_STATUS_SUCCESS) {
+				goto done;
+			}
+		} else if (after.dtls_state != race.in_progress.dtls_state ||
+			after.dtls_context != race.in_progress.dtls_context ||
+			after.dtls_ssl != race.in_progress.dtls_ssl ||
+			after.dtls_destroy_count != race.in_progress.dtls_destroy_count) {
+			goto done;
+		}
+		status = SWITCH_STATUS_SUCCESS;
+		goto done;
+	}
+	if (!match || race.completion_status != SWITCH_STATUS_SUCCESS ||
+		race.ready.dtls_state != DS_READY || !race.ready.dtls_context ||
+		!race.ready.dtls_ssl || !race.ready.srtp_send_ready || !race.ready.srtp_recv_ready) {
+		goto done;
+	}
+	switch_core_media_gen_local_sdp(target_session, SDP_ANSWER, NULL, 0, NULL, 0);
+	if (switch_core_media_activate_rtp(target_session) != SWITCH_STATUS_SUCCESS ||
+		switch_rtp_pvt_get_transport_snapshot(target_rtp, IPR_RTP, &after) !=
+			SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+	after_addr = switch_rtp_session_get_remote_addr(target_rtp);
+	if (after.dtls_state != DS_READY || after.dtls_context != race.ready.dtls_context ||
+		after.dtls_ssl != race.ready.dtls_ssl ||
+		after.dtls_destroy_count != race.ready.dtls_destroy_count ||
+		!after.srtp_send_ready || !after.srtp_recv_ready || !after_addr ||
+		switch_sockaddr_get_port(after_addr) != (family_rejection ? 18952 : 18951) ||
+		switch_sockaddr_get_family(after_addr) != (family_rejection ? AF_INET6 : AF_INET) ||
+		switch_rtp_pvt_srtp_round_trip(client_rtp, server_rtp) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+	status = SWITCH_STATUS_SUCCESS;
+
+done:
+	if (hook_set && target_rtp) {
+		switch_rtp_pvt_set_dtls_restart_transport_test_hook(target_rtp, NULL, NULL);
+	}
+	if (failure_set && target_rtp) {
+		switch_rtp_pvt_set_dtls_restart_transport_test_failure(target_rtp, SWITCH_FALSE);
+	}
+	cleanup_session_media_and_sdp(target_session, target_sdp_session, target_parser);
+	cleanup_session_media_and_sdp(peer_session, peer_sdp_session, peer_parser);
+	return status;
+}
+
+static switch_status_t run_ready_identity_update(const char *restart_sdp, switch_bool_t expect_preserved)
 {
 	switch_core_session_t *target_session = NULL;
 	switch_core_session_t *peer_session = NULL;
@@ -1087,6 +1633,8 @@ static switch_status_t run_ready_invalid_identity_restart(const char *restart_sd
 	char target_base[2048];
 	char peer_sdp[2048];
 	char *target_sdp = NULL;
+	char *runtime_restart_sdp = NULL;
+	const char *negotiated_restart_sdp = restart_sdp;
 	uint8_t match;
 	uint8_t proceed = 0;
 
@@ -1096,13 +1644,23 @@ static switch_status_t run_ready_invalid_identity_restart(const char *restart_sd
 			SWITCH_FALSE) != SWITCH_STATUS_SUCCESS ||
 		build_dtls_pair_sdp_ex(peer_sdp, sizeof(peer_sdp), 1683118281, 18920,
 			"active", "invalidIdentityPeerUfrag1", "invalidIdentityPeerPassword1234561",
-			SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
+			SWITCH_FALSE) != SWITCH_STATUS_SUCCESS ||
+		use_runtime_dtls_fingerprint(target_base) != SWITCH_STATUS_SUCCESS ||
+		use_runtime_dtls_fingerprint(peer_sdp) != SWITCH_STATUS_SUCCESS) {
 		return SWITCH_STATUS_FALSE;
+	}
+	if (expect_preserved) {
+		runtime_restart_sdp = strdup(restart_sdp);
+		if (!runtime_restart_sdp ||
+			use_runtime_dtls_fingerprint(runtime_restart_sdp) != SWITCH_STATUS_SUCCESS) {
+			goto done;
+		}
+		negotiated_restart_sdp = runtime_restart_sdp;
 	}
 	target_sdp = switch_string_replace(target_base, "a=fingerprint:",
 		"a=tls-id:association-1\na=fingerprint:");
 	if (!target_sdp) {
-		return SWITCH_STATUS_FALSE;
+		goto done;
 	}
 	if (make_session_and_rtp_with_sdp_ex(&target_session, &target_rtp,
 		&target_sdp_session, &target_parser, target_sdp, "PCMU", SWITCH_FALSE,
@@ -1121,7 +1679,7 @@ static switch_status_t run_ready_invalid_identity_restart(const char *restart_sd
 	}
 	switch_core_media_clear_ice(target_session);
 	switch_channel_set_flag(target_channel, CF_REINVITE);
-	match = switch_core_media_negotiate_sdp(target_session, restart_sdp, &proceed, SDP_OFFER);
+	match = switch_core_media_negotiate_sdp(target_session, negotiated_restart_sdp, &proceed, SDP_OFFER);
 	if (!match) {
 		goto done;
 	}
@@ -1130,7 +1688,14 @@ static switch_status_t run_ready_invalid_identity_restart(const char *restart_sd
 		switch_rtp_pvt_get_transport_snapshot(target_rtp, IPR_RTP, &after) != SWITCH_STATUS_SUCCESS) {
 		goto done;
 	}
-	if (after.dtls_state != DS_READY && after.dtls_destroy_count == before.dtls_destroy_count + 1 &&
+	if (expect_preserved) {
+		if (after.dtls_state == DS_READY && after.dtls_context == before.dtls_context &&
+			after.dtls_ssl == before.dtls_ssl && after.dtls_destroy_count == before.dtls_destroy_count &&
+			after.srtp_send_ready == SWITCH_TRUE && after.srtp_recv_ready == SWITCH_TRUE) {
+			status = SWITCH_STATUS_SUCCESS;
+		}
+	} else if (after.dtls_state != DS_READY &&
+		after.dtls_destroy_count == before.dtls_destroy_count + 1 &&
 		after.srtp_send_ready == SWITCH_FALSE && after.srtp_recv_ready == SWITCH_FALSE) {
 		status = SWITCH_STATUS_SUCCESS;
 	}
@@ -1139,6 +1704,7 @@ done:
 	cleanup_session_media_and_sdp(target_session, target_sdp_session, target_parser);
 	cleanup_session_media_and_sdp(peer_session, peer_sdp_session, peer_parser);
 	switch_safe_free(target_sdp);
+	switch_safe_free(runtime_restart_sdp);
 	return status;
 }
 
@@ -1909,6 +2475,141 @@ FCT_BGN()
 		}
 		FCT_TEST_END();
 
+		FCT_TEST_BGN(incompatible_restart_split_socket_ordinary_checks_match_receive_socket)
+		{
+			switch_core_session_t *session = NULL;
+			switch_channel_t *channel = NULL;
+			switch_media_handle_t *smh = NULL;
+			switch_core_media_params_t *mparams = NULL;
+			switch_rtp_t *rtp = NULL;
+			void *sdp_session = NULL;
+			sdp_parser_t *parser = NULL;
+			switch_rtp_pvt_transport_snapshot_t before_response;
+			switch_rtp_pvt_transport_snapshot_t after_check;
+			switch_rtp_pvt_transport_snapshot_t after_response;
+			switch_rtp_pvt_transport_snapshot_t after_conflict;
+			char ice_user[513] = "";
+			char incoming_user[513] = "";
+			char local_pwd[256] = "";
+			char remote_pwd[256] = "";
+			char success_id[13] = "";
+			char conflict_id[13] = "";
+			uint8_t stun_packet[512];
+			switch_size_t stun_len;
+			switch_bool_t has_addr = SWITCH_FALSE;
+			switch_status_t status;
+			uint8_t match;
+			uint8_t proceed = 0;
+			const char *initial_sdp =
+				"v=0\n"
+				"o=- 1683118194 1683118210 IN IP4 0.0.0.0\n"
+				"s=-\n"
+				"t=0 0\n"
+				"a=group:BUNDLE 0\n"
+				"m=audio 19620 UDP/TLS/RTP/SAVPF 0\n"
+				"c=IN IP4 192.0.2.10\n"
+				"a=ice-ufrag:splitRemoteUfrag1\n"
+				"a=ice-pwd:splitRemotePassword1234561\n"
+				"a=ice-options:trickle\n"
+				"a=candidate:1 1 udp 2130706431 192.0.2.10 19620 typ host\n"
+				"a=rtcp-mux\n"
+				"a=setup:active\n"
+				"a=tls-id:split-association-1\n"
+				"a=rtpmap:0 PCMU/8000\n"
+				"a=sendrecv\n"
+				"a=fingerprint:sha-256 " TEST_DTLS_FINGERPRINT "\n"
+				"a=mid:0\n";
+			const char *restart_sdp =
+				"v=0\n"
+				"o=- 1683118194 1683118211 IN IP6 ::\n"
+				"s=-\n"
+				"t=0 0\n"
+				"a=group:BUNDLE 0\n"
+				"m=audio 19621 UDP/TLS/RTP/SAVPF 0\n"
+				"c=IN IP6 ::1\n"
+				"a=ice-ufrag:splitRemoteUfrag2\n"
+				"a=ice-pwd:splitRemotePassword1234562\n"
+				"a=ice-options:trickle\n"
+				"a=candidate:2 1 udp 2130706430 ::1 19621 typ host\n"
+				"a=rtcp-mux\n"
+				"a=setup:active\n"
+				"a=tls-id:split-association-2\n"
+				"a=rtpmap:0 PCMU/8000\n"
+				"a=sendrecv\n"
+				"a=fingerprint:sha-256 " TEST_DTLS_FINGERPRINT "\n"
+				"a=mid:0\n";
+
+			status = make_session_and_rtp_with_sdp_ex(&session, &rtp, &sdp_session,
+				&parser, initial_sdp, "PCMU", SWITCH_TRUE, SWITCH_TRUE, "controlled");
+			review_regression_owner_adopt(session, sdp_session, parser);
+			fst_requires(status == SWITCH_STATUS_SUCCESS && session && rtp);
+			channel = switch_core_session_get_channel(session);
+			smh = switch_core_session_get_media_handle(session);
+			mparams = smh ? switch_core_media_get_mparams(smh) : NULL;
+			fst_requires(channel != NULL && mparams != NULL);
+			if (review_regression_inject_post_alloc("split-socket-ordinary-response")) {
+				fst_requires(SWITCH_FALSE);
+			}
+
+			mparams->rtpip6 = switch_core_session_strdup(session, "::1");
+			switch_channel_set_variable(channel, "apply-candidate-acl", "any_v6.auto");
+			switch_core_media_clear_ice(session);
+			switch_channel_set_flag(channel, CF_REINVITE);
+			match = switch_core_media_negotiate_sdp(session, restart_sdp, &proceed, SDP_OFFER);
+			fst_requires(match != 0);
+			fst_requires(switch_rtp_pvt_get_ice_state(rtp, IPR_RTP,
+				ice_user, sizeof(ice_user), local_pwd, sizeof(local_pwd),
+				remote_pwd, sizeof(remote_pwd), &has_addr) == SWITCH_STATUS_SUCCESS);
+			fst_requires(reverse_ice_username(ice_user, incoming_user,
+				sizeof(incoming_user)) == SWITCH_STATUS_SUCCESS);
+			stun_len = build_authenticated_ice_request(stun_packet, sizeof(stun_packet),
+				incoming_user, local_pwd);
+			fst_requires(switch_rtp_pvt_handle_ice_from(rtp, IPR_RTP, "::1", 19621,
+				stun_packet, stun_len) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP,
+				&before_response) == SWITCH_STATUS_SUCCESS);
+			fst_requires(before_response.dtls_restart_migrated == SWITCH_FALSE);
+			fst_requires(before_response.dtls_tuple_authoritative == SWITCH_FALSE);
+			fst_requires(before_response.socket != NULL && before_response.output_socket != NULL);
+			fst_requires(before_response.socket != before_response.output_socket);
+
+			fst_requires(switch_rtp_pvt_send_ice_check(rtp, IPR_RTP, success_id,
+				sizeof(success_id)) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP,
+				&after_check) == SWITCH_STATUS_SUCCESS);
+			fst_requires(after_check.ice_selected_pair_check_count > 0);
+			fst_requires(after_check.ice_selected_pair_check_socket == after_check.socket);
+			fst_requires(after_check.ice_selected_pair_check_local_port != 0);
+			fst_requires(after_check.ice_selected_pair_check_local_family == AF_INET);
+			fst_requires(after_check.ice_selected_pair_check_remote_port == 19621);
+			switch_sleep(50000);
+			stun_len = build_authenticated_ice_response(stun_packet, sizeof(stun_packet),
+				success_id, remote_pwd, "127.0.0.1", 19621);
+			fst_requires(switch_stun_packet_validate_auth(stun_packet,
+				(uint32_t)stun_len, remote_pwd) != 0);
+			fst_requires(switch_rtp_pvt_handle_ice_from(rtp, IPR_RTP, "::1", 19621,
+				stun_packet, stun_len) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP,
+				&after_response) == SWITCH_STATUS_SUCCESS);
+			fst_check(after_response.ice_selected_pair_last_response_us >
+				before_response.ice_selected_pair_last_response_us);
+
+			fst_requires(switch_rtp_pvt_send_ice_check(rtp, IPR_RTP, conflict_id,
+				sizeof(conflict_id)) == SWITCH_STATUS_SUCCESS);
+			stun_len = build_authenticated_ice_role_conflict_response(stun_packet,
+				sizeof(stun_packet), conflict_id, remote_pwd);
+			fst_requires(switch_stun_packet_validate_auth(stun_packet,
+				(uint32_t)stun_len, remote_pwd) != 0);
+			fst_requires(switch_rtp_pvt_handle_ice_from(rtp, IPR_RTP, "::1", 19621,
+				stun_packet, stun_len) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP,
+				&after_conflict) == SWITCH_STATUS_SUCCESS);
+			fst_check((after_conflict.ice_type & ICE_CONTROLLED) == 0);
+
+			review_regression_owner_cleanup();
+		}
+		FCT_TEST_END();
+
 		FCT_TEST_BGN(same_generation_clear_preserves_credentials_and_rearms_unchanged_media)
 		{
 			switch_core_session_t *session = NULL;
@@ -1944,21 +2645,34 @@ FCT_BGN()
 				"o=- 1683118194 1683118197 IN IP4 0.0.0.0\n"
 				"s=-\n"
 				"t=0 0\n"
-				"a=group:BUNDLE 0\n"
+				"a=group:BUNDLE 0 1\n"
 				"m=audio 18215 UDP/TLS/RTP/SAVPF 0\n"
-				"c=IN IP4 50.114.144.39\n"
-				"a=ice-ufrag:aZJpsl00bYnjrOZtkCFMtKhFC/CHAfcv\n"
-				"a=ice-pwd:aNniSnLLp43SSsJrz6TNPty1zPrxZNzh\n"
+				"c=IN IP4 198.51.100.20\n"
+				"a=ice-ufrag:sameGenerationRemoteUfrag1\n"
+				"a=ice-pwd:sameGenerationRemotePassword1234561\n"
 				"a=ice-options:trickle\n"
-				"a=candidate:265031753 1 udp 1685921533 50.114.144.39 18215 typ srflx raddr 100.69.211.204 rport 54081\n"
+				"a=candidate:1 1 udp 2122260223 198.51.100.20 18215 typ srflx raddr 192.0.2.10 rport 19002\n"
 				"a=rtcp-mux\n"
 				"a=setup:active\n"
 				"a=rtpmap:0 PCMU/8000\n"
 				"a=sendrecv\n"
-				"a=fingerprint:sha-256 17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4\n"
-				"a=mid:0\n";
+				"a=fingerprint:sha-256 " TEST_DTLS_FINGERPRINT "\n"
+				"a=mid:0\n"
+				"m=video 18215 UDP/TLS/RTP/SAVPF 31\n"
+				"c=IN IP4 198.51.100.20\n"
+				"a=ice-ufrag:sameGenerationRemoteUfrag1\n"
+				"a=ice-pwd:sameGenerationRemotePassword1234561\n"
+				"a=ice-options:trickle\n"
+				"a=candidate:1 1 udp 2122260223 198.51.100.20 18215 typ srflx raddr 192.0.2.10 rport 19002\n"
+				"a=rtcp-mux\n"
+				"a=setup:active\n"
+				"a=rtpmap:31 PROXY-VID/90000\n"
+				"a=sendrecv\n"
+				"a=fingerprint:sha-256 " TEST_DTLS_FINGERPRINT "\n"
+				"a=mid:1\n";
 
-			status = make_session_and_rtp_with_sdp(&session, &rtp, &sdp_session, &parser);
+			status = make_session_and_rtp_with_sdp_ex(&session, &rtp, &sdp_session, &parser,
+				NULL, "PCMU,PROXY-VID", SWITCH_TRUE, SWITCH_TRUE, NULL);
 			review_regression_owner_adopt(session, sdp_session, parser);
 			fst_requires(status == SWITCH_STATUS_SUCCESS && session && rtp && sdp_session && parser);
 			channel = switch_core_session_get_channel(session);
@@ -1967,7 +2681,7 @@ FCT_BGN()
 
 			status = switch_core_media_trickle_remote_candidate_and_recheck(
 				session, smh, sdp_session, SDP_TYPE_REQUEST, "0", 0,
-				"candidate:265031753 1 udp 1685921533 50.114.144.39 18215 typ srflx raddr 100.69.211.204 rport 54081", 0);
+				"candidate:1 1 udp 2122260223 198.51.100.20 18215 typ srflx raddr 192.0.2.10 rport 19002", 0);
 			fst_requires(status == SWITCH_STATUS_SUCCESS);
 			status = switch_rtp_pvt_get_ice_state(rtp, IPR_RTP,
 				initial_ice_user, sizeof(initial_ice_user),
@@ -1996,6 +2710,10 @@ FCT_BGN()
 			fst_requires(ready_before.srtp_send_ready == SWITCH_TRUE &&
 				ready_before.srtp_recv_ready == SWITCH_TRUE);
 
+			switch_channel_set_flag(channel, CF_VIDEO);
+			switch_channel_set_flag(channel, CF_VIDEO_POSSIBLE);
+			fst_requires(switch_core_media_choose_port(session, SWITCH_MEDIA_TYPE_VIDEO, 0) ==
+				SWITCH_STATUS_SUCCESS);
 			switch_core_media_clear_ice(session);
 			switch_channel_set_flag(channel, CF_REINVITE);
 			match = switch_core_media_negotiate_sdp(session, same_generation_sdp, &proceed, SDP_OFFER);
@@ -2570,6 +3288,8 @@ FCT_BGN()
 			switch_rtp_pvt_transport_snapshot_t target_after;
 			switch_rtp_pvt_transport_snapshot_t target_failover;
 			switch_rtp_pvt_transport_snapshot_t target_ready_restart;
+			switch_rtp_pvt_transport_snapshot_t target_ready_candidate_less;
+			switch_rtp_pvt_transport_snapshot_t target_ready_prflx;
 			switch_rtp_pvt_transport_snapshot_t peer_after;
 			int replay_sink_fd = -1;
 			uint8_t target_to_peer[32768];
@@ -2588,10 +3308,14 @@ FCT_BGN()
 			char peer_sdp[2048];
 			char restart_sdp[2048];
 			char ready_restart_sdp[2048];
+			char ready_candidate_less_base[2048];
+			char *ready_candidate_less_sdp;
+			char candidate_line[160];
 			char ice_user[513];
 			char incoming_user[513];
 			char local_pwd[256];
 			char remote_pwd[256];
+			char candidate_less_host[80];
 			uint8_t stun_packet[512];
 			switch_size_t stun_len;
 			switch_bool_t has_addr;
@@ -2601,6 +3325,7 @@ FCT_BGN()
 			switch_port_t peer_port;
 			switch_port_t restart_port;
 			switch_port_t failover_port;
+			switch_port_t candidate_less_port;
 			switch_status_t status;
 			int role_case;
 			int recovery_case;
@@ -2629,6 +3354,8 @@ FCT_BGN()
 				memset(&target_after, 0, sizeof(target_after));
 				memset(&target_failover, 0, sizeof(target_failover));
 				memset(&target_ready_restart, 0, sizeof(target_ready_restart));
+				memset(&target_ready_candidate_less, 0, sizeof(target_ready_candidate_less));
+				memset(&target_ready_prflx, 0, sizeof(target_ready_prflx));
 				memset(&peer_after, 0, sizeof(peer_after));
 				memset(target_to_peer, 0, sizeof(target_to_peer));
 				memset(peer_to_target, 0, sizeof(peer_to_target));
@@ -2640,6 +3367,8 @@ FCT_BGN()
 				memset(incoming_user, 0, sizeof(incoming_user));
 				memset(local_pwd, 0, sizeof(local_pwd));
 				memset(remote_pwd, 0, sizeof(remote_pwd));
+				memset(candidate_less_host, 0, sizeof(candidate_less_host));
+				ready_candidate_less_sdp = NULL;
 				target_to_peer_len = 0;
 				peer_to_target_len = 0;
 				duplicate_peer_flight_len = 0;
@@ -2652,6 +3381,7 @@ FCT_BGN()
 				peer_port = (switch_port_t)(18410 + (role_case * 20) + (recovery_case * 2));
 				restart_port = (switch_port_t)(target_port + 1);
 				failover_port = (switch_port_t)(target_port + 2);
+				candidate_less_port = (switch_port_t)(target_port + 3);
 				proceed = 0;
 				has_addr = SWITCH_FALSE;
 				old_restart_deadline = 0;
@@ -2677,6 +3407,27 @@ FCT_BGN()
 					(switch_port_t)(failover_port + 1), target_setup,
 					role_case ? "targetClientUfrag3" : "targetServerUfrag3",
 					role_case ? "targetClientPassword1234563" : "targetServerPassword1234563") == SWITCH_STATUS_SUCCESS);
+				fst_requires(build_dtls_pair_sdp(ready_candidate_less_base,
+					sizeof(ready_candidate_less_base),
+					1683118600 + (role_case * 10) + recovery_case,
+					restart_port, target_setup,
+					role_case ? "targetClientUfrag4" : "targetServerUfrag4",
+					role_case ? "targetClientPassword1234564" : "targetServerPassword1234564") ==
+					SWITCH_STATUS_SUCCESS);
+				fst_requires(use_runtime_dtls_fingerprint(target_sdp) == SWITCH_STATUS_SUCCESS);
+				fst_requires(use_runtime_dtls_fingerprint(peer_sdp) == SWITCH_STATUS_SUCCESS);
+				fst_requires(use_runtime_dtls_fingerprint(restart_sdp) == SWITCH_STATUS_SUCCESS);
+				fst_requires(use_runtime_dtls_fingerprint(ready_restart_sdp) == SWITCH_STATUS_SUCCESS);
+				fst_requires(use_runtime_dtls_fingerprint(ready_candidate_less_base) ==
+					SWITCH_STATUS_SUCCESS);
+				switch_snprintf(candidate_line, sizeof(candidate_line),
+					"a=candidate:1 1 udp 2130706431 127.0.0.1 %u typ host\n",
+					(unsigned)restart_port);
+				ready_candidate_less_sdp = switch_string_replace(ready_candidate_less_base,
+					candidate_line, "");
+				review_regression_owner_adopt_allocation(ready_candidate_less_sdp);
+				fst_requires(ready_candidate_less_sdp != NULL &&
+					strstr(ready_candidate_less_sdp, "a=candidate:") == NULL);
 				replay_sink_fd = bind_udp_sink_fd(restart_port);
 				fst_requires(replay_sink_fd >= 0);
 				review_regression_owner_adopt_socket(replay_sink_fd);
@@ -2931,12 +3682,61 @@ FCT_BGN()
 				fst_requires(status == SWITCH_STATUS_SUCCESS);
 				fst_requires(switch_rtp_pvt_get_transport_snapshot(target_rtp, IPR_RTP,
 					&target_ready_restart) == SWITCH_STATUS_SUCCESS);
-				fst_check(target_ready_restart.dtls_state != DS_READY);
-				fst_check(target_ready_restart.dtls_context != target_before.dtls_context);
+				fst_check(target_ready_restart.dtls_state == DS_READY);
+				fst_check(target_ready_restart.dtls_context == target_before.dtls_context);
+				fst_check(target_ready_restart.dtls_ssl == target_before.dtls_ssl);
 				fst_check(target_ready_restart.dtls_destroy_count ==
-					target_failover.dtls_destroy_count + 1);
-				fst_check(target_ready_restart.srtp_send_ready == SWITCH_FALSE);
-				fst_check(target_ready_restart.srtp_recv_ready == SWITCH_FALSE);
+					target_failover.dtls_destroy_count);
+				fst_check(target_ready_restart.srtp_send_ready == SWITCH_TRUE);
+				fst_check(target_ready_restart.srtp_recv_ready == SWITCH_TRUE);
+
+				switch_channel_set_variable(target_channel, "rtp_ice_prflx_bootstrap", "true");
+				switch_core_media_clear_ice(target_session);
+				switch_channel_set_flag(target_channel, CF_REINVITE);
+				proceed = 0;
+				match = switch_core_media_negotiate_sdp(target_session,
+					ready_candidate_less_sdp, &proceed, SDP_OFFER);
+				fst_requires(match != 0);
+				switch_core_media_gen_local_sdp(target_session, SDP_ANSWER, NULL, 0, NULL, 0);
+				status = switch_core_media_activate_rtp(target_session);
+				fst_requires(status == SWITCH_STATUS_SUCCESS);
+				fst_requires(switch_rtp_pvt_get_transport_snapshot(target_rtp, IPR_RTP,
+					&target_ready_candidate_less) == SWITCH_STATUS_SUCCESS);
+				fst_check(target_ready_candidate_less.dtls_state == DS_READY);
+				fst_check(target_ready_candidate_less.dtls_context == target_before.dtls_context);
+				fst_check(target_ready_candidate_less.dtls_ssl == target_before.dtls_ssl);
+				fst_check(target_ready_candidate_less.dtls_destroy_count ==
+					target_ready_restart.dtls_destroy_count);
+				fst_check(target_ready_candidate_less.srtp_send_ready == SWITCH_TRUE);
+				fst_check(target_ready_candidate_less.srtp_recv_ready == SWITCH_TRUE);
+				has_addr = SWITCH_TRUE;
+				fst_requires(switch_rtp_pvt_get_ice_state(target_rtp, IPR_RTP,
+					ice_user, sizeof(ice_user), local_pwd, sizeof(local_pwd),
+					remote_pwd, sizeof(remote_pwd), &has_addr) == SWITCH_STATUS_SUCCESS);
+				fst_check(has_addr == SWITCH_FALSE);
+				fst_requires(reverse_ice_username(ice_user, incoming_user,
+					sizeof(incoming_user)) == SWITCH_STATUS_SUCCESS);
+				stun_len = build_authenticated_ice_request_role(stun_packet,
+					sizeof(stun_packet), incoming_user, local_pwd, SWITCH_TRUE, SWITCH_TRUE);
+				fst_requires(switch_rtp_pvt_handle_ice_from(target_rtp, IPR_RTP,
+					"192.0.2.60", candidate_less_port, stun_packet, stun_len) == SWITCH_STATUS_SUCCESS);
+				fst_requires(switch_rtp_pvt_get_transport_snapshot(target_rtp, IPR_RTP,
+					&target_ready_prflx) == SWITCH_STATUS_SUCCESS);
+				fst_check(target_ready_prflx.dtls_state == DS_READY);
+				fst_check(target_ready_prflx.dtls_context == target_before.dtls_context);
+				fst_check(target_ready_prflx.dtls_ssl == target_before.dtls_ssl);
+				fst_check(target_ready_prflx.dtls_destroy_count ==
+					target_ready_candidate_less.dtls_destroy_count);
+				fst_check(target_ready_prflx.srtp_send_ready == SWITCH_TRUE);
+				fst_check(target_ready_prflx.srtp_recv_ready == SWITCH_TRUE);
+				fst_check(target_ready_prflx.ice_remote_port == candidate_less_port);
+				fst_check(target_ready_prflx.rtp_remote_port == candidate_less_port);
+				fst_check(target_ready_prflx.dtls_remote_port == candidate_less_port);
+				fst_requires(copy_sockaddr_tuple(switch_rtp_session_get_remote_addr(target_rtp),
+					candidate_less_host, sizeof(candidate_less_host), &candidate_less_port) ==
+					SWITCH_STATUS_SUCCESS);
+				fst_check_string_equals(candidate_less_host, "192.0.2.60");
+				fst_check(candidate_less_port == (switch_port_t)(target_port + 3));
 				review_regression_owner_cleanup();
 			}
 			review_regression_owner_cleanup();
@@ -2944,7 +3744,7 @@ FCT_BGN()
 		}
 		FCT_TEST_END();
 
-		FCT_TEST_BGN(ready_dtls_rejects_ambiguous_identity_snapshots)
+		FCT_TEST_BGN(ready_dtls_keeps_baseline_identity_update_behavior)
 		{
 			char restart_base[4096];
 			char same_generation_base[4096];
@@ -3017,19 +3817,19 @@ FCT_BGN()
 			if (review_regression_inject_post_alloc("ambiguous-identity-matrix")) {
 				fst_requires(SWITCH_FALSE);
 			}
-			fst_check(run_ready_invalid_identity_restart(conflicting_tls_id_sdp) ==
+			fst_check(run_ready_identity_update(conflicting_tls_id_sdp, SWITCH_TRUE) ==
 				SWITCH_STATUS_SUCCESS);
-			fst_check(run_ready_invalid_identity_restart(empty_tls_id_sdp) ==
+			fst_check(run_ready_identity_update(empty_tls_id_sdp, SWITCH_TRUE) ==
 				SWITCH_STATUS_SUCCESS);
-			fst_check(run_ready_invalid_identity_restart(empty_fingerprint_override_sdp) ==
+			fst_check(run_ready_identity_update(empty_fingerprint_override_sdp, SWITCH_FALSE) ==
 				SWITCH_STATUS_SUCCESS);
-			fst_check(run_ready_invalid_identity_restart(fingerprint_overflow_sdp) ==
+			fst_check(run_ready_identity_update(fingerprint_overflow_sdp, SWITCH_FALSE) ==
 				SWITCH_STATUS_SUCCESS);
-			fst_check(run_ready_invalid_identity_restart(same_generation_changed_tls_id_sdp) ==
+			fst_check(run_ready_identity_update(same_generation_changed_tls_id_sdp, SWITCH_TRUE) ==
 				SWITCH_STATUS_SUCCESS);
-			fst_check(run_ready_invalid_identity_restart(same_generation_empty_tls_id_sdp) ==
+			fst_check(run_ready_identity_update(same_generation_empty_tls_id_sdp, SWITCH_TRUE) ==
 				SWITCH_STATUS_SUCCESS);
-			fst_check(run_ready_invalid_identity_restart(same_generation_empty_fingerprint_sdp) ==
+			fst_check(run_ready_identity_update(same_generation_empty_fingerprint_sdp, SWITCH_FALSE) ==
 				SWITCH_STATUS_SUCCESS);
 			review_regression_owner_cleanup();
 		}
@@ -3932,7 +4732,8 @@ FCT_BGN()
 			if (race.identity_status == SWITCH_STATUS_SUCCESS) {
 				fst_check(race.preparation_result == SWITCH_RTP_PVT_DTLS_RESTART_PRESERVE ||
 					race.preparation_result == SWITCH_RTP_PVT_DTLS_RESTART_RESET ||
-					race.preparation_result == SWITCH_RTP_PVT_DTLS_RESTART_EXPIRED);
+					race.preparation_result == SWITCH_RTP_PVT_DTLS_RESTART_EXPIRED ||
+					race.preparation_result == SWITCH_RTP_PVT_DTLS_RESTART_READY);
 			}
 			fst_check(race.teardown_status == SWITCH_STATUS_SUCCESS);
 			for (i = 0; i < 4; ++i) {
@@ -3972,6 +4773,15 @@ FCT_BGN()
 			char *initial_without_tls_id_sdp;
 			char *stale_ufrag_sdp;
 			char *stale_pwd_sdp;
+			char *initial_passive_sdp;
+			char *same_identity_passive_sdp;
+			char *ipv6_restart_passive_sdp;
+			char *ipv6_second_restart_passive_sdp;
+			char *ipv6_second_restart_tls_id_changed_sdp;
+			char *ipv6_second_restart_tls_id_changed_passive_sdp;
+			char *ice_lite_third_restart_passive_sdp;
+			char *initial_nontrickle_sdp;
+			char *initial_nontrickle_passive_sdp;
 			char non_bundle_initial_sdp[2048];
 			char non_bundle_restart_sdp[2048];
 			const char *initial_sdp =
@@ -4005,6 +4815,64 @@ FCT_BGN()
 				"a=ice-ufrag:identityRemoteUfrag2\n"
 				"a=ice-pwd:identityRemotePassword1234562\n"
 				"a=candidate:2 1 udp 2130706430 127.0.0.1 18226 typ host\n"
+				"a=rtcp-mux\n"
+				"a=setup:active\n"
+				"a=tls-id:association-1\n"
+				"a=fingerprint:sha-384 01:02:03:04:05:06:07:08:09:0A:0B:0C:0D:0E:0F:10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F:20:21:22:23:24:25:26:27:28:29:2A:2B:2C:2D:2E:2F:30\n"
+				"a=fingerprint:sha-256 17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4\n"
+				"a=rtpmap:0 PCMU/8000\n"
+				"a=sendrecv\n"
+				"a=mid:0\n";
+			const char *ipv6_restart_sdp =
+				"v=0\n"
+				"o=- 1683118194 1683118196 IN IP4 0.0.0.0\n"
+				"s=-\n"
+				"t=0 0\n"
+				"a=group:BUNDLE 0\n"
+				"m=audio 18226 UDP/TLS/RTP/SAVPF 0\n"
+				"c=IN IP6 ::1\n"
+				"a=ice-ufrag:identityRemoteUfrag2\n"
+				"a=ice-pwd:identityRemotePassword1234562\n"
+				"a=candidate:2 1 udp 2130706430 ::1 18226 typ host\n"
+				"a=rtcp-mux\n"
+				"a=setup:active\n"
+				"a=tls-id:association-1\n"
+				"a=fingerprint:sha-384 01:02:03:04:05:06:07:08:09:0A:0B:0C:0D:0E:0F:10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F:20:21:22:23:24:25:26:27:28:29:2A:2B:2C:2D:2E:2F:30\n"
+				"a=fingerprint:sha-256 17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4\n"
+				"a=rtpmap:0 PCMU/8000\n"
+				"a=sendrecv\n"
+				"a=mid:0\n";
+			const char *ipv6_second_restart_sdp =
+				"v=0\n"
+				"o=- 1683118194 1683118197 IN IP4 0.0.0.0\n"
+				"s=-\n"
+				"t=0 0\n"
+				"a=group:BUNDLE 0\n"
+				"m=audio 18226 UDP/TLS/RTP/SAVPF 0\n"
+				"c=IN IP6 ::1\n"
+				"a=ice-ufrag:identityRemoteUfrag3\n"
+				"a=ice-pwd:identityRemotePassword1234563\n"
+				"a=candidate:3 1 udp 2130706429 ::1 18226 typ host\n"
+				"a=rtcp-mux\n"
+				"a=setup:active\n"
+				"a=tls-id:association-1\n"
+				"a=fingerprint:sha-384 01:02:03:04:05:06:07:08:09:0A:0B:0C:0D:0E:0F:10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F:20:21:22:23:24:25:26:27:28:29:2A:2B:2C:2D:2E:2F:30\n"
+				"a=fingerprint:sha-256 17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4\n"
+				"a=rtpmap:0 PCMU/8000\n"
+				"a=sendrecv\n"
+				"a=mid:0\n";
+			const char *ice_lite_third_restart_sdp =
+				"v=0\n"
+				"o=- 1683118194 1683118197 IN IP4 0.0.0.0\n"
+				"s=-\n"
+				"t=0 0\n"
+				"a=group:BUNDLE 0\n"
+				"a=ice-lite\n"
+				"m=audio 18227 UDP/TLS/RTP/SAVPF 0\n"
+				"c=IN IP4 127.0.0.1\n"
+				"a=ice-ufrag:identityRemoteUfrag3\n"
+				"a=ice-pwd:identityRemotePassword1234563\n"
+				"a=candidate:3 1 udp 2130706429 127.0.0.1 18227 typ host\n"
 				"a=rtcp-mux\n"
 				"a=setup:active\n"
 				"a=tls-id:association-1\n"
@@ -4135,18 +5003,105 @@ FCT_BGN()
 				"identityRemoteUfrag2", "identityRemoteUfrag1");
 			stale_pwd_sdp = switch_string_replace(same_identity_sdp,
 				"identityRemotePassword1234562", "identityRemotePassword1234561");
+			initial_passive_sdp = switch_string_replace(initial_sdp,
+				"a=setup:active\n", "a=setup:passive\n");
+			same_identity_passive_sdp = switch_string_replace(same_identity_sdp,
+				"a=setup:active\n", "a=setup:passive\n");
+			ipv6_restart_passive_sdp = switch_string_replace(ipv6_restart_sdp,
+				"a=setup:active\n", "a=setup:passive\n");
+			ipv6_second_restart_passive_sdp = switch_string_replace(ipv6_second_restart_sdp,
+				"a=setup:active\n", "a=setup:passive\n");
+			ipv6_second_restart_tls_id_changed_sdp = switch_string_replace(ipv6_second_restart_sdp,
+				"a=tls-id:association-1\n", "a=tls-id:association-2\n");
+			ipv6_second_restart_tls_id_changed_passive_sdp =
+				switch_string_replace(ipv6_second_restart_tls_id_changed_sdp,
+					"a=setup:active\n", "a=setup:passive\n");
+			ice_lite_third_restart_passive_sdp = switch_string_replace(ice_lite_third_restart_sdp,
+				"a=setup:active\n", "a=setup:passive\n");
+			initial_nontrickle_sdp = switch_string_replace(initial_sdp,
+				"a=ice-options:trickle\n", "");
+			initial_nontrickle_passive_sdp = switch_string_replace(initial_nontrickle_sdp,
+				"a=setup:active\n", "a=setup:passive\n");
 			review_regression_owner_adopt_allocation(fingerprint_algorithm_changed_sdp);
 			review_regression_owner_adopt_allocation(tls_id_removed_sdp);
 			review_regression_owner_adopt_allocation(initial_without_tls_id_sdp);
 			review_regression_owner_adopt_allocation(stale_ufrag_sdp);
 			review_regression_owner_adopt_allocation(stale_pwd_sdp);
+			review_regression_owner_adopt_allocation(initial_passive_sdp);
+			review_regression_owner_adopt_allocation(same_identity_passive_sdp);
+			review_regression_owner_adopt_allocation(ipv6_restart_passive_sdp);
+			review_regression_owner_adopt_allocation(ipv6_second_restart_passive_sdp);
+			review_regression_owner_adopt_allocation(ipv6_second_restart_tls_id_changed_sdp);
+			review_regression_owner_adopt_allocation(ipv6_second_restart_tls_id_changed_passive_sdp);
+			review_regression_owner_adopt_allocation(ice_lite_third_restart_passive_sdp);
+			review_regression_owner_adopt_allocation(initial_nontrickle_sdp);
+			review_regression_owner_adopt_allocation(initial_nontrickle_passive_sdp);
 			fst_requires(no_mux_sdp != NULL && no_bundle_sdp != NULL && component_changed_sdp != NULL &&
 				bundle_membership_changed_sdp != NULL && bundle_tag_changed_sdp != NULL &&
 				fingerprint_algorithm_changed_sdp != NULL && tls_id_removed_sdp != NULL &&
-				initial_without_tls_id_sdp != NULL && stale_ufrag_sdp != NULL && stale_pwd_sdp != NULL);
+				initial_without_tls_id_sdp != NULL && stale_ufrag_sdp != NULL && stale_pwd_sdp != NULL &&
+				initial_passive_sdp != NULL && same_identity_passive_sdp != NULL &&
+				ipv6_restart_passive_sdp != NULL &&
+				ipv6_second_restart_passive_sdp != NULL &&
+				ipv6_second_restart_tls_id_changed_sdp != NULL &&
+				ipv6_second_restart_tls_id_changed_passive_sdp != NULL &&
+				ice_lite_third_restart_passive_sdp != NULL && initial_nontrickle_sdp != NULL &&
+				initial_nontrickle_passive_sdp != NULL);
 			if (review_regression_inject_post_alloc("exact-identity-matrix")) {
 				fst_requires(SWITCH_FALSE);
 			}
+			status = run_dtls_restart_prepare_after_ready_transition_case(SWITCH_TRUE);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			status = run_dtls_restart_prepare_after_ready_transition_case(SWITCH_FALSE);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			status = run_dtls_restart_reset_after_ready_transition_case(SWITCH_TRUE,
+				SWITCH_TRUE, SWITCH_FALSE, SWITCH_TRUE, SWITCH_FALSE);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			status = run_dtls_restart_reset_after_ready_transition_case(SWITCH_FALSE,
+				SWITCH_TRUE, SWITCH_FALSE, SWITCH_TRUE, SWITCH_FALSE);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			status = run_dtls_restart_reset_after_ready_transition_case(SWITCH_TRUE,
+				SWITCH_FALSE, SWITCH_FALSE, SWITCH_TRUE, SWITCH_FALSE);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			status = run_dtls_restart_reset_after_ready_transition_case(SWITCH_FALSE,
+				SWITCH_FALSE, SWITCH_FALSE, SWITCH_TRUE, SWITCH_FALSE);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			status = run_dtls_restart_reset_after_ready_transition_case(SWITCH_TRUE,
+				SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_FALSE);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			status = run_dtls_restart_reset_after_ready_transition_case(SWITCH_FALSE,
+				SWITCH_TRUE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_FALSE);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			status = run_dtls_restart_reset_after_ready_transition_case(SWITCH_TRUE,
+				SWITCH_FALSE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_FALSE);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			status = run_dtls_restart_reset_after_ready_transition_case(SWITCH_FALSE,
+				SWITCH_FALSE, SWITCH_TRUE, SWITCH_TRUE, SWITCH_FALSE);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			status = run_dtls_restart_reset_after_ready_transition_case(SWITCH_TRUE,
+				SWITCH_TRUE, SWITCH_FALSE, SWITCH_TRUE, SWITCH_TRUE);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			status = run_dtls_restart_reset_after_ready_transition_case(SWITCH_FALSE,
+				SWITCH_TRUE, SWITCH_FALSE, SWITCH_TRUE, SWITCH_TRUE);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			status = run_dtls_restart_reset_after_ready_transition_case(SWITCH_TRUE,
+				SWITCH_FALSE, SWITCH_FALSE, SWITCH_TRUE, SWITCH_TRUE);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			status = run_dtls_restart_reset_after_ready_transition_case(SWITCH_FALSE,
+				SWITCH_FALSE, SWITCH_FALSE, SWITCH_TRUE, SWITCH_TRUE);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			status = run_dtls_restart_reset_after_ready_transition_case(SWITCH_TRUE,
+				SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE, SWITCH_TRUE);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			status = run_dtls_restart_reset_after_ready_transition_case(SWITCH_FALSE,
+				SWITCH_TRUE, SWITCH_FALSE, SWITCH_FALSE, SWITCH_TRUE);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			status = run_dtls_restart_reset_after_ready_transition_case(SWITCH_TRUE,
+				SWITCH_FALSE, SWITCH_FALSE, SWITCH_FALSE, SWITCH_TRUE);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			status = run_dtls_restart_reset_after_ready_transition_case(SWITCH_FALSE,
+				SWITCH_FALSE, SWITCH_FALSE, SWITCH_FALSE, SWITCH_TRUE);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
 			fst_requires(build_dtls_pair_sdp_ex(non_bundle_initial_sdp,
 				sizeof(non_bundle_initial_sdp), 1683118260, 18810, "active",
 				"nonBundleIdentityUfrag1", "nonBundleIdentityPassword1234561", SWITCH_FALSE) ==
@@ -4161,6 +5116,164 @@ FCT_BGN()
 			fst_requires(status == SWITCH_STATUS_SUCCESS);
 			fst_check(result.preserved == SWITCH_TRUE);
 			fst_check(result.before_port == 18225 && result.after_port == 18225);
+
+			status = run_dtls_restart_identity_case(initial_sdp, ipv6_restart_sdp, 0, 0,
+				SWITCH_FALSE, &result);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			fst_check(result.preserved == SWITCH_FALSE);
+			fst_check(result.before_family == AF_INET && result.after_family == AF_INET6);
+			fst_check(result.before_port == 18225 && result.after_port == 18226);
+			fst_check(result.output_socket_changed == SWITCH_TRUE);
+			fst_check(result.output_socket_split == SWITCH_TRUE);
+
+			status = run_dtls_restart_identity_case(initial_passive_sdp,
+				ipv6_restart_passive_sdp, 0, 0, SWITCH_FALSE, &result);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			fst_check(result.preserved == SWITCH_FALSE);
+			fst_check(result.before_family == AF_INET && result.after_family == AF_INET6);
+			fst_check(result.before_port == 18225 && result.after_port == 18226);
+			fst_check(result.output_socket_changed == SWITCH_TRUE);
+			fst_check(result.output_socket_split == SWITCH_TRUE);
+
+			status = run_dtls_restart_migration_then_family_reset_case(initial_sdp,
+				same_identity_sdp, 18226, ipv6_second_restart_sdp, SWITCH_TRUE, &result);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			fst_check(result.first_restart_migrated == SWITCH_TRUE);
+			fst_check(result.preserved == SWITCH_FALSE);
+			fst_check(result.tuple_authority_retired == SWITCH_TRUE);
+			fst_check(result.before_family == AF_INET && result.after_family == AF_INET6);
+			fst_check(result.before_port == 18225 && result.after_port == 18226);
+			fst_check(result.output_socket_changed == SWITCH_TRUE);
+			fst_check(result.output_socket_split == SWITCH_TRUE);
+
+			status = run_dtls_restart_migration_then_family_reset_case(initial_passive_sdp,
+				same_identity_passive_sdp, 18226, ipv6_second_restart_passive_sdp,
+				SWITCH_TRUE, &result);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			fst_check(result.first_restart_migrated == SWITCH_TRUE);
+			fst_check(result.preserved == SWITCH_FALSE);
+			fst_check(result.tuple_authority_retired == SWITCH_TRUE);
+			fst_check(result.before_family == AF_INET && result.after_family == AF_INET6);
+			fst_check(result.before_port == 18225 && result.after_port == 18226);
+			fst_check(result.output_socket_changed == SWITCH_TRUE);
+			fst_check(result.output_socket_split == SWITCH_TRUE);
+
+			status = run_dtls_restart_migration_then_family_reset_case(initial_sdp,
+				same_identity_sdp, 18226, ipv6_second_restart_tls_id_changed_sdp,
+				SWITCH_TRUE, &result);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			fst_check(result.first_restart_migrated == SWITCH_TRUE);
+			fst_check(result.preserved == SWITCH_FALSE);
+			fst_check(result.tuple_authority_retired == SWITCH_TRUE);
+			fst_check(result.before_family == AF_INET && result.after_family == AF_INET6);
+			fst_check(result.before_port == 18225 && result.after_port == 18226);
+			fst_check(result.output_socket_changed == SWITCH_TRUE);
+			fst_check(result.output_socket_split == SWITCH_TRUE);
+
+			status = run_dtls_restart_migration_then_family_reset_case(initial_passive_sdp,
+				same_identity_passive_sdp, 18226,
+				ipv6_second_restart_tls_id_changed_passive_sdp, SWITCH_TRUE, &result);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			fst_check(result.first_restart_migrated == SWITCH_TRUE);
+			fst_check(result.preserved == SWITCH_FALSE);
+			fst_check(result.tuple_authority_retired == SWITCH_TRUE);
+			fst_check(result.before_family == AF_INET && result.after_family == AF_INET6);
+			fst_check(result.before_port == 18225 && result.after_port == 18226);
+			fst_check(result.output_socket_changed == SWITCH_TRUE);
+			fst_check(result.output_socket_split == SWITCH_TRUE);
+
+			status = run_dtls_restart_migration_then_family_reset_case(initial_sdp,
+				same_identity_sdp, 18226, ice_lite_third_restart_sdp, SWITCH_TRUE, &result);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			fst_check(result.first_restart_migrated == SWITCH_TRUE);
+			fst_check(result.preserved == SWITCH_FALSE);
+			fst_check(result.tuple_authority_retired == SWITCH_TRUE);
+			fst_check((result.before_ice_type & ICE_LITE_INBOUND) == 0);
+			fst_check((result.after_ice_type & ICE_LITE_INBOUND) != 0);
+			fst_check(result.before_family == AF_INET && result.after_family == AF_INET);
+			fst_check(result.before_port == 18225 && result.after_port == 18227);
+
+			status = run_dtls_restart_migration_then_family_reset_case(initial_passive_sdp,
+				same_identity_passive_sdp, 18226, ice_lite_third_restart_passive_sdp,
+				SWITCH_TRUE, &result);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			fst_check(result.first_restart_migrated == SWITCH_TRUE);
+			fst_check(result.preserved == SWITCH_FALSE);
+			fst_check(result.tuple_authority_retired == SWITCH_TRUE);
+			fst_check((result.before_ice_type & ICE_LITE_INBOUND) == 0);
+			fst_check((result.after_ice_type & ICE_LITE_INBOUND) != 0);
+			fst_check(result.before_family == AF_INET && result.after_family == AF_INET);
+			fst_check(result.before_port == 18225 && result.after_port == 18227);
+
+			status = run_dtls_restart_migration_then_family_reset_case(initial_nontrickle_sdp,
+				same_identity_sdp, 18226, ipv6_second_restart_sdp, SWITCH_FALSE, &result);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			fst_check(result.first_restart_migrated == SWITCH_TRUE);
+			fst_check(result.preserved == SWITCH_FALSE);
+			fst_check(result.tuple_authority_retired == SWITCH_TRUE);
+			fst_check(result.before_family == AF_INET && result.after_family == AF_INET6);
+			fst_check(result.before_port == 18225 && result.after_port == 18226);
+			fst_check(result.output_socket_changed == SWITCH_TRUE);
+			fst_check(result.output_socket_split == SWITCH_TRUE);
+
+			status = run_dtls_restart_migration_then_family_reset_case(initial_nontrickle_passive_sdp,
+				same_identity_passive_sdp, 18226, ipv6_second_restart_passive_sdp,
+				SWITCH_FALSE, &result);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			fst_check(result.first_restart_migrated == SWITCH_TRUE);
+			fst_check(result.preserved == SWITCH_FALSE);
+			fst_check(result.tuple_authority_retired == SWITCH_TRUE);
+			fst_check(result.before_family == AF_INET && result.after_family == AF_INET6);
+			fst_check(result.before_port == 18225 && result.after_port == 18226);
+			fst_check(result.output_socket_changed == SWITCH_TRUE);
+			fst_check(result.output_socket_split == SWITCH_TRUE);
+
+			status = run_dtls_restart_migration_then_family_reset_case(initial_nontrickle_sdp,
+				same_identity_sdp, 18226, ipv6_second_restart_tls_id_changed_sdp,
+				SWITCH_FALSE, &result);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			fst_check(result.first_restart_migrated == SWITCH_TRUE);
+			fst_check(result.preserved == SWITCH_FALSE);
+			fst_check(result.tuple_authority_retired == SWITCH_TRUE);
+			fst_check(result.before_family == AF_INET && result.after_family == AF_INET6);
+			fst_check(result.before_port == 18225 && result.after_port == 18226);
+			fst_check(result.output_socket_changed == SWITCH_TRUE);
+			fst_check(result.output_socket_split == SWITCH_TRUE);
+
+			status = run_dtls_restart_migration_then_family_reset_case(initial_nontrickle_passive_sdp,
+				same_identity_passive_sdp, 18226,
+				ipv6_second_restart_tls_id_changed_passive_sdp, SWITCH_FALSE, &result);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			fst_check(result.first_restart_migrated == SWITCH_TRUE);
+			fst_check(result.preserved == SWITCH_FALSE);
+			fst_check(result.tuple_authority_retired == SWITCH_TRUE);
+			fst_check(result.before_family == AF_INET && result.after_family == AF_INET6);
+			fst_check(result.before_port == 18225 && result.after_port == 18226);
+			fst_check(result.output_socket_changed == SWITCH_TRUE);
+			fst_check(result.output_socket_split == SWITCH_TRUE);
+
+			status = run_dtls_restart_migration_then_family_reset_case(initial_nontrickle_sdp,
+				same_identity_sdp, 18226, ice_lite_third_restart_sdp, SWITCH_FALSE, &result);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			fst_check(result.first_restart_migrated == SWITCH_TRUE);
+			fst_check(result.preserved == SWITCH_FALSE);
+			fst_check(result.tuple_authority_retired == SWITCH_TRUE);
+			fst_check((result.before_ice_type & ICE_LITE_INBOUND) == 0);
+			fst_check((result.after_ice_type & ICE_LITE_INBOUND) != 0);
+			fst_check(result.before_family == AF_INET && result.after_family == AF_INET);
+			fst_check(result.before_port == 18225 && result.after_port == 18227);
+
+			status = run_dtls_restart_migration_then_family_reset_case(initial_nontrickle_passive_sdp,
+				same_identity_passive_sdp, 18226, ice_lite_third_restart_passive_sdp,
+				SWITCH_FALSE, &result);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			fst_check(result.first_restart_migrated == SWITCH_TRUE);
+			fst_check(result.preserved == SWITCH_FALSE);
+			fst_check(result.tuple_authority_retired == SWITCH_TRUE);
+			fst_check((result.before_ice_type & ICE_LITE_INBOUND) == 0);
+			fst_check((result.after_ice_type & ICE_LITE_INBOUND) != 0);
+			fst_check(result.before_family == AF_INET && result.after_family == AF_INET);
+			fst_check(result.before_port == 18225 && result.after_port == 18227);
 
 			status = run_dtls_restart_identity_case(initial_sdp, fingerprint_set_changed_sdp, 0, 0,
 				SWITCH_FALSE, &result);
@@ -4250,6 +5363,61 @@ FCT_BGN()
 				SWITCH_FALSE, &result);
 			fst_requires(status == SWITCH_STATUS_SUCCESS);
 			fst_check(result.preserved == SWITCH_FALSE);
+			review_regression_owner_cleanup();
+		}
+		FCT_TEST_END();
+
+		FCT_TEST_BGN(initial_candidate_less_controlled_trickle_selects_late_candidate)
+		{
+			switch_core_session_t *session = NULL;
+			switch_media_handle_t *smh = NULL;
+			switch_rtp_t *rtp = NULL;
+			void *sdp_session = NULL;
+			sdp_parser_t *parser = NULL;
+			switch_rtp_pvt_transport_snapshot_t before;
+			switch_rtp_pvt_transport_snapshot_t after;
+			switch_status_t status;
+			const char *initial_sdp =
+				"v=0\n"
+				"o=- 1683118194 1683118289 IN IP4 0.0.0.0\n"
+				"s=-\n"
+				"t=0 0\n"
+				"a=group:BUNDLE 0\n"
+				"m=audio 19005 UDP/TLS/RTP/SAVPF 0\n"
+				"c=IN IP4 192.0.2.39\n"
+				"a=ice-ufrag:initialCandidateLessUfrag1\n"
+				"a=ice-pwd:initialCandidateLessPassword1234561\n"
+				"a=ice-options:trickle\n"
+				"a=rtcp-mux\n"
+				"a=setup:active\n"
+				"a=fingerprint:sha-256 17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4\n"
+				"a=rtpmap:0 PCMU/8000\n"
+				"a=sendrecv\n"
+				"a=mid:0\n";
+
+			status = make_session_and_rtp_with_sdp_ex(&session, &rtp, &sdp_session, &parser,
+				initial_sdp, "PCMU", SWITCH_TRUE, SWITCH_TRUE, "controlled");
+			review_regression_owner_adopt(session, sdp_session, parser);
+			fst_requires(status == SWITCH_STATUS_SUCCESS && session && rtp && sdp_session && parser);
+			if (review_regression_inject_post_alloc("initial-candidate-less")) {
+				fst_requires(SWITCH_FALSE);
+			}
+			smh = switch_core_session_get_media_handle(session);
+			fst_requires(smh != NULL);
+			fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP, &before) ==
+				SWITCH_STATUS_SUCCESS);
+			fst_check(before.rtp_chosen == SWITCH_FALSE);
+			fst_check(before.ice_remote_port == 0);
+
+			status = switch_core_media_trickle_remote_candidate_and_recheck(session, smh,
+				sdp_session, SDP_TYPE_REQUEST, "0", 0,
+				"candidate:2 1 udp 2130706431 192.0.2.39 19005 typ host", 0);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP, &after) ==
+				SWITCH_STATUS_SUCCESS);
+			fst_check(after.rtp_chosen == SWITCH_TRUE);
+			fst_check(after.ice_remote_port == 19005);
+
 			review_regression_owner_cleanup();
 		}
 		FCT_TEST_END();
@@ -4652,7 +5820,7 @@ FCT_BGN()
 			switch_rtp_pvt_transport_snapshot_t after;
 			switch_rtp_pvt_transport_snapshot_t handshake_restart;
 			switch_rtp_pvt_transport_snapshot_t migrated_restart;
-			switch_rtp_pvt_transport_snapshot_t ready_restart;
+			switch_rtp_pvt_transport_snapshot_t established_ready;
 			char ice_user[256] = "";
 			char incoming_user[256] = "";
 			char local_pwd[256] = "";
@@ -4667,7 +5835,6 @@ FCT_BGN()
 			uint8_t stun_packet[512];
 			switch_size_t stun_len;
 			char handshake_restart_sdp[2048];
-			char ready_restart_sdp[2048];
 			char peer_sdp[2048];
 			uint8_t match;
 			uint8_t proceed = 0;
@@ -4710,10 +5877,10 @@ FCT_BGN()
 			status = switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP, &candidate_ready);
 			fst_requires(status == SWITCH_STATUS_SUCCESS);
 			fst_check((candidate_ready.ice_type & ICE_CONTROLLED) != 0);
-			fst_check(candidate_ready.rtp_chosen == SWITCH_FALSE);
+			fst_check(candidate_ready.rtp_chosen == SWITCH_TRUE);
 			fst_check(candidate_ready.dtls_state == DS_HANDSHAKE);
-			fst_check(candidate_ready.dtls_context == before.dtls_context);
-			fst_check(candidate_ready.dtls_ssl == before.dtls_ssl);
+			fst_check(candidate_ready.dtls_context != NULL);
+			fst_check(candidate_ready.dtls_ssl != NULL);
 
 			stun_len = build_authenticated_ice_request(stun_packet, sizeof(stun_packet),
 				incoming_user, local_pwd);
@@ -4724,10 +5891,10 @@ FCT_BGN()
 			fst_requires(status == SWITCH_STATUS_SUCCESS);
 			fst_requires(nominated.ice_ready == SWITCH_TRUE && nominated.ice_rready == SWITCH_TRUE);
 			fst_requires(nominated.rtp_chosen == SWITCH_TRUE);
-			fst_check(nominated.rtcp_chosen == SWITCH_FALSE);
+			fst_check(nominated.rtcp_chosen == SWITCH_TRUE);
 			fst_check(nominated.dtls_state == DS_HANDSHAKE);
-			fst_check(nominated.dtls_context == before.dtls_context);
-			fst_check(nominated.dtls_ssl == before.dtls_ssl);
+			fst_check(nominated.dtls_context == candidate_ready.dtls_context);
+			fst_check(nominated.dtls_ssl == candidate_ready.dtls_ssl);
 			fst_check(nominated.socket == before.socket);
 			status = switch_core_media_get_chosen_ice_candidate(session, SWITCH_MEDIA_TYPE_AUDIO,
 				&chosen_addr, &chosen_port);
@@ -4751,8 +5918,8 @@ FCT_BGN()
 			fst_check(after.rtp_chosen == nominated.rtp_chosen);
 			fst_check(after.rtcp_chosen == nominated.rtcp_chosen);
 			fst_check(after.dtls_state == DS_HANDSHAKE);
-			fst_check(after.dtls_context == before.dtls_context);
-			fst_check(after.dtls_ssl == before.dtls_ssl);
+			fst_check(after.dtls_context == nominated.dtls_context);
+			fst_check(after.dtls_ssl == nominated.dtls_ssl);
 			fst_check(after.socket == before.socket);
 			status = switch_core_media_get_chosen_ice_candidate(session, SWITCH_MEDIA_TYPE_AUDIO,
 				&chosen_addr, &chosen_port);
@@ -4779,8 +5946,8 @@ FCT_BGN()
 			fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP,
 				&handshake_restart) == SWITCH_STATUS_SUCCESS);
 			fst_check(handshake_restart.dtls_state == DS_HANDSHAKE);
-			fst_check(handshake_restart.dtls_context == before.dtls_context);
-			fst_check(handshake_restart.dtls_ssl == before.dtls_ssl);
+			fst_check(handshake_restart.dtls_context == after.dtls_context);
+			fst_check(handshake_restart.dtls_ssl == after.dtls_ssl);
 			fst_check(handshake_restart.dtls_restart_pending == SWITCH_TRUE);
 
 			memset(ice_user, 0, sizeof(ice_user));
@@ -4798,8 +5965,8 @@ FCT_BGN()
 				stun_packet, stun_len) == SWITCH_STATUS_SUCCESS);
 			fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP,
 				&migrated_restart) == SWITCH_STATUS_SUCCESS);
-			fst_check(migrated_restart.dtls_context == before.dtls_context);
-			fst_check(migrated_restart.dtls_ssl == before.dtls_ssl);
+			fst_check(migrated_restart.dtls_context == after.dtls_context);
+			fst_check(migrated_restart.dtls_ssl == after.dtls_ssl);
 			fst_check(migrated_restart.dtls_restart_pending == SWITCH_FALSE);
 			fst_check(migrated_restart.dtls_restart_migrated == SWITCH_TRUE);
 
@@ -4816,33 +5983,16 @@ FCT_BGN()
 			}
 			fst_requires(drive_dtls_pair_ready(peer_rtp, rtp) == SWITCH_STATUS_SUCCESS);
 			fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP,
-				&ready_restart) == SWITCH_STATUS_SUCCESS);
-			fst_requires(ready_restart.dtls_state == DS_READY);
-			fst_check(ready_restart.dtls_context == before.dtls_context);
-			fst_check(ready_restart.dtls_ssl == before.dtls_ssl);
-			fst_check(ready_restart.dtls_tuple_authoritative == SWITCH_TRUE);
+				&established_ready) == SWITCH_STATUS_SUCCESS);
+			fst_requires(established_ready.dtls_state == DS_READY);
+			fst_check(established_ready.dtls_context == after.dtls_context);
+			fst_check(established_ready.dtls_ssl == after.dtls_ssl);
+			fst_check(established_ready.dtls_restart_migrated == SWITCH_FALSE);
+			fst_check(established_ready.dtls_tuple_authoritative == SWITCH_TRUE);
 			fst_requires(copy_sockaddr_tuple(switch_rtp_session_get_remote_addr(rtp), after_host,
 				sizeof(after_host), &after_port) == SWITCH_STATUS_SUCCESS);
 			fst_check_string_equals(after_host, "127.0.0.1");
 			fst_check(after_port == 54303);
-
-			fst_requires(build_dtls_pair_sdp(ready_restart_sdp, sizeof(ready_restart_sdp),
-				1683118272, 54304, "active", "candidateLessRemoteUfrag3",
-				"candidateLessRemotePassword1234563") == SWITCH_STATUS_SUCCESS);
-			switch_core_media_clear_ice(session);
-			switch_channel_set_flag(channel, CF_REINVITE);
-			proceed = 0;
-			match = switch_core_media_negotiate_sdp(session, ready_restart_sdp, &proceed,
-				SDP_OFFER);
-			fst_requires(match != 0);
-			switch_core_media_gen_local_sdp(session, SDP_ANSWER, NULL, 0, NULL, 0);
-			fst_requires(switch_core_media_activate_rtp(session) == SWITCH_STATUS_SUCCESS);
-			fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP,
-				&ready_restart) == SWITCH_STATUS_SUCCESS);
-			fst_check(ready_restart.dtls_state != DS_READY);
-			fst_check(ready_restart.dtls_context != before.dtls_context);
-			fst_check(ready_restart.srtp_send_ready == SWITCH_FALSE);
-			fst_check(ready_restart.srtp_recv_ready == SWITCH_FALSE);
 
 			review_regression_owner_cleanup();
 		}
@@ -5007,7 +6157,7 @@ FCT_BGN()
 				"t=0 0\n"
 				"a=group:BUNDLE 0\n"
 				"m=audio 18215 UDP/TLS/RTP/SAVPF 0\n"
-				"c=IN IP4 50.114.144.39\n"
+				"c=IN IP4 198.51.100.20\n"
 				"a=ice-ufrag:restartRemoteUfrag\n"
 				"a=ice-pwd:restartRemotePassword123456\n"
 				"a=ice-options:trickle\n"
@@ -5026,7 +6176,7 @@ FCT_BGN()
 
 			status = switch_core_media_trickle_remote_candidate_and_recheck(
 				session, smh, sdp_session, SDP_TYPE_REQUEST, "0", 0,
-				"candidate:265031753 1 udp 1685921533 50.114.144.39 18215 typ srflx raddr 100.69.211.204 rport 54081", 0);
+				"candidate:1 1 udp 2122260223 198.51.100.20 18215 typ srflx raddr 192.0.2.10 rport 19002", 0);
 			fst_requires(status == SWITCH_STATUS_SUCCESS);
 			status = switch_rtp_pvt_get_ice_state(rtp, IPR_RTP,
 				initial_ice_user, sizeof(initial_ice_user),
@@ -5036,9 +6186,9 @@ FCT_BGN()
 			initial_local_ufrag = strchr(initial_ice_user, ':');
 			fst_requires(initial_local_ufrag != NULL && initial_local_ufrag[1] != '\0');
 			initial_local_ufrag++;
-			fst_check(!strncmp(initial_ice_user, "aZJpsl00bYnjrOZtkCFMtKhFC/CHAfcv:",
-				strlen("aZJpsl00bYnjrOZtkCFMtKhFC/CHAfcv:")));
-			fst_check_string_equals(initial_remote_pwd, "aNniSnLLp43SSsJrz6TNPty1zPrxZNzh");
+			fst_check(!strncmp(initial_ice_user, "sameGenerationRemoteUfrag1:",
+				strlen("sameGenerationRemoteUfrag1:")));
+			fst_check_string_equals(initial_remote_pwd, "sameGenerationRemotePassword1234561");
 			fst_check(initial_local_pwd[0] != '\0');
 			fst_check(has_addr == SWITCH_TRUE);
 
@@ -5719,14 +6869,13 @@ FCT_BGN()
 		smh = switch_core_session_get_media_handle(session);
 		fst_requires(smh != NULL);
 
-		/* Test the full production trickle ICE workflow */
-		/* This should replicate the exact sequence from the production logs */
+		/* Exercise the candidate-selection workflow with synthetic addresses. */
 
 		/* First candidate: host candidate (private IP - should be rejected by ACL) */
 		st = switch_core_media_trickle_remote_candidate_and_recheck(
 			session, smh, sdp_session, SDP_TYPE_REQUEST,
 			"0", 0,
-			"candidate:2913552865 1 udp 24977407 192.168.0.1 49412 typ host raddr 162.120.214.184 rport 55197",
+			"candidate:1 1 udp 2122260220 10.0.0.10 19001 typ host raddr 198.51.100.21 rport 19002",
 			0
 		);
 		fst_check(st == SWITCH_STATUS_SUCCESS);
@@ -5735,7 +6884,7 @@ FCT_BGN()
 		st = switch_core_media_trickle_remote_candidate_and_recheck(
 			session, smh, sdp_session, SDP_TYPE_REQUEST,
 			"0", 0,
-			"candidate:265031753 1 udp 1685921537 fd7a:115c:a1e0:ab12:4843:cd96:625d:273b 18215 typ srflx raddr 100.69.211.204 rport 54081",
+			"candidate:2 1 udp 2122260221 2001:db8::20 18215 typ srflx raddr 192.0.2.10 rport 19002",
 			0
 		);
 		fst_check(st == SWITCH_STATUS_SUCCESS);
@@ -5744,16 +6893,16 @@ FCT_BGN()
 		st = switch_core_media_trickle_remote_candidate_and_recheck(
 			session, smh, sdp_session, SDP_TYPE_REQUEST,
 			"0", 0,
-			"candidate:265031753 1 udp 1685921535 490f301c-75b1-45ea-b4ef-259ba8aade9b.local 18215 typ host raddr 100.69.211.204 rport 54081",
+			"candidate:3 1 udp 2122260222 synthetic-host.local 18215 typ host raddr 192.0.2.10 rport 19002",
 			0
 		);
 		fst_check(st == SWITCH_STATUS_SUCCESS);
 
-		/* Fourth candidate: public IP srflx candidate (THIS SHOULD BE CHOSEN!) */
+		/* Fourth candidate: routable documentation-range srflx candidate. */
 		st = switch_core_media_trickle_remote_candidate_and_recheck(
 			session, smh, sdp_session, SDP_TYPE_REQUEST,
 			"0", 0,
-			"candidate:265031753 1 udp 1685921533 50.114.144.39 18215 typ srflx raddr 100.69.211.204 rport 54081",
+			"candidate:4 1 udp 2122260223 198.51.100.20 18215 typ srflx raddr 192.0.2.10 rport 19002",
 			0
 		);
 		fst_check(st == SWITCH_STATUS_SUCCESS);
@@ -5779,10 +6928,8 @@ FCT_BGN()
 				"Chosen ICE candidate: %s:%d\n",
 				chosen_addr ? chosen_addr : "(null)", chosen_port);
 
-			/* Verify the correct candidate was chosen:
-			 * - NOT the private IP 192.168.0.1:49412
-			 * - SHOULD BE the public IP 50.114.144.39:18215 */
-			fst_check_string_equals(chosen_addr, "50.114.144.39");
+			/* The accepted synthetic srflx candidate must win over rejected inputs. */
+			fst_check_string_equals(chosen_addr, "198.51.100.20");
 			fst_check(chosen_port == 18215);
 		}
 

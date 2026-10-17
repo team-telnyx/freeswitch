@@ -157,12 +157,19 @@ typedef struct {
 	const void *dtls_remote_addr;
 	uint32_t dtls_destroy_count;
 	const void *socket;
+	const void *output_socket;
+	const void *ice_selected_pair_check_socket;
+	switch_port_t ice_selected_pair_check_local_port;
+	int ice_selected_pair_check_local_family;
+	switch_port_t ice_selected_pair_check_remote_port;
+	uint8_t ice_selected_pair_check_count;
 } switch_rtp_pvt_transport_snapshot_t;
 
 typedef enum {
 	SWITCH_RTP_PVT_DTLS_RESTART_RESET = 0,
 	SWITCH_RTP_PVT_DTLS_RESTART_PRESERVE,
-	SWITCH_RTP_PVT_DTLS_RESTART_EXPIRED
+	SWITCH_RTP_PVT_DTLS_RESTART_EXPIRED,
+	SWITCH_RTP_PVT_DTLS_RESTART_READY
 } switch_rtp_pvt_dtls_restart_result_t;
 
 SWITCH_DECLARE(void) switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *data, switch_size_t len);
@@ -188,6 +195,13 @@ SWITCH_DECLARE(void) switch_rtp_pvt_set_lock_test_hooks(switch_rtp_t *rtp_sessio
 	switch_rtp_pvt_lock_test_hook_t rtcp_stun_dispatch_hook,
 	switch_rtp_pvt_lock_test_hook_t dtls_destination_update_hook,
 	switch_rtp_pvt_lock_test_hook_t rtcp_dtls_post_process_hook, void *data);
+SWITCH_DECLARE(void) switch_rtp_pvt_set_dtls_restart_prepare_test_hook(switch_rtp_t *rtp_session,
+	switch_rtp_pvt_lock_test_hook_t hook, void *data);
+SWITCH_DECLARE(void) switch_rtp_pvt_run_dtls_restart_prepare_test_hook(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(void) switch_rtp_pvt_set_dtls_restart_transport_test_hook(switch_rtp_t *rtp_session,
+	switch_rtp_pvt_lock_test_hook_t hook, void *data);
+SWITCH_DECLARE(void) switch_rtp_pvt_set_dtls_restart_transport_test_failure(switch_rtp_t *rtp_session,
+	switch_bool_t fail);
 SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_srtp_round_trip(switch_rtp_t *left, switch_rtp_t *right);
 SWITCH_DECLARE(void) switch_rtp_pvt_set_dtls_association_identity(switch_rtp_t *rtp_session,
 	dtls_type_t type, const switch_rtp_pvt_dtls_identity_t *identity);
@@ -197,6 +211,8 @@ SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_dtls_association_identity_matches(s
 	const switch_rtp_pvt_dtls_identity_t *identity);
 SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_dtls_association_identity_compatible(switch_rtp_t *rtp_session,
 	const switch_rtp_pvt_dtls_identity_t *identity);
+SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_dtls_ice_restart_socket_compatible(
+	switch_rtp_t *rtp_session, switch_sockaddr_t *selected_addr);
 SWITCH_DECLARE(switch_rtp_pvt_dtls_restart_result_t) switch_rtp_pvt_prepare_dtls_ice_restart(switch_rtp_t *rtp_session,
 	const switch_rtp_pvt_dtls_identity_t *identity, uint32_t setup_timeout_ms,
 	switch_core_media_ice_type_t ice_type, const char *remote_ufrag, const char *local_ufrag,
@@ -205,6 +221,10 @@ SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_dtls_ice_restart_transport_authorit
 SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_set_remote_sdp_address(switch_rtp_t *rtp_session,
 	const char *host, switch_port_t port, switch_port_t remote_rtcp_port,
 	switch_bool_t change_adv_addr, const char **err);
+SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_reset_dtls_ice_restart_transport(switch_rtp_t *rtp_session,
+	const switch_rtp_pvt_dtls_identity_t *identity, const char *host, switch_port_t port,
+	switch_port_t remote_rtcp_port, switch_bool_t change_adv_addr,
+	switch_rtp_pvt_dtls_restart_result_t *result, const char **err);
 SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_expire_prepared_dtls_ice_restart(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_dtls_step(switch_rtp_t *rtp_session, dtls_type_t type,
 	const void *input, switch_size_t input_len, void *output, switch_size_t output_capacity,
