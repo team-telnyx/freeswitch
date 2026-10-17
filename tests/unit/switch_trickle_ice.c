@@ -180,6 +180,31 @@ static switch_size_t build_authenticated_ice_role_conflict_response(uint8_t *buf
 	return bytes;
 }
 
+static switch_size_t build_unauthenticated_ice_role_conflict_response(uint8_t *buf,
+	switch_size_t buflen, const char transaction_id[13])
+{
+	switch_stun_packet_attribute_t *attribute;
+	switch_stun_packet_t *packet;
+
+	switch_assert(buf);
+	switch_assert(buflen >= 128);
+	switch_assert(transaction_id);
+	memset(buf, 0, buflen);
+	packet = switch_stun_packet_build_header(SWITCH_STUN_BINDING_ERROR_RESPONSE,
+		(char *)transaction_id, buf);
+	attribute = (switch_stun_packet_attribute_t *)(buf + switch_stun_packet_length(packet));
+	attribute->type = htons(SWITCH_STUN_ATTR_ERROR_CODE);
+	attribute->length = htons(4);
+	attribute->value[0] = 0;
+	attribute->value[1] = 0;
+	attribute->value[2] = 4;
+	attribute->value[3] = 87;
+	packet->header.length += htons((uint16_t)(sizeof(*attribute) + 4));
+	switch_stun_packet_attribute_add_fingerprint(packet);
+
+	return switch_stun_packet_length(packet);
+}
+
 static switch_status_t reverse_ice_username(const char *ice_user, char *incoming, switch_size_t incoming_len)
 {
 	const char *colon;
@@ -228,6 +253,58 @@ static int bind_udp_sink_fd(switch_port_t port)
 		return -1;
 	}
 	return socket_fd;
+}
+
+static int bind_udp_any_sink_fd(switch_port_t port)
+{
+	struct sockaddr_in addr;
+	struct timeval timeout;
+	int socket_fd;
+	int reuse = 1;
+
+	socket_fd = socket(AF_INET, SOCK_DGRAM, 0);
+	if (socket_fd < 0) {
+		return -1;
+	}
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(port);
+	addr.sin_addr.s_addr = htonl(INADDR_ANY);
+	timeout.tv_sec = 0;
+	timeout.tv_usec = 100000;
+	setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+	setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+	if (bind(socket_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+		close(socket_fd);
+		return -1;
+	}
+	return socket_fd;
+}
+
+static switch_status_t receive_stun_transaction_id(int socket_fd, char transaction_id[13])
+{
+	uint8_t buf[512];
+	switch_stun_packet_t *packet;
+	ssize_t received;
+	int attempt;
+
+	if (socket_fd < 0 || !transaction_id) {
+		return SWITCH_STATUS_FALSE;
+	}
+	for (attempt = 0; attempt < 3; ++attempt) {
+		received = recv(socket_fd, buf, sizeof(buf), 0);
+		if (received < (ssize_t)sizeof(packet->header)) {
+			return SWITCH_STATUS_FALSE;
+		}
+		packet = (switch_stun_packet_t *)buf;
+		if (ntohs(packet->header.type) == SWITCH_STUN_BINDING_REQUEST) {
+			memcpy(transaction_id, packet->header.id, 12);
+			transaction_id[12] = '\0';
+			return SWITCH_STATUS_SUCCESS;
+		}
+	}
+
+	return SWITCH_STATUS_FALSE;
 }
 
 static switch_status_t send_udp_packet_fd(int socket_fd, switch_port_t port,
@@ -5801,6 +5878,145 @@ FCT_BGN()
 		}
 		FCT_TEST_END();
 
+		FCT_TEST_BGN(ordinary_prflx_bootstrap_preserves_roles_and_authentication_boundary)
+		{
+			switch_core_session_t *session = NULL;
+			switch_channel_t *channel = NULL;
+			switch_rtp_t *rtp = NULL;
+			void *sdp_session = NULL;
+			sdp_parser_t *parser = NULL;
+			switch_rtp_pvt_transport_snapshot_t before;
+			switch_rtp_pvt_transport_snapshot_t rejected;
+			switch_rtp_pvt_transport_snapshot_t accepted;
+			switch_status_t status;
+			char ice_user[256] = "";
+			char incoming_user[256] = "";
+			char local_pwd[256] = "";
+			char remote_pwd[256] = "";
+			char nomination_id[13] = "";
+			uint8_t stun_packet[512];
+			switch_size_t stun_len;
+			switch_bool_t has_addr = SWITCH_FALSE;
+			const char *ice_role;
+			switch_port_t accepted_port;
+			int nomination_sink_fd;
+			int role_case;
+
+			for (role_case = 0; role_case < 2; ++role_case) {
+				session = NULL;
+				channel = NULL;
+				rtp = NULL;
+				sdp_session = NULL;
+				parser = NULL;
+				memset(&before, 0, sizeof(before));
+				memset(&rejected, 0, sizeof(rejected));
+				memset(&accepted, 0, sizeof(accepted));
+				memset(ice_user, 0, sizeof(ice_user));
+				memset(incoming_user, 0, sizeof(incoming_user));
+				memset(local_pwd, 0, sizeof(local_pwd));
+				memset(remote_pwd, 0, sizeof(remote_pwd));
+				memset(nomination_id, 0, sizeof(nomination_id));
+				has_addr = SWITCH_FALSE;
+				ice_role = role_case ? "controlled" : "controlling";
+				accepted_port = (switch_port_t)(54330 + role_case);
+				nomination_sink_fd = -1;
+
+				status = make_session_and_rtp_with_sdp_ex(&session, &rtp, &sdp_session,
+					&parser, NULL, "PCMU", SWITCH_TRUE, SWITCH_FALSE, ice_role);
+				review_regression_owner_adopt(session, sdp_session, parser);
+				fst_requires(status == SWITCH_STATUS_SUCCESS && session && !rtp &&
+					sdp_session && parser);
+				channel = switch_core_session_get_channel(session);
+				fst_requires(channel != NULL);
+				if (review_regression_inject_post_alloc("ordinary-prflx-bootstrap")) {
+					fst_requires(SWITCH_FALSE);
+				}
+				switch_channel_set_variable(channel, "rtp_ice_prflx_bootstrap", "true");
+				switch_channel_set_variable(channel, "rtp_ice_prflx_bootstrap_ms", "5000");
+				fst_requires(switch_core_media_activate_rtp(session) == SWITCH_STATUS_SUCCESS);
+				rtp = switch_core_media_get_rtp_session(session, SWITCH_MEDIA_TYPE_AUDIO);
+				fst_requires(rtp != NULL);
+				fst_requires(switch_rtp_pvt_get_ice_state(rtp, IPR_RTP,
+					ice_user, sizeof(ice_user), local_pwd, sizeof(local_pwd),
+					remote_pwd, sizeof(remote_pwd), &has_addr) == SWITCH_STATUS_SUCCESS);
+				fst_requires(has_addr == SWITCH_FALSE);
+				fst_requires(reverse_ice_username(ice_user, incoming_user,
+					sizeof(incoming_user)) == SWITCH_STATUS_SUCCESS);
+				fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP,
+					&before) == SWITCH_STATUS_SUCCESS);
+				fst_check(!!(before.ice_type & ICE_CONTROLLED) == !!role_case);
+				fst_check(before.rtp_chosen == SWITCH_FALSE);
+
+				stun_len = build_authenticated_ice_request_full(stun_packet,
+					sizeof(stun_packet), incoming_user, "invalid-bootstrap-password",
+					SWITCH_FALSE, role_case ? SWITCH_TRUE : SWITCH_FALSE, SWITCH_TRUE);
+				fst_requires(switch_rtp_pvt_handle_ice_from(rtp, IPR_RTP,
+					"192.0.2.30", (switch_port_t)(54320 + role_case), stun_packet,
+					stun_len) == SWITCH_STATUS_SUCCESS);
+				stun_len = build_authenticated_ice_request_full(stun_packet,
+					sizeof(stun_packet), "unmatched:ice", local_pwd, SWITCH_FALSE,
+					role_case ? SWITCH_TRUE : SWITCH_FALSE, SWITCH_TRUE);
+				fst_requires(switch_rtp_pvt_handle_ice_from(rtp, IPR_RTP,
+					"192.0.2.31", (switch_port_t)(54325 + role_case), stun_packet,
+					stun_len) == SWITCH_STATUS_SUCCESS);
+				stun_len = build_authenticated_ice_request_full(stun_packet,
+					sizeof(stun_packet), incoming_user, local_pwd, SWITCH_FALSE,
+					role_case ? SWITCH_TRUE : SWITCH_FALSE, SWITCH_FALSE);
+				fst_requires(switch_rtp_pvt_handle_ice_from(rtp, IPR_RTP,
+					"192.0.2.32", accepted_port, stun_packet, stun_len) ==
+					SWITCH_STATUS_SUCCESS);
+				has_addr = SWITCH_FALSE;
+				fst_requires(switch_rtp_pvt_get_ice_state(rtp, IPR_RTP,
+					ice_user, sizeof(ice_user), local_pwd, sizeof(local_pwd),
+					remote_pwd, sizeof(remote_pwd), &has_addr) == SWITCH_STATUS_SUCCESS);
+				fst_check(has_addr == SWITCH_FALSE);
+				fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP,
+					&rejected) == SWITCH_STATUS_SUCCESS);
+				fst_check(rejected.rtp_chosen == SWITCH_FALSE);
+				fst_check(rejected.rtp_remote_port == before.rtp_remote_port);
+				fst_check(rejected.dtls_remote_port == before.dtls_remote_port);
+
+				if (!role_case) {
+					nomination_sink_fd = bind_udp_any_sink_fd(accepted_port);
+					fst_requires(nomination_sink_fd >= 0);
+					review_regression_owner_adopt_socket(nomination_sink_fd);
+				}
+				stun_len = build_authenticated_ice_request_full(stun_packet,
+					sizeof(stun_packet), incoming_user, local_pwd,
+					role_case ? SWITCH_TRUE : SWITCH_FALSE,
+					role_case ? SWITCH_TRUE : SWITCH_FALSE, SWITCH_TRUE);
+				fst_requires(switch_rtp_pvt_handle_ice_from(rtp, IPR_RTP,
+					"192.0.2.1", accepted_port, stun_packet, stun_len) ==
+					SWITCH_STATUS_SUCCESS);
+				if (!role_case) {
+					fst_requires(receive_stun_transaction_id(nomination_sink_fd,
+						nomination_id) == SWITCH_STATUS_SUCCESS);
+					stun_len = build_authenticated_ice_response(stun_packet,
+						sizeof(stun_packet), nomination_id, remote_pwd, "192.0.2.1",
+						accepted_port);
+					fst_requires(switch_rtp_pvt_handle_ice_from(rtp, IPR_RTP,
+						"192.0.2.1", accepted_port, stun_packet, stun_len) ==
+						SWITCH_STATUS_SUCCESS);
+				}
+				has_addr = SWITCH_FALSE;
+				fst_requires(switch_rtp_pvt_get_ice_state(rtp, IPR_RTP,
+					ice_user, sizeof(ice_user), local_pwd, sizeof(local_pwd),
+					remote_pwd, sizeof(remote_pwd), &has_addr) == SWITCH_STATUS_SUCCESS);
+				fst_check(has_addr == SWITCH_TRUE);
+				fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP,
+					&accepted) == SWITCH_STATUS_SUCCESS);
+				fst_check(!!(accepted.ice_type & ICE_CONTROLLED) == !!role_case);
+				fst_check(accepted.ice_ready == SWITCH_TRUE);
+				fst_check(accepted.ice_rready == SWITCH_TRUE);
+				fst_check(accepted.rtp_chosen == SWITCH_TRUE);
+				fst_check(accepted.rtp_remote_port == accepted_port);
+				fst_check(accepted.dtls_remote_port == accepted_port);
+
+				review_regression_owner_cleanup();
+			}
+		}
+		FCT_TEST_END();
+
 		FCT_TEST_BGN(rtcp_mux_prflx_late_srflx_preserves_inflight_dtls)
 		{
 			switch_core_session_t *session = NULL;
@@ -5821,13 +6037,20 @@ FCT_BGN()
 			switch_rtp_pvt_transport_snapshot_t handshake_restart;
 			switch_rtp_pvt_transport_snapshot_t migrated_restart;
 			switch_rtp_pvt_transport_snapshot_t established_ready;
+			switch_rtp_pvt_transport_snapshot_t conflict_before;
+			switch_rtp_pvt_transport_snapshot_t after_unauthenticated_conflict;
+			switch_rtp_pvt_transport_snapshot_t after_unmatched_conflict;
+			switch_rtp_pvt_transport_snapshot_t after_authenticated_conflict;
 			char ice_user[256] = "";
 			char incoming_user[256] = "";
 			char local_pwd[256] = "";
 			char remote_pwd[256] = "";
+			char conflict_id[13] = "";
+			char unmatched_conflict_id[13] = "unmatched487";
 			char nominated_host[80] = "";
 			char after_host[80] = "";
 			char *chosen_addr = NULL;
+			const char *remote_address_error = NULL;
 			switch_port_t chosen_port = 0;
 			switch_port_t nominated_port = 0;
 			switch_port_t after_port = 0;
@@ -5991,6 +6214,54 @@ FCT_BGN()
 			fst_check(established_ready.dtls_tuple_authoritative == SWITCH_TRUE);
 			fst_requires(copy_sockaddr_tuple(switch_rtp_session_get_remote_addr(rtp), after_host,
 				sizeof(after_host), &after_port) == SWITCH_STATUS_SUCCESS);
+			fst_check_string_equals(after_host, "127.0.0.1");
+			fst_check(after_port == 54303);
+
+			fst_requires(switch_rtp_pvt_send_ice_check(rtp, IPR_RTP, conflict_id,
+				sizeof(conflict_id)) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP,
+				&conflict_before) == SWITCH_STATUS_SUCCESS);
+			fst_requires((conflict_before.ice_type & ICE_CONTROLLED) != 0);
+			fst_requires(conflict_before.dtls_tuple_authoritative == SWITCH_TRUE);
+			stun_len = build_unauthenticated_ice_role_conflict_response(stun_packet,
+				sizeof(stun_packet), conflict_id);
+			fst_requires(switch_rtp_pvt_handle_ice_from(rtp, IPR_RTP, "127.0.0.1", 54303,
+				stun_packet, stun_len) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP,
+				&after_unauthenticated_conflict) == SWITCH_STATUS_SUCCESS);
+			fst_check((after_unauthenticated_conflict.ice_type & ICE_CONTROLLED) != 0);
+			fst_check(after_unauthenticated_conflict.dtls_tuple_authoritative == SWITCH_TRUE);
+			fst_check(after_unauthenticated_conflict.rtp_remote_port == 54303);
+			fst_check(after_unauthenticated_conflict.dtls_remote_port == 54303);
+
+			stun_len = build_authenticated_ice_role_conflict_response(stun_packet,
+				sizeof(stun_packet), unmatched_conflict_id, remote_pwd);
+			fst_requires(switch_rtp_pvt_handle_ice_from(rtp, IPR_RTP, "127.0.0.1", 54303,
+				stun_packet, stun_len) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP,
+				&after_unmatched_conflict) == SWITCH_STATUS_SUCCESS);
+			fst_check((after_unmatched_conflict.ice_type & ICE_CONTROLLED) != 0);
+			fst_check(after_unmatched_conflict.dtls_tuple_authoritative == SWITCH_TRUE);
+			fst_check(after_unmatched_conflict.rtp_remote_port == 54303);
+			fst_check(after_unmatched_conflict.dtls_remote_port == 54303);
+
+			stun_len = build_authenticated_ice_role_conflict_response(stun_packet,
+				sizeof(stun_packet), conflict_id, remote_pwd);
+			fst_requires(switch_rtp_pvt_handle_ice_from(rtp, IPR_RTP, "127.0.0.1", 54303,
+				stun_packet, stun_len) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP,
+				&after_authenticated_conflict) == SWITCH_STATUS_SUCCESS);
+			fst_check((after_authenticated_conflict.ice_type & ICE_CONTROLLED) == 0);
+			fst_check(after_authenticated_conflict.dtls_tuple_authoritative == SWITCH_TRUE);
+			fst_check(after_authenticated_conflict.rtp_remote_port == 54303);
+			fst_check(after_authenticated_conflict.dtls_remote_port == 54303);
+			fst_check(after_authenticated_conflict.dtls_context ==
+				established_ready.dtls_context);
+			fst_check(after_authenticated_conflict.dtls_ssl == established_ready.dtls_ssl);
+			fst_requires(switch_rtp_pvt_set_remote_sdp_address(rtp, "127.0.0.1", 54304,
+				0, SWITCH_FALSE, &remote_address_error) == SWITCH_STATUS_SUCCESS);
+			fst_requires(copy_sockaddr_tuple(switch_rtp_session_get_remote_addr(rtp),
+				after_host, sizeof(after_host), &after_port) == SWITCH_STATUS_SUCCESS);
 			fst_check_string_equals(after_host, "127.0.0.1");
 			fst_check(after_port == 54303);
 
