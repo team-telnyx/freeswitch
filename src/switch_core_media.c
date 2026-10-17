@@ -7501,9 +7501,7 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 		reset_dtls_restart_transport = SWITCH_TRUE;
 	}
 
-	if (switch_rtp_pvt_dtls_association_identity_matches(engine->rtp_session,
-		&engine->dtls_identity) &&
-		switch_rtp_pvt_should_preserve_trickle_dtls(engine->new_ice ? SWITCH_TRUE : SWITCH_FALSE,
+	if (switch_rtp_pvt_should_preserve_trickle_dtls(engine->new_ice ? SWITCH_TRUE : SWITCH_FALSE,
 		engine->rtp_session && switch_rtp_ready(engine->rtp_session) ? SWITCH_TRUE : SWITCH_FALSE,
 		&check_ice_rtp_tuple, engine->rtcp_mux > 0 ? SWITCH_TRUE : SWITCH_FALSE,
 		check_ice_active_remote_ufrag, check_ice_active_remote_pwd,

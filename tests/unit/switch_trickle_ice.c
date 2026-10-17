@@ -6017,6 +6017,73 @@ FCT_BGN()
 		}
 		FCT_TEST_END();
 
+		FCT_TEST_BGN(same_generation_late_trickle_preserves_inflight_server_dtls_with_ambiguous_identity)
+		{
+			switch_core_session_t *session = NULL;
+			switch_channel_t *channel = NULL;
+			switch_media_handle_t *smh = NULL;
+			switch_rtp_t *rtp = NULL;
+			void *sdp_session = NULL;
+			sdp_parser_t *parser = NULL;
+			switch_rtp_pvt_transport_snapshot_t before;
+			switch_rtp_pvt_transport_snapshot_t after;
+			switch_status_t status;
+			const char *initial_sdp =
+				"v=0\n"
+				"o=- 1683118194 1683118299 IN IP4 0.0.0.0\n"
+				"s=-\n"
+				"t=0 0\n"
+				"a=group:BUNDLE 0\n"
+				"m=audio 54306 UDP/TLS/RTP/SAVPF 0\n"
+				"c=IN IP4 192.0.2.10\n"
+				"a=ice-ufrag:sameGenerationLateUfrag1\n"
+				"a=ice-pwd:sameGenerationLatePassword1234561\n"
+				"a=ice-options:trickle\n"
+				"a=rtcp-mux\n"
+				"a=setup:active\n"
+				"a=tls-id:ambiguous-association-1\n"
+				"a=tls-id:ambiguous-association-2\n"
+				"a=fingerprint:sha-256 " TEST_DTLS_FINGERPRINT "\n"
+				"a=rtpmap:0 PCMU/8000\n"
+				"a=sendrecv\n"
+				"a=mid:0\n";
+
+			status = make_session_and_rtp_with_sdp_ex(&session, &rtp, &sdp_session,
+				&parser, initial_sdp, "PCMU", SWITCH_TRUE, SWITCH_FALSE, "controlled");
+			review_regression_owner_adopt(session, sdp_session, parser);
+			fst_requires(status == SWITCH_STATUS_SUCCESS && session && !rtp &&
+				sdp_session && parser);
+			channel = switch_core_session_get_channel(session);
+			smh = switch_core_session_get_media_handle(session);
+			fst_requires(channel != NULL && smh != NULL);
+			switch_channel_set_variable(channel, "rtp_ice_prflx_bootstrap", "true");
+			switch_channel_set_variable(channel, "rtp_ice_prflx_bootstrap_ms", "5000");
+			fst_requires(switch_core_media_activate_rtp(session) == SWITCH_STATUS_SUCCESS);
+			rtp = switch_core_media_get_rtp_session(session, SWITCH_MEDIA_TYPE_AUDIO);
+			fst_requires(rtp != NULL);
+			fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP, &before) ==
+				SWITCH_STATUS_SUCCESS);
+			fst_requires(before.dtls_state == DS_HANDSHAKE && before.dtls_context &&
+				before.dtls_ssl);
+			fst_check(before.rtp_chosen == SWITCH_FALSE);
+
+			status = switch_core_media_trickle_remote_candidate_and_recheck(session, smh,
+				sdp_session, SDP_TYPE_REQUEST, "0", 0,
+				"candidate:265031754 1 udp 2122260223 192.0.2.10 54306 typ host", 0);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP, &after) ==
+				SWITCH_STATUS_SUCCESS);
+			fst_check(after.rtp_chosen == SWITCH_TRUE);
+			fst_check(after.rtp_remote_port == 54306);
+			fst_check(after.dtls_state == DS_HANDSHAKE);
+			fst_check(after.dtls_context == before.dtls_context);
+			fst_check(after.dtls_ssl == before.dtls_ssl);
+			fst_check(after.dtls_destroy_count == before.dtls_destroy_count);
+
+			review_regression_owner_cleanup();
+		}
+		FCT_TEST_END();
+
 		FCT_TEST_BGN(rtcp_mux_prflx_late_srflx_preserves_inflight_dtls)
 		{
 			switch_core_session_t *session = NULL;
