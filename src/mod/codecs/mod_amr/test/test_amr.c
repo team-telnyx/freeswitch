@@ -1621,6 +1621,22 @@ FST_CORE_BEGIN(".")
 		}
 		FST_TEST_END()
 
+		/* the same answered set, but now the peer signals it: CMRs outside it are ignored from then on */
+		FST_TEST_BEGIN(amr_reports_a_newly_signalled_mode_set)
+		{
+			switch_codec_t codec = { 0 };
+			const char *r;
+
+			fst_requires(amr_reload("<param name=\"mode-set\" value=\"0,2,7\"/>") == SWITCH_STATUS_SUCCESS);
+			fst_requires(amr_init(&codec, "octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			r = amr_changes_framing(&codec, "octet-align=1");
+			fst_check(r && !strcmp(r, "false"));
+			r = amr_changes_framing(&codec, "mode-set=0,2,7;octet-align=1");
+			fst_check(r && !strcmp(r, "true"));
+			switch_core_codec_destroy(&codec);
+		}
+		FST_TEST_END()
+
 		FST_TEST_BEGIN(amr_mode_set_answers)
 		{
 			switch_codec_t codec = { 0 };
@@ -1900,8 +1916,10 @@ FST_CORE_BEGIN(".")
 				{ "invite-prefer-be", NULL, "mode-set=2", "octet-align=1; mode-set=2", "96 ", "octet-align=0" },
 				/* greedy (our order: bandwidth efficient first): a later other one is skipped once one matched */
 				{ "invite-prefer-oa", "greedy", "octet-align=1; mode-set=2", "mode-set=2", "96 ", "octet-align=1" },
-				/* none of the preferred framing: the last one is taken */
-				{ "invite-prefer-oa", NULL, "mode-set=2", "mode-set=7", "97 ", "octet-align=0" }
+				/* none of the preferred framing: nothing is skipped, the first one is taken */
+				{ "invite-prefer-oa", NULL, "mode-set=2", "mode-set=7", "96 ", "octet-align=0" },
+				/* the preferred one is not usable (crc): the other one is not skipped */
+				{ "invite-prefer-oa", NULL, "octet-align=0; mode-set=2", "octet-align=1; crc=1; mode-set=2", "96 ", "octet-align=0" }
 			};
 			int i;
 
@@ -1923,12 +1941,12 @@ FST_CORE_BEGIN(".")
 		FST_TEST_END()
 
 		/* invite-prefer with three AMR payload types: once one matched, later ones of the other framing are skipped;
-		 * none of the preferred framing: the last one */
+		 * none of the preferred framing: the first one */
 		FST_TEST_BEGIN(amr_invite_prefer_with_three_payload_types)
 		{
 			const struct { const char *negotiation; const char *f96, *f97, *f98; const char *answer; } cases[] = {
 				{ "greedy", "octet-align=1; mode-set=2", "mode-set=2", "mode-set=2", "96 " },
-				{ NULL, "mode-set=2", "mode-set=2", "mode-set=2", "98 " }
+				{ NULL, "mode-set=2", "mode-set=2", "mode-set=2", "96 " }
 			};
 			int i;
 
