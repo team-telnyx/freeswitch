@@ -2639,7 +2639,8 @@ FST_CORE_BEGIN(".")
 			uint32_t len, rate = 16000, total = 0;
 			unsigned int flag = 0;
 			switch_frame_t *read = NULL;
-			int f, i;
+			int f, i, reads = 0, changed_reads = 0;
+			uint32_t changed_len = 0;
 
 			fst_requires(endpoint);
 			for (i = 0; i < 320; i++) pcm[i] = (int16_t) (8000 * sin(2 * M_PI * 440 * i / 16000.0));
@@ -2660,6 +2661,10 @@ FST_CORE_BEGIN(".")
 			amrwb_stub_frame.rate = 16000;
 			amrwb_stub_frame.channels = 1;
 
+			fst_requires(switch_core_codec_init(&other, "L16", NULL, NULL, 8000, 20, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
+												NULL, switch_core_session_get_pool(fst_session)) == SWITCH_STATUS_SUCCESS);
+
+			/* nothing between the swap and its restore may leave the test early */
 			amrwb_stub_reads = 0;
 			null_read = endpoint->io_routines->read_frame;
 			endpoint->io_routines->read_frame = amrwb_stub_read;
@@ -2667,24 +2672,30 @@ FST_CORE_BEGIN(".")
 				if (switch_core_session_read_frame(fst_session, &read, SWITCH_IO_FLAG_NONE, 0) == SWITCH_STATUS_SUCCESS && read &&
 					!switch_test_flag(read, SFF_CNG)) {
 					total += read->datalen;
+					/* the chunks after a packet's first carry no timestamp: the writer stamps them */
+					if (i % 3) {
+						fst_check(!read->timestamp && !read->m);
+					}
 				}
 			}
-			amrwb_check_int(amrwb_stub_reads, 3);
-			amrwb_check_int(total, 9 * 640);
+			reads = amrwb_stub_reads;
 
 			/* what is left for one read codec is dropped when another one is set: the next read reads a packet */
-			fst_check(switch_core_session_read_frame(fst_session, &read, SWITCH_IO_FLAG_NONE, 0) == SWITCH_STATUS_SUCCESS);
-			fst_requires(switch_core_codec_init(&other, "L16", NULL, NULL, 8000, 20, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
-												NULL, switch_core_session_get_pool(fst_session)) == SWITCH_STATUS_SUCCESS);
-			fst_requires(switch_core_session_set_read_codec(fst_session, &other) == SWITCH_STATUS_SUCCESS);
-			fst_check(switch_core_session_read_frame(fst_session, &read, SWITCH_IO_FLAG_NONE, 0) == SWITCH_STATUS_SUCCESS && read);
-			amrwb_check_int(amrwb_stub_reads, 5);
-			amrwb_check_int(read ? read->datalen : 0, 320);
-			switch_core_session_set_read_codec(fst_session, NULL);
-			switch_core_codec_destroy(&other);
-
+			switch_core_session_read_frame(fst_session, &read, SWITCH_IO_FLAG_NONE, 0);
+			if (switch_core_session_set_read_codec(fst_session, &other) == SWITCH_STATUS_SUCCESS) {
+				changed_reads = amrwb_stub_reads;
+				changed_len = switch_core_session_read_frame(fst_session, &read, SWITCH_IO_FLAG_NONE, 0) == SWITCH_STATUS_SUCCESS && read ? read->datalen : 0;
+				changed_reads = amrwb_stub_reads - changed_reads;
+				switch_core_session_set_read_codec(fst_session, NULL);
+			}
 			endpoint->io_routines->read_frame = null_read;
 			UNPROTECT_INTERFACE(endpoint);
+
+			amrwb_check_int(reads, 3);
+			amrwb_check_int(total, 9 * 640);
+			amrwb_check_int(changed_reads, 1);
+			amrwb_check_int(changed_len, 320);
+			switch_core_codec_destroy(&other);
 			switch_core_codec_destroy(&decoder);
 		}
 		FST_SESSION_END()
