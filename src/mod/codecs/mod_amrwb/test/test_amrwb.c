@@ -1269,6 +1269,34 @@ FST_CORE_BEGIN(".")
 		}
 		FST_TEST_END()
 
+		/* mode-change-period: the frame-blocks a pause (DTX) leaves out count for the phase */
+		FST_TEST_BEGIN(amrwb_mode_change_period_counts_the_blocks_of_a_pause)
+		{
+			switch_codec_t codec = { 0 };
+			unsigned char cmr0[2] = { 0x00, 0x7c }, out[SWITCH_RECOMMENDED_BUFFER_SIZE];
+			uint32_t out_len = sizeof(out), rate = 16000;
+			unsigned int flag = 0;
+			switch_time_t start, late;
+			int ft, block;
+
+			fst_requires(amrwb_init(&codec, "mode-set=0,1,2;mode-change-period=2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			ft = amrwb_encoded_ft(&codec, SWITCH_TRUE);
+			fst_check_int_equals(ft, 2);
+			start = switch_time_ref();
+			fst_requires(switch_core_codec_decode(&codec, NULL, cmr0, sizeof(cmr0), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			/* about 3 blocks not encoded: the next one is block 4, even, where counting encodes would say 1 */
+			switch_yield(80000);
+			late = switch_time_ref() - start - 20000;
+			block = 1 + (late >= 30000 ? (int) ((late + 10000) / 20000) : 0);
+			ft = amrwb_encoded_ft(&codec, SWITCH_TRUE);
+			fst_check_int_equals(ft, block % 2 ? 2 : 0);
+			if (late < 70000) {
+				fst_check_int_equals(block, 4);
+			}
+			switch_core_codec_destroy(&codec);
+		}
+		FST_TEST_END()
+
 		FST_TEST_BEGIN(amrwb_only_the_read_codec_passes_cmr_to_the_write_codec)
 		{
 			switch_core_session_t *session = NULL;

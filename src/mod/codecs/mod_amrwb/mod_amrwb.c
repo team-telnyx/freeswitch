@@ -189,6 +189,7 @@ typedef enum {
 #define SWITCH_AMRWB_CMR_NONE 15
 
 #define SWITCH_AMRWB_OUT_MAX_SIZE 62
+#define SWITCH_AMRWB_FRAME_US 20000
 
 struct amrwb_context {
 	/* first: kept across switch_core_codec_reset, the other leg's encoder may hold the mutex */
@@ -209,6 +210,8 @@ struct amrwb_context {
 	uint32_t id;
 	switch_byte_t cur_mode;
 	uint32_t frames;
+	/* when the frame-block after the last encoded one is due (switch_time_ref), 0 before the first */
+	switch_time_t frame_due;
 	/* enc_mode lowered or raised by adjust-bitrate (kept across switch_core_codec_reset) */
 	switch_bool_t adjusted;
 	uint32_t concealed;
@@ -270,10 +273,21 @@ static switch_byte_t amrwb_clamp_mode(struct amrwb_context *context, int mode)
 	return context->enc_mode;
 }
 
-/* mode-change-neighbor: one allowed mode per step; mode-change-period N: steps at every Nth frame */
+/* mode-change-neighbor: one allowed mode per step; mode-change-period N: steps at every Nth frame-block, counting
+ * the ones not encoded (DTX): an encode 1.5 blocks or more past the due one adds the blocks in between */
 static switch_byte_t amrwb_next_mode(struct amrwb_context *context, switch_byte_t target)
 {
 	int m = target, step;
+	switch_time_t now = switch_time_ref();
+
+	if (context->frame_due && now >= context->frame_due + SWITCH_AMRWB_FRAME_US * 3 / 2) {
+		uint32_t skipped = (uint32_t) ((now - context->frame_due + SWITCH_AMRWB_FRAME_US / 2) / SWITCH_AMRWB_FRAME_US);
+
+		context->frames += skipped;
+		context->frame_due += (switch_time_t) skipped * SWITCH_AMRWB_FRAME_US;
+	} else if (!context->frame_due) {
+		context->frame_due = now;
+	}
 
 	if (context->cur_mode >= SWITCH_AMRWB_MODES - 1) {
 		context->cur_mode = target;
@@ -285,6 +299,7 @@ static switch_byte_t amrwb_next_mode(struct amrwb_context *context, switch_byte_
 		context->cur_mode = (switch_byte_t) m;
 	}
 	context->frames++;
+	context->frame_due += SWITCH_AMRWB_FRAME_US;
 
 	return context->cur_mode;
 }
@@ -756,6 +771,7 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 		switch_bool_t valid;
 		switch_byte_t cur_mode, enc_mode, cmr;
 		uint32_t frames;
+		switch_time_t frame_due;
 		switch_bool_t adjusted;
 	} kept = { 0 };
 
@@ -769,6 +785,7 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 		kept.enc_mode = context->enc_mode;
 		kept.cmr = context->cmr;
 		kept.frames = context->frames;
+		kept.frame_due = context->frame_due;
 		kept.adjusted = context->adjusted;
 		switch_mutex_lock(context->decoded_sid_mutex);
 		memset(&context->encoder_state, 0, sizeof(*context) - offsetof(struct amrwb_context, encoder_state));
@@ -952,6 +969,7 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 			if (kept.cur_mode < SWITCH_AMRWB_MODES - 1) {
 				context->cur_mode = amrwb_clamp_mode(context, kept.cur_mode);
 				context->frames = kept.frames;
+				context->frame_due = kept.frame_due;
 			}
 			if (kept.cmr != SWITCH_AMRWB_CMR_NONE) {
 				amrwb_set_cmr(codec, context, kept.cmr);
