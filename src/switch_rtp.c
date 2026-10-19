@@ -387,6 +387,8 @@ struct trickle_cb_ctx {
 static switch_status_t parse_cand_line(const char *line, switch_rtp_ice_cand_t *out);
 
 struct switch_rtp {
+	switch_rtp_pvt_dtls_destination_hook_t dtls_destination_hook;
+	void *dtls_destination_hook_data;
 	/*
 	 * Two sockets are needed because we might be transcoding protocol families
 	 * (e.g. receive over IPv4 and send over IPv6). In case the protocol
@@ -1810,6 +1812,58 @@ SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_ice_restart_pending(switch_rtp_t *r
 	pending = ice_restart_pending(rtp_session, &rtp_session->ice);
 	switch_mutex_unlock(rtp_session->ice_mutex);
 	return pending;
+}
+
+SWITCH_DECLARE(void) switch_rtp_pvt_set_dtls_destination_hook(switch_rtp_t *rtp_session,
+	switch_rtp_pvt_dtls_destination_hook_t hook, void *data)
+{
+	switch_mutex_lock(rtp_session->write_mutex);
+	rtp_session->dtls_destination_hook = hook;
+	rtp_session->dtls_destination_hook_data = data;
+	switch_mutex_unlock(rtp_session->write_mutex);
+}
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_sync_ice_dtls_destination(switch_rtp_t *rtp_session, const char **err)
+{
+	switch_rtp_pvt_dtls_destination_hook_t hook;
+	void *hook_data;
+	switch_rtp_ice_t *ice;
+	icand_t *candidate;
+	int chosen;
+	switch_status_t status = SWITCH_STATUS_SUCCESS;
+
+	*err = "Success";
+	if (!rtp_session) return SWITCH_STATUS_FALSE;
+	/* Separate RTCP receives with ICE held before requesting write. It is
+	 * ineligible for this mux-only fix and must not enter write -> ICE. */
+	if (!rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX]) return SWITCH_STATUS_SUCCESS;
+	switch_mutex_lock(rtp_session->write_mutex);
+	hook = rtp_session->dtls_destination_hook;
+	hook_data = rtp_session->dtls_destination_hook_data;
+	if (hook) {
+		rtp_session->dtls_destination_hook = NULL;
+		rtp_session->dtls_destination_hook_data = NULL;
+		switch_mutex_unlock(rtp_session->write_mutex);
+		hook(rtp_session, hook_data);
+		switch_mutex_lock(rtp_session->write_mutex);
+	}
+	switch_mutex_lock(rtp_session->ice_mutex);
+	ice = &rtp_session->ice;
+	/* Nomination may have completed before these locks. Never replay a cached tuple. */
+	if (ice_restart_pending(rtp_session, ice) && ice->ice_params) {
+		chosen = ice->ice_params->chosen[0];
+		if (chosen >= 0 && chosen < ice->ice_params->cand_idx[0] && chosen < MAX_CAND) {
+			candidate = &ice->ice_params->cands[chosen][0];
+			if (candidate->ready) {
+				/* Both mutexes are recursive; retain write -> ICE order through the setter. */
+				status = switch_rtp_set_remote_address(rtp_session, candidate->con_addr,
+					candidate->con_port, 0, SWITCH_TRUE, err);
+			}
+		}
+	}
+	switch_mutex_unlock(rtp_session->ice_mutex);
+	switch_mutex_unlock(rtp_session->write_mutex);
+	return status;
 }
 
 static switch_bool_t ice_restart_ready(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,

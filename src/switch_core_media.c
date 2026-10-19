@@ -13821,7 +13821,7 @@ static switch_status_t activate_video_ice(switch_core_session_t *session, switch
 	return activate_media_ice(session, engine, SWITCH_MEDIA_TYPE_VIDEO, provisional);
 }
 
-static void check_dtls_reinvite(switch_core_session_t *session, switch_rtp_engine_t *engine)
+static switch_status_t check_dtls_reinvite(switch_core_session_t *session, switch_rtp_engine_t *engine)
 {
 	if (switch_channel_test_flag(session->channel, CF_REINVITE) && engine->new_dtls) {
 
@@ -13834,6 +13834,16 @@ static void check_dtls_reinvite(switch_core_session_t *session, switch_rtp_engin
 #endif // HAVE_OPENSSL_DTLSv1_2_method
 
 			dtls_type_t xtype, dtype = engine->dtls_controller ? DTLS_TYPE_CLIENT : DTLS_TYPE_SERVER;
+			const char *err = NULL;
+			switch_status_t status;
+
+			/* Revalidate active ICE selection under RTP's mutation locks before replacing DTLS. */
+			status = switch_rtp_pvt_sync_ice_dtls_destination(engine->rtp_session, &err);
+			if (status != SWITCH_STATUS_SUCCESS) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+					"Cannot update %s destination before DTLS restart: %s\n", type2str(engine->type), err);
+				return status;
+			}
 
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "RE-SETTING %s DTLS\n", type2str(engine->type));
 
@@ -13855,6 +13865,7 @@ static void check_dtls_reinvite(switch_core_session_t *session, switch_rtp_engin
 		}
 		engine->new_dtls = 0;
 	}
+	return SWITCH_STATUS_SUCCESS;
 }
 
 //?
@@ -14070,7 +14081,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 			a_engine->cur_payload_map->negotiated = 1;
 
 			if (session && a_engine) {
-				check_dtls_reinvite(session, a_engine);
+				status = check_dtls_reinvite(session, a_engine);
+				if (status != SWITCH_STATUS_SUCCESS) goto end;
 			}
 
 			goto video;
@@ -14141,7 +14153,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 		}
 
 		if (session && a_engine) {
-			check_dtls_reinvite(session, a_engine);
+			status = check_dtls_reinvite(session, a_engine);
+			if (status != SWITCH_STATUS_SUCCESS) goto end;
 		}
 
 		goto video;
@@ -15331,7 +15344,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
  video_up:
 
 	if (session && v_engine && switch_core_media_engine_owns_rtp(v_engine)) {
-		check_dtls_reinvite(session, v_engine);
+		status = check_dtls_reinvite(session, v_engine);
+		if (status != SWITCH_STATUS_SUCCESS) goto end;
 	}
 
 	status = SWITCH_STATUS_SUCCESS;

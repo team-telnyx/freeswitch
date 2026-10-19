@@ -128,6 +128,12 @@ SWITCH_DECLARE(void) switch_rtp_pvt_clear_ice_params(switch_rtp_t *rtp_session, 
 	char **remote_ufrag, char **remote_pwd);
 SWITCH_DECLARE(void) switch_rtp_pvt_reset_ice(switch_rtp_t *rtp_session, ice_t *shared_params);
 SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_ice_restart_pending(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_sync_ice_dtls_destination(switch_rtp_t *rtp_session, const char **err);
+/* One-shot regression hook, invoked without transport locks before destination revalidation. */
+typedef void (*switch_rtp_pvt_dtls_destination_hook_t)(switch_rtp_t *rtp_session, void *data);
+SWITCH_DECLARE(void) switch_rtp_pvt_set_dtls_destination_hook(switch_rtp_t *rtp_session,
+	switch_rtp_pvt_dtls_destination_hook_t hook, void *data);
+
 
 SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_get_transport_snapshot(switch_rtp_t *rtp_session,
 	ice_proto_t proto, switch_rtp_pvt_transport_snapshot_t *snapshot);

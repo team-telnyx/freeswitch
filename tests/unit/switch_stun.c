@@ -142,9 +142,49 @@ static switch_bool_t receive_authenticated_stun(switch_socket_t *socket, switch_
 	return SWITCH_FALSE;
 }
 
+static void count_dtls_destination_entry(switch_rtp_t *rtp, void *data)
+{
+	(void)rtp;
+	(*(int *)data)++;
+}
+
+static struct {
+	const char *host;
+	switch_port_t port;
+	int calls;
+	switch_status_t status;
+	switch_rtp_pvt_transport_snapshot_t nominated;
+} dtls_nomination;
+
+static void nominate_before_dtls_destination(switch_rtp_t *rtp, void *data)
+{
+	char ice_user[256], local_pwd[256], remote_pwd[256], username[512];
+	char *colon;
+	uint8_t packet[512];
+	switch_size_t len;
+	switch_bool_t has_addr;
+
+	(void)data;
+	dtls_nomination.calls++;
+	dtls_nomination.status = SWITCH_STATUS_FALSE;
+	if (!switch_rtp_pvt_ice_restart_pending(rtp) ||
+		switch_rtp_pvt_get_ice_state(rtp, IPR_RTP, ice_user, sizeof(ice_user), local_pwd,
+			sizeof(local_pwd), remote_pwd, sizeof(remote_pwd), &has_addr) != SWITCH_STATUS_SUCCESS) return;
+	colon = strchr(ice_user, ':');
+	if (!colon) return;
+	*colon++ = '\0';
+	switch_snprintf(username, sizeof(username), "%s:%s", colon, ice_user);
+	len = build_authenticated_request_with_role(packet, sizeof(packet), username, local_pwd,
+		SWITCH_TRUE, SWITCH_FALSE, SWITCH_TRUE);
+	if (switch_rtp_pvt_handle_ice_from(rtp, IPR_RTP, dtls_nomination.host,
+		dtls_nomination.port, packet, len) != SWITCH_STATUS_SUCCESS) return;
+	dtls_nomination.status = switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP, &dtls_nomination.nominated);
+}
+
 static struct {
 	switch_core_session_t *sessions[2];
 	switch_rtp_t *rtp[2];
+	switch_rtp_t *audio;
 	switch_socket_t *alternate;
 	void (*alarm_handler)(int);
 	int alarm_active;
@@ -162,7 +202,13 @@ static void cleanup_restart_fixture(void)
 	for (i = 0; i < 2; i++) {
 		if (restart_fixture.sessions[i]) {
 			switch_core_media_set_rtp_session(restart_fixture.sessions[i], SWITCH_MEDIA_TYPE_AUDIO, NULL);
+			switch_core_media_set_rtp_session(restart_fixture.sessions[i], SWITCH_MEDIA_TYPE_VIDEO, NULL);
+			if (!i && restart_fixture.audio) {
+				switch_rtp_destroy(&restart_fixture.audio);
+				restart_fixture.audio = NULL;
+			}
 			if (restart_fixture.rtp[i]) {
+				switch_rtp_pvt_set_dtls_destination_hook(restart_fixture.rtp[i], NULL, NULL);
 				switch_rtp_destroy(&restart_fixture.rtp[i]);
 				restart_fixture.rtp[i] = NULL;
 			}
@@ -1376,7 +1422,54 @@ FST_TEARDOWN_END()
 			}
 		}
 		FST_SESSION_END()
+		FST_TEST_BEGIN(test_dtls_destination_excludes_nonmux)
+		{
+			switch_core_session_t **session = &restart_fixture.sessions[0];
+			switch_rtp_t **rtp = &restart_fixture.rtp[0];
+			switch_memory_pool_t *pool;
+			switch_rtp_flag_t flags[SWITCH_RTP_FLAG_INVALID] = { 0 };
+			switch_call_cause_t cause;
+			switch_rtp_pvt_transport_snapshot_t before, after;
+			const char *err = NULL;
+			int calls = 0;
+
+			restart_fixture.alarm_handler = signal(SIGALRM, SIG_DFL);
+			fst_requires(restart_fixture.alarm_handler != SIG_ERR);
+			restart_fixture.alarm_active = 1;
+			alarm(10);
+			fst_requires(switch_ivr_originate(NULL, session, &cause, "null/+15553334444", 2,
+				NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) == SWITCH_STATUS_SUCCESS);
+			pool = switch_core_session_get_pool(*session);
+			switch_core_memory_pool_set_data(pool, "__session", *session);
+			flags[SWITCH_RTP_FLAG_NOBLOCK] = 1;
+			*rtp = switch_rtp_new(rx_host, 26400, rx_host, 26402, TEST_PT, 160, 20000,
+				flags, NULL, &err, pool);
+			fst_requires(*rtp != NULL);
+			fst_requires(switch_rtp_activate_rtcp(*rtp, 100, 26403, SWITCH_FALSE) == SWITCH_STATUS_SUCCESS);
+			fst_requires(!switch_rtp_test_flag(*rtp, SWITCH_RTP_FLAG_RTCP_MUX));
+			fst_requires(switch_rtp_pvt_get_transport_snapshot(*rtp, IPR_RTP, &before) == SWITCH_STATUS_SUCCESS);
+			switch_rtp_pvt_set_dtls_destination_hook(*rtp, count_dtls_destination_entry, &calls);
+			fst_check(switch_rtp_pvt_sync_ice_dtls_destination(*rtp, &err) == SWITCH_STATUS_SUCCESS);
+			fst_check(calls == 0);
+			/* An eligible topology still enters the helper, even without pending ICE. */
+			switch_rtp_set_flag(*rtp, SWITCH_RTP_FLAG_RTCP_MUX);
+			fst_check(switch_rtp_pvt_sync_ice_dtls_destination(*rtp, &err) == SWITCH_STATUS_SUCCESS);
+			fst_check(calls == 1);
+			switch_rtp_clear_flag(*rtp, SWITCH_RTP_FLAG_RTCP_MUX);
+			switch_rtp_pvt_set_dtls_destination_hook(*rtp, NULL, NULL);
+			fst_check(switch_rtp_pvt_get_transport_snapshot(*rtp, IPR_RTP, &after) == SWITCH_STATUS_SUCCESS);
+			fst_check(before.ice_remote_port == after.ice_remote_port);
+			fst_check(before.dtls_context == after.dtls_context && before.dtls_ssl == after.dtls_ssl);
+			fst_check(switch_sockaddr_get_port(switch_rtp_session_get_remote_addr(*rtp)) == 26402);
+		}
+		FST_TEST_END()
+
 		FCT_TEST_BGN_IF(restart_has_nonloopback_ipv4(), test_ready_dtls_restart_nominates_observed_tuple)
+		{
+			int interleave;
+
+			/* Recreate READY DTLS for the sequential and nomination-at-handoff cases. */
+			for (interleave = 0; interleave < 2; interleave++)
 		{
 			switch_core_session_t **sessions = restart_fixture.sessions;
 			switch_rtp_t **rtp = restart_fixture.rtp;
@@ -2007,8 +2100,95 @@ FST_TEARDOWN_END()
 					sdp_parser_free(parser);
 				}
 			}
+			{
+				switch_media_handle_t *smh;
+				switch_core_media_params_t *mparams;
+				char *sdp;
+				char fingerprint[sizeof(fingerprints[1].str)];
+				uint8_t proceed = 0;
+
+				switch_port_t expected_port = interleave ? 25102 : 25100;
+
+				/* Reuse the real READY association as an unbundled video transport.
+				 * Retained DTLS must wait for nomination; replacement DTLS must use B. */
+				fst_requires_module("mod_h26x");
+				mparams = switch_core_session_alloc(sessions[0], sizeof(*mparams));
+				mparams->inbound_codec_string = mparams->outbound_codec_string = "PCMA,H264";
+				mparams->rtpip = mparams->rtpip4 = host;
+				fst_requires(switch_media_handle_create(&smh, sessions[0], mparams) == SWITCH_STATUS_SUCCESS);
+				switch_channel_set_variable(channel, "absolute_codec_string", "PCMA,H264");
+				switch_channel_set_variable(channel, "rtp_ice_role", "controlled");
+				switch_channel_set_variable(channel, "rtp_ice_prflx_bootstrap_ms", "10000");
+				switch_channel_clear_flag(channel, CF_RECOVERING);
+				switch_channel_set_flag(channel, CF_DTLS_OK);
+				fst_requires(switch_core_media_prepare_codecs(sessions[0], SWITCH_TRUE) == SWITCH_STATUS_SUCCESS);
+				fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp[0], IPR_RTP, &prior) == SWITCH_STATUS_SUCCESS);
+				fst_requires(prior.dtls_state == DS_READY);
+				switch_set_string(fingerprint, fingerprints[1].str);
+				for (mode = 0; mode < 3; mode++) {
+					if (mode) switch_core_media_clear_ice(sessions[0]);
+					switch_channel_set_flag(channel, CF_REINVITE);
+					if (mode == 2) fingerprint[0] = fingerprint[0] == 'A' ? 'B' : 'A';
+					sdp = switch_core_session_sprintf(sessions[0],
+						"v=0\no=- 3 %d IN IP4 %s\ns=-\nt=0 0\n"
+						"m=audio 25990 RTP/AVP 8\nc=IN IP4 %s\na=rtpmap:8 PCMA/8000\na=mid:0\n"
+						"m=video %u UDP/TLS/RTP/SAVPF 97\nc=IN IP4 %s\n"
+						"a=rtpmap:97 H264/90000\na=mid:1\na=sendrecv\na=rtcp-mux\na=setup:passive\n"
+						"a=fingerprint:sha-256 %s\na=ice-ufrag:videoRestart%d\n"
+						"a=ice-pwd:videoRestartPassword123456\n"
+						"a=candidate:video 1 udp 2000000000 %s %u typ host\n",
+						mode, host, rx_host, mode ? 25100 : prior.dtls_remote_port, "198.51.100.20",
+						fingerprint, mode, "198.51.100.20", mode ? 25100 : prior.dtls_remote_port);
+					if (interleave) sdp = switch_core_session_sprintf(sessions[0],
+						"%sa=candidate:nomination 1 udp 1900000000 %s 25102 typ host\n", sdp, host);
+					fst_requires(switch_core_media_negotiate_sdp(sessions[0], sdp, &proceed, SDP_OFFER));
+					if (!mode) {
+						restart_fixture.audio = switch_rtp_new(rx_host, 25004, rx_host, 25990, TEST_PT, 160, 20000,
+							flags, NULL, &err, pools[0]);
+						fst_requires(restart_fixture.audio != NULL);
+						switch_core_media_set_rtp_session(sessions[0], SWITCH_MEDIA_TYPE_AUDIO, restart_fixture.audio);
+						switch_core_media_set_rtp_session(sessions[0], SWITCH_MEDIA_TYPE_VIDEO, rtp[0]);
+						switch_rtp_set_flag(rtp[0], SWITCH_RTP_FLAG_VIDEO);
+						continue;
+					}
+					fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp[0], IPR_RTP, &after) == SWITCH_STATUS_SUCCESS);
+					fst_check(after.dtls_ssl == prior.dtls_ssl && after.dtls_remote_port == prior.dtls_remote_port);
+					if (mode == 2 && interleave) {
+						memset(&dtls_nomination, 0, sizeof(dtls_nomination));
+						dtls_nomination.host = host;
+						dtls_nomination.port = expected_port;
+						switch_rtp_pvt_set_dtls_destination_hook(rtp[0], nominate_before_dtls_destination, NULL);
+					}
+					fst_requires(switch_core_media_activate_rtp(sessions[0]) == SWITCH_STATUS_SUCCESS);
+					fst_requires(switch_rtp_pvt_get_transport_snapshot(rtp[0], IPR_RTP, &after) == SWITCH_STATUS_SUCCESS);
+					fst_check(after.ice_remote_port == (mode == 2 ? expected_port : 25100));
+					if (mode == 1) {
+						fst_check(switch_rtp_pvt_ice_restart_pending(rtp[0]));
+						fst_check(after.dtls_ssl == prior.dtls_ssl && after.dtls_state == DS_READY);
+						fst_check(after.dtls_remote_port == prior.dtls_remote_port);
+						fst_check(switch_sockaddr_get_port(switch_rtp_session_get_remote_addr(rtp[0])) == prior.dtls_remote_port);
+					} else {
+						if (interleave) {
+							fst_check(dtls_nomination.calls == 1 && dtls_nomination.status == SWITCH_STATUS_SUCCESS);
+							fst_check(dtls_nomination.nominated.ice_ready && dtls_nomination.nominated.ice_rready);
+							fst_check(dtls_nomination.nominated.ice_remote_port == expected_port);
+							fst_check(dtls_nomination.nominated.dtls_remote_port == expected_port);
+							fst_check(dtls_nomination.nominated.dtls_ssl == prior.dtls_ssl &&
+								dtls_nomination.nominated.dtls_state == DS_READY);
+						}
+						fst_check(after.dtls_state == DS_HANDSHAKE);
+						fst_check(after.dtls_remote_port == expected_port);
+						fst_check(switch_sockaddr_get_port(switch_rtp_session_get_remote_addr(rtp[0])) == expected_port);
+						fst_check(!switch_rtp_pvt_ice_restart_pending(rtp[0]));
+					}
+				}
+				fst_requires(mode == 3);
+			}
+
 #endif
 			cleanup_restart_fixture();
+			}
+			fst_requires(interleave == 2);
 		}
 		FCT_TEST_END_IF()
 }
