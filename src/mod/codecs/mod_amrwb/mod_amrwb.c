@@ -224,6 +224,8 @@ struct amrwb_context {
 		switch_byte_t octet_align;
 		uint16_t answer_modes;
 		uint16_t enc_modes;
+		/* the mode-set the peer signalled (0: none) */
+		uint16_t peer_modes;
 		switch_byte_t neighbor;
 		uint32_t period;
 		/* crc / robust-sorting offered (as 0): returned in the answer */
@@ -716,6 +718,7 @@ static void amrwb_fmtp_framing(const char *fmtp, struct amrwb_framing *framing)
 	if (framing->period < 2) {
 		framing->period = 0;
 	}
+	framing->peer_modes = offered;
 	amrwb_mode_sets(offered, &framing->answer_modes, &framing->enc_modes);
 }
 
@@ -1227,7 +1230,8 @@ static switch_status_t switch_amrwb_control(switch_codec_t *codec,
 				amrwb_fmtp_framing((const char *) cmd_arg, &framing);
 				*rtype = SCCT_STRING;
 				*ret_data = (void *) ((framing.octet_align != context->framing.octet_align || framing.answer_modes != context->framing.answer_modes ||
-									   framing.enc_modes != context->framing.enc_modes || framing.neighbor != context->framing.neighbor ||
+									   framing.enc_modes != context->framing.enc_modes || framing.peer_modes != context->framing.peer_modes ||
+									   framing.neighbor != context->framing.neighbor ||
 									   framing.period != context->framing.period || framing.returned != context->framing.returned) ? "true" : "false");
 			}
 		}

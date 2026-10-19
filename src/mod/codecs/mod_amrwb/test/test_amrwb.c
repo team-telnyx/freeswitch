@@ -1354,7 +1354,8 @@ FST_CORE_BEGIN(".")
 		}
 		FST_TEST_END()
 
-		/* re-INVITE: a new codec only when octet-align, the answered or encoded mode-set, or the mode-change parameters change */
+		/* re-INVITE: a new codec only when octet-align, the answered, encoded or signalled mode-set, or the mode-change
+		 * parameters change */
 		FST_TEST_BEGIN(amrwb_reports_fmtp_framing_changes)
 		{
 			switch_codec_t codec = { 0 };
@@ -1372,9 +1373,9 @@ FST_CORE_BEGIN(".")
 			fst_check(r && !strcmp(r, "true"));
 			r = amrwb_changes_framing(&codec, "mode-set=0,1;octet-align=1");
 			fst_check(r && !strcmp(r, "true"));
-			/* no mode-set: we answer and encode the configured 0,1,2, as before */
+			/* no mode-set: we answer and encode the configured 0,1,2 as before, but the peer no longer signals one */
 			r = amrwb_changes_framing(&codec, "octet-align=1");
-			fst_check(r && !strcmp(r, "false"));
+			fst_check(r && !strcmp(r, "true"));
 			/* period 1: no restriction, as before */
 			r = amrwb_changes_framing(&codec, "mode-set=0,1,2;octet-align=1;mode-change-period=1");
 			fst_check(r && !strcmp(r, "false"));
@@ -1387,10 +1388,13 @@ FST_CORE_BEGIN(".")
 			fst_check(r && !strcmp(r, "true"));
 			switch_core_codec_destroy(&codec);
 
-			/* offer without mode-set, re-offer with the mode-set we answered */
+			/* offer without mode-set, re-offer with the mode-set we answered: the peer now signals it, so CMRs
+			 * outside it are ignored from then on */
 			fst_requires(amrwb_init(&codec, "octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
-			r = amrwb_changes_framing(&codec, "mode-set=0,1,2;octet-align=1");
+			r = amrwb_changes_framing(&codec, "octet-align=1");
 			fst_check(r && !strcmp(r, "false"));
+			r = amrwb_changes_framing(&codec, "mode-set=0,1,2;octet-align=1");
+			fst_check(r && !strcmp(r, "true"));
 			r = amrwb_changes_framing(&codec, "mode-set=0,1;octet-align=1");
 			fst_check(r && !strcmp(r, "true"));
 			switch_core_codec_destroy(&codec);
