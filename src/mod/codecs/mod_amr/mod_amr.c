@@ -112,10 +112,10 @@
  * invite-prefer-oa
  *		Default off. Of an offer with several AMR payload types, skip the bandwidth-efficient
  *		ones, with or without an fmtp (one without octet-align is octet aligned with force-oa),
- *		unless the last one is reached without a match.
+ *		if it has an octet-aligned one we can match.
  * invite-prefer-be
  *		Default off. Of an offer with several AMR payload types, skip the octet-aligned ones,
- *		unless the last one is reached without a match.
+ *		if it has a bandwidth-efficient one we can match.
  * mode-set
  *		Default none. Modes 0-7 (others are dropped with a WARNING). Offered, and answered to an
  *		offer without mode-set; with mode-set-overwrite answered to every offer. Not used when
@@ -227,6 +227,8 @@ struct amr_context {
 		switch_byte_t octet_align;
 		uint16_t answer_modes;
 		uint16_t enc_modes;
+		/* the mode-set the peer signalled (0: none) */
+		uint16_t peer_modes;
 		switch_byte_t neighbor;
 		uint32_t period;
 		/* crc / robust-sorting offered (as 0): returned in the answer */
@@ -678,6 +680,7 @@ static void amr_fmtp_framing(const char *fmtp, struct amr_framing *framing)
 	if (framing->period < 2) {
 		framing->period = 0;
 	}
+	framing->peer_modes = offered;
 	amr_mode_sets(offered, &framing->answer_modes, &framing->enc_modes);
 }
 
@@ -1172,7 +1175,8 @@ static switch_status_t switch_amr_control(switch_codec_t *codec,
 				amr_fmtp_framing((const char *) cmd_arg, &framing);
 				*rtype = SCCT_STRING;
 				*ret_data = (void *) ((framing.octet_align != context->framing.octet_align || framing.answer_modes != context->framing.answer_modes ||
-									   framing.enc_modes != context->framing.enc_modes || framing.neighbor != context->framing.neighbor ||
+									   framing.enc_modes != context->framing.enc_modes || framing.peer_modes != context->framing.peer_modes ||
+									   framing.neighbor != context->framing.neighbor ||
 									   framing.period != context->framing.period || framing.returned != context->framing.returned) ? "true" : "false");
 			}
 		}
