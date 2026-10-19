@@ -9601,6 +9601,7 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 	int tries = 0;
 	int block = 0;
 	int accelerate = 0;
+	switch_bool_t dtls_write_locked;
 
 	switch_assert(bytes);
 
@@ -9911,6 +9912,9 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 		}
 	}
 
+	/* Muxed DTLS can retarget through the write-locked destination setter. */
+	dtls_write_locked = rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX] ? SWITCH_TRUE : SWITCH_FALSE;
+	if (dtls_write_locked) switch_mutex_lock(rtp_session->write_mutex);
 	switch_mutex_lock(rtp_session->ice_mutex);
 
 	if (*bytes && rtp_session->has_rtp && rtp_session->ice.ice_user) {
@@ -9963,12 +9967,14 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 				}
 #endif
 				switch_mutex_unlock(rtp_session->ice_mutex);
+				if (dtls_write_locked) switch_mutex_unlock(rtp_session->write_mutex);
 				return SWITCH_STATUS_SUCCESS;
 			}
 		}
 	}
 
 	switch_mutex_unlock(rtp_session->ice_mutex);
+	if (dtls_write_locked) switch_mutex_unlock(rtp_session->write_mutex);
 
 	if ((*bytes && (!rtp_write_ready(rtp_session, *bytes, __LINE__) || !rtp_session->has_rtp || rtp_session->has_rtcp)) || sync) {
 		rtp_session->hot_hits = 0;
