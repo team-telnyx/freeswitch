@@ -9,6 +9,7 @@ Author: Terry Caton
 #include "writer.h"
 #include <iostream>
 #include <iomanip>
+#include <cstdio>
 
 /*  
 
@@ -82,7 +83,9 @@ inline void Writer::Write_i(const Object& object)
       Object::const_iterator it(object.Begin()),
                              itEnd(object.End());
       while (it != itEnd) {
-         m_ostr << std::string(m_nTabDepth, '\t') << '"' << it->name << "\" : ";
+         m_ostr << std::string(m_nTabDepth, '\t');
+         Write_i(String(it->name));
+         m_ostr << " : ";
          Write_i(it->element); 
 
          if (++it != itEnd)
@@ -123,8 +126,17 @@ inline void Writer::Write_i(const String& stringElement)
          case '\n':        m_ostr << "\\n";    break;
          case '\r':        m_ostr << "\\r";    break;
          case '\t':        m_ostr << "\\t";    break;
-         //case '\u':        m_ostr << "";    break;  ??
-         default:          m_ostr << *it;       break;
+         default:
+            // the other control characters are not allowed raw in a JSON string
+            if (static_cast<unsigned char>(*it) < 0x20) {
+               char esc[7];
+               snprintf(esc, sizeof(esc), "\\u%04x", static_cast<unsigned char>(*it));
+               m_ostr << esc;
+            }
+            else {
+               m_ostr << *it;
+            }
+            break;
       }
    }
 
