@@ -9912,10 +9912,18 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 		}
 	}
 
-	/* Muxed DTLS can retarget through the write-locked destination setter. */
-	dtls_write_locked = rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX] ? SWITCH_TRUE : SWITCH_FALSE;
-	if (dtls_write_locked) switch_mutex_lock(rtp_session->write_mutex);
+	dtls_write_locked = SWITCH_FALSE;
 	switch_mutex_lock(rtp_session->ice_mutex);
+	/* Only a different ICE tuple can make DTLS enter the destination setter. */
+	if (rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX] && rtp_session->dtls &&
+		rtp_session->ice.ice_user && rtp_session->ice.addr &&
+		!switch_cmp_addr(rtp_session->from_addr, rtp_session->ice.addr, SWITCH_FALSE)) {
+		/* Drop ICE before taking write; dispatch re-reads current DTLS/ICE below. */
+		switch_mutex_unlock(rtp_session->ice_mutex);
+		switch_mutex_lock(rtp_session->write_mutex);
+		switch_mutex_lock(rtp_session->ice_mutex);
+		dtls_write_locked = SWITCH_TRUE;
+	}
 
 	if (*bytes && rtp_session->has_rtp && rtp_session->ice.ice_user) {
 		ice_track_inbound_media_candidate(&rtp_session->ice, rtp_session->from_addr);
