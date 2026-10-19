@@ -210,7 +210,7 @@ struct amrwb_context {
 	uint32_t id;
 	switch_byte_t cur_mode;
 	uint32_t frames;
-	/* when the frame-block after the last encoded one is due (switch_time_ref), 0 before the first */
+	/* when the frame-block after the last encoded one is due (monotonic), 0 before the first */
 	switch_time_t frame_due;
 	/* enc_mode lowered or raised by adjust-bitrate (kept across switch_core_codec_reset) */
 	switch_bool_t adjusted;
@@ -274,18 +274,18 @@ static switch_byte_t amrwb_clamp_mode(struct amrwb_context *context, int mode)
 }
 
 /* mode-change-neighbor: one allowed mode per step; mode-change-period N: steps at every Nth frame-block, counting
- * the ones not encoded (DTX): an encode 1.5 blocks or more past the due one adds the blocks in between */
+ * the ones not encoded (DTX): an encode 1.5 blocks or more past the due one adds the blocks in between. Within
+ * jitter of the due time it follows the caller's clock; more than half a block early (a burst) keeps the lead */
 static switch_byte_t amrwb_next_mode(struct amrwb_context *context, switch_byte_t target)
 {
 	int m = target, step;
-	switch_time_t now = switch_time_ref();
+	switch_time_t now = switch_mono_micro_time_now();
+	int64_t late = context->frame_due ? (int64_t) (now - context->frame_due) : 0;
 
-	if (context->frame_due && now >= context->frame_due + SWITCH_AMRWB_FRAME_US * 3 / 2) {
-		uint32_t skipped = (uint32_t) ((now - context->frame_due + SWITCH_AMRWB_FRAME_US / 2) / SWITCH_AMRWB_FRAME_US);
-
-		context->frames += skipped;
-		context->frame_due += (switch_time_t) skipped * SWITCH_AMRWB_FRAME_US;
-	} else if (!context->frame_due) {
+	if (late >= SWITCH_AMRWB_FRAME_US * 3 / 2) {
+		context->frames += (uint32_t) ((late + SWITCH_AMRWB_FRAME_US / 2) / SWITCH_AMRWB_FRAME_US);
+		context->frame_due = now;
+	} else if (!context->frame_due || late > -(SWITCH_AMRWB_FRAME_US / 2)) {
 		context->frame_due = now;
 	}
 

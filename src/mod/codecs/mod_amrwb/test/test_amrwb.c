@@ -1282,14 +1282,43 @@ FST_CORE_BEGIN(".")
 			fst_requires(amrwb_init(&codec, "mode-set=0,1,2;mode-change-period=2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
 			ft = amrwb_encoded_ft(&codec, SWITCH_TRUE);
 			fst_check_int_equals(ft, 2);
-			start = switch_time_ref();
+			start = switch_mono_micro_time_now();
 			fst_requires(switch_core_codec_decode(&codec, NULL, cmr0, sizeof(cmr0), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
 			/* about 3 blocks not encoded: the next one is block 4, even, where counting encodes would say 1 */
 			switch_sleep(80000);
-			late = switch_time_ref() - start - 20000;
+			late = switch_mono_micro_time_now() - start - 20000;
 			block = 1 + (late >= 30000 ? (int) ((late + 10000) / 20000) : 0);
 			ft = amrwb_encoded_ft(&codec, SWITCH_TRUE);
 			fst_check(block > 1);
+			fst_check_int_equals(ft, block % 2 ? 2 : 0);
+			switch_core_codec_destroy(&codec);
+		}
+		FST_TEST_END()
+
+		/* a sender a little faster than our clock: the due time follows it, so a later pause still counts */
+		FST_TEST_BEGIN(amrwb_mode_change_period_follows_a_fast_sender)
+		{
+			switch_codec_t codec = { 0 };
+			unsigned char cmr0[2] = { 0x00, 0x7c }, out[SWITCH_RECOMMENDED_BUFFER_SIZE];
+			uint32_t out_len = sizeof(out), rate = 16000;
+			unsigned int flag = 0;
+			switch_time_t start, late;
+			int ft = 0, block, i;
+
+			fst_requires(amrwb_init(&codec, "mode-set=0,1,2;mode-change-period=2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			/* 40 frames 16 ms apart: without following, over 100 ms of lead hide the pause below */
+			for (i = 0; i < 40; i++) {
+				if (i) switch_sleep(16000);
+				ft = amrwb_encoded_ft(&codec, SWITCH_TRUE);
+			}
+			fst_check_int_equals(ft, 2);
+			start = switch_mono_micro_time_now();
+			fst_requires(switch_core_codec_decode(&codec, NULL, cmr0, sizeof(cmr0), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			switch_sleep(80000);
+			late = switch_mono_micro_time_now() - start - 20000;
+			block = 40 + (late >= 30000 ? (int) ((late + 10000) / 20000) : 0);
+			ft = amrwb_encoded_ft(&codec, SWITCH_TRUE);
+			fst_check(block > 40);
 			fst_check_int_equals(ft, block % 2 ? 2 : 0);
 			switch_core_codec_destroy(&codec);
 		}

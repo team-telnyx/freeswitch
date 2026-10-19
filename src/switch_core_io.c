@@ -314,7 +314,8 @@ cnt_with_cng:
 
 	/* e.g. an AMR mode request: needed by the encoder whether or not this payload is decoded */
 	if (switch_test_flag((*frame)->codec, SWITCH_CODEC_FLAG_PEEK_RECEIVED) && (*frame)->datalen &&
-		!switch_test_flag(*frame, SFF_CNG) && !switch_test_flag(*frame, SFF_PLC) && !switch_test_flag(*frame, SFF_NOT_AUDIO)) {
+		!switch_test_flag(*frame, SFF_CNG) && !switch_test_flag(*frame, SFF_PLC) && !switch_test_flag(*frame, SFF_NOT_AUDIO) &&
+		!switch_test_flag(*frame, SFF_RTCP)) {
 		switch_core_codec_control((*frame)->codec, SCC_CODEC_SPECIFIC, SCCT_STRING, (void *) "received", SCCT_NONE, *frame, NULL, NULL);
 	}
 
