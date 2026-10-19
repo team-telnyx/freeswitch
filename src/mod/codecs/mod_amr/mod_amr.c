@@ -208,6 +208,9 @@ struct amr_context {
 	uint16_t enc_modes;
 	/* the mode-set of the received fmtp (0: none, any mode): mode requests outside it are ignored */
 	uint16_t peer_modes;
+	/* _sid_suppressed() as last read, and the calls left before it is read again */
+	switch_bool_t sid_suppressed;
+	uint32_t sid_suppressed_ttl;
 	switch_byte_t enc_mode;
 	uint32_t change_period;
 	switch_byte_t flags;
@@ -907,6 +910,7 @@ static switch_status_t switch_amr_init(switch_codec_t *codec, switch_codec_flag_
 		}
 
 		context->cmr = SWITCH_AMR_CMR_NONE;
+		context->sid_suppressed_ttl = 0;
 		amr_fmtp_framing(codec->fmtp_in, &context->framing);
 		context->cur_mode = SWITCH_AMR_CMR_NONE;
 		context->destroyed = SWITCH_FALSE;
@@ -1159,6 +1163,23 @@ static switch_bool_t amr_sid_suppressed(switch_codec_t *codec)
 	return ((smh = switch_core_session_get_media_handle(codec->session)) && switch_media_handle_test_media_flag(smh, SCMF_SUPPRESS_CNG)) ? SWITCH_TRUE : SWITCH_FALSE;
 }
 
+/* amr_sid_suppressed() for the per-frame passthrough checks, read again about once a second */
+static switch_bool_t amr_sid_suppressed_cached(switch_codec_t *codec)
+{
+	struct amr_context *context = codec->private_info;
+
+	if (!context) {
+		return amr_sid_suppressed(codec);
+	}
+	if (!context->sid_suppressed_ttl) {
+		context->sid_suppressed = amr_sid_suppressed(codec);
+		context->sid_suppressed_ttl = 50;
+	}
+	context->sid_suppressed_ttl--;
+
+	return context->sid_suppressed;
+}
+
 /* payloads from this codec's peer pass untranscoded to other's peer (same implementation): every mode we
  * answered is in other's mode-set, and other takes SID frames or this peer sends none */
 static switch_bool_t amr_passes_to(switch_codec_t *codec, struct amr_context *context, switch_codec_t *other)
@@ -1172,7 +1193,7 @@ static switch_bool_t amr_passes_to(switch_codec_t *codec, struct amr_context *co
 		return SWITCH_FALSE;
 	}
 
-	return (amr_sid_suppressed(other) && !amr_sid_suppressed(codec)) ? SWITCH_FALSE : SWITCH_TRUE;
+	return (amr_sid_suppressed_cached(other) && !amr_sid_suppressed_cached(codec)) ? SWITCH_FALSE : SWITCH_TRUE;
 }
 
 static switch_status_t switch_amr_control(switch_codec_t *codec,

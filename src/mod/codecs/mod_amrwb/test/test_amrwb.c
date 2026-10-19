@@ -477,9 +477,12 @@ static const char *amrwb_transcodes_dtx_to(switch_codec_t *codec, switch_codec_t
 static switch_io_write_frame_t amrwb_null_write = NULL;
 static unsigned char amrwb_written[SWITCH_RECOMMENDED_BUFFER_SIZE];
 static uint32_t amrwb_written_len = 0;
+/* frames per payload amrwb_forwarded_ft() writes, and the writes the session made */
+static int amrwb_payload_frames = 1, amrwb_writes = 0;
 
 static switch_status_t amrwb_capture_write(switch_core_session_t *session, switch_frame_t *frame, switch_io_flag_t flags, int stream_id)
 {
+	amrwb_writes++;
 	amrwb_written_len = frame->datalen <= sizeof(amrwb_written) ? frame->datalen : 0;
 	memcpy(amrwb_written, frame->data, amrwb_written_len);
 	return SWITCH_STATUS_SUCCESS;
@@ -491,26 +494,35 @@ static int amrwb_forwarded_ft(switch_core_session_t *session, switch_memory_pool
 {
 	switch_endpoint_interface_t *endpoint = switch_loadable_module_get_endpoint_interface("null");
 	switch_codec_t encoder = { 0 }, from = { 0 }, to = { 0 };
-	unsigned char payload[SWITCH_RECOMMENDED_BUFFER_SIZE];
+	unsigned char payload[SWITCH_RECOMMENDED_BUFFER_SIZE], frames[12][64];
 	uint32_t len = sizeof(payload), rate = 16000;
 	unsigned int flag = 0;
 	switch_frame_t frame = { 0 };
 	int16_t pcm[320];
-	int ft = -1, i;
+	int ft = -1, i, f;
 
 	*same = SWITCH_FALSE;
 	amrwb_written_len = 0;
+	amrwb_writes = 0;
 	for (i = 0; i < 320; i++) pcm[i] = (int16_t) (8000 * sin(2 * M_PI * 440 * i / 16000.0));
 	if (endpoint && amrwb_init(&encoder, "octet-align=1; mode-set=8", SWITCH_CODEC_FLAG_ENCODE, pool) == SWITCH_STATUS_SUCCESS &&
 		amrwb_init(&from, "octet-align=1; mode-set=8", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, pool) == SWITCH_STATUS_SUCCESS &&
 		amrwb_init(&to, to_fmtp, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, switch_core_session_get_pool(session)) == SWITCH_STATUS_SUCCESS &&
 		switch_core_codec_encode(&encoder, NULL, pcm, sizeof(pcm), 16000, payload, &len, &rate, &flag) == SWITCH_STATUS_SUCCESS &&
 		switch_core_session_set_write_codec(session, &to) == SWITCH_STATUS_SUCCESS) {
+		if (amrwb_payload_frames > 1) {
+			memcpy(frames[0], payload, len);
+			for (f = 1; f < amrwb_payload_frames; f++) {
+				len = sizeof(frames[f]);
+				switch_core_codec_encode(&encoder, NULL, pcm, sizeof(pcm), 16000, frames[f], &len, &rate, &flag);
+			}
+			len = amrwb_payload(frames, amrwb_payload_frames, SWITCH_TRUE, payload, sizeof(payload));
+		}
 		frame.codec = &from;
 		frame.data = payload;
 		frame.datalen = len;
 		frame.buflen = sizeof(payload);
-		frame.samples = 320;
+		frame.samples = 320 * amrwb_payload_frames;
 		frame.rate = 16000;
 		frame.channels = 1;
 		amrwb_null_write = endpoint->io_routines->write_frame;
@@ -2755,7 +2767,7 @@ FST_CORE_BEGIN(".")
 		}
 		FST_TEST_END()
 
-		FST_SESSION_BEGIN(amrwb_passthrough_is_transcoded_to_the_other_legs_mode_set)
+		FST_SESSION_BEGIN_RATE(amrwb_passthrough_is_transcoded_to_the_other_legs_mode_set, 16000)
 		{
 			switch_bool_t same;
 
@@ -2765,6 +2777,12 @@ FST_CORE_BEGIN(".")
 			fst_check(same);
 			amrwb_check_int(amrwb_forwarded_ft(fst_session, fst_pool, "octet-align=1", &same), 8);
 			fst_check(same);
+
+			/* every frame of a refused payload is re-encoded, not only the first */
+			amrwb_payload_frames = 3;
+			amrwb_check_int(amrwb_forwarded_ft(fst_session, fst_pool, "octet-align=1; mode-set=2", &same), 2);
+			amrwb_check_int(amrwb_writes, 3);
+			amrwb_payload_frames = 1;
 		}
 		FST_SESSION_END()
 
@@ -2772,6 +2790,7 @@ FST_CORE_BEGIN(".")
 		FST_SESSION_BEGIN(amrwb_passes_no_sid_to_a_leg_without_silence_suppression)
 		{
 			switch_codec_t from = { 0 }, to = { 0 };
+			int i;
 
 			fst_requires(amrwb_init(&from, "octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
 			fst_requires(amrwb_init(&to, "octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
@@ -2779,6 +2798,9 @@ FST_CORE_BEGIN(".")
 			fst_check_string_equals(amrwb_passes_to(&from, &to), "true");
 			fst_check_string_equals(amrwb_transcodes_dtx_to(&from, &to), "true");
 			switch_channel_set_variable(switch_core_session_get_channel(fst_session), "suppress_cng", "true");
+			/* read again within 50 calls, about a second of frames */
+			for (i = 0; i < 50 && !strcmp(switch_str_nil(amrwb_passes_to(&from, &to)), "true"); i++);
+			fst_check(i < 50);
 			fst_check_string_equals(amrwb_passes_to(&from, &to), "false");
 			fst_check_string_equals(amrwb_transcodes_dtx_to(&from, &to), "false");
 			fst_check_string_equals(amrwb_passes_to(&to, &from), "true");

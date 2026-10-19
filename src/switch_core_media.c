@@ -19772,6 +19772,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 	switch_status_t status = SWITCH_STATUS_FALSE;
 	switch_frame_t *enc_frame = NULL, *write_frame = frame;
 	unsigned int flag = 0, need_codec = 0, perfect = 0, do_bugs = 0, do_write = 0, do_resample = 0, ptime_mismatch = 0, pass_cng = 0, resample = 0;
+	/* the frame's codec refused to pass it: it may carry several frames, re-encode them all */
+	unsigned int refused = 0;
 	int did_write_resample = 0;
 	int16_t *resample_tmp = NULL;
 	uint8_t *orig_frame_data = frame->data;
@@ -19879,7 +19881,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 		need_codec = TRUE;
 	} else if (frame->codec && frame->codec != session->write_codec && switch_test_flag(frame->codec, SWITCH_CODEC_FLAG_CHECK_PASSTHROUGH) &&
 			   !codec_answers_true(frame->codec, session->write_codec, "passes_to")) {
-		need_codec = TRUE;
+		need_codec = refused = TRUE;
 	}
 
 	if (frame->codec && frame->codec != session->write_codec && switch_test_flag(frame->codec, SWITCH_CODEC_FLAG_CHECK_PASSTHROUGH) &&
@@ -20195,7 +20197,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 	}
 
 	if (session->write_codec) {
-		if (!ptime_mismatch && write_frame->codec && write_frame->codec->implementation &&
+		if (!ptime_mismatch && !refused && write_frame->codec && write_frame->codec->implementation &&
 			write_frame->codec->implementation->decoded_bytes_per_packet == session->write_impl.decoded_bytes_per_packet) {
 			perfect = TRUE;
 		}

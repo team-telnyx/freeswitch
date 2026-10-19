@@ -200,6 +200,9 @@ struct amrwb_context {
 	uint16_t enc_modes;
 	/* the mode-set of the received fmtp (0: none, any mode): mode requests outside it are ignored */
 	uint16_t peer_modes;
+	/* _sid_suppressed() as last read, and the calls left before it is read again */
+	switch_bool_t sid_suppressed;
+	uint32_t sid_suppressed_ttl;
 	switch_byte_t enc_mode;
 	uint32_t change_period;
 	switch_byte_t flags;
@@ -470,6 +473,23 @@ static switch_bool_t amrwb_sid_suppressed(switch_codec_t *codec)
 	return ((smh = switch_core_session_get_media_handle(codec->session)) && switch_media_handle_test_media_flag(smh, SCMF_SUPPRESS_CNG)) ? SWITCH_TRUE : SWITCH_FALSE;
 }
 
+/* amrwb_sid_suppressed() for the per-frame passthrough checks, read again about once a second */
+static switch_bool_t amrwb_sid_suppressed_cached(switch_codec_t *codec)
+{
+	struct amrwb_context *context = codec->private_info;
+
+	if (!context) {
+		return amrwb_sid_suppressed(codec);
+	}
+	if (!context->sid_suppressed_ttl) {
+		context->sid_suppressed = amrwb_sid_suppressed(codec);
+		context->sid_suppressed_ttl = 50;
+	}
+	context->sid_suppressed_ttl--;
+
+	return context->sid_suppressed;
+}
+
 /* payloads from this codec's peer pass untranscoded to other's peer (same implementation): every mode we
  * answered is in other's mode-set, and other takes SID frames or this peer sends none */
 static switch_bool_t amrwb_passes_to(switch_codec_t *codec, struct amrwb_context *context, switch_codec_t *other)
@@ -483,7 +503,7 @@ static switch_bool_t amrwb_passes_to(switch_codec_t *codec, struct amrwb_context
 		return SWITCH_FALSE;
 	}
 
-	return (amrwb_sid_suppressed(other) && !amrwb_sid_suppressed(codec)) ? SWITCH_FALSE : SWITCH_TRUE;
+	return (amrwb_sid_suppressed_cached(other) && !amrwb_sid_suppressed_cached(codec)) ? SWITCH_FALSE : SWITCH_TRUE;
 }
 
 /* the SID the other leg decoded into decoded_data replaces frame (storage format) */
@@ -966,6 +986,7 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 		}
 
 		context->cmr = SWITCH_AMRWB_CMR_NONE;
+		context->sid_suppressed_ttl = 0;
 		amrwb_fmtp_framing(codec->fmtp_in, &context->framing);
 		context->cur_mode = SWITCH_AMRWB_CMR_NONE;
 		context->destroyed = SWITCH_FALSE;
@@ -1253,7 +1274,7 @@ static switch_status_t switch_amrwb_control(switch_codec_t *codec,
 
 				/* the encoder of an AMR-WB leg that takes SID frames relays ours */
 				*rtype = SCCT_STRING;
-				*ret_data = (void *) ((other->implementation->init == codec->implementation->init && !amrwb_sid_suppressed(other)) ? "true" : "false");
+				*ret_data = (void *) ((other->implementation->init == codec->implementation->init && !amrwb_sid_suppressed_cached(other)) ? "true" : "false");
 			}
 		}
 		break;
