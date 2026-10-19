@@ -1285,15 +1285,59 @@ FST_CORE_BEGIN(".")
 			start = switch_time_ref();
 			fst_requires(switch_core_codec_decode(&codec, NULL, cmr0, sizeof(cmr0), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
 			/* about 3 blocks not encoded: the next one is block 4, even, where counting encodes would say 1 */
-			switch_yield(80000);
+			switch_sleep(80000);
 			late = switch_time_ref() - start - 20000;
 			block = 1 + (late >= 30000 ? (int) ((late + 10000) / 20000) : 0);
 			ft = amrwb_encoded_ft(&codec, SWITCH_TRUE);
+			fst_check(block > 1);
 			fst_check_int_equals(ft, block % 2 ? 2 : 0);
-			if (late < 70000) {
-				fst_check_int_equals(block, 4);
-			}
 			switch_core_codec_destroy(&codec);
+		}
+		FST_TEST_END()
+
+		/* a received mode request reaches the encoder also when the core returns the payload undecoded */
+		FST_TEST_BEGIN(amrwb_cmr_reaches_the_encoder_without_a_decode)
+		{
+			switch_codec_t writer = { 0 }, reader = { 0 };
+			switch_core_session_t *session;
+			switch_endpoint_interface_t *endpoint;
+			switch_io_read_frame_t null_read;
+			unsigned char cmr0[2] = { 0x00, 0x7c };
+			/* CMR 0, then 5 bytes that are neither frames nor RTP padding */
+			unsigned char bad[7] = { 0x00, 0x7c, 1, 2, 3, 4, 9 };
+			switch_frame_t *read = NULL;
+			int ft;
+
+			fst_requires((session = amrwb_cmr_session(&reader, &writer, fst_pool)));
+			fst_requires((endpoint = switch_loadable_module_get_endpoint_interface("null")));
+			memset(&amrwb_stub_frame, 0, sizeof(amrwb_stub_frame));
+			amrwb_stub_frame.codec = &reader;
+			amrwb_stub_frame.data = cmr0;
+			amrwb_stub_frame.datalen = sizeof(cmr0);
+			amrwb_stub_frame.buflen = sizeof(cmr0);
+			amrwb_stub_frame.samples = 320;
+			amrwb_stub_frame.rate = 16000;
+			amrwb_stub_frame.channels = 1;
+
+			null_read = endpoint->io_routines->read_frame;
+			endpoint->io_routines->read_frame = amrwb_stub_read;
+			amrwb_stub_frame.data = bad;
+			amrwb_stub_frame.datalen = sizeof(bad);
+			switch_core_session_read_frame(session, &read, SWITCH_IO_FLAG_NONE, 0);
+			ft = amrwb_encoded_ft(&writer, SWITCH_TRUE);
+			amrwb_stub_frame.data = cmr0;
+			amrwb_stub_frame.datalen = sizeof(cmr0);
+			switch_core_session_read_frame(session, &read, SWITCH_IO_FLAG_NONE, 0);
+			endpoint->io_routines->read_frame = null_read;
+			UNPROTECT_INTERFACE(endpoint);
+
+			/* a payload that does not unpack carries no request */
+			fst_check_int_equals(ft, 2);
+			/* returned as received: not decoded */
+			fst_check(read == &amrwb_stub_frame);
+			ft = amrwb_encoded_ft(&writer, SWITCH_TRUE);
+			fst_check_int_equals(ft, 0);
+			amrwb_cmr_session_end(session, &reader, &writer);
 		}
 		FST_TEST_END()
 

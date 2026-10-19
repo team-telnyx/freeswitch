@@ -960,7 +960,7 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 		amrwb_fmtp_framing(codec->fmtp_in, &context->framing);
 		context->cur_mode = SWITCH_AMRWB_CMR_NONE;
 		context->destroyed = SWITCH_FALSE;
-		codec->flags |= SWITCH_CODEC_FLAG_NATIVE_DTX;
+		codec->flags |= SWITCH_CODEC_FLAG_NATIVE_DTX | SWITCH_CODEC_FLAG_PEEK_RECEIVED;
 		codec->private_info = context;
 
 		/* after a reset the encoder goes on from the mode it sent (mode-change-neighbor and
@@ -1228,7 +1228,18 @@ static switch_status_t switch_amrwb_control(switch_codec_t *codec,
 		{
 			const char *command = (const char *) cmd_data;
 
-			if (!zstr(command) && !strcasecmp(command, "fmtp_changes_framing") && rtype && ret_data) {
+			if (!zstr(command) && !strcasecmp(command, "received") && cmd_arg) {
+				/* a payload the core may not decode: its mode request still reaches the encoder */
+				switch_frame_t *frame = (switch_frame_t *) cmd_arg;
+				uint8_t frames[SWITCH_AMRWB_MAX_FRAMES][SWITCH_AMRWB_OUT_MAX_SIZE];
+				const uint8_t *payload = frame->data;
+				uint32_t used = 0;
+
+				if (payload && amrwb_unpack(payload, frame->datalen, switch_test_flag(context, AMRWB_OPT_OCTET_ALIGN) ? SWITCH_TRUE : SWITCH_FALSE, frames, &used) &&
+					(frame->datalen <= used + 3 || payload[frame->datalen - 1] == frame->datalen - used)) {
+					amrwb_set_cmr(codec, context, payload[0] >> 4);
+				}
+			} else if (!zstr(command) && !strcasecmp(command, "fmtp_changes_framing") && rtype && ret_data) {
 				struct amrwb_framing framing;
 
 				amrwb_fmtp_framing((const char *) cmd_arg, &framing);
