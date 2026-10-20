@@ -433,6 +433,8 @@ struct switch_rtp {
 	uint32_t ts;
 	//uint32_t last_clock_ts;
 	uint32_t last_write_ts;
+	uint32_t sent_frames;
+	uint32_t sent_frame_ts;
 	uint32_t raw_ts_offset;		/* added to forwarded audio ts after generated frames */
 	uint8_t raw_ts_forwarded;
 	uint8_t raw_ts_generated;
@@ -12532,6 +12534,8 @@ fork_done:
 #endif
 
 		rtp_session->last_write_ts = this_ts;
+		rtp_session->sent_frame_ts = this_ts;
+		rtp_session->sent_frames++;
 		rtp_session->flags[SWITCH_RTP_FLAG_RESET] = 0;
 
 		if (rtp_session->flags[SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP] && rtp_session->raw_ts_rate != raw_ts_rate) {
@@ -13116,6 +13120,18 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_write_raw(switch_rtp_t *rtp_session, 
 SWITCH_DECLARE(uint32_t) switch_rtp_get_ssrc(switch_rtp_t *rtp_session)
 {
 	return rtp_session->ssrc;
+}
+
+SWITCH_DECLARE(uint32_t) switch_rtp_get_sent_frames(switch_rtp_t *rtp_session, uint32_t *ts)
+{
+	if (!rtp_session) {
+		return 0;
+	}
+	if (ts) {
+		*ts = rtp_session->sent_frame_ts;
+	}
+
+	return rtp_session->sent_frames;
 }
 
 SWITCH_DECLARE(uint32_t) switch_rtp_get_remote_ssrc(switch_rtp_t *rtp_session)

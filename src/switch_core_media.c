@@ -4399,6 +4399,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 	switch_rtp_engine_t *engine;
 	switch_media_handle_t *smh;
 	int fire_writable = 0;
+	uint32_t sent, ts = 0;
 
 	switch_assert(session);
 #if DEBUG_RTP
@@ -4469,6 +4470,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 	engine->timestamp_send += samples;
 
 	fire_writable = !switch_channel_test_flag(session->channel, CF_MEDIA_WRITABLE_FIRED);
+	sent = switch_rtp_get_sent_frames(engine->rtp_session, NULL);
 	if (switch_rtp_write_frame(engine->rtp_session, frame) < 0) {
 		status = SWITCH_STATUS_FALSE;
 	}
@@ -4481,6 +4483,12 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_write_frame(switch_core_sessio
 			switch_channel_set_flag(session->channel, CF_MEDIA_WRITABLE_FIRED);
 			switch_core_session_media_writable(session);
 		}
+	}
+
+	/* e.g. an AMR encoder keeping its mode changes on the frame-blocks the receiver counts */
+	if (status == SWITCH_STATUS_SUCCESS && frame->codec && frame->codec == session->write_codec && switch_core_codec_ready(frame->codec) &&
+		switch_test_flag(frame->codec, SWITCH_CODEC_FLAG_PEEK_SENT) && switch_rtp_get_sent_frames(engine->rtp_session, &ts) != sent) {
+		switch_core_codec_control(frame->codec, SCC_CODEC_SPECIFIC, SCCT_STRING, (void *) "sent", SCCT_INT, &ts, NULL, NULL);
 	}
 
 	switch_thread_rwlock_unlock(engine->dtls_init_rwlock);
