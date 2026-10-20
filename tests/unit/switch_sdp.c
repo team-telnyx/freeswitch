@@ -1056,6 +1056,82 @@ FST_CORE_BEGIN("./conf_sdp")
 		FST_SESSION_END()
 
 		/*
+		 * A read codec re-created in place with another implementation and set again (mod_loopback's tech_init
+		 * when a frame of another codec reaches it): set_read_codec returns early on the same pointer, and the
+		 * media bugs' copy has to follow the frames' codec, or A-law is decoded as u-law.
+		 */
+		FST_SESSION_BEGIN(sdp_read_codec_recreated_in_place_refreshes_media_bug_codec)
+		{
+			switch_status_t status;
+			switch_codec_t *codec, reference = { 0 };
+			switch_endpoint_interface_t *endpoint;
+			switch_frame_t frame = { 0 }, *read_frame = NULL;
+			switch_media_bug_t *bug = NULL;
+			struct bug_audio audio = { { 0 } };
+			uint8_t payload[160];
+			int16_t expected[160];
+			uint32_t expected_len = sizeof(expected), rate = 8000, flag = 0;
+			int i, pcmu_ok = 0;
+
+			for (i = 0; i < 160; i++) {
+				payload[i] = (uint8_t) (i * 37 + 5);
+			}
+			codec = switch_core_session_alloc(fst_session, sizeof(*codec));
+			fst_requires(switch_core_codec_init(codec, "PCMU", NULL, NULL, 8000, 20, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
+												NULL, switch_core_session_get_pool(fst_session)) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_core_codec_init(&reference, "PCMA", NULL, NULL, 8000, 20, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
+												NULL, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_core_codec_decode(&reference, NULL, payload, sizeof(payload), 8000, expected, &expected_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			switch_core_codec_destroy(&reference);
+			fst_requires(expected_len == sizeof(expected));
+
+			fst_requires(switch_core_session_set_read_codec(fst_session, codec) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_core_media_bug_add(fst_session, "bug_codec_test", NULL, read_bug_callback, &audio, 0, SMBF_READ_REPLACE, &bug) == SWITCH_STATUS_SUCCESS);
+			fst_requires((endpoint = switch_loadable_module_get_endpoint_interface("null")));
+			fst_requires(endpoint->io_routines && endpoint->io_routines->read_frame);
+			null_read_frame = endpoint->io_routines->read_frame;
+			endpoint->io_routines->read_frame = next_frame_read;
+
+			frame.codec = codec;
+			frame.data = payload;
+			frame.datalen = frame.buflen = sizeof(payload);
+			frame.samples = 160;
+			frame.rate = 8000;
+			frame.channels = 1;
+
+			/* the first read with the bug copies PCMU. Checks only until the null endpoint is restored */
+			next_frame = &frame;
+			status = switch_core_session_read_frame(fst_session, &read_frame, SWITCH_IO_FLAG_NONE, 0);
+			pcmu_ok = status == SWITCH_STATUS_SUCCESS && audio.datalen == sizeof(expected);
+
+			/* as tech_init: destroyed, initialised again in the same struct, set again */
+			switch_core_codec_destroy(codec);
+			status = switch_core_codec_init(codec, "PCMA", NULL, NULL, 8000, 20, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
+											NULL, switch_core_session_get_pool(fst_session));
+			if (status == SWITCH_STATUS_SUCCESS) {
+				switch_core_session_set_read_codec(fst_session, codec);
+				next_frame = &frame;
+				audio.datalen = 0;
+				status = switch_core_session_read_frame(fst_session, &read_frame, SWITCH_IO_FLAG_NONE, 0);
+			}
+
+			endpoint->io_routines->read_frame = null_read_frame;
+			next_frame = NULL;
+			UNPROTECT_INTERFACE(endpoint);
+			switch_core_media_bug_remove(fst_session, &bug);
+			switch_core_session_set_read_codec(fst_session, NULL);
+			if (switch_core_codec_ready(codec)) {
+				switch_core_codec_destroy(codec);
+			}
+
+			fst_check(pcmu_ok);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			fst_xcheck(audio.datalen == sizeof(expected) && !memcmp(audio.data, expected, sizeof(expected)),
+					   "the media bug gets the A-law payload decoded as A-law");
+		}
+		FST_SESSION_END()
+
+		/*
 		 * Negative control: the same offers with telnyx-strict-codec-match left unset.
 		 * These assertions pin the behaviour of the unflagged path, defects included, so
 		 * that a change to it has to be deliberate rather than accidental.

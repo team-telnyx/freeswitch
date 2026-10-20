@@ -539,6 +539,15 @@ cnt_with_cng:
 						goto done;
 					}
 
+					/* the frames' codec re-created in place with another implementation (mod_loopback's tech_init sets it
+					 * again, and set_read_codec returns early on the same pointer): the copy follows it */
+					if (switch_core_codec_ready(&session->bug_codec) && switch_core_codec_ready(read_frame->codec) &&
+						session->bug_codec.implementation != read_frame->codec->implementation) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Destroying BUG Codec %s:%d\n",
+										  session->bug_codec.implementation->iananame, session->bug_codec.implementation->ianacode);
+						switch_core_codec_destroy(&session->bug_codec);
+					}
+
 					if (!switch_core_codec_ready(&session->bug_codec) && switch_core_codec_ready(read_frame->codec)) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Setting BUG Codec %s:%d\n",
 										  read_frame->codec->implementation->iananame, read_frame->codec->implementation->ianacode);
