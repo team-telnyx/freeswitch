@@ -2688,7 +2688,16 @@ FST_CORE_BEGIN(".")
 			}
 			reads = amrwb_stub_reads;
 
-			/* re-encoded (before the 8 kHz codec below leaves its resampler): a one-frame packet keeps its timestamp
+			/* what is left for one read codec is dropped when another one is set: the next read reads a packet */
+			switch_core_session_read_frame(fst_session, &read, SWITCH_IO_FLAG_NONE, 0);
+			if (switch_core_session_set_read_codec(fst_session, &other) == SWITCH_STATUS_SUCCESS) {
+				changed_reads = amrwb_stub_reads;
+				changed_len = switch_core_session_read_frame(fst_session, &read, SWITCH_IO_FLAG_NONE, 0) == SWITCH_STATUS_SUCCESS && read ? read->datalen : 0;
+				changed_reads = amrwb_stub_reads - changed_reads;
+				switch_core_session_set_read_codec(fst_session, NULL);
+			}
+
+			/* re-encoded, after the 8 kHz codec (its resampler must not stay): a one-frame packet keeps its timestamp
 			 * and marker, the chunks of a 3-frame one get none */
 			if (switch_core_session_set_read_codec(fst_session, &be) == SWITCH_STATUS_SUCCESS) {
 				amrwb_stub_frame.datalen = amrwb_payload(frames, 1, SWITCH_TRUE, payload, sizeof(payload));
@@ -2706,15 +2715,6 @@ FST_CORE_BEGIN(".")
 						chunks_unstamped += !read->timestamp && !read->m;
 					}
 				}
-				switch_core_session_set_read_codec(fst_session, NULL);
-			}
-
-			/* what is left for one read codec is dropped when another one is set: the next read reads a packet */
-			switch_core_session_read_frame(fst_session, &read, SWITCH_IO_FLAG_NONE, 0);
-			if (switch_core_session_set_read_codec(fst_session, &other) == SWITCH_STATUS_SUCCESS) {
-				changed_reads = amrwb_stub_reads;
-				changed_len = switch_core_session_read_frame(fst_session, &read, SWITCH_IO_FLAG_NONE, 0) == SWITCH_STATUS_SUCCESS && read ? read->datalen : 0;
-				changed_reads = amrwb_stub_reads - changed_reads;
 				switch_core_session_set_read_codec(fst_session, NULL);
 			}
 			endpoint->io_routines->read_frame = null_read;
