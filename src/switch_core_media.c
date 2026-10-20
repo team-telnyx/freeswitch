@@ -6673,6 +6673,9 @@ SWITCH_DECLARE(int16_t) switch_core_media_validate_common_audio_sdp(switch_core_
 
 							/* as in negotiation: no more near matches than the array holds */
 							if (nm_idx >= MAX_MATCHES) {
+								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+												  "Audio Codec Compare [%s:%d:%u:%u:%d:%u:%d] was not saved as a near-match. Too many. Ignoring.\n",
+												  imp->iananame, imp->ianacode, codec_rate, imp->actual_samples_per_second, imp->microseconds_per_packet / 1000, bit_rate, imp->number_of_channels);
 								continue;
 							}
 

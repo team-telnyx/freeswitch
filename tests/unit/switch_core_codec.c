@@ -415,8 +415,8 @@ FST_CORE_BEGIN("./conf")
 		}
 		FST_TEST_END()
 
-		/* the near-match lookups pass a one-slot array: a codec with fmtp matching and several
-		 * implementations must not be written past it */
+		/* the near-match lookups pass a one-slot array: of a codec with fmtp matching and several
+		 * implementations only as many as fit are returned */
 		FST_TEST_BEGIN(test_get_codecs_sorted_stays_in_the_array)
 		{
 			struct {
@@ -472,8 +472,7 @@ FST_CORE_BEGIN("./conf")
 		/* SDP validation (re-INVITEs) records at most MAX_MATCHES (30) near matches, as negotiation does. In
 		 * validation ptime comes from a=maxptime (not a=ptime): with maxptime 40, 31 payload types of a codec
 		 * that has only 60 ms are near matches that are then refused (60 > 40); a 32nd payload type of a 20 ms
-		 * codec would be accepted, but is beyond the 30 recorded, so the SDP is refused. Without the bound the
-		 * 31st and 32nd are written past the stack array: undefined, it shows reliably only under ASan. */
+		 * codec would be accepted, but is beyond the 30 recorded, so the SDP is refused, as in negotiation. */
 		FST_TEST_BEGIN(test_validate_sdp_keeps_near_matches_in_the_array)
 		{
 			switch_core_session_t *session = NULL;
