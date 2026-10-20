@@ -61,6 +61,20 @@ static const char *amr_offer(switch_core_session_t *session, int version, const 
 		"a=sendrecv\r\n", version, fmtp);
 }
 
+/* an offer without a=fmtp: RFC 4867 defaults, bandwidth efficient */
+static const char *amr_offer_without_fmtp(switch_core_session_t *session, int version)
+{
+	return switch_core_session_sprintf(session,
+		"v=0\r\n"
+		"o=- 1 %d IN IP4 198.51.100.1\r\n"
+		"s=-\r\n"
+		"t=0 0\r\n"
+		"m=audio 56210 RTP/AVP 96\r\n"
+		"c=IN IP4 198.51.100.1\r\n"
+		"a=rtpmap:96 AMR/8000\r\n"
+		"a=sendrecv\r\n", version);
+}
+
 static const char *amr_offer_two_maps(switch_core_session_t *session, int version, const char *fmtp_96, const char *fmtp_97)
 {
 	return switch_core_session_sprintf(session,
@@ -377,6 +391,20 @@ FST_CORE_BEGIN(".")
 		}
 		FST_SESSION_END()
 
+		/* a re-offer without a=fmtp (a hold re-INVITE, say) offers the RFC 4867 default, bandwidth efficient: an
+		 * octet-aligned codec is re-created, and the answer does not claim octet-align=1 */
+		FST_SESSION_BEGIN(amr_reoffer_without_fmtp_is_bandwidth_efficient)
+		{
+			amr_reoffer_result_t result = amr_reoffer(fst_session, NULL, AMR_FMTP_OA, amr_offer_without_fmtp(fst_session, 2), AMR_FMTP_BE);
+
+			fst_requires(result.negotiated);
+			fst_xcheck(result.codec_reset, "the codec is re-created bandwidth efficient");
+			fst_xcheck(!result.framing_stale, "the codec runs bandwidth efficient framing");
+			fst_xcheck(result.decoded, "bandwidth efficient frames decode after the re-offer");
+			fst_xcheck(result.answer_octet_align != 1, "the answer does not advertise octet aligned framing");
+		}
+		FST_SESSION_END()
+
 		FST_TEST_BEGIN(amr_decode) 
 		{
 			switch_codec_t read_codec = { 0 };
@@ -435,6 +463,24 @@ FST_SESSION_BEGIN(amr_strict_reoffer_forced_framing_keeps_codec)
 			fst_xcheck(!result.codec_reset, "with force-oa an octet-align change does not reset the codec");
 			fst_xcheck(result.decoded, "octet aligned frames still decode");
 			fst_xcheck(result.answer_octet_align == 1, "the answer still advertises octet aligned framing");
+		}
+		FST_SESSION_END()
+
+		/* with force-oa a re-offer without a=fmtp keeps the octet-aligned codec */
+		FST_SESSION_BEGIN(amr_reoffer_without_fmtp_with_force_oa_keeps_codec)
+		{
+			amr_reoffer_result_t result;
+
+			switch_xml_bind_search_function(amr_force_oa_config, switch_xml_parse_section_string("configuration"), NULL);
+			fst_requires(amr_reload_module() == SWITCH_STATUS_SUCCESS);
+
+			result = amr_reoffer(fst_session, NULL, AMR_FMTP_OA, amr_offer_without_fmtp(fst_session, 2), AMR_FMTP_OA);
+			switch_xml_unbind_search_function_ptr(amr_force_oa_config);
+
+			fst_requires(result.negotiated);
+			fst_xcheck(!result.codec_reset, "with force-oa the codec is kept");
+			fst_xcheck(result.decoded, "octet aligned frames still decode");
+			fst_xcheck(result.answer_octet_align == 1, "the answer keeps the a=fmtp of the codec it kept");
 		}
 		FST_SESSION_END()
 
