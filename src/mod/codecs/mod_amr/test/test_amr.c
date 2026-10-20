@@ -688,6 +688,88 @@ static int amr_answer_to(switch_core_session_t *session, const char *offer, char
 	return 1;
 }
 
+static const char *amr_passes_to(switch_codec_t *codec, switch_codec_t *other)
+{
+	switch_codec_control_type_t rtype = SCCT_NONE;
+	void *ret = NULL;
+
+	switch_core_codec_control(codec, SCC_CODEC_SPECIFIC, SCCT_STRING, (void *) "passes_to", SCCT_NONE, other, &rtype, &ret);
+	return rtype == SCCT_STRING ? (const char *) ret : NULL;
+}
+
+static const char *amr_transcodes_dtx_to(switch_codec_t *codec, switch_codec_t *other)
+{
+	switch_codec_control_type_t rtype = SCCT_NONE;
+	void *ret = NULL;
+
+	switch_core_codec_control(codec, SCC_CODEC_SPECIFIC, SCCT_STRING, (void *) "transcodes_dtx_to", SCCT_NONE, other, &rtype, &ret);
+	return rtype == SCCT_STRING ? (const char *) ret : NULL;
+}
+
+static switch_io_write_frame_t amr_null_write = NULL;
+static unsigned char amr_written[SWITCH_RECOMMENDED_BUFFER_SIZE];
+static uint32_t amr_written_len = 0;
+/* frames per payload amr_forwarded_ft() writes, and the writes the session made */
+static int amr_payload_frames = 1, amr_writes = 0;
+
+static switch_status_t amr_capture_write(switch_core_session_t *session, switch_frame_t *frame, switch_io_flag_t flags, int stream_id)
+{
+	amr_writes++;
+	amr_written_len = frame->datalen <= sizeof(amr_written) ? frame->datalen : 0;
+	memcpy(amr_written, frame->data, amr_written_len);
+	return SWITCH_STATUS_SUCCESS;
+}
+
+/* writes a mode 7 payload of a leg answered mode-set=7 to the session, its write codec on to_fmtp (octet aligned);
+ * the FT sent, -1 if nothing was; same: sent unchanged */
+static int amr_forwarded_ft(switch_core_session_t *session, switch_memory_pool_t *pool, const char *to_fmtp, switch_bool_t *same)
+{
+	switch_endpoint_interface_t *endpoint = switch_loadable_module_get_endpoint_interface("null");
+	switch_codec_t encoder = { 0 }, from = { 0 }, to = { 0 };
+	unsigned char payload[SWITCH_RECOMMENDED_BUFFER_SIZE], frames[12][64];
+	switch_frame_t frame = { 0 };
+	int16_t pcm[160];
+	int ft = -1, f;
+
+	*same = SWITCH_FALSE;
+	amr_written_len = 0;
+	amr_writes = 0;
+	amr_tone(pcm, 0);
+	if (endpoint && amr_init(&encoder, "octet-align=1; mode-set=7", SWITCH_CODEC_FLAG_ENCODE, pool) == SWITCH_STATUS_SUCCESS &&
+		amr_init(&from, "octet-align=1; mode-set=7", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, pool) == SWITCH_STATUS_SUCCESS &&
+		amr_init(&to, to_fmtp, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, switch_core_session_get_pool(session)) == SWITCH_STATUS_SUCCESS &&
+		switch_core_session_set_write_codec(session, &to) == SWITCH_STATUS_SUCCESS) {
+		frame.codec = &from;
+		frame.data = payload;
+		if (amr_payload_frames == 1) {
+			frame.datalen = amr_encode(&encoder, pcm, payload, sizeof(payload));
+		} else {
+			for (f = 0; f < amr_payload_frames; f++) {
+				amr_encode(&encoder, pcm, frames[f], sizeof(frames[f]));
+			}
+			frame.datalen = amr_payload(frames, amr_payload_frames, SWITCH_TRUE, payload, sizeof(payload));
+		}
+		frame.buflen = sizeof(payload);
+		frame.samples = 160 * amr_payload_frames;
+		frame.rate = 8000;
+		frame.channels = 1;
+		amr_null_write = endpoint->io_routines->write_frame;
+		endpoint->io_routines->write_frame = amr_capture_write;
+		switch_core_session_write_frame(session, &frame, SWITCH_IO_FLAG_NONE, 0);
+		endpoint->io_routines->write_frame = amr_null_write;
+		switch_core_session_set_write_codec(session, NULL);
+		if (amr_written_len > 1) {
+			ft = (amr_written[1] >> 3) & 0x0f;
+			*same = amr_written_len == frame.datalen && !memcmp(amr_written, payload, frame.datalen);
+		}
+	}
+	if (switch_core_codec_ready(&to)) switch_core_codec_destroy(&to);
+	if (switch_core_codec_ready(&from)) switch_core_codec_destroy(&from);
+	if (switch_core_codec_ready(&encoder)) switch_core_codec_destroy(&encoder);
+	if (endpoint) UNPROTECT_INTERFACE(endpoint);
+	return ft;
+}
+
 FST_CORE_BEGIN(".")
 {
 	FST_SUITE_BEGIN(test_amr)
@@ -2484,6 +2566,68 @@ FST_CORE_BEGIN(".")
 			fst_check_int_equals(wrong, 0);
 		}
 		FST_TEST_END()
+
+		/* payloads pass to a leg of the same implementation only within its mode-set */
+		FST_TEST_BEGIN(amr_passes_only_within_the_other_legs_mode_set)
+		{
+			switch_codec_t from = { 0 }, to = { 0 };
+			const char *to_fmtps[] = { "octet-align=1; mode-set=2", "octet-align=1; mode-set=2,7", "octet-align=1" };
+			const char *expected[] = { "false", "true", "true" };
+			int i;
+
+			fst_requires(amr_init(&from, "octet-align=1; mode-set=7", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_test_flag(&from, SWITCH_CODEC_FLAG_CHECK_PASSTHROUGH));
+			for (i = 0; i < 3; i++) {
+				fst_requires(amr_init(&to, to_fmtps[i], SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+				fst_check_string_equals(amr_passes_to(&from, &to), expected[i]);
+				switch_core_codec_destroy(&to);
+			}
+			switch_core_codec_destroy(&from);
+		}
+		FST_TEST_END()
+
+		FST_SESSION_BEGIN(amr_passthrough_is_transcoded_to_the_other_legs_mode_set)
+		{
+			switch_bool_t same;
+
+			amr_check_int(amr_forwarded_ft(fst_session, fst_pool, "octet-align=1; mode-set=2", &same), 2);
+			fst_check(!same);
+			amr_check_int(amr_forwarded_ft(fst_session, fst_pool, "octet-align=1; mode-set=2,7", &same), 7);
+			fst_check(same);
+			amr_check_int(amr_forwarded_ft(fst_session, fst_pool, "octet-align=1", &same), 7);
+			fst_check(same);
+
+			/* every frame of a refused payload is re-encoded, not only the first */
+			amr_payload_frames = 3;
+			amr_check_int(amr_forwarded_ft(fst_session, fst_pool, "octet-align=1; mode-set=2", &same), 2);
+			amr_check_int(amr_writes, 3);
+			amr_payload_frames = 1;
+		}
+		FST_SESSION_END()
+
+		/* no SID frames to a leg that takes none from a leg that may send them */
+		FST_SESSION_BEGIN(amr_passes_no_sid_to_a_leg_without_silence_suppression)
+		{
+			switch_codec_t from = { 0 }, to = { 0 };
+			int i;
+
+			fst_requires(amr_init(&from, "octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(amr_init(&to, "octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
+								  switch_core_session_get_pool(fst_session)) == SWITCH_STATUS_SUCCESS);
+			fst_check_string_equals(amr_passes_to(&from, &to), "true");
+			fst_check_string_equals(amr_transcodes_dtx_to(&from, &to), "false");
+			switch_channel_set_variable(switch_core_session_get_channel(fst_session), "suppress_cng", "true");
+			/* read again within 50 calls, about a second of frames */
+			for (i = 0; i < 50 && !strcmp(switch_str_nil(amr_passes_to(&from, &to)), "true"); i++);
+			fst_check(i < 50);
+			fst_check_string_equals(amr_passes_to(&from, &to), "false");
+			fst_check_string_equals(amr_transcodes_dtx_to(&from, &to), "false");
+			fst_check_string_equals(amr_passes_to(&to, &from), "true");
+			switch_channel_set_variable(switch_core_session_get_channel(fst_session), "suppress_cng", NULL);
+			switch_core_codec_destroy(&to);
+			switch_core_codec_destroy(&from);
+		}
+		FST_SESSION_END()
 	}
 	FST_SUITE_END()
 }

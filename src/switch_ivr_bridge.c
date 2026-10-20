@@ -389,7 +389,8 @@ static switch_bool_t native_dtx_passthrough(switch_core_session_t *session_a, sw
 			switch_core_session_get_real_read_impl(session_a, &read_impl) == SWITCH_STATUS_SUCCESS &&
 			switch_core_session_get_write_impl(session_b, &write_impl) == SWITCH_STATUS_SUCCESS &&
 			read_impl.codec_id == write_impl.codec_id &&
-			switch_core_media_bug_tap_only(session_a) && switch_core_media_bug_tap_only(session_b)) ? SWITCH_TRUE : SWITCH_FALSE;
+			switch_core_media_bug_tap_only(session_a) && switch_core_media_bug_tap_only(session_b) &&
+			!switch_core_session_write_drops_native_dtx(session_b)) ? SWITCH_TRUE : SWITCH_FALSE;
 }
 
 static switch_bool_t is_silence_frame(switch_frame_t *frame, int silence_threshold, switch_codec_implementation_t *codec_impl)
