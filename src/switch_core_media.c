@@ -7075,6 +7075,30 @@ static const char *amr_offered_octet_align(switch_media_handle_t *smh, int pt, c
 	return *oa == '1' ? "octet-align=1" : "octet-align=0";
 }
 
+/*
+ * AMR / AMR-WB answer to our offer that leaves out octet-align: it is the one we offered on that payload type, as our
+ * last SDP states it (RFC 4867 8.3.1 wants it returned unmodified; many stacks drop the default). The codec default
+ * for an fmtp without octet-align (bandwidth efficient, or octet aligned with the codec's force-oa) is for offers.
+ * Early media answers to our INVITE come as SDP_OFFER: before the outbound leg is answered they are answers too,
+ * unless the endpoint marks a real offer (CF_REMOTE_SDP_OFFER: an early-dialog UPDATE from the far end, which keeps
+ * the default and is answered with the framing it offered). The fmtp to negotiate map with.
+ */
+static const char *amr_answer_fmtp(switch_core_session_t *session, switch_media_handle_t *smh, switch_sdp_type_t sdp_type, sdp_rtpmap_t *map)
+{
+	const char *offered;
+
+	if ((sdp_type == SDP_ANSWER ||
+		 (switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_OUTBOUND && !switch_channel_test_flag(session->channel, CF_ANSWERED) &&
+		  !switch_channel_test_flag(session->channel, CF_REMOTE_SDP_OFFER))) &&
+		(!strcasecmp(map->rm_encoding, "AMR") || !strcasecmp(map->rm_encoding, "AMR-WB")) &&
+		(zstr(map->rm_fmtp) || !switch_stristr("octet-align", map->rm_fmtp)) &&
+		(offered = amr_offered_octet_align(smh, map->rm_pt, map->rm_encoding))) {
+		return switch_core_session_sprintf(session, "%s%s%s", zstr(map->rm_fmtp) ? "" : map->rm_fmtp, zstr(map->rm_fmtp) ? "" : "; ", offered);
+	}
+
+	return map->rm_fmtp;
+}
+
 //?
 SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *session, const char *r_sdp, uint8_t *proceed, switch_sdp_type_t sdp_type)
 {
@@ -7113,7 +7137,8 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 	switch_port_t audio_port = 0, video_port = 0;
 	int amrwb_offerings_n = 0, amr_offerings_n = 0;
 	//int amrwb_offerings_rejected_n = 0,
-	int amr_offerings_rejected_n = 0;
+	/* invite-prefer: AMR payload types of the preferred framing that one of ours matches */
+	int amr_offerings_preferred = 0;
 
 	switch_assert(session);
 
@@ -7579,6 +7604,8 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 			 */
 			int partner_driven = switch_channel_test_flag(session->channel, CF_AWAITING_STREAM_CHANGE);
 
+			/* invite-prefer: AMR payload types of this m-line */
+			amr_offerings_n = amr_offerings_preferred = 0;
 			nm_idx = 0;
 			m_idx = 0;
 			memset(matches, 0, sizeof(matches[0]) * MAX_MATCHES);
@@ -7934,24 +7961,41 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 				fmtp_remote_codec_rate = 0;
 				memset(&codec_fmtp, 0, sizeof(codec_fmtp));
 
-				/*
-				 * AMR / AMR-WB answer to our offer that leaves out octet-align: it is the one we offered on that
-				 * payload type, as our last SDP states it (RFC 4867 8.3.1 wants it returned unmodified; many
-				 * stacks drop the default). The codec default for an fmtp without octet-align (bandwidth
-				 * efficient, or octet aligned with the codec's force-oa) is for offers. Early media answers to
-				 * our INVITE come here as SDP_OFFER: before the outbound leg is answered they are answers too,
-				 * unless the endpoint marks a real offer (CF_REMOTE_SDP_OFFER: an early-dialog UPDATE from the
-				 * far end, which keeps the default and is answered with the framing it offered).
-				 */
-				if ((sdp_type == SDP_ANSWER ||
-					 (switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_OUTBOUND && !switch_channel_test_flag(session->channel, CF_ANSWERED) &&
-					  !switch_channel_test_flag(session->channel, CF_REMOTE_SDP_OFFER))) &&
-					(!strcasecmp(map->rm_encoding, "AMR") || !strcasecmp(map->rm_encoding, "AMR-WB")) &&
-					(zstr(map->rm_fmtp) || !switch_stristr("octet-align", map->rm_fmtp))) {
-					const char *offered = amr_offered_octet_align(smh, map->rm_pt, map->rm_encoding);
+				/* AMR payload types without an fmtp count as well */
+				if (!strcasecmp(map->rm_encoding, "AMR") && !amr_offerings_n) {
+					sdp_rtpmap_t *mp = NULL;
+					int j;
 
-					if (offered) {
-						map->rm_fmtp = switch_core_session_sprintf(session, "%s%s%s", zstr(map->rm_fmtp) ? "" : map->rm_fmtp, zstr(map->rm_fmtp) ? "" : "; ", offered);
+					for (mp = m->m_rtpmaps; mp; mp = mp->rm_next) {
+						switch_codec_fmtp_t prefer_fmtp = { 0 };
+						const char *fmtp;
+
+						if (strcasecmp(mp->rm_encoding, "AMR")) {
+							continue;
+						}
+						++amr_offerings_n;
+						/* as the match below sees it */
+						fmtp = amr_answer_fmtp(session, smh, sdp_type, mp);
+						if (SWITCH_STATUS_IGNORE == switch_core_codec_parse_fmtp(mp->rm_encoding, zstr(fmtp) ? ";" : fmtp, mp->rm_rate, &prefer_fmtp)) {
+							continue;
+						}
+						for (j = 0; j < smh->mparams->num_codecs && j < total_codecs; j++) {
+							if (!strcasecmp(codec_array[j]->iananame, "AMR") && codec_array[j]->matches_fmtp && mp->rm_rate == codec_array[j]->samples_per_second &&
+								codec_array[j]->matches_fmtp(fmtp, codec_array[j]->fmtp) == SWITCH_STATUS_SUCCESS) {
+								++amr_offerings_preferred;
+								break;
+							}
+						}
+					}
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "There is %d AMR rtpmap%s, %d usable of the preferred framing\n",
+									  amr_offerings_n, amr_offerings_n == 1 ? "" : "s", amr_offerings_preferred);
+				}
+
+				{
+					const char *fmtp = amr_answer_fmtp(session, smh, sdp_type, map);
+
+					if (fmtp != map->rm_fmtp) {
+						map->rm_fmtp = fmtp;
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s answer on payload type %d without octet-align: as offered, fmtp [%s]\n",
 										  map->rm_encoding, map->rm_pt, map->rm_fmtp);
 					}
@@ -7978,17 +8022,6 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 						}
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "There is %d AMR-WB rtpmap%s\n",
 								amrwb_offerings_n, amrwb_offerings_n == 1 ? "" : "s");
-					}
-
-					if (!strcasecmp(map->rm_encoding, "AMR") && !amr_offerings_n) {
-						sdp_rtpmap_t *mp = NULL;
-						for (mp = m->m_rtpmaps; mp; mp = mp->rm_next) {
-							if (!strcasecmp(mp->rm_encoding, "AMR")) {
-								++amr_offerings_n;
-							}
-						}
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "There is %d AMR rtpmap%s\n",
-								amr_offerings_n, amr_offerings_n == 1 ? "" : "s");
 					}
 
 					s = switch_core_codec_parse_fmtp(map->rm_encoding, map->rm_fmtp, map->rm_rate, &codec_fmtp);
@@ -8018,6 +8051,8 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 					const switch_codec_implementation_t *imp = codec_array[i];
 					uint32_t bit_rate = imp->bits_per_second;
 					uint32_t codec_rate = imp->samples_per_second;
+					/* the AMR checks below decide alone: the generic fmtp check must not match again what they refused */
+					int amr_decided = 0;
 
 					if (imp->codec_type != SWITCH_CODEC_TYPE_AUDIO) {
 						continue;
@@ -8057,9 +8092,27 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 							}
 						}
 					} else if (!strcasecmp(map->rm_encoding, "AMR")) {
-						if (amr_offerings_n > 1) {
-							if (amr_offerings_rejected_n + 1 < amr_offerings_n) {
-								if (SWITCH_STATUS_IGNORE == switch_core_codec_parse_fmtp(map->rm_encoding, map->rm_fmtp, map->rm_rate, &codec_fmtp)) {
+						amr_decided = 1;
+						if (!strcasecmp(imp->iananame, "AMR") && imp->matches_fmtp) {
+							/* the offered framing and options decide the implementation, as for AMR-WB; so a
+							 * dynamic payload type below 96 is matched as well */
+							if (!match && map->rm_pt < 96 &&
+								(remote_codec_rate == codec_rate || fmtp_remote_codec_rate == imp->actual_samples_per_second)) {
+								match = 1;
+							}
+							if (match && SWITCH_STATUS_SUCCESS != imp->matches_fmtp(map->rm_fmtp, imp->fmtp)) {
+								match = 0;
+							}
+							/*
+							 * invite-prefer-oa/-be: the codec skips (IGNORE) payload types of the other framing,
+							 * when the offer has one of the preferred framing we can match
+							 */
+							if (match && amr_offerings_preferred) {
+								switch_codec_fmtp_t prefer_fmtp = { 0 };
+
+								/* a payload type without an fmtp is offered too: the codec gets an empty parameter list */
+								if (SWITCH_STATUS_IGNORE == switch_core_codec_parse_fmtp(map->rm_encoding, zstr(map->rm_fmtp) ? ";" : map->rm_fmtp,
+																						 map->rm_rate, &prefer_fmtp)) {
 									match = 0;
 								}
 							}
@@ -8069,7 +8122,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 					/*
 					 * Check codec fmtp compatibility.
 					 */
-					if (!match && imp->matches_fmtp && !strcasecmp(map->rm_encoding, imp->iananame)) {
+					if (!match && !amr_decided && imp->matches_fmtp && !strcasecmp(map->rm_encoding, imp->iananame)) {
 						if (SWITCH_STATUS_SUCCESS != imp->matches_fmtp(map->rm_fmtp, imp->fmtp)) {
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 								"Codec Match FAILED: fmtp mismatch [%s:%d] remote_fmtp=[%s] local_fmtp=[%s]\n",
@@ -8163,7 +8216,6 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 
 				// Count rejected AMR-WB offerings
 				if (!amr_matched && !strcasecmp(map->rm_encoding, "AMR")) {
-					++amr_offerings_rejected_n;
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "AMR codec [%s:%d:%u:%d] rejected\n",
 							rm_encoding, map->rm_pt, (int) remote_codec_rate, codec_ms);
 				}
