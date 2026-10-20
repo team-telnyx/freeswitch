@@ -1888,6 +1888,35 @@ FST_CORE_BEGIN(".")
 		}
 		FST_TEST_END()
 
+		/* invite-prefer counts the preferred framing as the match sees it: an answer on our octet-aligned payload type
+		 * that leaves out octet-align is octet aligned (as offered); a payload type at another clock rate does not
+		 * match, so it does not skip a usable one of the other framing */
+		FST_TEST_BEGIN(amr_invite_prefer_counts_what_the_match_sees)
+		{
+			switch_core_session_t *session;
+			char answer[256];
+			const char *fmtps[] = { "mode-set=7", NULL };
+			int i;
+
+			fst_requires(amr_reload("<param name=\"invite-prefer-be\" value=\"true\"/>") == SWITCH_STATUS_SUCCESS);
+			for (i = 0; i < 2; i++) {
+				fst_requires((session = amr_new_session()));
+				amr_check_int(amr_answer_framing(session, SWITCH_TRUE, fmtps[i]), 1);
+				amr_end_session(session);
+			}
+
+			fst_requires(amr_reload("<param name=\"invite-prefer-oa\" value=\"true\"/>") == SWITCH_STATUS_SUCCESS);
+			fst_requires((session = amr_new_session()));
+			fst_check(amr_answer_to(session, switch_core_session_sprintf(session,
+				"v=0\r\no=- 1 1 IN IP4 198.51.100.1\r\ns=-\r\nt=0 0\r\nm=audio 56210 RTP/AVP 96 97\r\nc=IN IP4 198.51.100.1\r\n"
+				"a=rtpmap:96 AMR/16000\r\na=fmtp:96 octet-align=1; mode-set=2\r\na=rtpmap:97 AMR/8000\r\na=fmtp:97 mode-set=2\r\n"
+				"a=sendrecv\r\n"), answer, sizeof(answer)));
+			fst_check(!strncmp(answer, "97 ", 3));
+			fst_check(strstr(answer, "octet-align=0") != NULL);
+			amr_end_session(session);
+		}
+		FST_TEST_END()
+
 		/* without invite-prefer the first matching payload type is answered */
 		FST_SESSION_BEGIN(amr_offer_order_decides_without_invite_prefer)
 		{
