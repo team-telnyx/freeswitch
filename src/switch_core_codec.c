@@ -757,6 +757,7 @@ SWITCH_DECLARE(switch_bool_t) switch_core_codec_ptime_supported(const switch_cod
 {
 	const switch_codec_implementation_t *running, *iptr;
 	switch_codec_interface_t *codec_interface;
+	switch_bool_t supported = SWITCH_FALSE;
 	int g722;
 
 	if (!codec || zstr(codec_name) || ms <= 0) {
@@ -764,9 +765,8 @@ SWITCH_DECLARE(switch_bool_t) switch_core_codec_ptime_supported(const switch_cod
 	}
 
 	running = codec->implementation;
-	codec_interface = codec->codec_interface;
 
-	if (!running || !codec_interface || zstr(running->iananame)) {
+	if (!running || !codec->codec_interface || zstr(running->iananame)) {
 		return SWITCH_FALSE;
 	}
 
@@ -774,7 +774,7 @@ SWITCH_DECLARE(switch_bool_t) switch_core_codec_ptime_supported(const switch_cod
 		return SWITCH_FALSE;
 	}
 
-	if (!zstr(modname) && (zstr(codec_interface->modname) || strcasecmp(modname, codec_interface->modname))) {
+	if (!zstr(modname) && (zstr(codec->codec_interface->modname) || strcasecmp(modname, codec->codec_interface->modname))) {
 		return SWITCH_FALSE;
 	}
 
@@ -784,17 +784,25 @@ SWITCH_DECLARE(switch_bool_t) switch_core_codec_ptime_supported(const switch_cod
 		return SWITCH_FALSE;
 	}
 
+	/* the interface the rebuild will use: switch_core_codec_init_with_bitrate() looks it up by name the same way */
+	if (!(codec_interface = switch_loadable_module_get_codec_interface(codec_name, modname))) {
+		return SWITCH_FALSE;
+	}
+
 	for (iptr = codec_interface->implementations; iptr; iptr = iptr->next) {
 		uint32_t crate = g722 ? iptr->samples_per_second : iptr->actual_samples_per_second;
 		if ((!rate || rate == crate) && (!bitrate || bitrate == (uint32_t)iptr->bits_per_second) &&
 			(ms == (int)(iptr->microseconds_per_packet / 1000)) && (!channels || channels == iptr->number_of_channels)) {
 			if (!iptr->matches_fmtp || SWITCH_STATUS_SUCCESS == iptr->matches_fmtp(iptr->fmtp, fmtp)) {
-				return SWITCH_TRUE;
+				supported = SWITCH_TRUE;
+				break;
 			}
 		}
 	}
 
-	return SWITCH_FALSE;
+	UNPROTECT_INTERFACE(codec_interface);
+
+	return supported;
 }
 
 SWITCH_DECLARE(switch_status_t) switch_core_codec_encode(switch_codec_t *codec,

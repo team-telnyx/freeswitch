@@ -36,6 +36,7 @@
 #include <switch_nat.h>
 #include "private/switch_core_pvt.h"
 #include "private/switch_rtp_pvt.h"
+#include "private/switch_core_media_pvt.h"
 #include <switch_curl.h>
 #include <errno.h>
 #include <sofia-sip/sdp.h>
@@ -394,7 +395,8 @@ static inline uint32_t vbr_ptime_observe(switch_core_session_t *session, switch_
 	uint16_t seq_gap;
 	uint32_t codec_ms = 0;
 
-	if (!ts || !seq || samples_per_second < 1000) {
+	/* a zero timestamp means the frame has none; sequence number 0 is an ordinary value once per wrap */
+	if (!ts || samples_per_second < 1000) {
 		memset(state, 0, sizeof(*state));
 		return 0;
 	}
@@ -4217,7 +4219,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 
 					} else if (smh->media_flags[SCMF_AUTOFIX_TIMING] && is_vbr && switch_rtp_get_jitter_buffer(engine->rtp_session)
 							   && type == SWITCH_MEDIA_TYPE_AUDIO && !switch_test_flag((&engine->read_frame), SFF_PLC)
-							   && engine->read_frame.timestamp && engine->read_frame.seq && engine->read_impl.samples_per_second) {
+							   && engine->read_frame.timestamp && engine->read_impl.samples_per_second) {
 						uint32_t codec_ms;
 						uint32_t generation = switch_atomic_read(&engine->codec_generation);
 
@@ -4229,7 +4231,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 						codec_ms = vbr_ptime_observe(session, &engine->vbr_ptime, engine->read_frame.timestamp, engine->read_frame.seq,
 													 engine->read_impl.samples_per_second, engine->cur_payload_map->codec_ms);
 
-						if (codec_ms && !switch_core_media_vbr_ptime_adopt(session, session->codec_read_mutex, &engine->read_codec,
+						if (codec_ms && !switch_core_media_pvt_vbr_ptime_adopt(session, session->codec_read_mutex, &engine->read_codec,
 																		   engine->cur_payload_map, codec_ms, &engine->reset_codec,
 																		   &engine->codec_generation, engine->vbr_ptime_generation)) {
 							engine->vbr_ptime.mismatch_count = 0;
@@ -10941,8 +10943,8 @@ SWITCH_DECLARE(void) switch_core_media_reset_autofix(switch_core_session_t *sess
 	engine->vbr_ptime.last_ts = 0;
 }
 
-SWITCH_DECLARE(uint32_t) switch_core_media_vbr_ptime_observe(switch_core_session_t *session, switch_vbr_ptime_state_t *state,
-															 uint32_t ts, uint16_t seq, uint32_t samples_per_second, uint32_t cur_ms)
+SWITCH_DECLARE(uint32_t) switch_core_media_pvt_vbr_ptime_observe(switch_core_session_t *session, switch_vbr_ptime_state_t *state,
+															     uint32_t ts, uint16_t seq, uint32_t samples_per_second, uint32_t cur_ms)
 {
 	if (!state) {
 		return 0;
@@ -10951,9 +10953,9 @@ SWITCH_DECLARE(uint32_t) switch_core_media_vbr_ptime_observe(switch_core_session
 	return vbr_ptime_observe(session, state, ts, seq, samples_per_second, cur_ms);
 }
 
-SWITCH_DECLARE(switch_bool_t) switch_core_media_vbr_ptime_adopt(switch_core_session_t *session, switch_mutex_t *codec_mutex, switch_codec_t *codec,
-																payload_map_t *pmap, uint32_t codec_ms, uint8_t *reset_codec,
-																volatile switch_atomic_t *codec_generation, uint32_t observed_generation)
+SWITCH_DECLARE(switch_bool_t) switch_core_media_pvt_vbr_ptime_adopt(switch_core_session_t *session, switch_mutex_t *codec_mutex, switch_codec_t *codec,
+																    payload_map_t *pmap, uint32_t codec_ms, uint8_t *reset_codec,
+																    volatile switch_atomic_t *codec_generation, uint32_t observed_generation)
 {
 	switch_bool_t adopted = SWITCH_FALSE;
 

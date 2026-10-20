@@ -355,6 +355,24 @@ FST_CORE_DB_BEGIN("./conf_vbr")
 		}
 		FST_TEST_END()
 
+		FST_TEST_BEGIN(opus_change_across_sequence_wrap_is_adopted)
+		{
+			vbr_call_t c;
+
+			fst_requires(vbr_start(&c, "opus", OPUS_MEDIA(116), 48000, NULL) == SWITCH_STATUS_SUCCESS);
+			/* the 40 ms run carries sequence numbers 65532..65535, 0..3: eight intervals, seven needed */
+			c.seq = (uint16_t) (65531 - 30);
+			vbr_run(&c, 116, 30, 20, 120);
+			fst_check(c.seq == 65531 && vbr_ptime(&c) == 20);
+			vbr_run(&c, 116, 8, 40, 240);
+			fst_check(c.seq == 3);
+			vbr_finish(&c, 116, 20, 120);
+			fst_check(c.alive);
+			fst_check(vbr_ptime(&c) == 40);
+			vbr_end(&c);
+		}
+		FST_TEST_END()
+
 		FST_TEST_BEGIN(opus_codec_rebuild_restarts_the_count)
 		{
 			vbr_call_t c;
