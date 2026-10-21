@@ -986,10 +986,13 @@ SWITCH_DECLARE(void) switch_core_session_hangup_state(switch_core_session_t *ses
 
 	/* A leg still waiting for blind-transfer confirmation is going away: tell the
 	   parked transferor the transfer failed, or it waits for park_timeout.
-	   switch_ivr_blind_transfer_ack() tests and clears the flag, so this fires at most once. */
+	   switch_ivr_blind_transfer_ack() tests the flag and then clears it, so on this leg's
+	   own thread this fires at most once. With early hangup this runs on the caller's
+	   thread, where another sender of the result could pass the same test. The
+	   transferor's mod_sofia ignores the response if it has left the park. */
 	if (switch_ivr_blind_transfer_ack(session, SWITCH_FALSE) == SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-						  "%s hung up with blind transfer confirmation pending, notified transferor of failure\n",
+						  "%s hung up with blind transfer confirmation pending, sent the failure response to the transferor\n",
 						  switch_channel_get_name(session->channel));
 	}
 

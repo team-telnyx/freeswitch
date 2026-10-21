@@ -12,4 +12,6 @@ FST_BLIND_TRANSFER_ONLY=1
 export FST_BLIND_TRANSFER_ONLY
 rc=0
 ./sipp-based-tests blind_transfer_caller_hangup_while_ringing || rc=1
+./sipp-based-tests blind_transfer_referrer_moved_before_result || rc=1
+./sipp-based-tests blind_transfer_referrer_reparked_before_result || rc=1
 exit $rc
