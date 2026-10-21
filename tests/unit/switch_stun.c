@@ -292,6 +292,172 @@ FST_TEARDOWN_BEGIN()
 	cleanup_restart_fixture();
 }
 FST_TEARDOWN_END()
+
+	FST_TEST_BEGIN(test_snapshot_clear_preserves_candidates_and_publication)
+	{
+		switch_core_session_t **session = &restart_fixture.sessions[0];
+		switch_rtp_t **rtp = &restart_fixture.rtp[0];
+		switch_memory_pool_t *pool;
+		switch_rtp_flag_t flags[SWITCH_RTP_FLAG_INVALID] = { 0 };
+		switch_call_cause_t cause;
+		ice_t *shared, *copied;
+		char *ufrag = NULL, *pwd = NULL;
+		const char *err = NULL;
+		int i;
+
+		restart_fixture.alarm_handler = signal(SIGALRM, SIG_DFL);
+		fst_requires(restart_fixture.alarm_handler != SIG_ERR);
+		restart_fixture.alarm_active = 1;
+		alarm(10);
+		fst_requires(switch_ivr_originate(NULL, session, &cause, "null/+15553334444", 2,
+			NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) == SWITCH_STATUS_SUCCESS);
+		pool = switch_core_session_get_pool(*session);
+		switch_core_memory_pool_set_data(pool, "__session", *session);
+		shared = switch_core_alloc(pool, sizeof(*shared));
+		copied = switch_core_alloc(pool, sizeof(*copied));
+		shared->ufrag = "old-ufrag";
+		shared->pwd = "old-password";
+		flags[SWITCH_RTP_FLAG_NOBLOCK] = 1;
+		*rtp = switch_rtp_new(rx_host, 26500, rx_host, 26502, TEST_PT, 160, 20000,
+			flags, NULL, &err, pool);
+		fst_requires(*rtp != NULL);
+		switch_rtp_prepare_trickle_ice(*rtp, IPR_RTP, shared);
+		switch_rtp_prepare_trickle_ice(*rtp, IPR_RTCP, shared);
+		fst_requires(switch_rtp_add_trickle_remote_candidate(*rtp, 0, "0",
+			"candidate:old 1 udp 1900000001 192.0.2.10 41000 typ host") == SWITCH_STATUS_SUCCESS);
+		fst_requires(switch_rtp_add_trickle_remote_candidate(*rtp, 0, "0",
+			"candidate:old 2 udp 1900000000 192.0.2.10 41001 typ host") == SWITCH_STATUS_SUCCESS);
+		/* Ordinary reset retains the list and its unpublished candidates. */
+		switch_rtp_reset(*rtp);
+		fst_check(switch_rtp_merge_remote_ice_candidates_into_engine(*rtp, *session, shared) == 2);
+		fst_check(switch_rtp_merge_remote_ice_candidates_into_engine(*rtp, *session, shared) == 0);
+		fst_requires(switch_rtp_add_trickle_remote_candidate(*rtp, 0, "0",
+			"candidate:late 1 udp 1899999999 192.0.2.20 42000 typ host") == SWITCH_STATUS_SUCCESS);
+		/* Rejected/repeated parser resets must not destroy the retained generation. */
+		for (i = 0; i < 2; i++) {
+			switch_rtp_pvt_clear_ice_params(*rtp, shared, &ufrag, &pwd);
+			fst_check(shared->cand_idx[0] == 0 && shared->cand_idx[1] == 0);
+			fst_requires(ufrag != NULL && pwd != NULL);
+			fst_check_string_equals(ufrag, "old-ufrag");
+			fst_check_string_equals(pwd, "old-password");
+			memset(copied, 0, sizeof(*copied));
+			fst_check(switch_rtp_merge_remote_ice_candidates_into_engine(*rtp, *session, copied) == 3);
+			fst_check(copied->cand_idx[0] == 2 && copied->cand_idx[1] == 1);
+			fst_check(copied->cands[0][0].con_port == 41000 && copied->cands[1][0].con_port == 42000);
+			fst_check(copied->cands[0][1].con_port == 41001);
+		}
+		/* Rebinding and invalidating must not publish counters from the old list. */
+		for (i = 0; i < 2; i++) {
+			if (i) switch_rtp_pvt_reset_ice(*rtp, shared);
+			switch_rtp_prepare_trickle_ice(*rtp, IPR_RTP, shared);
+			switch_rtp_prepare_trickle_ice(*rtp, IPR_RTCP, shared);
+			fst_check(switch_rtp_merge_remote_ice_candidates_into_engine(*rtp, *session, shared) == 0);
+			fst_requires(switch_rtp_add_trickle_remote_candidate(*rtp, 0, "0",
+				"candidate:new 1 udp 1900000001 192.0.2.30 43000 typ host") == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_rtp_merge_remote_ice_candidates_into_engine(*rtp, *session, shared) == 1);
+			fst_check(switch_rtp_merge_remote_ice_candidates_into_engine(*rtp, *session, shared) == 0);
+		}
+	}
+	FST_TEST_END()
+	FST_TEST_BEGIN(test_ice_request_capacity)
+	{
+		uint8_t buf[1024], untouched[1024];
+		char username[513], software[128];
+		char id[12] = "transaction1";
+		const char tie_breaker[8] = "12345678";
+		const unsigned int lengths[] = { 33, 81, 512 };
+		unsigned int i, role;
+
+		memset(software, 's', sizeof(software) - 1);
+		software[sizeof(software) - 1] = '\0';
+		memset(untouched, 0xa5, sizeof(untouched));
+		for (i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++) {
+			memset(username, 'r', lengths[i]);
+			username[lengths[i] - 17] = ':';
+			memset(username + lengths[i] - 16, 'l', 16);
+			username[lengths[i]] = '\0';
+			for (role = 0; role < 3; role++) {
+				switch_stun_packet_t *packet;
+				switch_stun_packet_attribute_t *attr;
+				switch_size_t expected = i == 0 ? 244 : (i == 1 ? 292 : 720);
+				switch_size_t offset;
+				uint32_t priority;
+
+				if (role == 2) expected += 4;
+				memcpy(buf, untouched, sizeof(buf));
+				fst_check(!switch_stun_packet_build_ice_request(buf, expected - 1, id, username,
+					software, 1234, "synthetic-password", tie_breaker, role != 0, role == 2));
+				fst_check(!memcmp(buf, untouched, sizeof(buf)));
+				packet = switch_stun_packet_build_ice_request(buf, expected, id, username,
+					software, 1234, "synthetic-password", tie_breaker, role != 0, role == 2);
+				fst_check(packet != NULL);
+				if (!packet) continue;
+				fst_check(switch_stun_packet_length(packet) == expected);
+				fst_check(!memcmp(packet->header.id, id, sizeof(id)));
+				fst_check(!memcmp(buf + expected, untouched + expected, sizeof(buf) - expected));
+				fst_check(switch_stun_packet_validate_auth(buf, (uint32_t)expected, "synthetic-password"));
+				attr = (switch_stun_packet_attribute_t *)(buf + 20);
+				fst_check(ntohs(attr->type) == SWITCH_STUN_ATTR_USERNAME);
+				fst_check(ntohs(attr->length) == lengths[i]);
+				fst_check(!memcmp(attr->value, username, lengths[i]));
+				offset = 24 + ((lengths[i] + 3) & ~3U);
+				attr = (switch_stun_packet_attribute_t *)(buf + offset);
+				fst_check(ntohs(attr->type) == SWITCH_STUN_ATTR_PRIORITY);
+				memcpy(&priority, attr->value, sizeof(priority));
+				fst_check(ntohl(priority) == 1234);
+				attr = (switch_stun_packet_attribute_t *)(buf + offset + 8);
+				fst_check(ntohs(attr->type) == SWITCH_STUN_ATTR_SOFTWARE);
+				fst_check(ntohs(attr->length) == 127);
+				fst_check(!memcmp(attr->value, software, 127));
+				attr = (switch_stun_packet_attribute_t *)(buf + offset + 140);
+				fst_check(ntohs(attr->type) == (role ? SWITCH_STUN_ATTR_CONTROLLING : SWITCH_STUN_ATTR_CONTROLLED));
+				fst_check(!memcmp(attr->value, tie_breaker, sizeof(tie_breaker)));
+				attr = (switch_stun_packet_attribute_t *)(buf + offset + 152);
+				fst_check(ntohs(attr->type) == (role == 2 ? SWITCH_STUN_ATTR_USE_CAND : SWITCH_STUN_ATTR_MESSAGE_INTEGRITY));
+			}
+		}
+	}
+	FST_TEST_END()
+	FST_TEST_BEGIN(test_ice_request_rejects_invalid_input)
+	{
+		uint8_t buf[1024], untouched[1024];
+		char username[514], software[129];
+
+		memset(buf, 0xa5, sizeof(buf));
+		memcpy(untouched, buf, sizeof(buf));
+		memset(username, 'u', sizeof(username) - 1);
+		username[sizeof(username) - 1] = '\0';
+		memset(software, 's', sizeof(software) - 1);
+		software[sizeof(software) - 1] = '\0';
+		fst_check(!switch_stun_packet_build_ice_request(NULL, sizeof(buf), NULL, "u", NULL, 0, NULL, NULL, 0, 0));
+		fst_check(!switch_stun_packet_build_ice_request(buf, sizeof(buf), NULL, NULL, NULL, 0, NULL, NULL, 0, 0));
+		fst_check(!switch_stun_packet_build_ice_request(buf, sizeof(buf), NULL, username, NULL, 0, NULL, NULL, 0, 0));
+		fst_check(!switch_stun_packet_build_ice_request(buf, sizeof(buf), NULL, "u", software, 0, "p", "12345678", 0, 0));
+		fst_check(!switch_stun_packet_build_ice_request(buf, sizeof(buf), NULL, "u", "s", 0, NULL, "12345678", 0, 0));
+		fst_check(!switch_stun_packet_build_ice_request(buf, sizeof(buf), NULL, "u", "s", 0, "p", NULL, 0, 0));
+		fst_check(!memcmp(buf, untouched, sizeof(buf)));
+	}
+	FST_TEST_END()
+	FST_TEST_BEGIN(test_large_legacy_stun_packets)
+	{
+		uint8_t buf[1024] = { 0 };
+		char username[513];
+		switch_stun_packet_t *packet;
+
+		memset(username, 'u', sizeof(username) - 1);
+		username[sizeof(username) - 1] = '\0';
+		packet = switch_stun_packet_build_ice_request(buf, sizeof(buf), NULL, username, NULL, 0, NULL, NULL, 0, 0);
+		fst_requires(packet != NULL);
+		fst_check(switch_stun_packet_length(packet) == 536);
+		packet = switch_stun_packet_build_header(SWITCH_STUN_BINDING_RESPONSE, NULL, buf);
+		switch_stun_packet_attribute_add_username(packet, username, 512);
+		switch_stun_packet_attribute_add_xor_binded_address(packet, "2001:db8::1", 12345, AF_INET6);
+		switch_stun_packet_attribute_add_integrity(packet, "synthetic-password");
+		switch_stun_packet_attribute_add_fingerprint(packet);
+		fst_check(switch_stun_packet_length(packet) == 592);
+		fst_check(switch_stun_packet_validate_auth(buf, 592, "synthetic-password"));
+	}
+	FST_TEST_END()
 	FST_TEST_BEGIN(test_binding_indication)
 	{
 		switch_stun_packet_t *packet;
@@ -1081,33 +1247,39 @@ FST_TEARDOWN_END()
 			switch_status_t status;
 			switch_call_cause_t cause;
 			switch_rtp_ice_t ice = { 0 };
-			switch_rtp_ice_t timeout_ice = { 0 };
 			switch_memory_pool_t *pool = NULL;
 			static switch_rtp_t *rtp_session = NULL;
 			static switch_rtp_flag_t flags[SWITCH_RTP_FLAG_INVALID] = { 0 };
 			const char *err = NULL;
 			ice_t ice_params = { 0 };
-			ice_t timeout_params = { 0 };
 			uint8_t tampered[128];
 			uint8_t missing_username[128];
+			uint8_t oversized_request[1024];
+			char oversized_username[514];
 			uint8_t wrong_username[128];
 			uint8_t successful_request[128];
 			uint8_t controlling_request[128];
+			uint8_t replacement_request[128];
 			uint8_t nomination_response[128];
+			char candidate_line[256];
 			char bootstrap_host[80] = { 0 };
 			char learned_host[80] = { 0 };
 			char remote_host[80] = { 0 };
 			char wrong_nomination_id[13] = "wrong-id-123";
+			switch_stun_packet_t *oversized_packet;
 			switch_size_t missing_username_len;
 			switch_size_t wrong_username_len;
 			switch_size_t successful_request_len;
 			switch_size_t no_use_candidate_len;
 			switch_size_t controlling_request_len;
+			switch_size_t replacement_request_len;
 			switch_size_t nomination_response_len;
 			switch_sockaddr_t *remote_addr;
+			uint32_t learned_priority;
+			int added;
 			int initial_cand_idx;
 			int initial_chosen;
-			int reused_idx;
+			int i;
 
 			switch_core_new_memory_pool(&pool);
 			status = switch_ivr_originate(NULL, &session, &cause, "null/+15553334444", 2, NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL);
@@ -1117,7 +1289,7 @@ FST_TEARDOWN_END()
 			channel = switch_core_session_get_channel(session);
 			fst_check(channel);
 			switch_channel_set_variable(channel, "rtp_ice_prflx_bootstrap", "true");
-			switch_channel_set_variable(channel, "rtp_ice_prflx_bootstrap_ms", "5000");
+			switch_channel_set_variable(channel, "rtp_ice_prflx_bootstrap_ms", "20000");
 
 			switch_core_memory_pool_set_data(pool, "__session", session);
 			fst_xcheck(switch_find_local_ip(bootstrap_host, sizeof(bootstrap_host), NULL, AF_INET) == SWITCH_STATUS_SUCCESS, "switch_find_local_ip()");
@@ -1153,6 +1325,22 @@ FST_TEARDOWN_END()
 			fst_check(ice.addr == NULL);
 			fst_check(ice.ice_params->cand_idx[ice.proto] == initial_cand_idx);
 			fst_check(ice.ice_params->chosen[ice.proto] == initial_chosen);
+			fst_check(ice.missed_count == 7);
+
+			memset(oversized_username, 'u', sizeof(oversized_username) - 1);
+			memcpy(oversized_username, ice.user_ice, strlen(ice.user_ice) + 1);
+			memset(oversized_request, 0, sizeof(oversized_request));
+			oversized_packet = switch_stun_packet_build_header(SWITCH_STUN_BINDING_REQUEST, NULL, oversized_request);
+			switch_stun_packet_attribute_add_priority(oversized_packet, 0x6e0001ff);
+			switch_stun_packet_attribute_add_username(oversized_packet, oversized_username, 513);
+			switch_stun_packet_attribute_add_use_candidate(oversized_packet);
+			switch_stun_packet_attribute_add_integrity(oversized_packet, ice.pass);
+			switch_stun_packet_attribute_add_fingerprint(oversized_packet);
+			wrong_username_len = switch_stun_packet_length(oversized_packet);
+			fst_check(switch_stun_packet_validate_auth(oversized_request, (uint32_t)wrong_username_len, ice.pass));
+			switch_rtp_pvt_handle_ice(rtp_session, &ice, oversized_request, wrong_username_len);
+			fst_check(!ice.ready);
+			fst_check(ice.addr == NULL);
 			fst_check(ice.missed_count == 7);
 
 			wrong_username_len = build_authenticated_request(wrong_username, sizeof(wrong_username), "wrong:username", ice.pass, SWITCH_TRUE);
@@ -1323,29 +1511,64 @@ FST_TEARDOWN_END()
 				fst_check(switch_sockaddr_get_port(remote_addr) == rx_port);
 			}
 
-			/* A startup nomination timeout leaves the uncommitted prflx slot reusable,
-			 * so a changed authenticated NAT tuple can be nominated without growing
-			 * or blocking the candidate list. */
-			timeout_ice.ice_params = &timeout_params;
-			timeout_ice.proto = IPR_RTP;
-			timeout_ice.prflx_bootstrap_idx = 1;
-			timeout_ice.controlling_failover_idx = -1;
-			timeout_ice.controlling_failover_state = SWITCH_RTP_ICE_CONTROLLING_FAILOVER_IDLE;
-			timeout_ice.ice_params->chosen[timeout_ice.proto] = 0;
-			timeout_ice.ice_params->cand_idx[timeout_ice.proto] = 2;
-			timeout_ice.ice_params->cands[1][timeout_ice.proto].cand_type = (char *)"prflx";
-			timeout_ice.ice_params->cands[1][timeout_ice.proto].con_addr = (char *)"192.0.2.10";
-			timeout_ice.ice_params->cands[1][timeout_ice.proto].con_port = 40000;
-			reused_idx = switch_rtp_pvt_reuse_pending_startup_prflx_candidate(rtp_session,
-				&timeout_ice, "192.0.2.20", 50000, 0x6e0001fe);
-			fst_check(reused_idx == 1);
-			fst_check(timeout_ice.ice_params->cand_idx[timeout_ice.proto] == 2);
-			fst_check(!strcmp(timeout_ice.ice_params->cands[1][timeout_ice.proto].con_addr, "192.0.2.20"));
-			fst_check(timeout_ice.ice_params->cands[1][timeout_ice.proto].con_port == 50000);
-			fst_check(timeout_ice.ice_params->cands[1][timeout_ice.proto].priority == 0x6e0001fe);
-			fst_check(!timeout_ice.ice_params->cands[1][timeout_ice.proto].responsive);
-			fst_check(!timeout_ice.ice_params->cands[1][timeout_ice.proto].ready);
-			fst_check(!timeout_ice.ice_params->cands[1][timeout_ice.proto].use_candidate);
+			memset(&ice_params, 0, sizeof(ice_params));
+			ice_params.chosen[IPR_RTP] = 0;
+			ice_params.cand_idx[IPR_RTP] = MAX_CAND - 1;
+			for (i = 0; i < MAX_CAND - 1; ++i) {
+				ice_params.cands[i][IPR_RTP].component_id = 1;
+				ice_params.cands[i][IPR_RTP].transport = (char *)"udp";
+				ice_params.cands[i][IPR_RTP].priority = 2000000000U - (uint32_t)i;
+				ice_params.cands[i][IPR_RTP].con_addr = (char *)tx_host;
+				ice_params.cands[i][IPR_RTP].con_port = (switch_port_t)(30000 + i);
+				ice_params.cands[i][IPR_RTP].cand_type = (char *)"host";
+			}
+			status = switch_rtp_activate_ice(rtp_session, "localUfrag", "remoteUfrag",
+				"test-local-ice-password", "test-remote-ice-password", IPR_RTP,
+				ICE_VANILLA, &ice_params);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+
+			controlling_request_len = build_authenticated_request_with_role(controlling_request,
+				sizeof(controlling_request), "remoteUfrag:localUfrag", "test-local-ice-password",
+				SWITCH_FALSE, SWITCH_TRUE, SWITCH_FALSE);
+			fst_requires(switch_stun_packet_validate_auth(controlling_request,
+				(uint32_t)controlling_request_len, "test-local-ice-password"));
+			status = switch_rtp_pvt_handle_ice_from(rtp_session, IPR_RTP, bootstrap_host, 40000,
+				controlling_request, controlling_request_len);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			fst_check(ice_params.cand_idx[IPR_RTP] == MAX_CAND);
+			fst_check_string_equals(ice_params.cands[MAX_CAND - 1][IPR_RTP].cand_type, "prflx");
+			fst_check_string_equals(ice_params.cands[MAX_CAND - 1][IPR_RTP].con_addr, bootstrap_host);
+			fst_check(ice_params.cands[MAX_CAND - 1][IPR_RTP].con_port == 40000);
+			fst_check(!ice_params.cands[MAX_CAND - 1][IPR_RTP].ready);
+			fst_check(!ice_params.cands[MAX_CAND - 1][IPR_RTP].responsive);
+			fst_check(!ice_params.cands[MAX_CAND - 1][IPR_RTP].use_candidate);
+			learned_priority = ice_params.cands[MAX_CAND - 1][IPR_RTP].priority;
+
+			switch_snprintf(candidate_line, sizeof(candidate_line),
+				"candidate:late 1 udp 1845494271 %s 40000 typ host", bootstrap_host);
+			status = switch_rtp_add_trickle_remote_candidate(rtp_session, 0, "0", candidate_line);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			added = switch_rtp_merge_remote_ice_candidates_into_engine(rtp_session, session, &ice_params);
+			fst_check(added == 0);
+			fst_check(!ice_params.cands[MAX_CAND - 1][IPR_RTP].ready);
+
+			switch_sleep(5500000);
+			switch_rtp_ping(rtp_session);
+			replacement_request_len = build_authenticated_request_with_role(replacement_request,
+				sizeof(replacement_request), "remoteUfrag:localUfrag", "test-local-ice-password",
+				SWITCH_FALSE, SWITCH_TRUE, SWITCH_FALSE);
+			fst_requires(switch_stun_packet_validate_auth(replacement_request,
+				(uint32_t)replacement_request_len, "test-local-ice-password"));
+			status = switch_rtp_pvt_handle_ice_from(rtp_session, IPR_RTP, bootstrap_host, 50000,
+				replacement_request, replacement_request_len);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+			fst_check(ice_params.cand_idx[IPR_RTP] == MAX_CAND);
+			fst_check_string_equals(ice_params.cands[MAX_CAND - 1][IPR_RTP].con_addr, bootstrap_host);
+			fst_check(ice_params.cands[MAX_CAND - 1][IPR_RTP].con_port == 50000);
+			fst_check(ice_params.cands[MAX_CAND - 1][IPR_RTP].priority == learned_priority);
+			fst_check(!ice_params.cands[MAX_CAND - 1][IPR_RTP].responsive);
+			fst_check(!ice_params.cands[MAX_CAND - 1][IPR_RTP].ready);
+			fst_check(!ice_params.cands[MAX_CAND - 1][IPR_RTP].use_candidate);
 
 			switch_rtp_destroy(&rtp_session);
 			switch_core_session_rwunlock(session);
@@ -1747,6 +1970,41 @@ FST_TEARDOWN_END()
 				switch_rtp_prepare_ice_restart(rtp[0], IPR_RTP, SWITCH_TRUE);
 				fst_requires(switch_rtp_activate_ice(rtp[0], remote_ufrag, "local1", "local-password1",
 					"remote-password1", IPR_RTP, ICE_VANILLA, &params) == SWITCH_STATUS_SUCCESS);
+
+				if (!mode) {
+					ice_t *list_a = switch_core_alloc(pools[0], sizeof(*list_a));
+					ice_t *list_b = switch_core_alloc(pools[0], sizeof(*list_b));
+
+					/* Same-credential restart activation must preserve publication only for the same list. */
+					*list_a = *list_b = params;
+					list_a->cands[0][IPR_RTP].component_id = list_b->cands[0][IPR_RTP].component_id = 1;
+					fst_requires(switch_rtp_pvt_ice_restart_pending(rtp[0]));
+					fst_requires(switch_rtp_activate_ice(rtp[0], remote_ufrag, "local1", "local-password1",
+						"remote-password1", IPR_RTP, ICE_VANILLA, list_a) == SWITCH_STATUS_SUCCESS);
+					fst_requires(switch_rtp_add_trickle_remote_candidate(rtp[0], 0, "0",
+						"candidate:publication-a 1 udp 1900000001 198.51.100.80 25290 typ host") == SWITCH_STATUS_SUCCESS);
+					fst_requires(list_a->cand_idx[IPR_RTP] == 2);
+					fst_requires(switch_rtp_activate_ice(rtp[0], remote_ufrag, "local1", "local-password1",
+						"remote-password1", IPR_RTP, ICE_VANILLA, list_a) == SWITCH_STATUS_SUCCESS);
+					fst_check(switch_rtp_merge_remote_ice_candidates_into_engine(rtp[0], sessions[0], list_a) == 1);
+					fst_check(switch_rtp_merge_remote_ice_candidates_into_engine(rtp[0], sessions[0], list_a) == 0);
+					fst_requires(switch_rtp_add_trickle_remote_candidate(rtp[0], 0, "0",
+						"candidate:publication-old 1 udp 1900000000 198.51.100.81 25292 typ host") == SWITCH_STATUS_SUCCESS);
+					fst_requires(list_a->cand_idx[IPR_RTP] == 3);
+					fst_requires(switch_rtp_activate_ice(rtp[0], remote_ufrag, "local1", "local-password1",
+						"remote-password1", IPR_RTP, ICE_VANILLA, list_b) == SWITCH_STATUS_SUCCESS);
+					fst_check(switch_rtp_merge_remote_ice_candidates_into_engine(rtp[0], sessions[0], list_b) == 0);
+					fst_check(list_b->cand_idx[IPR_RTP] == 1);
+					fst_requires(switch_rtp_add_trickle_remote_candidate(rtp[0], 0, "0",
+						"candidate:publication-b 1 udp 1899999999 198.51.100.82 25294 typ host") == SWITCH_STATUS_SUCCESS);
+					fst_requires(list_b->cand_idx[IPR_RTP] == 2);
+					fst_check(switch_rtp_merge_remote_ice_candidates_into_engine(rtp[0], sessions[0], list_b) == 1);
+					fst_check(switch_rtp_merge_remote_ice_candidates_into_engine(rtp[0], sessions[0], list_b) == 0);
+					fst_requires(switch_rtp_activate_ice(rtp[0], remote_ufrag, "local1", "local-password1",
+						"remote-password1", IPR_RTP, ICE_VANILLA, &params) == SWITCH_STATUS_SUCCESS);
+					fst_check(switch_rtp_pvt_ice_restart_pending(rtp[0]));
+					fst_check(params.cand_idx[IPR_RTP] == 1);
+				}
 
 				for (bad = 0; bad < 6; bad++) {
 					len = build_authenticated_request_with_role(packet, sizeof(packet),
