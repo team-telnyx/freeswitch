@@ -595,6 +595,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 
 		if (app_name) {
 			int x;
+			int raised_broadcast = 0;
 			const char *b_uuid = NULL;
 			switch_core_session_t *b_session = NULL;
 
@@ -605,6 +606,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 
 			if (!switch_channel_test_flag(channel, CF_BROADCAST)) {
 				switch_channel_set_flag(channel, CF_BROADCAST);
+				/* this frame is the outermost broadcast on the channel */
+				raised_broadcast = 1;
 				if (inner) {
 					inner--;
 				}
@@ -733,16 +736,23 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 				switch_channel_set_flag(channel, CF_BREAK);
 			}
 
-			/* The flag belongs to the broadcast that just ended, whether or not
-			 * the app consumed it. playback does; speak and gentones do not, and
-			 * a dialplan playback later on this channel must not inherit it.
-			 * Clearing on CMD_EXECUTE entry alone cannot cover that, because a
-			 * dialplan app never reaches switch_ivr_parse_event().
-			 * This must stay below the CF_BROADCAST clears above. The bridge
-			 * thread stamps the flag only while CF_BROADCAST is set, so a clear
-			 * placed above them can be overwritten during the b_uuid wait, which
-			 * lasts up to 5 seconds. */
-			switch_channel_set_variable(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, NULL);
+			/* The flag belongs to the broadcast that just ended, and a dialplan
+			 * playback later on this channel must not inherit it. Clearing on
+			 * CMD_EXECUTE entry alone cannot cover that, because a dialplan app
+			 * never reaches switch_ivr_parse_event().
+			 * Only the frame that raised CF_BROADCAST clears it. A priority
+			 * broadcast runs nested inside a running playback, and the playback
+			 * it nests in has to report the same peer hangup when it ends. Do
+			 * not test inner here: on a bridged channel it is zero in the nested
+			 * frame as well, because it only counts a broadcast that starts
+			 * while the channel is unbridged or holds the b leg.
+			 * This must also stay below the CF_BROADCAST clears above. The
+			 * bridge thread stamps the flag only while CF_BROADCAST is set, so a
+			 * clear placed above them can be overwritten during the b_uuid wait,
+			 * which lasts up to 5 seconds. */
+			if (raised_broadcast) {
+				switch_channel_set_variable(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, NULL);
+			}
 
 			switch_channel_audio_sync(channel);
 
