@@ -1705,6 +1705,49 @@ FST_CORE_BEGIN(".")
 		}
 		FST_SESSION_END()
 
+		/* normalised timestamps: the input's are not kept, so an on-time input after a skipped source block (blocks 0,
+		 * 1, 2, then CMR 0 and block 4, sent as wire block 3) is placed by the count */
+		FST_SESSION_BEGIN_RATE(amrwb_mode_change_on_the_wire_with_normalised_timestamps, 16000)
+		{
+			unsigned char cmr0[2] = { 0x00, 0x7c }, out[SWITCH_RECOMMENDED_BUFFER_SIZE];
+			uint32_t out_len = sizeof(out), rate = 16000, ts, first = 0, last = 0;
+			unsigned int flag = 0;
+			switch_port_t port = 0;
+			switch_codec_t l16 = { 0 };
+			switch_rtp_t *rtp;
+			int fd, ft = -1, prev = -1, i;
+
+			fst_requires((fd = amrwb_udp_sink(&port)) >= 0);
+			fst_requires(amrwb_rtp_to(fst_session, port) >= 0);
+			fst_requires((rtp = switch_core_media_get_rtp_session(fst_session, SWITCH_MEDIA_TYPE_AUDIO)));
+			switch_rtp_intentional_bugs(rtp, RTP_BUG_SEND_NORMALISED_TIMESTAMPS);
+			fst_requires(switch_core_codec_init(&l16, "L16", NULL, NULL, 16000, 20, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, NULL, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(amrwb_rtp_writes(SWITCH_TRUE) == SWITCH_STATUS_SUCCESS);
+			for (i = 0; i < 10; i++) {
+				if (i == 3) {
+					switch_core_codec_decode(switch_core_session_get_read_codec(fst_session), NULL, cmr0, sizeof(cmr0), 16000, out, &out_len, &rate, &flag);
+				}
+				fst_requires(amrwb_session_write(fst_session, &l16, 20, 16000 + (uint32_t) ((i < 3 ? i : i + 1) * 320)) == SWITCH_STATUS_SUCCESS);
+				fst_requires((ft = amrwb_rtp_recv(fd, 1000, &ts)) >= 0);
+				if (prev < 0) {
+					first = ts;
+				} else if (ft != prev) {
+					fst_xcheck((((ts - first) / 320) % 2) == 0, "mode change on an odd frame-block");
+				}
+				if (i == 3) {
+					/* the skipped block is not on the wire */
+					fst_check_int_equals(ts - last, 320);
+				}
+				prev = ft;
+				last = ts;
+			}
+			fst_check_int_equals(ft, 0);
+			amrwb_rtp_writes(SWITCH_FALSE);
+			switch_core_codec_destroy(&l16);
+			close(fd);
+		}
+		FST_SESSION_END()
+
 		FST_TEST_BEGIN(amrwb_only_the_read_codec_passes_cmr_to_the_write_codec)
 		{
 			switch_core_session_t *session = NULL;

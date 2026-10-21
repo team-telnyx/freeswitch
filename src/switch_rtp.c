@@ -12536,7 +12536,8 @@ fork_done:
 
 		rtp_session->last_write_ts = this_ts;
 		rtp_session->sent_frame_ts = this_ts;
-		rtp_session->sent_frame_ts_kept = timestamp_given && !(rtp_session->rtp_bugs & RTP_BUG_SEND_LINEAR_TIMESTAMPS);
+		rtp_session->sent_frame_ts_kept = timestamp_given &&
+			!(rtp_session->rtp_bugs & (RTP_BUG_SEND_LINEAR_TIMESTAMPS | RTP_BUG_SEND_NORMALISED_TIMESTAMPS));
 		rtp_session->sent_frames++;
 		rtp_session->flags[SWITCH_RTP_FLAG_RESET] = 0;
 
