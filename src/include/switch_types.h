@@ -1836,7 +1836,7 @@ SWITCH_CODEC_FLAG_AAL2 =			(1 <<  6) - USE AAL2 Bitpacking
 SWITCH_CODEC_FLAG_PASSTHROUGH =		(1 <<  7) - Passthrough only
 SWITCH_CODEC_FLAG_NATIVE_DTX =		(1 << 17) - Codec carries its own silence descriptors (e.g. AMR SID); the receiver generates comfort noise from them
 SWITCH_CODEC_FLAG_PEEK_RECEIVED =	(1 << 19) - Codec sees every received payload (SCC_CODEC_SPECIFIC "received"), also those the core does not decode
-SWITCH_CODEC_FLAG_PEEK_SENT =		(1 << 20) - Codec gets the RTP timestamp each of its payloads was sent with (SCC_CODEC_SPECIFIC "sent")
+SWITCH_CODEC_FLAG_PEEK_SENT =		(1 << 20) - Codec gets the RTP timestamp each of its payloads was sent with (SCC_CODEC_SPECIFIC "sent"), "unsent" for one not sent
 </pre>
 */
 typedef enum {
