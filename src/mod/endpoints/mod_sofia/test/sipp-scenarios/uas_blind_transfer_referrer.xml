@@ -1,7 +1,10 @@
 <?xml version="1.0" encoding="ISO-8859-1" ?>
-<!-- Blind transfer test, B: answers, sends REFER to the target extension 1 s later, answers every
-     NOTIFY, and ends on a BYE from FreeSWITCH or with its own BYE 4 s after the last request. -->
+<!-- Blind transfer test, B: answers, sends REFER to the target extension 1 s later, requires one
+     final NOTIFY with the expected sipfrag, and ends on a BYE from FreeSWITCH or with its own
+     BYE 4 s after the NOTIFY. -->
 <scenario name="blind transfer referrer">
+  <Global variables="expected_frag"/>
+
   <recv request="INVITE" crlf="true">
     <action>
       <ereg regexp="\n(m|Contact): *[^\r\n]*sip:([a-zA-Z0-9_.@:+-]+)" search_in="msg" check_it="true" assign_to="c0,c1,fs_contact"/>
@@ -59,18 +62,37 @@
   <recv response="100" optional="true"/>
   <recv response="202"/>
 
-  <label id="wait"/>
-  <recv request="NOTIFY|BYE" regexp_match="true" timeout="4000" ontimeout="own_bye">
+  <!-- The first request after the 202 must be the final NOTIFY, with the sipfrag the test
+       passes in as expected_frag (-set expected_frag "SIP/2.0 403 Forbidden"). A BYE first,
+       a wrong sipfrag or Subscription-State, or no NOTIFY in 10 s fails the call. -->
+  <recv request="NOTIFY" timeout="10000">
     <action>
-      <ereg regexp="CSeq: *[0-9]+ NOTIFY" search_in="msg" check_it="false" assign_to="is_notify"/>
-      <ereg regexp="CSeq: *[0-9]+ BYE" search_in="msg" check_it="false" assign_to="is_bye"/>
+      <ereg regexp="message/sipfrag" search_in="hdr" header="Content-Type:" check_it="true" assign_to="ctype"/>
+      <ereg regexp="terminated" search_in="hdr" header="Subscription-State:" check_it="true" assign_to="substate"/>
+      <ereg regexp="SIP/2\.0 [0-9]{3} [A-Za-z ]+" search_in="body" check_it="true" assign_to="frag"/>
+      <strcmp assign_to="frag_cmp" variable="frag" variable2="expected_frag"/>
+      <test assign_to="frag_wrong" variable="frag_cmp" compare="not_equal" value="0"/>
     </action>
   </recv>
-  <!-- SIPp keeps a matched variable set, so test BYE first. -->
-  <nop next="got_bye" test="is_bye"/>
-  <nop next="got_notify" test="is_notify"/>
 
-  <label id="got_bye"/>
+  <send>
+    <![CDATA[
+
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Content-Length: 0
+
+    ]]>
+  </send>
+  <nop next="wrong_frag" test="frag_wrong"/>
+
+  <!-- After the result: a BYE from FreeSWITCH, or B's own BYE 4 s later. A second
+       NOTIFY is an unexpected message and fails the call. -->
+  <recv request="BYE" timeout="4000" ontimeout="own_bye"/>
   <send next="end">
     <![CDATA[
 
@@ -85,20 +107,10 @@
     ]]>
   </send>
 
-  <label id="got_notify"/>
-  <send next="wait">
-    <![CDATA[
-
-      SIP/2.0 200 OK
-      [last_Via:]
-      [last_From:]
-      [last_To:]
-      [last_Call-ID:]
-      [last_CSeq:]
-      Content-Length: 0
-
-    ]]>
-  </send>
+  <!-- Fails the call: this request never comes, and a timeout with no ontimeout
+       label (or any other message) aborts the call. -->
+  <label id="wrong_frag"/>
+  <recv request="SIPFRAG_MISMATCH" timeout="100"/>
 
   <label id="own_bye"/>
   <send retrans="500">
@@ -118,5 +130,5 @@
   <recv response="200"/>
 
   <label id="end"/>
-  <Reference variables="c0,c1,f0,f1,t0,t1"/>
+  <Reference variables="c0,c1,f0,f1,t0,t1,ctype,substate,frag_cmp"/>
 </scenario>

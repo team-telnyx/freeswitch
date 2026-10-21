@@ -72,15 +72,20 @@ static void wait_for_response(void)
 }
 
 /* Waits up to about 5 s for the hung-up leg to finish its hangup state, where the
-   teardown producer runs, so that every response it could send has arrived. */
-static void wait_for_destroy(switch_channel_t *channel)
+   teardown producer runs, so that every response it could send has arrived.
+   Returns SWITCH_FALSE on timeout: the counts are then not final. */
+static switch_bool_t wait_for_destroy(switch_channel_t *channel)
 {
 	int i;
 
 	for (i = 0; i < 500 && switch_channel_get_state(channel) != CS_DESTROY; ++i) {
 		switch_yield(10000);
 	}
+	if (switch_channel_get_state(channel) != CS_DESTROY) {
+		return SWITCH_FALSE;
+	}
 	switch_yield(100000);
+	return SWITCH_TRUE;
 }
 
 /* Removes the hook and ends the peer. */
@@ -331,7 +336,7 @@ FST_CORE_BEGIN("./conf")
 			switch_channel_set_variable(fst_channel, "blind_transfer_uuid", switch_core_session_get_uuid(peer_session));
 
 			switch_channel_hangup(fst_channel, SWITCH_CAUSE_NORMAL_CLEARING);
-			wait_for_destroy(fst_channel);
+			fst_xcheck(wait_for_destroy(fst_channel), "hung-up leg reached CS_DESTROY");
 
 			fst_xcheck(switch_atomic_read(&blind_transfer_response_count) == 1, "one failure response delivered to the peer on hangup");
 			fst_xcheck(blind_transfer_response_numeric_arg == 0, "failure response carries numeric_arg=0");
@@ -356,7 +361,7 @@ FST_CORE_BEGIN("./conf")
 			fst_xcheck(!switch_channel_test_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER), "flag cleared by the explicit ack");
 
 			switch_channel_hangup(fst_channel, SWITCH_CAUSE_NORMAL_CLEARING);
-			wait_for_destroy(fst_channel);
+			fst_xcheck(wait_for_destroy(fst_channel), "hung-up leg reached CS_DESTROY");
 			fst_xcheck(switch_atomic_read(&blind_transfer_response_count) == 1, "no second response after the explicit ack");
 			stop_peer(peer_session);
 		}

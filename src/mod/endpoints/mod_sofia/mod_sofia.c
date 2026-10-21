@@ -250,6 +250,20 @@ static switch_status_t sofia_pre_validate_remote_sdp(switch_core_session_t *sess
 	return SWITCH_STATUS_SUCCESS;
 }
 
+/* A REFER sender parked for a confirmed blind transfer has left that park (moved by
+   uuid_transfer or uuid_bridge): forget the transfer, so that a later result does not
+   act on the leg even if it is parked again. */
+static void sofia_forget_blind_transfer(switch_core_session_t *session)
+{
+	switch_channel_t *channel = switch_core_session_get_channel(session);
+
+	if (switch_channel_get_variable(channel, "sip_blind_transfer_event")) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+						  "%s left the blind transfer park, a later transfer result is ignored\n", switch_channel_get_name(channel));
+		switch_channel_set_variable(channel, "sip_blind_transfer_event", NULL);
+	}
+}
+
 static switch_status_t sofia_on_routing(switch_core_session_t *session)
 {
 	private_object_t *tech_pvt = (private_object_t *) switch_core_session_get_private(session);
@@ -268,6 +282,8 @@ static switch_status_t sofia_on_routing(switch_core_session_t *session)
 		sofia_clear_flag_locked(tech_pvt, TFLAG_SIP_HOLD);
 		switch_channel_clear_flag(channel, CF_LEG_HOLDING);
 	}
+
+	sofia_forget_blind_transfer(session);
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s SOFIA ROUTING\n",
 					  switch_channel_get_name(switch_core_session_get_channel(session)));
@@ -306,6 +322,8 @@ static switch_status_t sofia_on_hibernate(switch_core_session_t *session)
 		switch_channel_clear_flag(channel, CF_LEG_HOLDING);
 	}
 
+	sofia_forget_blind_transfer(session);
+
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s SOFIA HIBERNATE\n",
 					  switch_channel_get_name(switch_core_session_get_channel(session)));
 
@@ -325,6 +343,8 @@ static switch_status_t sofia_on_execute(switch_core_session_t *session)
 		sofia_clear_flag_locked(tech_pvt, TFLAG_SIP_HOLD);
 		switch_channel_clear_flag(channel, CF_LEG_HOLDING);
 	}
+
+	sofia_forget_blind_transfer(session);
 
 	sofia_pre_extract_media_security_preference(session, &params);
 	if (sofia_pre_validate_remote_sdp(session, tech_pvt->profile, params) != SWITCH_STATUS_SUCCESS) {
@@ -874,12 +894,14 @@ switch_status_t sofia_on_hangup(switch_core_session_t *session)
 
 static switch_status_t sofia_on_exchange_media(switch_core_session_t *session)
 {
+	sofia_forget_blind_transfer(session);
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "SOFIA EXCHANGE_MEDIA\n");
 	return SWITCH_STATUS_SUCCESS;
 }
 
 static switch_status_t sofia_on_soft_execute(switch_core_session_t *session)
 {
+	sofia_forget_blind_transfer(session);
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "SOFIA SOFT_EXECUTE\n");
 	return SWITCH_STATUS_SUCCESS;
 }
@@ -1934,7 +1956,9 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 			uuid = switch_channel_get_variable(channel, "blind_transfer_uuid");
 
 			/* Only a leg still parked for this result: if it left CS_PARK
-			   (moved by uuid_transfer or uuid_bridge), the result is stale. */
+			   (moved by uuid_transfer or uuid_bridge), the result is stale.
+			   Leaving the park also unsets sip_blind_transfer_event (see
+			   sofia_forget_blind_transfer()), so a leg parked again is skipped. */
 			if (event && uuid && switch_channel_get_state(channel) == CS_PARK) {
 				/* Default failure sipfrag: also the one sent when the transferred
 				   leg is already down, because the locate below then fails. */
