@@ -542,6 +542,9 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 	if (cmd_hash == CMD_EXECUTE) {
 		switch_channel_clear_flag(channel, CF_STOP_BROADCAST);
 		switch_channel_clear_flag(channel, CF_BREAK);
+		/* A new command cannot inherit the previous one's peer hangup. Apps
+		 * other than playback never consume the flag, so clear it here too. */
+		switch_channel_set_variable(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, NULL);
 	}
 
 	if (switch_true(event_lock)) {

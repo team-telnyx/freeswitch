@@ -2070,14 +2070,16 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_play_file_detailed(switch_core_sessio
 
 			/* This channel is still up, so event_set_data() found no cause.
 			 * Report the peer's, or the stop reads as a file that played to the
-			 * end. Only the peer-hangup path sets the flag, so a customer stop
-			 * never lands here. */
-			if (switch_channel_get_variable(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE)
-				&& !switch_event_get_header(event, "Hangup-Cause")) {
-				const char *peer_cause = switch_channel_get_variable(channel, "last_bridge_hangup_cause");
+			 * end. Consume the flag here: it belongs to this playback alone,
+			 * and the early returns below would leave it for the next one. */
+			if (switch_channel_get_variable(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE)) {
+				if (!switch_event_get_header(event, "Hangup-Cause")) {
+					const char *peer_cause = switch_channel_get_variable(channel, "last_bridge_hangup_cause");
 
-				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Hangup-Cause",
-											   peer_cause ? peer_cause : switch_channel_cause2str(SWITCH_CAUSE_NORMAL_CLEARING));
+					switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Hangup-Cause",
+												   peer_cause ? peer_cause : switch_channel_cause2str(SWITCH_CAUSE_NORMAL_CLEARING));
+				}
+				switch_channel_set_variable(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, NULL);
 			}
 
 			if (!strncasecmp(file, "local_stream:", 13)) {
@@ -2120,9 +2122,6 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_play_file_detailed(switch_core_sessio
 			switch_buffer_destroy(&fh->sp_audio_buffer);
 		}
 	}
-
-	/* One-shot: a later stop the customer asked for must not inherit it. */
-	switch_channel_set_variable(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, NULL);
 
 	if (switch_core_codec_ready((&codec))) {
 		switch_core_codec_destroy(&codec);
