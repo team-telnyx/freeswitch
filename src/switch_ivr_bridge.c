@@ -2260,9 +2260,13 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_multi_threaded_bridge(switch_core_ses
 
 			switch_channel_clear_flag_recursive(caller_channel, CF_BRIDGE_ORIGINATOR);
 
-			/* Only when this leg really went away. The bridge also ends on
-			 * transfer, park, intercept and a clean exit, where it did not. */
-			if (switch_channel_down_nosig(caller_channel)) {
+			/* Only when this leg really went away, and only onto a peer that is
+			 * playing something right now. The bridge also ends on transfer,
+			 * park, intercept and a clean exit, where nothing went away, and a
+			 * peer that survives the bridge must not carry the flag into a later
+			 * playback of its own. The window before CF_BROADCAST is covered by
+			 * the peer check in switch_ivr_parse_event() instead. */
+			if (switch_channel_down_nosig(caller_channel) && switch_channel_test_flag(peer_channel, CF_BROADCAST)) {
 				switch_channel_set_variable(peer_channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, "true");
 			}
 			switch_channel_stop_broadcast(peer_channel);

@@ -542,8 +542,9 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 	if (cmd_hash == CMD_EXECUTE) {
 		switch_channel_clear_flag(channel, CF_STOP_BROADCAST);
 		switch_channel_clear_flag(channel, CF_BREAK);
-		/* A new command cannot inherit the previous one's peer hangup. Apps
-		 * other than playback never consume the flag, so clear it here too. */
+		/* Backstop only. The flag is cleared when the broadcast that set it
+		 * ends, below; this covers the narrow case of it being set by another
+		 * thread just after that clear ran. */
 		switch_channel_set_variable(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, NULL);
 	}
 
@@ -731,6 +732,17 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 				switch_channel_clear_flag(channel, CF_BROADCAST);
 				switch_channel_set_flag(channel, CF_BREAK);
 			}
+
+			/* The flag belongs to the broadcast that just ended, whether or not
+			 * the app consumed it. playback does; speak and gentones do not, and
+			 * a dialplan playback later on this channel must not inherit it.
+			 * Clearing on CMD_EXECUTE entry alone cannot cover that, because a
+			 * dialplan app never reaches switch_ivr_parse_event().
+			 * This must stay below the CF_BROADCAST clears above. The bridge
+			 * thread stamps the flag only while CF_BROADCAST is set, so a clear
+			 * placed above them can be overwritten during the b_uuid wait, which
+			 * lasts up to 5 seconds. */
+			switch_channel_set_variable(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, NULL);
 
 			switch_channel_audio_sync(channel);
 
