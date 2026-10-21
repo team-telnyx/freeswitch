@@ -582,7 +582,8 @@ static void ack_race_free(ack_race_t *r)
 }
 
 /* Blind transfer with confirm_blind_transfer (test dialplan 7878780001/7878780002): SIPp A calls B,
-   B sends REFER, C is the transfer target. The result sent to B is read from the endpoint's log. */
+   B sends REFER, C is the transfer target. The result is read from the endpoint's log, and SIPp B
+   checks the NOTIFY it receives against the expected sipfrag. */
 static struct {
 	pthread_mutex_t mutex;
 	int results;
@@ -627,7 +628,8 @@ typedef struct {
 	int referrer_blind_transfer_hangup;
 } bt_result_t;
 
-static int start_bt_sipp(const char *ip, const char *scenario, const char *port, const char *target, const char *hold_ms, pid_t *pid)
+static int start_bt_sipp(const char *ip, const char *scenario, const char *port, const char *target, const char *hold_ms,
+						 const char *expected_frag, pid_t *pid)
 {
 	char *remote = target ? switch_mprintf("%s:5080", ip) : NULL;
 	char *argv[32];
@@ -657,6 +659,11 @@ static int start_bt_sipp(const char *ip, const char *scenario, const char *port,
 	argv[i++] = "-timeout_error";
 	argv[i++] = "-nostdin";
 	argv[i++] = "-trace_err";
+	if (expected_frag) {
+		argv[i++] = "-set";
+		argv[i++] = "expected_frag";
+		argv[i++] = (char *)expected_frag;
+	}
 	argv[i] = NULL;
 	result = posix_spawnp(pid, "sipp", NULL, NULL, argv, environ);
 	if (result != 0) {
@@ -693,8 +700,10 @@ static switch_bool_t bt_profile_ready(void)
 	return ready;
 }
 
-/* C and B listen first; A calls and hangs up hold_ms after the answer. */
-static void blind_transfer_run(const char *ip, const char *target_scenario, const char *hold_ms, bt_result_t *r)
+/* C and B listen first; A calls and hangs up hold_ms after the answer. B passes only if its
+   first request after the 202 is one NOTIFY carrying expected_frag. */
+static void blind_transfer_run(const char *ip, const char *target_scenario, const char *hold_ms, const char *expected_frag,
+							   bt_result_t *r)
 {
 	pid_t a = -1, b = -1, c = -1;
 	int loop_count = 100;
@@ -708,11 +717,12 @@ static void blind_transfer_run(const char *ip, const char *target_scenario, cons
 	pthread_mutex_unlock(&bt_watch.mutex);
 	switch_log_bind_logger(bt_watch_logger, SWITCH_LOG_DEBUG, SWITCH_FALSE);
 
-	if (!bt_profile_ready() || start_bt_sipp(ip, target_scenario, "5064", NULL, NULL, &c) || start_bt_sipp(ip, "sipp-scenarios/uas_blind_transfer_referrer.xml", "5063", NULL, NULL, &b)) {
+	if (!bt_profile_ready() || start_bt_sipp(ip, target_scenario, "5064", NULL, NULL, NULL, &c) ||
+		start_bt_sipp(ip, "sipp-scenarios/uas_blind_transfer_referrer.xml", "5063", NULL, NULL, expected_frag, &b)) {
 		goto end;
 	}
 	switch_sleep(500 * 1000);
-	if (start_bt_sipp(ip, "sipp-scenarios/uac_blind_transfer_caller.xml", "5062", "7878780001", hold_ms, &a)) {
+	if (start_bt_sipp(ip, "sipp-scenarios/uac_blind_transfer_caller.xml", "5062", "7878780001", hold_ms, NULL, &a)) {
 		goto end;
 	}
 	r->started = 1;
@@ -1096,11 +1106,13 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 		{
 			bt_result_t r = { 0 };
 
-			blind_transfer_run(switch_core_get_variable("local_ip_v4"), "sipp-scenarios/uas_blind_transfer_target_early_answer.xml", "6000", &r);
+			blind_transfer_run(switch_core_get_variable("local_ip_v4"), "sipp-scenarios/uas_blind_transfer_target_early_answer.xml", "6000",
+							   "SIP/2.0 200 OK", &r);
 			fst_xcheck(r.started, "Unable to start the SIPp peers");
 			fst_xcheck(r.results == 1, "the REFER sender did not get exactly one result");
 			fst_xcheck(strstr(r.status, "SIP/2.0 200 OK") != NULL, "the result is not 200 OK");
 			fst_xcheck(r.target_answered_at && r.result_at >= r.target_answered_at, "200 OK was sent before the target answered");
+			fst_xcheck(r.b_ok, "the REFER sender did not get one NOTIFY with SIP/2.0 200 OK before the BYE");
 			fst_xcheck(r.a_ok && r.b_ok && r.c_ok, "a SIPp peer failed; inspect the *_blind_transfer_*_errors.log files");
 		}
 		FST_TEST_END()
@@ -1110,10 +1122,12 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 		{
 			bt_result_t r = { 0 };
 
-			blind_transfer_run(switch_core_get_variable("local_ip_v4"), "sipp-scenarios/uas_blind_transfer_target_early_busy.xml", "6000", &r);
+			blind_transfer_run(switch_core_get_variable("local_ip_v4"), "sipp-scenarios/uas_blind_transfer_target_early_busy.xml", "6000",
+							   "SIP/2.0 486 Busy Here", &r);
 			fst_xcheck(r.started, "Unable to start the SIPp peers");
 			fst_xcheck(r.results == 1, "the REFER sender did not get exactly one result");
 			fst_xcheck(strstr(r.status, "SIP/2.0 486 Busy Here") != NULL, "the result is not 486 Busy Here");
+			fst_xcheck(r.b_ok, "the REFER sender did not get one NOTIFY with SIP/2.0 486 Busy Here before the BYE");
 			fst_xcheck(r.a_ok && r.b_ok && r.c_ok, "a SIPp peer failed; inspect the *_blind_transfer_*_errors.log files");
 		}
 		FST_TEST_END()
@@ -1123,11 +1137,13 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 		{
 			bt_result_t r = { 0 };
 
-			blind_transfer_run(switch_core_get_variable("local_ip_v4"), "sipp-scenarios/uas_blind_transfer_target_early_cancel.xml", "4000", &r);
+			blind_transfer_run(switch_core_get_variable("local_ip_v4"), "sipp-scenarios/uas_blind_transfer_target_early_cancel.xml", "4000",
+							   "SIP/2.0 403 Forbidden", &r);
 			fst_xcheck(r.started, "Unable to start the SIPp peers");
 			fst_xcheck(r.results == 1, "the REFER sender did not get exactly one result");
 			fst_xcheck(strstr(r.status, "SIP/2.0 403 Forbidden") != NULL, "the result is not the failure 403 Forbidden");
 			fst_xcheck(r.referrer_blind_transfer_hangup, "the REFER sender was not hung up with BLIND_TRANSFER");
+			fst_xcheck(r.b_ok, "the REFER sender did not get one NOTIFY with SIP/2.0 403 Forbidden before the BYE");
 			fst_xcheck(r.a_ok && r.b_ok && r.c_ok, "a SIPp peer failed; inspect the *_blind_transfer_*_errors.log files");
 		}
 		FST_TEST_END()
@@ -1137,11 +1153,13 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 		{
 			bt_result_t r = { 0 };
 
-			blind_transfer_run(switch_core_get_variable("local_ip_v4"), "sipp-scenarios/uas_blind_transfer_target_ring_cancel.xml", "4000", &r);
+			blind_transfer_run(switch_core_get_variable("local_ip_v4"), "sipp-scenarios/uas_blind_transfer_target_ring_cancel.xml", "4000",
+							   "SIP/2.0 403 Forbidden", &r);
 			fst_xcheck(r.started, "Unable to start the SIPp peers");
 			fst_xcheck(r.results == 1, "the REFER sender did not get exactly one result");
 			fst_xcheck(strstr(r.status, "SIP/2.0 403 Forbidden") != NULL, "the result is not the failure 403 Forbidden");
 			fst_xcheck(r.referrer_blind_transfer_hangup, "the REFER sender was not hung up with BLIND_TRANSFER");
+			fst_xcheck(r.b_ok, "the REFER sender did not get one NOTIFY with SIP/2.0 403 Forbidden before the BYE");
 			fst_xcheck(r.a_ok && r.b_ok && r.c_ok, "a SIPp peer failed; inspect the *_blind_transfer_*_errors.log files");
 		}
 		FST_TEST_END()

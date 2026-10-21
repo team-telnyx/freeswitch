@@ -72,15 +72,20 @@ static void wait_for_response(void)
 }
 
 /* Waits up to about 5 s for the hung-up leg to finish its hangup state, where the
-   teardown producer runs, so that every response it could send has arrived. */
-static void wait_for_destroy(switch_channel_t *channel)
+   teardown producer runs, so that every response it could send has arrived.
+   Returns SWITCH_FALSE on timeout: the counts are then not final. */
+static switch_bool_t wait_for_destroy(switch_channel_t *channel)
 {
 	int i;
 
 	for (i = 0; i < 500 && switch_channel_get_state(channel) != CS_DESTROY; ++i) {
 		switch_yield(10000);
 	}
+	if (switch_channel_get_state(channel) != CS_DESTROY) {
+		return SWITCH_FALSE;
+	}
 	switch_yield(100000);
+	return SWITCH_TRUE;
 }
 
 /* Removes the hook and ends the peer. */
@@ -90,6 +95,22 @@ static void stop_peer(switch_core_session_t *peer_session)
 	switch_channel_hangup(switch_core_session_get_channel(peer_session), SWITCH_CAUSE_NORMAL_CLEARING);
 	switch_core_session_rwunlock(peer_session);
 }
+
+/* the null endpoint's read_frame, replaced for a read that returns one large frame first */
+static switch_io_read_frame_t null_read_frame = NULL;
+static switch_frame_t *large_frame = NULL;
+
+static switch_status_t large_frame_read(switch_core_session_t *session, switch_frame_t **frame, switch_io_flag_t flags, int stream_id)
+{
+	if (large_frame) {
+		*frame = large_frame;
+		large_frame = NULL;
+		return SWITCH_STATUS_SUCCESS;
+	}
+
+	return null_read_frame(session, frame, flags, stream_id);
+}
+
 
 FST_CORE_BEGIN("./conf")
 {
@@ -315,7 +336,7 @@ FST_CORE_BEGIN("./conf")
 			switch_channel_set_variable(fst_channel, "blind_transfer_uuid", switch_core_session_get_uuid(peer_session));
 
 			switch_channel_hangup(fst_channel, SWITCH_CAUSE_NORMAL_CLEARING);
-			wait_for_destroy(fst_channel);
+			fst_xcheck(wait_for_destroy(fst_channel), "hung-up leg reached CS_DESTROY");
 
 			fst_xcheck(switch_atomic_read(&blind_transfer_response_count) == 1, "one failure response delivered to the peer on hangup");
 			fst_xcheck(blind_transfer_response_numeric_arg == 0, "failure response carries numeric_arg=0");
@@ -340,7 +361,7 @@ FST_CORE_BEGIN("./conf")
 			fst_xcheck(!switch_channel_test_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER), "flag cleared by the explicit ack");
 
 			switch_channel_hangup(fst_channel, SWITCH_CAUSE_NORMAL_CLEARING);
-			wait_for_destroy(fst_channel);
+			fst_xcheck(wait_for_destroy(fst_channel), "hung-up leg reached CS_DESTROY");
 			fst_xcheck(switch_atomic_read(&blind_transfer_response_count) == 1, "no second response after the explicit ack");
 			stop_peer(peer_session);
 		}
@@ -490,6 +511,69 @@ FST_CORE_BEGIN("./conf")
 			stop_peer(r_session);
 			stop_peer(o_session);
 			stop_peer(t_session);
+		}
+		FST_SESSION_END()
+
+		/*
+		 * A frame that decodes to more audio than one packet, read through a read codec at a higher rate
+		 * (a conference pushes one at its own rate): upsampled it no longer fits the frame it was decoded
+		 * into, and must reach the read buffer without overrunning it. 8000 bytes of L16 at 8 kHz become
+		 * 48000 at 48 kHz, past the session's read buffers.
+		 */
+		FST_SESSION_BEGIN(read_frame_upsampled_past_the_frame_is_buffered)
+		{
+			switch_codec_t codec_8k = { 0 }, codec_48k = { 0 };
+			switch_endpoint_interface_t *endpoint;
+			switch_frame_t frame = { 0 }, *read_frame = NULL;
+			switch_log_level_t loglevel = switch_core_session_get_loglevel(fst_session);
+			int16_t *samples;
+			switch_status_t status;
+			int i;
+
+			fst_requires(switch_core_codec_init(&codec_8k, "L16", NULL, NULL, 8000, 20, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
+												NULL, switch_core_session_get_pool(fst_session)) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_core_codec_init(&codec_48k, "L16", NULL, NULL, 48000, 20, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
+												NULL, switch_core_session_get_pool(fst_session)) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_core_session_set_read_codec(fst_session, &codec_48k) == SWITCH_STATUS_SUCCESS);
+			fst_requires((endpoint = switch_loadable_module_get_endpoint_interface("null")));
+			fst_requires(endpoint->io_routines && endpoint->io_routines->read_frame);
+
+			samples = switch_core_session_alloc(fst_session, 8000);
+			for (i = 0; i < 4000; i++) {
+				samples[i] = 0x4141;
+			}
+			frame.codec = &codec_8k;
+			frame.data = samples;
+			frame.datalen = frame.buflen = 8000;
+			frame.samples = 4000;
+			frame.rate = 8000;
+			frame.channels = 1;
+
+			null_read_frame = endpoint->io_routines->read_frame;
+			endpoint->io_routines->read_frame = large_frame_read;
+			large_frame = &frame;
+
+			/* the first packet of the 48000 bytes (25 packets of 1920 at 48 kHz) */
+			status = switch_core_session_read_frame(fst_session, &read_frame, SWITCH_IO_FLAG_NONE, 0);
+
+			endpoint->io_routines->read_frame = null_read_frame;
+			large_frame = NULL;
+			UNPROTECT_INTERFACE(endpoint);
+
+			/* nothing past the read buffers was written over */
+			fst_check(switch_core_session_get_loglevel(fst_session) == loglevel);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			if (status == SWITCH_STATUS_SUCCESS && read_frame) {
+				int16_t v = ((int16_t *) read_frame->data)[480];
+
+				fst_check(read_frame->datalen == 1920);
+				/* past the resampler's start-up, the constant */
+				fst_check(read_frame->datalen != 1920 || (v > 0x4141 - 64 && v < 0x4141 + 64));
+			}
+
+			switch_core_session_set_read_codec(fst_session, NULL);
+			switch_core_codec_destroy(&codec_48k);
+			switch_core_codec_destroy(&codec_8k);
 		}
 		FST_SESSION_END()
 	}
