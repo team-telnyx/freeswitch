@@ -105,6 +105,9 @@ static const switch_payload_t INVALID_PT = 255;
 
 #define rtp_session_name(_rtp_session) _rtp_session->session ? switch_core_session_get_name(_rtp_session->session) : "-"
 
+/* Maximum request: header + USERNAME(512) + SOFTWARE(127) + ICE/auth attributes = 724 bytes.
+ * Also covers legacy responses with USERNAME, IPv6 mapped address and authentication. */
+#define RTP_STUN_PACKET_SIZE 1024
 #define STUN_USERNAME_MAX_SIZE 513 /* From RFC5389:  "It MUST contain a UTF-8 [RFC3629] encoded sequence of less than 513 bytes" */
 #define SDP_UFRAG_MAX_SIZE 256 	/* From draft-ietf-mmusic-ice-sip-sdp-24: "the ice-ufrag attribute MUST NOT be longer than 32
 								 * characters when sending, but an implementation MUST accept up to 256
@@ -1717,7 +1720,7 @@ SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_ice_role_conflict_response_matches(
 static switch_status_t ice_send_controlling_check(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 	int candidate_idx, switch_bool_t use_candidate, char *transaction_id, switch_bool_t new_transaction)
 {
-	uint8_t buf[256] = { 0 };
+	uint8_t buf[RTP_STUN_PACKET_SIZE] = { 0 };
 	char sw[128] = "";
 	switch_stun_packet_t *packet;
 	switch_sockaddr_t *candidate_addr = NULL;
@@ -1749,22 +1752,15 @@ static switch_status_t ice_send_controlling_check(switch_rtp_t *rtp_session, swi
 		return SWITCH_STATUS_FALSE;
 	}
 
-	packet = switch_stun_packet_build_header(SWITCH_STUN_BINDING_REQUEST,
-		new_transaction ? NULL : transaction_id, buf);
-	switch_stun_packet_attribute_add_username(packet, ice->ice_user, (uint16_t)strlen(ice->ice_user));
-	/* RFC 8445 PRIORITY describes the local peer-reflexive candidate that this
-	 * check could create at the peer, not the remote candidate being checked. */
-	switch_stun_packet_attribute_add_priority(packet,
-		switch_rtp_pvt_ice_local_prflx_priority(ice == &rtp_session->rtcp_ice,
-			rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX] ? SWITCH_TRUE : SWITCH_FALSE));
 	switch_snprintf(sw, sizeof(sw), "FreeSWITCH (%s)", switch_version_revision_human());
-	switch_stun_packet_attribute_add_software(packet, sw, (uint16_t)strlen(sw));
-	switch_stun_packet_attribute_add_controlling_value(packet, rtp_session->ice_tie_breaker);
-	if (use_candidate) {
-		switch_stun_packet_attribute_add_use_candidate(packet);
+	packet = switch_stun_packet_build_ice_request(buf, sizeof(buf), new_transaction ? NULL : transaction_id,
+		ice->ice_user, sw, switch_rtp_pvt_ice_local_prflx_priority(ice == &rtp_session->rtcp_ice,
+			rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX] ? SWITCH_TRUE : SWITCH_FALSE),
+		ice->rpass, rtp_session->ice_tie_breaker, SWITCH_TRUE, use_candidate);
+	if (!packet) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR, "Cannot build ICE controlling request\n");
+		return SWITCH_STATUS_FALSE;
 	}
-	switch_stun_packet_attribute_add_integrity(packet, ice->rpass);
-	switch_stun_packet_attribute_add_fingerprint(packet);
 	bytes = switch_stun_packet_length(packet);
 	if (new_transaction) {
 		memcpy(transaction_id, packet->header.id, 12);
@@ -1909,7 +1905,7 @@ static void ice_controlling_failover_tick(switch_rtp_t *rtp_session, switch_rtp_
 
 static switch_status_t ice_out(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, switch_bool_t force)
 {
-	uint8_t buf[256] = { 0 };
+	uint8_t buf[RTP_STUN_PACKET_SIZE];
 	switch_stun_packet_t *packet;
 	unsigned int elapsed;
 	switch_size_t bytes;
@@ -2011,40 +2007,26 @@ static switch_status_t ice_out(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 		}
 	}
 
-	packet = switch_stun_packet_build_header(SWITCH_STUN_BINDING_REQUEST, NULL, buf);
-	switch_stun_packet_attribute_add_username(packet, ice->ice_user, (uint16_t)strlen(ice->ice_user));
-
 	switch_mutex_lock(rtp_session->ice_mutex);
 	sent_controlling = ice->type & ICE_CONTROLLED ? SWITCH_FALSE : SWITCH_TRUE;
 	memcpy(tie_breaker, rtp_session->ice_tie_breaker, sizeof(tie_breaker));
 
-	//if (ice->pass && ice->type == ICE_GOOGLE_JINGLE) {
-	//	switch_stun_packet_attribute_add_password(packet, ice->pass, (uint16_t)strlen(ice->pass));
-	//}
-
-	if ((ice->type & ICE_VANILLA)) {
+	{
 		char sw[128] = "";
 
-		/* PRIORITY identifies the local peer-reflexive candidate that the check
-		 * could create at the peer, not the selected remote candidate. */
-		switch_stun_packet_attribute_add_priority(packet,
-			switch_rtp_pvt_ice_local_prflx_priority(ice == &rtp_session->rtcp_ice,
-				rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX] ? SWITCH_TRUE : SWITCH_FALSE));
-
 		switch_snprintf(sw, sizeof(sw), "FreeSWITCH (%s)", switch_version_revision_human());
-		switch_stun_packet_attribute_add_software(packet, sw, (uint16_t)strlen(sw));
-
-		if (!sent_controlling) {
-			switch_stun_packet_attribute_add_controlled_value(packet, tie_breaker);
-		} else {
-			switch_stun_packet_attribute_add_controlling_value(packet, tie_breaker);
-			switch_stun_packet_attribute_add_use_candidate(packet);
-		}
-
-		switch_stun_packet_attribute_add_integrity(packet, ice->rpass);
-		switch_stun_packet_attribute_add_fingerprint(packet);
+		packet = switch_stun_packet_build_ice_request(buf, sizeof(buf), NULL, ice->ice_user,
+			(ice->type & ICE_VANILLA) ? sw : NULL,
+			switch_rtp_pvt_ice_local_prflx_priority(ice == &rtp_session->rtcp_ice,
+				rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX] ? SWITCH_TRUE : SWITCH_FALSE),
+			ice->rpass, tie_breaker, sent_controlling, sent_controlling);
 	}
-
+	if (!packet) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR, "Cannot build ICE request\n");
+		switch_mutex_unlock(rtp_session->ice_mutex);
+		READ_DEC(rtp_session);
+		return SWITCH_STATUS_FALSE;
+	}
 
 	bytes = switch_stun_packet_length(packet);
 
@@ -2735,6 +2717,9 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 			break;
 		case SWITCH_STUN_ATTR_USERNAME:
 			{
+				if (attr->length >= sizeof(username)) {
+					goto end;
+				}
 				switch_stun_packet_attribute_get_username(attr, username, sizeof(username));
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG8, "|------: %s\n", username);
 			}
@@ -3049,7 +3034,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 		char buf2[80] = "";
 
 		if (packet->header.type == SWITCH_STUN_BINDING_REQUEST) {
-			uint8_t stunbuf[512];
+			uint8_t stunbuf[RTP_STUN_PACKET_SIZE];
 			switch_stun_packet_t *rpacket;
 			const char *remote_ip;
 			switch_size_t bytes;

@@ -91,6 +91,105 @@ FST_TEARDOWN_BEGIN()
 {
 }
 FST_TEARDOWN_END()
+	FST_TEST_BEGIN(test_ice_request_capacity)
+	{
+		uint8_t buf[1024], untouched[1024];
+		char username[513], software[128];
+		char id[12] = "transaction1";
+		const char tie_breaker[8] = "12345678";
+		const unsigned int lengths[] = { 33, 81, 512 };
+		unsigned int i, role;
+
+		memset(software, 's', sizeof(software) - 1);
+		software[sizeof(software) - 1] = '\0';
+		memset(untouched, 0xa5, sizeof(untouched));
+		for (i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++) {
+			memset(username, 'r', lengths[i]);
+			username[lengths[i] - 17] = ':';
+			memset(username + lengths[i] - 16, 'l', 16);
+			username[lengths[i]] = '\0';
+			for (role = 0; role < 3; role++) {
+				switch_stun_packet_t *packet;
+				switch_stun_packet_attribute_t *attr;
+				switch_size_t expected = i == 0 ? 244 : (i == 1 ? 292 : 720);
+				switch_size_t offset;
+				uint32_t priority;
+
+				if (role == 2) expected += 4;
+				memcpy(buf, untouched, sizeof(buf));
+				fst_check(!switch_stun_packet_build_ice_request(buf, expected - 1, id, username,
+					software, 1234, "synthetic-password", tie_breaker, role != 0, role == 2));
+				fst_check(!memcmp(buf, untouched, sizeof(buf)));
+				packet = switch_stun_packet_build_ice_request(buf, expected, id, username,
+					software, 1234, "synthetic-password", tie_breaker, role != 0, role == 2);
+				fst_check(packet != NULL);
+				if (!packet) continue;
+				fst_check(switch_stun_packet_length(packet) == expected);
+				fst_check(!memcmp(packet->header.id, id, sizeof(id)));
+				fst_check(!memcmp(buf + expected, untouched + expected, sizeof(buf) - expected));
+				fst_check(switch_stun_packet_validate_auth(buf, (uint32_t)expected, "synthetic-password"));
+				attr = (switch_stun_packet_attribute_t *)(buf + 20);
+				fst_check(ntohs(attr->type) == SWITCH_STUN_ATTR_USERNAME);
+				fst_check(ntohs(attr->length) == lengths[i]);
+				fst_check(!memcmp(attr->value, username, lengths[i]));
+				offset = 24 + ((lengths[i] + 3) & ~3U);
+				attr = (switch_stun_packet_attribute_t *)(buf + offset);
+				fst_check(ntohs(attr->type) == SWITCH_STUN_ATTR_PRIORITY);
+				memcpy(&priority, attr->value, sizeof(priority));
+				fst_check(ntohl(priority) == 1234);
+				attr = (switch_stun_packet_attribute_t *)(buf + offset + 8);
+				fst_check(ntohs(attr->type) == SWITCH_STUN_ATTR_SOFTWARE);
+				fst_check(ntohs(attr->length) == 127);
+				fst_check(!memcmp(attr->value, software, 127));
+				attr = (switch_stun_packet_attribute_t *)(buf + offset + 140);
+				fst_check(ntohs(attr->type) == (role ? SWITCH_STUN_ATTR_CONTROLLING : SWITCH_STUN_ATTR_CONTROLLED));
+				fst_check(!memcmp(attr->value, tie_breaker, sizeof(tie_breaker)));
+				attr = (switch_stun_packet_attribute_t *)(buf + offset + 152);
+				fst_check(ntohs(attr->type) == (role == 2 ? SWITCH_STUN_ATTR_USE_CAND : SWITCH_STUN_ATTR_MESSAGE_INTEGRITY));
+			}
+		}
+	}
+	FST_TEST_END()
+	FST_TEST_BEGIN(test_ice_request_rejects_invalid_input)
+	{
+		uint8_t buf[1024], untouched[1024];
+		char username[514], software[129];
+
+		memset(buf, 0xa5, sizeof(buf));
+		memcpy(untouched, buf, sizeof(buf));
+		memset(username, 'u', sizeof(username) - 1);
+		username[sizeof(username) - 1] = '\0';
+		memset(software, 's', sizeof(software) - 1);
+		software[sizeof(software) - 1] = '\0';
+		fst_check(!switch_stun_packet_build_ice_request(NULL, sizeof(buf), NULL, "u", NULL, 0, NULL, NULL, 0, 0));
+		fst_check(!switch_stun_packet_build_ice_request(buf, sizeof(buf), NULL, NULL, NULL, 0, NULL, NULL, 0, 0));
+		fst_check(!switch_stun_packet_build_ice_request(buf, sizeof(buf), NULL, username, NULL, 0, NULL, NULL, 0, 0));
+		fst_check(!switch_stun_packet_build_ice_request(buf, sizeof(buf), NULL, "u", software, 0, "p", "12345678", 0, 0));
+		fst_check(!switch_stun_packet_build_ice_request(buf, sizeof(buf), NULL, "u", "s", 0, NULL, "12345678", 0, 0));
+		fst_check(!switch_stun_packet_build_ice_request(buf, sizeof(buf), NULL, "u", "s", 0, "p", NULL, 0, 0));
+		fst_check(!memcmp(buf, untouched, sizeof(buf)));
+	}
+	FST_TEST_END()
+	FST_TEST_BEGIN(test_large_legacy_stun_packets)
+	{
+		uint8_t buf[1024] = { 0 };
+		char username[513];
+		switch_stun_packet_t *packet;
+
+		memset(username, 'u', sizeof(username) - 1);
+		username[sizeof(username) - 1] = '\0';
+		packet = switch_stun_packet_build_ice_request(buf, sizeof(buf), NULL, username, NULL, 0, NULL, NULL, 0, 0);
+		fst_requires(packet != NULL);
+		fst_check(switch_stun_packet_length(packet) == 536);
+		packet = switch_stun_packet_build_header(SWITCH_STUN_BINDING_RESPONSE, NULL, buf);
+		switch_stun_packet_attribute_add_username(packet, username, 512);
+		switch_stun_packet_attribute_add_xor_binded_address(packet, "2001:db8::1", 12345, AF_INET6);
+		switch_stun_packet_attribute_add_integrity(packet, "synthetic-password");
+		switch_stun_packet_attribute_add_fingerprint(packet);
+		fst_check(switch_stun_packet_length(packet) == 592);
+		fst_check(switch_stun_packet_validate_auth(buf, 592, "synthetic-password"));
+	}
+	FST_TEST_END()
 	FST_TEST_BEGIN(test_binding_indication)
 	{
 		switch_stun_packet_t *packet;
@@ -877,6 +976,8 @@ FST_TEARDOWN_END()
 			ice_t ice_params = { 0 };
 			uint8_t tampered[128];
 			uint8_t missing_username[128];
+			uint8_t oversized_request[1024];
+			char oversized_username[514];
 			uint8_t wrong_username[128];
 			uint8_t successful_request[128];
 			uint8_t controlling_request[128];
@@ -887,6 +988,7 @@ FST_TEARDOWN_END()
 			char learned_host[80] = { 0 };
 			char remote_host[80] = { 0 };
 			char wrong_nomination_id[13] = "wrong-id-123";
+			switch_stun_packet_t *oversized_packet;
 			switch_size_t missing_username_len;
 			switch_size_t wrong_username_len;
 			switch_size_t successful_request_len;
@@ -945,6 +1047,22 @@ FST_TEARDOWN_END()
 			fst_check(ice.addr == NULL);
 			fst_check(ice.ice_params->cand_idx[ice.proto] == initial_cand_idx);
 			fst_check(ice.ice_params->chosen[ice.proto] == initial_chosen);
+			fst_check(ice.missed_count == 7);
+
+			memset(oversized_username, 'u', sizeof(oversized_username) - 1);
+			memcpy(oversized_username, ice.user_ice, strlen(ice.user_ice) + 1);
+			memset(oversized_request, 0, sizeof(oversized_request));
+			oversized_packet = switch_stun_packet_build_header(SWITCH_STUN_BINDING_REQUEST, NULL, oversized_request);
+			switch_stun_packet_attribute_add_priority(oversized_packet, 0x6e0001ff);
+			switch_stun_packet_attribute_add_username(oversized_packet, oversized_username, 513);
+			switch_stun_packet_attribute_add_use_candidate(oversized_packet);
+			switch_stun_packet_attribute_add_integrity(oversized_packet, ice.pass);
+			switch_stun_packet_attribute_add_fingerprint(oversized_packet);
+			wrong_username_len = switch_stun_packet_length(oversized_packet);
+			fst_check(switch_stun_packet_validate_auth(oversized_request, (uint32_t)wrong_username_len, ice.pass));
+			switch_rtp_pvt_handle_ice(rtp_session, &ice, oversized_request, wrong_username_len);
+			fst_check(!ice.ready);
+			fst_check(ice.addr == NULL);
 			fst_check(ice.missed_count == 7);
 
 			wrong_username_len = build_authenticated_request(wrong_username, sizeof(wrong_username), "wrong:username", ice.pass, SWITCH_TRUE);
