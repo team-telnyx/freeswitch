@@ -5,6 +5,7 @@
 #include "private/switch_dtls_ready.h"
 
 typedef size_t switch_size_t;
+typedef uint64_t switch_time_t;
 typedef unsigned short switch_port_t;
 typedef int switch_bool_t;
 typedef void switch_channel_t;
@@ -18,8 +19,12 @@ typedef struct {
 } test_ice_t;
 typedef struct {
 	int state, type, handshake_peer_set;
+	int preserve_restart_pending, preserve_restart_migrated;
 	size_t bytes;
-	void *data, *remote_addr, *handshake_peer_addr, *sock_output;
+	size_t last_flight_len;
+	unsigned int last_flight_packet_count;
+	switch_time_t restart_deadline_us, last_flight_sent_us;
+	void *data, *remote_addr, *handshake_peer_addr, *restart_old_peer_addr, *sock_output;
 	SSL *ssl;
 	BIO *read_bio, *write_bio, *filter_bio;
 	switch_dtls_ready_t ready_receive;
@@ -61,6 +66,8 @@ enum { DS_OFF, DS_HANDSHAKE, DS_SETUP, DS_READY, DS_FAIL };
 	((void)(a), (void)(b), (void)(s), (void)(r), (void)(c), (void)(n), 0)
 #define switch_rtp_change_ice_dest(s, i, h, p) ((void)0)
 #define switch_mono_micro_time_now() 1000000
+#define switch_micro_time_now() 1000000
+#define dtls_set_state(d, s) ((d)->state = (s))
 
 static unsigned char sent[MAX_DTLS_MTU];
 static size_t sent_len;
@@ -87,6 +94,46 @@ static int dtls_state_setup(switch_rtp_t *rtp, switch_dtls_t *dtls)
 	++setup_calls;
 	dtls->state = fail_setup ? DS_FAIL : DS_READY;
 	return fail_setup ? -1 : 0;
+}
+
+static int dtls_state_fail(switch_rtp_t *rtp, switch_dtls_t *dtls)
+{
+	(void)rtp; (void)dtls;
+	return -1;
+}
+
+static int dtls_update_nominated_destination(switch_rtp_t *rtp, switch_dtls_t *dtls,
+	const char *host, switch_port_t port)
+{
+	(void)rtp; (void)dtls; (void)host; (void)port;
+	return 1;
+}
+
+static int dtls_peer_packet_is_duplicate(switch_dtls_t *dtls, const void *packet,
+	switch_size_t packet_len)
+{
+	(void)dtls; (void)packet; (void)packet_len;
+	return 0;
+}
+
+static int dtls_replay_last_flight(switch_rtp_t *rtp, switch_dtls_t *dtls)
+{
+	(void)rtp; (void)dtls;
+	return 0;
+}
+
+static switch_bool_t dtls_capture_flight_packet(switch_rtp_t *rtp, switch_dtls_t *dtls,
+	const void *packet, switch_size_t packet_len, switch_bool_t first_packet)
+{
+	(void)rtp; (void)dtls; (void)packet; (void)packet_len; (void)first_packet;
+	return SWITCH_TRUE;
+}
+
+static switch_bool_t dtls_capture_peer_packet(switch_rtp_t *rtp, switch_dtls_t *dtls,
+	const void *packet, switch_size_t packet_len)
+{
+	(void)rtp; (void)dtls; (void)packet; (void)packet_len;
+	return SWITCH_TRUE;
 }
 
 static int test_handshake(switch_rtp_t *rtp, switch_dtls_t *dtls)

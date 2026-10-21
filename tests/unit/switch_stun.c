@@ -148,6 +148,7 @@ static void count_dtls_destination_entry(switch_rtp_t *rtp, void *data)
 	(*(int *)data)++;
 }
 
+#ifdef SWITCH_STUN_HAVE_SOFIA
 static struct {
 	const char *host;
 	switch_port_t port;
@@ -180,6 +181,7 @@ static void nominate_before_dtls_destination(switch_rtp_t *rtp, void *data)
 		dtls_nomination.port, packet, len) != SWITCH_STATUS_SUCCESS) return;
 	dtls_nomination.status = switch_rtp_pvt_get_transport_snapshot(rtp, IPR_RTP, &dtls_nomination.nominated);
 }
+#endif
 
 static struct {
 	switch_core_session_t *sessions[2];
@@ -542,7 +544,7 @@ FST_TEARDOWN_END()
 		ice.controlling_failover_state = SWITCH_RTP_ICE_CONTROLLING_FAILOVER_PROBING;
 		ice.controlling_failover_local_port = 27018;
 		ice.controlling_failover_local_family = AF_INET;
-		ice.controlling_failover_socket = local_socket;
+		ice.controlling_failover_receive_socket = local_socket;
 		memcpy(ice.controlling_failover_probe_id, probe_id, 12);
 		memcpy(ice.controlling_failover_nomination_id, nomination_id, 12);
 
@@ -660,7 +662,7 @@ FST_TEARDOWN_END()
 		ice.controlling_failover_idx = 1;
 		ice.controlling_failover_local_port = 27018;
 		ice.controlling_failover_local_family = AF_INET;
-		ice.controlling_failover_socket = local_socket;
+		ice.controlling_failover_receive_socket = local_socket;
 		memcpy(ice.controlling_failover_probe_id, probe_id, 12);
 		fst_check(!switch_rtp_pvt_ice_role_conflict_response_matches(&ice, alternative_addr, 1,
 			probe_id, SWITCH_TRUE, local_socket, 27019, AF_INET, &sent_controlling));
