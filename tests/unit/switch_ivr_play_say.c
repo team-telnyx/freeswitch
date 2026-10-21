@@ -101,39 +101,49 @@ static switch_status_t partial_play_and_collect_input_callback(switch_core_sessi
 }
 
 /*
- * Watches PLAYBACK_STOP for one specific channel. Used by
- * peer_hangup_during_lead_frames_ends_bridged_broadcast, which asserts both
- * that the playback ends promptly once the bridge peer is gone and that it is
- * reported as a break rather than as a file that played to the end.
+ * Watches PLAYBACK_STOP for one specific channel, recording both the playback
+ * status and any hangup cause the event carried. The two tests below assert
+ * opposite things about the cause: a peer hangup must report one, and a stop
+ * the customer asked for must not, although both report a break.
  */
 static char playback_watch_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1] = "";
 static char playback_watch_status[32] = "";
+static char playback_watch_cause[64] = "";
 
 static void on_playback_stop_watch(switch_event_t *event)
 {
 	const char *uuid = switch_event_get_header(event, "Unique-ID");
 
 	if (uuid && *playback_watch_uuid && !strcmp(uuid, playback_watch_uuid)) {
+		/* before the status: the callers wait on the status, and would read a
+		 * stale cause if the status went up first */
+		switch_set_string(playback_watch_cause, switch_str_nil(switch_event_get_header(event, "Hangup-Cause")));
 		switch_set_string(playback_watch_status, switch_str_nil(switch_event_get_header(event, "Playback-Status")));
 	}
 }
 
 /*
- * One run of the peer-hangup-during-lead-frames scenario over a real two-leg
- * bridge. bcast_index picks which leg carries the broadcast, so the caller can
- * drive both directions.
+ * One run of the broadcast-stop scenario over a real two-leg bridge.
+ * bcast_index picks which leg carries the broadcast, so the caller can drive
+ * both directions.
  *
- * Leaves the outcome in playback_watch_status: "break" once the stop landed,
- * still empty if the playback never ended.
+ * customer_stop picks why the playback ends. 0 kills the bridge peer inside
+ * the lead-frames window, which is the bug under test. 1 leaves both legs up
+ * and raises the stop the customer asks for, which must report no cause.
+ *
+ * Leaves the outcome in playback_watch_status, "break" once the stop landed
+ * and still empty if the playback never ended, and the reported hangup cause
+ * in playback_watch_cause, still empty when the event carried none.
  *
  * Plain C rather than fct macros: fst_requires expands to a bare "break",
  * which inside a loop would escape only that loop and let the caller run on
  * with half-built fixtures.
  *
  * Returns 0 if the fixture could not be established, so nothing was measured.
- * Sets *in_window to 1 if the hangup really did land before CF_BROADCAST.
+ * Sets *in_window to 1 if the hangup really did land before CF_BROADCAST. It
+ * is not meaningful when customer_stop is set, which waits for CF_BROADCAST.
  */
-static int run_peer_hangup_lead_frames_case(int bcast_index, int *in_window)
+static int run_peer_hangup_lead_frames_case(int bcast_index, int customer_stop, int *in_window)
 {
 	switch_core_session_t *legs[2] = { NULL, NULL };
 	switch_channel_t *chans[2] = { NULL, NULL };
@@ -144,6 +154,7 @@ static int run_peer_hangup_lead_frames_case(int bcast_index, int *in_window)
 
 	*in_window = 0;
 	*playback_watch_status = '\0';
+	*playback_watch_cause = '\0';
 
 	for (i = 0; i < 2; i++) {
 		if (switch_ivr_originate(NULL, &legs[i], &cause, "null/+15553334444", 2,
@@ -201,7 +212,22 @@ static int run_peer_hangup_lead_frames_case(int bcast_index, int *in_window)
 	*in_window = (switch_core_session_private_event_count(legs[bcast_index]) == 0 &&
 				  !switch_channel_test_flag(chans[bcast_index], CF_BROADCAST));
 
-	switch_channel_hangup(chans[!bcast_index], SWITCH_CAUSE_NORMAL_CLEARING);
+	if (customer_stop) {
+		/* Shaped like the stop a customer asks for. uuid_break takes exactly
+		 * one of two branches, so wait for CF_BROADCAST and take the same one
+		 * it would: stop_broadcast alone, which raises CF_BREAK itself. The
+		 * point here is the reported cause, not the pre-CF_BROADCAST window.
+		 * Both legs stay up. */
+		for (waited = 0; waited < 10000 && !switch_channel_test_flag(chans[bcast_index], CF_BROADCAST); waited += 100) {
+			switch_sleep(100000);
+		}
+		if (!switch_channel_test_flag(chans[bcast_index], CF_BROADCAST)) {
+			goto done;
+		}
+		switch_channel_stop_broadcast(chans[bcast_index]);
+	} else {
+		switch_channel_hangup(chans[!bcast_index], SWITCH_CAUSE_NORMAL_CLEARING);
+	}
 
 	/* Fixed: the lead-frames wait ends, the peer check raises the stop, and
 	 * the app breaks on its first frame -- PLAYBACK_STOP within ~2s of the
@@ -708,16 +734,47 @@ FST_CORE_BEGIN("./conf_playsay")
 			fst_requires_module("mod_loopback");
 
 			/* direction 1: the bridge originator carries the broadcast */
-			fst_requires(run_peer_hangup_lead_frames_case(0, &in_window));
+			fst_requires(run_peer_hangup_lead_frames_case(0, 0, &in_window));
 			fst_xcheck(in_window, "A-leg: expect the peer hangup to land before CF_BROADCAST is raised");
 			fst_xcheck(*playback_watch_status, "A-leg: expect the playback to end once the bridge peer is gone, not after the whole file");
 			fst_xcheck(!strcmp(playback_watch_status, "break"), "A-leg: expect PLAYBACK_STOP to report a break, not a file played to the end");
+			fst_xcheck(*playback_watch_cause, "A-leg: expect PLAYBACK_STOP to carry the peer hangup cause, not an empty one");
 
 			/* direction 2: the bridge originatee carries the broadcast */
-			fst_requires(run_peer_hangup_lead_frames_case(1, &in_window));
+			fst_requires(run_peer_hangup_lead_frames_case(1, 0, &in_window));
 			fst_xcheck(in_window, "B-leg: expect the peer hangup to land before CF_BROADCAST is raised");
 			fst_xcheck(*playback_watch_status, "B-leg: expect the playback to end once the bridge peer is gone, not after the whole file");
 			fst_xcheck(!strcmp(playback_watch_status, "break"), "B-leg: expect PLAYBACK_STOP to report a break, not a file played to the end");
+			fst_xcheck(*playback_watch_cause, "B-leg: expect PLAYBACK_STOP to carry the peer hangup cause, not an empty one");
+		}
+		FST_TEST_END()
+
+		/*
+		 * The other half of the same contract. A playback stop the customer
+		 * asked for reports a break too, so the break alone must not be read as
+		 * a hangup. Nothing hangs up here: both legs stay up, and the stop is
+		 * raised on the leg that is playing.
+		 *
+		 * This guards the marker's lifetime as much as its set sites. A marker
+		 * that is set when no leg went away, or that outlives the playback it
+		 * belongs to, shows up here as a cause on a live leg.
+		 */
+		FST_TEST_BEGIN(customer_stop_during_bridged_broadcast_reports_no_cause)
+		{
+			int in_window = 0;
+
+			fst_requires_module("mod_commands");
+			fst_requires_module("mod_loopback");
+
+			fst_requires(run_peer_hangup_lead_frames_case(0, 1, &in_window));
+			fst_xcheck(*playback_watch_status, "A-leg: expect the customer stop to end the playback");
+			fst_xcheck(!strcmp(playback_watch_status, "break"), "A-leg: expect a customer stop to report a break");
+			fst_xcheck(!*playback_watch_cause, "A-leg: expect no hangup cause on a customer stop, or it reads as a hangup");
+
+			fst_requires(run_peer_hangup_lead_frames_case(1, 1, &in_window));
+			fst_xcheck(*playback_watch_status, "B-leg: expect the customer stop to end the playback");
+			fst_xcheck(!strcmp(playback_watch_status, "break"), "B-leg: expect a customer stop to report a break");
+			fst_xcheck(!*playback_watch_cause, "B-leg: expect no hangup cause on a customer stop, or it reads as a hangup");
 		}
 		FST_TEST_END()
 	}
