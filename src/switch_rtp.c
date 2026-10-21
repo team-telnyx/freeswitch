@@ -2913,13 +2913,8 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_reset_dtls_ice_restart_transport(
 		dtls_identity_equal(&dtls->association_identity, identity)) {
 		*result = SWITCH_RTP_PVT_DTLS_RESTART_READY;
 	}
-	if (rtp_session->pvt_dtls_restart_transport_fail) {
-		*err = "Injected DTLS restart transport failure";
-		status = SWITCH_STATUS_FALSE;
-	} else {
-		status = switch_rtp_set_remote_address(rtp_session, host, port, remote_rtcp_port,
-			change_adv_addr, err);
-	}
+	status = switch_rtp_set_remote_address(rtp_session, host, port, remote_rtcp_port,
+		change_adv_addr, err);
 	if (status == SWITCH_STATUS_SUCCESS) {
 		dtls_restart_migration_clear(dtls);
 		if (*result == SWITCH_RTP_PVT_DTLS_RESTART_RESET && dtls) {
@@ -6676,9 +6671,12 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_udptl_mode(switch_rtp_t *rtp_session)
 SWITCH_DECLARE(switch_status_t) switch_rtp_set_remote_address(switch_rtp_t *rtp_session, const char *host, switch_port_t port, switch_port_t remote_rtcp_port,
 															  switch_bool_t change_adv_addr, const char **err)
 {
-	switch_socket_t *sock;
+	switch_socket_t *old_sock_output;
+	switch_socket_t *new_sock_output = NULL;
 	switch_sockaddr_t *remote_addr;
+	switch_sockaddr_t *dtls_remote_addr = NULL;
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
+	switch_bool_t created_output_socket = SWITCH_FALSE;
 	*err = "Success";
 
 	if (switch_sockaddr_info_get(&remote_addr, host, SWITCH_UNSPEC, port, 0, rtp_session->pool) != SWITCH_STATUS_SUCCESS || !remote_addr) {
@@ -6689,7 +6687,36 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_set_remote_address(switch_rtp_t *rtp_
 
 	switch_mutex_lock(rtp_session->write_mutex);
 
+	if (rtp_session->dtls && rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX]) {
+		switch_mutex_lock(rtp_session->ice_mutex);
+		status = switch_sockaddr_info_get(&dtls_remote_addr, host, SWITCH_UNSPEC, port, 0, rtp_session->pool);
+		switch_mutex_unlock(rtp_session->ice_mutex);
+		if (status != SWITCH_STATUS_SUCCESS || !dtls_remote_addr) {
+			*err = "DTLS Remote Address Error!";
+			status = SWITCH_STATUS_FALSE;
+			goto done;
+		}
+	}
+
+	if (rtp_session->sock_input && switch_sockaddr_get_family(remote_addr) == switch_sockaddr_get_family(rtp_session->local_addr)) {
+		new_sock_output = rtp_session->sock_input;
+	} else {
+		if (rtp_session->pvt_dtls_restart_transport_fail) {
+			status = SWITCH_STATUS_FALSE;
+		} else {
+			status = rtp_socket_create(rtp_session, &new_sock_output,
+				switch_sockaddr_get_family(remote_addr));
+		}
+		if (status != SWITCH_STATUS_SUCCESS) {
+			*err = "Socket Error!";
+			goto done;
+		}
+		created_output_socket = SWITCH_TRUE;
+	}
+
+	old_sock_output = rtp_session->sock_output;
 	rtp_session->remote_addr = remote_addr;
+	rtp_session->sock_output = new_sock_output;
 
 	if (change_adv_addr) {
 		rtp_session->remote_host_str = switch_core_strdup(rtp_session->pool, host);
@@ -6699,29 +6726,13 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_set_remote_address(switch_rtp_t *rtp_
 	rtp_session->eff_remote_host_str = switch_core_strdup(rtp_session->pool, host);
 	rtp_session->eff_remote_port = port;
 
-	if (rtp_session->sock_input && switch_sockaddr_get_family(rtp_session->remote_addr) == switch_sockaddr_get_family(rtp_session->local_addr)) {
-		rtp_session->sock_output = rtp_session->sock_input;
-	} else {
-		if (rtp_session->sock_output && rtp_session->sock_output != rtp_session->sock_input) {
-			sock = rtp_session->sock_output;
-			rtp_session->sock_output = NULL;
-			rtp_socket_close(rtp_session, sock);
-		}
-		if ((status = rtp_socket_create(rtp_session, &rtp_session->sock_output,
-										switch_sockaddr_get_family(rtp_session->remote_addr))) != SWITCH_STATUS_SUCCESS) {
-
-			*err = "Socket Error!";
-		}
-	}
-
 	if (rtp_session->dtls) {
-		rtp_session->dtls->sock_output = rtp_session->sock_output;
-
-		if (rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX]) {
-			switch_mutex_lock(rtp_session->ice_mutex);
-			status = switch_sockaddr_info_get(&rtp_session->dtls->remote_addr, host, SWITCH_UNSPEC, port, 0, rtp_session->pool);
-			switch_mutex_unlock(rtp_session->ice_mutex);
+		switch_mutex_lock(rtp_session->ice_mutex);
+		rtp_session->dtls->sock_output = new_sock_output;
+		if (dtls_remote_addr) {
+			rtp_session->dtls->remote_addr = dtls_remote_addr;
 		}
+		switch_mutex_unlock(rtp_session->ice_mutex);
 	}
 
 
@@ -6745,6 +6756,12 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_set_remote_address(switch_rtp_t *rtp_
 			}*/
 	}
 
+	if (created_output_socket && old_sock_output && old_sock_output != rtp_session->sock_input &&
+		old_sock_output != new_sock_output) {
+		rtp_socket_close(rtp_session, old_sock_output);
+	}
+
+ done:
 	switch_mutex_unlock(rtp_session->write_mutex);
 
 	return status;
