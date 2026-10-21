@@ -15,4 +15,6 @@ rc=0
 ./sipp-based-tests blind_transfer_early_media_then_busy || rc=1
 ./sipp-based-tests blind_transfer_caller_hangup_during_early_media || rc=1
 ./sipp-based-tests blind_transfer_caller_hangup_while_ringing || rc=1
+./sipp-based-tests blind_transfer_referrer_moved_before_result || rc=1
+./sipp-based-tests blind_transfer_referrer_reparked_before_result || rc=1
 exit $rc

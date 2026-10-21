@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="ISO-8859-1" ?>
 <!-- Blind transfer test, B: answers, sends REFER to the target extension 1 s later, requires one
      final NOTIFY with the expected sipfrag, and ends on a BYE from FreeSWITCH or with its own
-     BYE 4 s after the NOTIFY. -->
+     BYE 4 s after the NOTIFY. With expected_frag "none" it requires that no NOTIFY comes. -->
 <scenario name="blind transfer referrer">
   <Global variables="expected_frag"/>
 
@@ -60,7 +60,13 @@
   </send>
 
   <recv response="100" optional="true"/>
-  <recv response="202"/>
+  <recv response="202">
+    <action>
+      <strcmp assign_to="none_cmp" variable="expected_frag" value="none"/>
+      <test assign_to="skip_frag" variable="none_cmp" compare="equal" value="0"/>
+    </action>
+  </recv>
+  <nop next="no_result" test="skip_frag"/>
 
   <!-- The first request after the 202 must be the final NOTIFY for the refer event, with the
        sipfrag the test passes in as expected_frag (-set expected_frag "SIP/2.0 403 Forbidden").
@@ -95,6 +101,25 @@
   <!-- After the result: a BYE from FreeSWITCH, or B's own BYE 4 s later. A second
        NOTIFY is an unexpected message and fails the call. -->
   <recv request="BYE" timeout="4000" ontimeout="own_bye"/>
+  <send next="end">
+    <![CDATA[
+
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <!-- expected_frag "none": B must get no NOTIFY at all. It ends on a BYE from FreeSWITCH,
+       or with its own BYE 8 s after the 202. A NOTIFY is an unexpected message and fails
+       the call. -->
+  <label id="no_result"/>
+  <recv request="BYE" timeout="8000" ontimeout="own_bye"/>
   <send next="end">
     <![CDATA[
 
