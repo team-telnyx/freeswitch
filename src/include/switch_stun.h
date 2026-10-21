@@ -226,6 +226,13 @@ SWITCH_DECLARE(char *) switch_stun_packet_attribute_get_username(switch_stun_pac
 */
 SWITCH_DECLARE(switch_stun_packet_t *) switch_stun_packet_build_header(switch_stun_message_t type, char *id, uint8_t *buf);
 
+/* Build an ICE request, rejecting insufficient capacity before touching buf.
+ * USERNAME is at most 512 bytes; SOFTWARE is at most 127 bytes.
+ * A NULL software selects the legacy USERNAME-only request. */
+SWITCH_DECLARE(switch_stun_packet_t *) switch_stun_packet_build_ice_request(uint8_t *buf, switch_size_t capacity,
+	char *id, const char *username, const char *software, uint32_t priority,
+	const char *password, const char *tie_breaker, switch_bool_t controlling, switch_bool_t use_candidate);
+
 /*!
   \brief Add a username packet attribute
   \param packet the packet to add the attribute to

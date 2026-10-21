@@ -5,7 +5,8 @@ typedef enum {
 	SWITCH_RTP_ICE_CONTROLLING_FAILOVER_IDLE = 0,
 	SWITCH_RTP_ICE_CONTROLLING_FAILOVER_PROBING,
 	SWITCH_RTP_ICE_CONTROLLING_FAILOVER_NOMINATING,
-	SWITCH_RTP_ICE_CONTROLLING_STARTUP_NOMINATING
+	SWITCH_RTP_ICE_CONTROLLING_STARTUP_NOMINATING,
+	SWITCH_RTP_ICE_CONTROLLING_RESTART_NOMINATING
 } switch_rtp_ice_controlling_failover_state_t;
 
 typedef enum {
@@ -58,11 +59,14 @@ typedef struct {
 		switch_time_t next_run;
 		switch_core_media_ice_type_t type;
 		ice_t *ice_params;
+		ice_t *saved_ice_params;
+		ice_t *saved_ice_source;
 		ice_proto_t proto;
 		uint8_t sending;
 		uint8_t ready;
 		uint8_t rready;
 		uint8_t remote_eoc_received;
+		uint8_t pending_trickle_candidates; /* Direct insertions awaiting merge publication. */
 		uint8_t initializing;
 		int missed_count;
 		char last_sent_id[13];
@@ -111,7 +115,9 @@ typedef struct {
 		uint32_t prflx_bootstrap_ms;
 		int prflx_bootstrap_idx;
 		switch_time_t prflx_bootstrap_us;
+		switch_time_t restart_started_us;
 		uint8_t restart_pending;
+		uint8_t generation_invalidated;
 		uint8_t restart_provisional;
 		switch_time_t restart_provisional_us;
 } switch_rtp_ice_t;
@@ -134,6 +140,7 @@ typedef struct {
 	switch_core_media_ice_type_t ice_type;
 	switch_bool_t ice_ready;
 	switch_bool_t ice_rready;
+	switch_rtp_ice_controlling_failover_state_t nomination_state;
 	switch_bool_t rtp_chosen;
 	switch_bool_t rtcp_chosen;
 	dtls_state_t dtls_state;
@@ -186,6 +193,15 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_get_controlling_nomination_id(swi
 	ice_proto_t proto, char *transaction_id, switch_size_t transaction_id_len);
 SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_ice_timer_tick(switch_rtp_t *rtp_session,
 	ice_proto_t proto, switch_time_t now);
+SWITCH_DECLARE(void) switch_rtp_pvt_clear_ice_params(switch_rtp_t *rtp_session, ice_t *shared_params,
+	char **remote_ufrag, char **remote_pwd);
+SWITCH_DECLARE(void) switch_rtp_pvt_reset_ice(switch_rtp_t *rtp_session, ice_t *shared_params);
+SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_ice_restart_pending(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_sync_ice_dtls_destination(switch_rtp_t *rtp_session, const char **err);
+/* One-shot regression hook, invoked without transport locks before destination revalidation. */
+typedef void (*switch_rtp_pvt_dtls_destination_hook_t)(switch_rtp_t *rtp_session, void *data);
+SWITCH_DECLARE(void) switch_rtp_pvt_set_dtls_destination_hook(switch_rtp_t *rtp_session,
+	switch_rtp_pvt_dtls_destination_hook_t hook, void *data);
 SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_get_transport_snapshot(switch_rtp_t *rtp_session,
 	ice_proto_t proto, switch_rtp_pvt_transport_snapshot_t *snapshot);
 SWITCH_DECLARE(switch_bool_t) switch_rtp_pvt_read_lock_held(switch_rtp_t *rtp_session);
