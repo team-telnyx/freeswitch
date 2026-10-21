@@ -128,8 +128,10 @@ static void on_playback_stop_watch(switch_event_t *event)
  * both directions.
  *
  * customer_stop picks why the playback ends. 0 kills the bridge peer inside
- * the lead-frames window, which is the bug under test. 1 leaves both legs up
- * and raises the stop the customer asks for, which must report no cause.
+ * the lead-frames window, which is the bug under test, hanging up with
+ * USER_BUSY so the reported cause cannot be confused with the fallback. 1
+ * leaves both legs up and raises the stop the customer asks for, which must
+ * report no cause at all.
  *
  * Leaves the outcome in playback_watch_status, "break" once the stop landed
  * and still empty if the playback never ended, and the reported hangup cause
@@ -226,7 +228,10 @@ static int run_peer_hangup_lead_frames_case(int bcast_index, int customer_stop, 
 		}
 		switch_channel_stop_broadcast(chans[bcast_index]);
 	} else {
-		switch_channel_hangup(chans[!bcast_index], SWITCH_CAUSE_NORMAL_CLEARING);
+		/* USER_BUSY, not NORMAL_CLEARING: NORMAL_CLEARING is also the fallback
+		 * in switch_ivr_play_file_detailed(), so asserting it would pass even if
+		 * the peer's real cause were never carried. */
+		switch_channel_hangup(chans[!bcast_index], SWITCH_CAUSE_USER_BUSY);
 	}
 
 	/* Fixed: the lead-frames wait ends, the peer check raises the stop, and
@@ -738,14 +743,14 @@ FST_CORE_BEGIN("./conf_playsay")
 			fst_xcheck(in_window, "A-leg: expect the peer hangup to land before CF_BROADCAST is raised");
 			fst_xcheck(*playback_watch_status, "A-leg: expect the playback to end once the bridge peer is gone, not after the whole file");
 			fst_xcheck(!strcmp(playback_watch_status, "break"), "A-leg: expect PLAYBACK_STOP to report a break, not a file played to the end");
-			fst_xcheck(*playback_watch_cause, "A-leg: expect PLAYBACK_STOP to carry the peer hangup cause, not an empty one");
+			fst_xcheck(!strcmp(playback_watch_cause, "USER_BUSY"), "A-leg: expect PLAYBACK_STOP to carry the peer's real cause, not the fallback");
 
 			/* direction 2: the bridge originatee carries the broadcast */
 			fst_requires(run_peer_hangup_lead_frames_case(1, 0, &in_window));
 			fst_xcheck(in_window, "B-leg: expect the peer hangup to land before CF_BROADCAST is raised");
 			fst_xcheck(*playback_watch_status, "B-leg: expect the playback to end once the bridge peer is gone, not after the whole file");
 			fst_xcheck(!strcmp(playback_watch_status, "break"), "B-leg: expect PLAYBACK_STOP to report a break, not a file played to the end");
-			fst_xcheck(*playback_watch_cause, "B-leg: expect PLAYBACK_STOP to carry the peer hangup cause, not an empty one");
+			fst_xcheck(!strcmp(playback_watch_cause, "USER_BUSY"), "B-leg: expect PLAYBACK_STOP to carry the peer's real cause, not the fallback");
 		}
 		FST_TEST_END()
 
