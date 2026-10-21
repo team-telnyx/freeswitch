@@ -777,9 +777,10 @@ SWITCH_DECLARE(uint32_t) switch_rtp_get_remote_ssrc(switch_rtp_t *rtp_session);
   \brief Count of the frames switch_rtp_write_frame sent, and the RTP timestamp of the last one
   \param rtp_session the RTP session
   \param ts the timestamp of the last frame sent (optional)
+  \param kept whether that timestamp is the frame's own (plus an offset) rather than generated (optional)
   \return the count
 */
-SWITCH_DECLARE(uint32_t) switch_rtp_get_sent_frames(switch_rtp_t *rtp_session, uint32_t *ts);
+SWITCH_DECLARE(uint32_t) switch_rtp_get_sent_frames(switch_rtp_t *rtp_session, uint32_t *ts, switch_bool_t *kept);
 
 /*!
   \brief Associate an arbitrary data pointer with and RTP session

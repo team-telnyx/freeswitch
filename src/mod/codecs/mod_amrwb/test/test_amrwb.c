@@ -556,9 +556,9 @@ static int amrwb_rtp_recv(int fd, int wait_ms, uint32_t *ts)
 	return (packet[13] >> 3) & 0x0f;
 }
 
-/* writes ms of silence to the session as an application does, as frames of codec (L16) (the core encodes it
- * with the write codec, with amrwb_rtp_writes on it goes out over RTP) */
-static switch_status_t amrwb_session_write(switch_core_session_t *session, switch_codec_t *codec, int ms)
+/* writes ms of silence to the session as an application does, as frames of codec (L16) with RTP timestamp ts (0:
+ * none) (the core encodes it with the write codec, with amrwb_rtp_writes on it goes out over RTP) */
+static switch_status_t amrwb_session_write(switch_core_session_t *session, switch_codec_t *codec, int ms, uint32_t ts)
 {
 	int16_t pcm[16 * 120] = { 0 };
 	switch_frame_t frame = { 0 };
@@ -569,6 +569,7 @@ static switch_status_t amrwb_session_write(switch_core_session_t *session, switc
 	frame.samples = (uint32_t) (16 * ms);
 	frame.rate = 16000;
 	frame.channels = 1;
+	frame.timestamp = ts;
 	return switch_core_session_write_frame(session, &frame, SWITCH_IO_FLAG_NONE, 0);
 }
 
@@ -583,7 +584,7 @@ static int amrwb_rtp_send(switch_core_session_t *session, int pt, int fd, uint32
 							   switch_core_session_get_pool(session)) != SWITCH_STATUS_SUCCESS) {
 		return -1;
 	}
-	status = amrwb_session_write(session, &l16, 20);
+	status = amrwb_session_write(session, &l16, 20, 0);
 	switch_core_codec_destroy(&l16);
 	if (status != SWITCH_STATUS_SUCCESS) {
 		return -1;
@@ -1619,11 +1620,11 @@ FST_CORE_BEGIN(".")
 					out_len = sizeof(out);
 					switch_core_codec_decode(switch_core_session_get_read_codec(fst_session), NULL, cmr, sizeof(cmr), 16000, out, &out_len, &rate, &flag);
 				}
-				if (amrwb_session_write(fst_session, &l16, 40) != SWITCH_STATUS_SUCCESS) {
+				if (amrwb_session_write(fst_session, &l16, 40, 0) != SWITCH_STATUS_SUCCESS) {
 					break;
 				}
 				/* once the write thread queues: one 20 ms frame more, an odd number of frames queued from then on */
-				if (i == 3 && amrwb_session_write(fst_session, &l16_20, 20) != SWITCH_STATUS_SUCCESS) {
+				if (i == 3 && amrwb_session_write(fst_session, &l16_20, 20, 0) != SWITCH_STATUS_SUCCESS) {
 					break;
 				}
 				for (until = start + (i + 1) * 40000; switch_micro_time_now() < until; ) {
@@ -1648,6 +1649,59 @@ FST_CORE_BEGIN(".")
 			fst_check(packets >= 70);
 			fst_check(changes >= 4);
 			fst_xcheck(odd == 0, "mode change on an odd frame-block");
+		}
+		FST_SESSION_END()
+
+		/* input with its own RTP timestamps: an input on time that skips a source block is placed by its timestamp
+		 * when the core keeps it on the wire, and by the count with linear timestamps; every mode change still goes
+		 * out on an even frame-block */
+		FST_SESSION_BEGIN_RATE(amrwb_mode_change_on_the_wire_after_a_skipped_source_block, 16000)
+		{
+			unsigned char cmr[2] = { 0x00, 0x7c }, out[SWITCH_RECOMMENDED_BUFFER_SIZE];
+			uint32_t out_len, rate = 16000, src, ts, first = 0, last = 0;
+			unsigned int flag = 0;
+			switch_port_t port = 0;
+			switch_codec_t l16 = { 0 };
+			switch_rtp_t *rtp;
+			int fd, ft = -1, prev = -1, i, pass;
+
+			fst_requires((fd = amrwb_udp_sink(&port)) >= 0);
+			fst_requires(amrwb_rtp_to(fst_session, port) >= 0);
+			fst_requires((rtp = switch_core_media_get_rtp_session(fst_session, SWITCH_MEDIA_TYPE_AUDIO)));
+			fst_requires(switch_core_codec_init(&l16, "L16", NULL, NULL, 16000, 20, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, NULL, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(amrwb_rtp_writes(SWITCH_TRUE) == SWITCH_STATUS_SUCCESS);
+			for (pass = 0; pass < 2; pass++) {
+				if (pass) {
+					switch_rtp_intentional_bugs(rtp, RTP_BUG_SEND_LINEAR_TIMESTAMPS);
+				}
+				src = 16000 + (uint32_t) pass * 32000;
+				/* CMR 15 (back up to mode 2), source blocks 0, 1, then CMR 0 and blocks 3, 4, ...; after the switch to
+				 * linear timestamps one frame first, its report shows they are not kept */
+				for (i = pass ? -1 : 0; i < 10; i++) {
+					if (i == 0 || i == 2) {
+						cmr[0] = i ? 0x00 : 0xf0;
+						out_len = sizeof(out);
+						switch_core_codec_decode(switch_core_session_get_read_codec(fst_session), NULL, cmr, sizeof(cmr), 16000, out, &out_len, &rate, &flag);
+					}
+					fst_requires(amrwb_session_write(fst_session, &l16, 20, src + (uint32_t) ((i < 2 ? i : i + 1) * 320)) == SWITCH_STATUS_SUCCESS);
+					fst_requires((ft = amrwb_rtp_recv(fd, 1000, &ts)) >= 0);
+					if (prev < 0) {
+						first = ts;
+					} else if (ft != prev) {
+						fst_xcheck((((ts - first) / 320) % 2) == 0, "mode change on an odd frame-block");
+					}
+					if (i == 2) {
+						/* the skipped block is on the wire too, or not with linear timestamps */
+						fst_check_int_equals(ts - last, pass ? 320 : 640);
+					}
+					prev = ft;
+					last = ts;
+				}
+				fst_check_int_equals(ft, 0);
+			}
+			amrwb_rtp_writes(SWITCH_FALSE);
+			switch_core_codec_destroy(&l16);
+			close(fd);
 		}
 		FST_SESSION_END()
 
