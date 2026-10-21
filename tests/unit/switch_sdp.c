@@ -406,6 +406,56 @@ static uint32_t amrwb_reference_decode(const char *fmtp, uint8_t *payload, uint3
 	return out_len;
 }
 
+/* a codec with two implementations that differ only in the bitrate, and no matches_fmtp: a copy, which does not
+ * pass the bitrate, picks the one registered last */
+#define TWO_RATES_FILE "switch_sdp_two_rates"
+static int two_rates_inits = 0;
+
+static switch_status_t two_rates_init(switch_codec_t *codec, switch_codec_flag_t flags, const switch_codec_settings_t *codec_settings)
+{
+	two_rates_inits++;
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static switch_status_t two_rates_decode(switch_codec_t *codec, switch_codec_t *other_codec, void *encoded_data, uint32_t encoded_data_len,
+										uint32_t encoded_rate, void *decoded_data, uint32_t *decoded_data_len, uint32_t *decoded_rate,
+										unsigned int *flag)
+{
+	memset(decoded_data, 0, codec->implementation->decoded_bytes_per_packet);
+	*decoded_data_len = codec->implementation->decoded_bytes_per_packet;
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static switch_status_t two_rates_encode(switch_codec_t *codec, switch_codec_t *other_codec, void *decoded_data, uint32_t decoded_data_len,
+										uint32_t decoded_rate, void *encoded_data, uint32_t *encoded_data_len, uint32_t *encoded_rate,
+										unsigned int *flag)
+{
+	memset(encoded_data, 0, codec->implementation->encoded_bytes_per_packet);
+	*encoded_data_len = codec->implementation->encoded_bytes_per_packet;
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static switch_status_t two_rates_destroy(switch_codec_t *codec)
+{
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static switch_status_t two_rates_load(switch_loadable_module_interface_t **module_interface, switch_memory_pool_t *pool)
+{
+	switch_codec_interface_t *codec_interface;
+
+	*module_interface = switch_loadable_module_create_module_interface(pool, "mod_two_rates");
+	SWITCH_ADD_CODEC(codec_interface, "two rates");
+	switch_core_codec_add_implementation(pool, codec_interface, SWITCH_CODEC_TYPE_AUDIO, 115, "TWO-RATES", NULL,
+										 16000, 16000, 24000, 20000, 320, 640, 60, 1, 1,
+										 two_rates_init, two_rates_encode, two_rates_decode, two_rates_destroy);
+	switch_core_codec_add_implementation(pool, codec_interface, SWITCH_CODEC_TYPE_AUDIO, 115, "TWO-RATES", NULL,
+										 16000, 16000, 32000, 20000, 320, 640, 80, 1, 1,
+										 two_rates_init, two_rates_encode, two_rates_decode, two_rates_destroy);
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
 FST_CORE_BEGIN("./conf_sdp")
 {
 	FST_SUITE_BEGIN(switch_sdp)
@@ -1128,6 +1178,73 @@ FST_CORE_BEGIN("./conf_sdp")
 			fst_check(status == SWITCH_STATUS_SUCCESS);
 			fst_xcheck(audio.datalen == sizeof(expected) && !memcmp(audio.data, expected, sizeof(expected)),
 					   "the media bug gets the A-law payload decoded as A-law");
+		}
+		FST_SESSION_END()
+
+		/*
+		 * The media bugs' copy of the read codec may land on another implementation than the read codec (the copy
+		 * does not pass the bitrate). With the read codec unchanged, the copy is made once, not on every frame.
+		 */
+		FST_SESSION_BEGIN(sdp_media_bug_codec_copied_once_when_the_copy_picks_another_bitrate)
+		{
+			switch_status_t status = SWITCH_STATUS_SUCCESS;
+			switch_codec_t *codec;
+			switch_endpoint_interface_t *endpoint;
+			switch_frame_t frame = { 0 }, *read_frame = NULL;
+			switch_media_bug_t *bug = NULL;
+			struct bug_audio audio = { { 0 } };
+			uint8_t payload[60] = { 0 };
+			int i, inits_after_first = -1, inits_after_all = -1, codec_ok = 0, frames_ok = 1;
+
+			/* stays loaded: the session's recording keeps the bugs' copy, and so the module, until the session ends */
+			fst_requires(switch_loadable_module_build_dynamic((char *) TWO_RATES_FILE, two_rates_load, NULL, NULL, SWITCH_FALSE) == SWITCH_STATUS_SUCCESS);
+
+			codec = switch_core_session_alloc(fst_session, sizeof(*codec));
+			if (switch_core_codec_init_with_bitrate(codec, "TWO-RATES", NULL, NULL, 16000, 20, 1, 24000, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
+													NULL, switch_core_session_get_pool(fst_session)) == SWITCH_STATUS_SUCCESS) {
+				codec_ok = codec->implementation->bits_per_second == 24000;
+				switch_core_session_set_read_codec(fst_session, codec);
+				switch_core_media_bug_add(fst_session, "bug_codec_test", NULL, read_bug_callback, &audio, 0, SMBF_READ_REPLACE, &bug);
+
+				if ((endpoint = switch_loadable_module_get_endpoint_interface("null"))) {
+					null_read_frame = endpoint->io_routines->read_frame;
+					endpoint->io_routines->read_frame = next_frame_read;
+
+					frame.codec = codec;
+					frame.data = payload;
+					frame.datalen = frame.buflen = sizeof(payload);
+					frame.samples = 320;
+					frame.rate = 16000;
+					frame.channels = 1;
+
+					for (i = 0; i < 5; i++) {
+						frame.timestamp = i * 320;
+						next_frame = &frame;
+						audio.datalen = 0;
+						status = switch_core_session_read_frame(fst_session, &read_frame, SWITCH_IO_FLAG_NONE, 0);
+						frames_ok = frames_ok && status == SWITCH_STATUS_SUCCESS && audio.datalen == 640;
+						if (!i) {
+							inits_after_first = two_rates_inits;
+						}
+					}
+					inits_after_all = two_rates_inits;
+
+					endpoint->io_routines->read_frame = null_read_frame;
+					next_frame = NULL;
+					UNPROTECT_INTERFACE(endpoint);
+				}
+
+				if (bug) {
+					switch_core_media_bug_remove(fst_session, &bug);
+				}
+				switch_core_session_set_read_codec(fst_session, NULL);
+				switch_core_codec_destroy(codec);
+			}
+
+			fst_check(codec_ok);
+			fst_check(frames_ok);
+			fst_check(inits_after_first > 0);
+			fst_xcheck(inits_after_all == inits_after_first, "the media bug codec is copied once, not on every frame");
 		}
 		FST_SESSION_END()
 

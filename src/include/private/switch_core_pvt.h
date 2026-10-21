@@ -163,6 +163,8 @@ struct switch_core_session {
 	switch_frame_t *fork_read_frame;
 
 	switch_codec_t bug_codec;
+	/* the implementation bug_codec was copied from; the copy itself may pick another one (e.g. without the bitrate) */
+	const switch_codec_implementation_t *bug_codec_src_impl;
 	uint32_t read_frame_count;
 	uint32_t track_duration;
 	uint32_t track_id;
