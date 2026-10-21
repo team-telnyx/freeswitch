@@ -626,6 +626,7 @@ typedef struct {
 	switch_time_t result_at;
 	switch_time_t target_answered_at;
 	int referrer_blind_transfer_hangup;
+	int settled;
 } bt_result_t;
 
 static int start_bt_sipp(const char *ip, const char *scenario, const char *port, const char *target, const char *hold_ms,
@@ -730,10 +731,11 @@ static void blind_transfer_run(const char *ip, const char *target_scenario, cons
 	r->b_ok = bt_sipp_ok(&b, 15000);
 	r->c_ok = bt_sipp_ok(&c, 15000);
 
-	/* Let the last channels finish before the next test starts. */
+	/* Let the last channels finish before the results are read and the next test starts. */
 	while (loop_count-- && switch_core_session_count()) {
 		switch_sleep(50 * 1000);
 	}
+	r->settled = !switch_core_session_count();
 
  end:
 	switch_log_unbind_logger(bt_watch_logger);
@@ -1109,6 +1111,7 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 			blind_transfer_run(switch_core_get_variable("local_ip_v4"), "sipp-scenarios/uas_blind_transfer_target_ring_cancel.xml", "4000",
 							   "SIP/2.0 403 Forbidden", &r);
 			fst_xcheck(r.started, "Unable to start the SIPp peers");
+			fst_xcheck(r.settled, "channels still up 5 s after the SIPp peers ended");
 			fst_xcheck(r.results == 1, "the REFER sender did not get exactly one result");
 			fst_xcheck(strstr(r.status, "SIP/2.0 403 Forbidden") != NULL, "the result is not the failure 403 Forbidden");
 			fst_xcheck(r.referrer_blind_transfer_hangup, "the REFER sender was not hung up with BLIND_TRANSFER");

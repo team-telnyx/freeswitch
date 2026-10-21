@@ -256,12 +256,14 @@ static switch_status_t sofia_pre_validate_remote_sdp(switch_core_session_t *sess
 static void sofia_forget_blind_transfer(switch_core_session_t *session)
 {
 	switch_channel_t *channel = switch_core_session_get_channel(session);
+	switch_channel_state_t state = switch_channel_get_state(channel);
 
 	/* The state loop parses queued signal data before it calls the handler of the state
 	   it just took, so a park can land before this handler runs (the REFER itself, or a
-	   uuid_park right after a uuid_transfer): the standard handler of the old state is
-	   then skipped and the leg stays in the park, so keep the transfer. */
-	if (switch_channel_get_state(channel) == CS_PARK) {
+	   uuid_park right after a uuid_transfer). The midstate check then skips the standard
+	   handler of that state and the leg stays in the park, so keep the transfer. A leg
+	   that is already hanging up gets no result either way. */
+	if (state == CS_PARK || state >= CS_HANGUP) {
 		return;
 	}
 
@@ -1960,10 +1962,8 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 				goto end;
 			}
 
-			/* This runs in the thread of the leg that sends the result, while this
-			   leg's own thread can unset these variables: work on copies. */
-			event = switch_channel_get_variable_dup(channel, "sip_blind_transfer_event", SWITCH_TRUE, -1);
-			uuid = switch_channel_get_variable_dup(channel, "blind_transfer_uuid", SWITCH_TRUE, -1);
+			event = switch_channel_get_variable(channel, "sip_blind_transfer_event");
+			uuid = switch_channel_get_variable(channel, "blind_transfer_uuid");
 
 			/* Only a leg still parked for this result: if it left CS_PARK
 			   (moved by uuid_transfer or uuid_bridge), the result is stale.
@@ -1976,11 +1976,18 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 				char payload_str[255] = "SIP/2.0 403 Forbidden\r\n";
 				const char *session_id_header = sofia_glue_session_id_header(session, tech_pvt->profile);
 				switch_bool_t peer_alive = SWITCH_FALSE;
+
+				/* Taken before the leg is transferred or hung up below, so a later
+				   result finds nothing to answer. event and uuid are copies (session
+				   pool), so they stay valid. */
+				switch_channel_set_variable(channel, "sip_blind_transfer_event", NULL);
+				switch_channel_set_variable(channel, "blind_transfer_uuid", NULL);
+
 				if (msg->numeric_arg) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 							"%s Completing blind transfer with success\n", switch_channel_get_name(channel));
 					switch_set_string(payload_str, "SIP/2.0 200 OK\r\n");
-				} else if (uuid) {
+				} else {
 					switch_core_session_t *other_session = switch_core_session_locate(uuid);
 					if (other_session) {
 						switch_channel_t *other_channel = switch_core_session_get_channel(other_session);
@@ -2020,10 +2027,6 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 						switch_channel_hangup(channel, SWITCH_CAUSE_BLIND_TRANSFER);
 					}
 				}
-
-				/* The result is delivered: a later one finds nothing to answer. */
-				switch_channel_set_variable(channel, "sip_blind_transfer_event", NULL);
-				switch_channel_set_variable(channel, "blind_transfer_uuid", NULL);
 			}
 
 		}

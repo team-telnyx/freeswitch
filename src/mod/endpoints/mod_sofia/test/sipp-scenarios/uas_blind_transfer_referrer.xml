@@ -62,13 +62,15 @@
   <recv response="100" optional="true"/>
   <recv response="202"/>
 
-  <!-- The first request after the 202 must be the final NOTIFY, with the sipfrag the test
-       passes in as expected_frag (-set expected_frag "SIP/2.0 403 Forbidden"). A BYE first,
-       a wrong sipfrag or Subscription-State, or no NOTIFY in 10 s fails the call. -->
+  <!-- The first request after the 202 must be the final NOTIFY for the refer event, with the
+       sipfrag the test passes in as expected_frag (-set expected_frag "SIP/2.0 403 Forbidden").
+       A BYE first, a wrong Event, sipfrag or Subscription-State, or no NOTIFY in 10 s fails
+       the call. -->
   <recv request="NOTIFY" timeout="10000">
     <action>
       <ereg regexp="message/sipfrag" search_in="hdr" header="Content-Type:" check_it="true" assign_to="ctype"/>
       <ereg regexp="terminated" search_in="hdr" header="Subscription-State:" check_it="true" assign_to="substate"/>
+      <ereg regexp="^ *refer" search_in="hdr" header="Event:" check_it="true" assign_to="evt"/>
       <ereg regexp="SIP/2\.0 [0-9]{3} [A-Za-z ]+" search_in="body" check_it="true" assign_to="frag"/>
       <strcmp assign_to="frag_cmp" variable="frag" variable2="expected_frag"/>
       <test assign_to="frag_wrong" variable="frag_cmp" compare="not_equal" value="0"/>
@@ -130,5 +132,5 @@
   <recv response="200"/>
 
   <label id="end"/>
-  <Reference variables="c0,c1,f0,f1,t0,t1,ctype,substate,frag_cmp"/>
+  <Reference variables="c0,c1,f0,f1,t0,t1,ctype,substate,evt,frag_cmp"/>
 </scenario>
