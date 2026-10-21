@@ -109,16 +109,25 @@ static switch_status_t partial_play_and_collect_input_callback(switch_core_sessi
 static char playback_watch_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1] = "";
 static char playback_watch_status[32] = "";
 static char playback_watch_cause[64] = "";
+static int playback_watch_events = 0;
+static int playback_watch_with_cause = 0;
 
 static void on_playback_stop_watch(switch_event_t *event)
 {
 	const char *uuid = switch_event_get_header(event, "Unique-ID");
 
 	if (uuid && *playback_watch_uuid && !strcmp(uuid, playback_watch_uuid)) {
-		/* before the status: the callers wait on the status, and would read a
-		 * stale cause if the status went up first */
-		switch_set_string(playback_watch_cause, switch_str_nil(switch_event_get_header(event, "Hangup-Cause")));
+		const char *cause = switch_event_get_header(event, "Hangup-Cause");
+
+		if (!zstr(cause)) {
+			++playback_watch_with_cause;
+		}
+
+		/* before the status and the count: the callers wait on those, and would
+		 * read a stale cause if either went up first */
+		switch_set_string(playback_watch_cause, switch_str_nil(cause));
 		switch_set_string(playback_watch_status, switch_str_nil(switch_event_get_header(event, "Playback-Status")));
+		++playback_watch_events;
 	}
 }
 
@@ -157,6 +166,8 @@ static int run_peer_hangup_lead_frames_case(int bcast_index, int customer_stop, 
 	*in_window = 0;
 	*playback_watch_status = '\0';
 	*playback_watch_cause = '\0';
+	playback_watch_events = 0;
+	playback_watch_with_cause = 0;
 
 	for (i = 0; i < 2; i++) {
 		if (switch_ivr_originate(NULL, &legs[i], &cause, "null/+15553334444", 2,
@@ -251,6 +262,127 @@ static int run_peer_hangup_lead_frames_case(int bcast_index, int customer_stop, 
 	switch_event_unbind_callback(on_playback_stop_watch);
 	*playback_watch_uuid = '\0';
 	/* no-op once the queue took ownership and NULLed it */
+	switch_event_destroy(&event);
+
+	for (i = 0; i < 2; i++) {
+		if (legs[i]) {
+			if (switch_channel_ready(chans[i])) {
+				switch_channel_hangup(chans[i], SWITCH_CAUSE_NORMAL_CLEARING);
+			}
+			switch_core_session_rwunlock(legs[i]);
+		}
+	}
+
+	return ok;
+}
+
+/*
+ * A priority broadcast runs nested inside a running playback, and hold music is
+ * queued that way. switch_core_session_dequeue_private_event() takes the
+ * priority queue first and gates it on CF_EVENT_LOCK_PRI alone, so the
+ * event-lock the outer broadcast holds does not stop it, and the playback frame
+ * loop dequeues it through switch_ivr_parse_all_events().
+ *
+ * One peer hangup then cuts both playbacks short, so both have to report it.
+ * The customer sees the outer one, so a marker that only the innermost playback
+ * can read leaves the reported playback looking like a file that played to the
+ * end.
+ *
+ * Returns 0 if the fixture could not be established, so nothing was measured.
+ */
+static int run_nested_priority_case(void)
+{
+	switch_core_session_t *legs[2] = { NULL, NULL };
+	switch_channel_t *chans[2] = { NULL, NULL };
+	switch_call_cause_t cause = SWITCH_CAUSE_NORMAL_CLEARING;
+	switch_event_t *event = NULL;
+	int ok = 0;
+	int i, waited;
+
+	*playback_watch_status = '\0';
+	*playback_watch_cause = '\0';
+	playback_watch_events = 0;
+	playback_watch_with_cause = 0;
+
+	for (i = 0; i < 2; i++) {
+		if (switch_ivr_originate(NULL, &legs[i], &cause, "null/+15553334444", 2,
+								 NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) != SWITCH_STATUS_SUCCESS || !legs[i]) {
+			goto done;
+		}
+		chans[i] = switch_core_session_get_channel(legs[i]);
+		switch_channel_set_variable(chans[i], "send_silence_when_idle", "-1");
+		switch_channel_set_state(chans[i], CS_SOFT_EXECUTE);
+		if (!switch_channel_wait_for_state_timeout(chans[i], CS_SOFT_EXECUTE, 5000) || !switch_channel_up(chans[i])) {
+			goto done;
+		}
+	}
+
+	if (switch_ivr_uuid_bridge(switch_core_session_get_uuid(legs[0]),
+							   switch_core_session_get_uuid(legs[1])) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+
+	if (switch_channel_wait_for_flag(chans[0], CF_BRIDGED, SWITCH_TRUE, 5000, NULL) != SWITCH_STATUS_SUCCESS ||
+		switch_channel_wait_for_flag(chans[1], CF_BRIDGED, SWITCH_TRUE, 5000, NULL) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+
+	switch_set_string(playback_watch_uuid, switch_core_session_get_uuid(legs[0]));
+	if (switch_event_bind("nested_priority_broadcast", SWITCH_EVENT_PLAYBACK_STOP, SWITCH_EVENT_SUBCLASS_ANY,
+						  on_playback_stop_watch, NULL) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+
+	/* the outer broadcast: the one the customer started. event-lock, the way
+	 * switch_ivr_broadcast() queues it, which holds CF_EVENT_LOCK and not
+	 * CF_EVENT_LOCK_PRI. */
+	if (switch_event_create(&event, SWITCH_EVENT_COMMAND) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "call-command", "execute");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-name", "playback");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-arg", "silence_stream://20000");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "event-lock", "true");
+	if (switch_core_session_queue_private_event(legs[0], &event, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+
+	/* it has to be playing, not still in the lead-frames wait, or the nested
+	 * command lands in a window this case is not about */
+	for (waited = 0; waited < 10000 && !switch_channel_test_flag(chans[0], CF_BROADCAST); waited += 100) {
+		switch_sleep(100000);
+	}
+	if (!switch_channel_test_flag(chans[0], CF_BROADCAST)) {
+		goto done;
+	}
+	switch_sleep(500000);
+
+	/* the nested one, on the priority queue, shaped like hold music */
+	if (switch_event_create(&event, SWITCH_EVENT_COMMAND) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "call-command", "execute");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-name", "playback");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-arg", "silence_stream://20000");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "event-lock", "true");
+	if (switch_core_session_queue_private_event(legs[0], &event, SWITCH_TRUE) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+	switch_sleep(1500000);
+
+	switch_channel_hangup(chans[1], SWITCH_CAUSE_USER_BUSY);
+
+	/* both playbacks end: the nested one, then the one it nested in */
+	for (waited = 0; waited < 12000 && playback_watch_events < 2; waited += 100) {
+		switch_sleep(100000);
+	}
+
+	ok = 1;
+
+  done:
+
+	switch_event_unbind_callback(on_playback_stop_watch);
+	*playback_watch_uuid = '\0';
 	switch_event_destroy(&event);
 
 	for (i = 0; i < 2; i++) {
@@ -780,6 +912,25 @@ FST_CORE_BEGIN("./conf_playsay")
 			fst_xcheck(*playback_watch_status, "B-leg: expect the customer stop to end the playback");
 			fst_xcheck(!strcmp(playback_watch_status, "break"), "B-leg: expect a customer stop to report a break");
 			fst_xcheck(!*playback_watch_cause, "B-leg: expect no hangup cause on a customer stop, or it reads as a hangup");
+		}
+		FST_TEST_END()
+
+		/*
+		 * The marker has to outlive a nested playback. Hold music is queued on
+		 * the priority private queue, which the event-lock of a running
+		 * broadcast does not hold shut, so it plays nested inside the playback
+		 * the customer started. One peer hangup cuts both short. A marker that
+		 * the innermost playback consumes leaves the outer PLAYBACK_STOP, the
+		 * one the customer is told about, with no cause at all.
+		 */
+		FST_TEST_BEGIN(nested_priority_broadcast_reports_peer_hangup_on_both_playbacks)
+		{
+			fst_requires_module("mod_commands");
+			fst_requires_module("mod_loopback");
+
+			fst_requires(run_nested_priority_case());
+			fst_xcheck(playback_watch_events == 2, "expect a PLAYBACK_STOP from the nested playback and from the one it nested in");
+			fst_xcheck(playback_watch_with_cause == 2, "expect both playbacks to report the peer hangup, not only the innermost");
 		}
 		FST_TEST_END()
 	}

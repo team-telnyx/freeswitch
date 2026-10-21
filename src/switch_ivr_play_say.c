@@ -2070,8 +2070,11 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_play_file_detailed(switch_core_sessio
 
 			/* This channel is still up, so event_set_data() found no cause.
 			 * Report the peer's, or the stop reads as a file that played to the
-			 * end. Consume the flag here: it belongs to this playback alone,
-			 * and the early returns below would leave it for the next one. */
+			 * end. Read the flag without clearing it. A priority broadcast, for
+			 * example hold music, runs nested inside this playback, and every
+			 * playback the peer hangup cut short has to report it, not only the
+			 * innermost one. switch_ivr_parse_event() clears the flag when the
+			 * outermost broadcast ends. */
 			if (switch_channel_get_variable(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE)) {
 				if (!switch_event_get_header(event, "Hangup-Cause")) {
 					const char *peer_cause = switch_channel_get_variable(channel, "last_bridge_hangup_cause");
@@ -2079,7 +2082,6 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_play_file_detailed(switch_core_sessio
 					switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Hangup-Cause",
 												   peer_cause ? peer_cause : switch_channel_cause2str(SWITCH_CAUSE_NORMAL_CLEARING));
 				}
-				switch_channel_set_variable(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, NULL);
 			}
 
 			if (!strncasecmp(file, "local_stream:", 13)) {
