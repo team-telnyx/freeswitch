@@ -7,6 +7,7 @@
       <modules>
         <load module="mod_console"/>
         <load module="mod_loopback"/>
+        <load module="mod_h26x"/>
         <load module="mod_commands"/>
         <load module="mod_sndfile"/>
 	<load module="mod_test"/>
