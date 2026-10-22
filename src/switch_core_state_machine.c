@@ -983,12 +983,15 @@ SWITCH_DECLARE(void) switch_core_session_hangup_state(switch_core_session_t *ses
 
 		if (switch_core_session_get_partner(session, &partner_session) == SWITCH_STATUS_SUCCESS) {
 			switch_channel_t *partner_channel = switch_core_session_get_channel(partner_session);
+			/* Read before the flag check, never after: read afterwards it could
+			 * already be the next broadcast's generation. */
+			uint32_t partner_gen = switch_channel_get_broadcast_generation(partner_channel);
 
 			if (switch_channel_test_flag(partner_channel, CF_BROADCAST)) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 								  "%s Stopping broadcast on bridge partner %s due to hangup\n",
 								  switch_channel_get_name(session->channel), switch_channel_get_name(partner_channel));
-				switch_channel_set_variable(partner_channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, "true");
+				switch_channel_set_variable_printf(partner_channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, "%u", partner_gen);
 				switch_channel_stop_broadcast(partner_channel);
 			}
 

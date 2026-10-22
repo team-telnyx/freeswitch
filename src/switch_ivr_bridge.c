@@ -2262,12 +2262,23 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_multi_threaded_bridge(switch_core_ses
 
 			/* Only when this leg really went away, and only onto a peer that is
 			 * playing something right now. The bridge also ends on transfer,
-			 * park, intercept and a clean exit, where nothing went away, and a
-			 * peer that survives the bridge must not carry the flag into a later
-			 * playback of its own. The window before CF_BROADCAST is covered by
-			 * the peer check in switch_ivr_parse_event() instead. */
-			if (switch_channel_down_nosig(caller_channel) && switch_channel_test_flag(peer_channel, CF_BROADCAST)) {
-				switch_channel_set_variable(peer_channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, "true");
+			 * park, intercept and a clean exit, where nothing went away. The
+			 * window before CF_BROADCAST is covered by the peer check in
+			 * switch_ivr_parse_event() instead.
+			 *
+			 * The flag check and the write are not one transaction, so the
+			 * marker carries a generation and switch_ivr_parse_event() closes
+			 * that generation when the broadcast ends. Read the generation
+			 * before the flag check, never after: read afterwards it could
+			 * already be the next broadcast's, and the next playback would
+			 * accept it. Read first, a stale value can only be older than the
+			 * current one, so it is always rejected. */
+			{
+				uint32_t peer_gen = switch_channel_get_broadcast_generation(peer_channel);
+
+				if (switch_channel_down_nosig(caller_channel) && switch_channel_test_flag(peer_channel, CF_BROADCAST)) {
+					switch_channel_set_variable_printf(peer_channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, "%u", peer_gen);
+				}
 			}
 			switch_channel_stop_broadcast(peer_channel);
 

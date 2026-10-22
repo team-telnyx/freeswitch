@@ -1275,6 +1275,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_play_file_detailed(switch_core_sessio
 	const char *timer_name;
 	const char *prebuf;
 	const char *alt = NULL;
+	const char *marker;
+	uint32_t bcast_gen;
 	const char *sleep_val;
 	const char *play_delimiter_val;
 	char play_delimiter = 0;
@@ -2070,12 +2072,19 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_play_file_detailed(switch_core_sessio
 
 			/* This channel is still up, so event_set_data() found no cause.
 			 * Report the peer's, or the stop reads as a file that played to the
-			 * end. Read the flag without clearing it. A priority broadcast, for
-			 * example hold music, runs nested inside this playback, and every
-			 * playback the peer hangup cut short has to report it, not only the
-			 * innermost one. switch_ivr_parse_event() clears the flag when the
-			 * outermost broadcast ends. */
-			if (switch_channel_get_variable(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE)) {
+			 * end. The marker carries the broadcast generation it was written
+			 * for, so one left behind by a setter that raced the end of that
+			 * broadcast does not match and is ignored. The marker is not
+			 * cleared here: a priority broadcast such as hold music runs nested
+			 * inside this playback, and both share one generation, so every
+			 * playback the peer hangup cut short reports it. */
+			marker = switch_channel_get_variable(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE);
+			bcast_gen = switch_channel_get_broadcast_generation(channel);
+
+			/* A zero generation means no broadcast has run on this channel, so a
+			 * marker set by hand from the dialplan, which parses as zero, can
+			 * never match one written by the core. */
+			if (marker && bcast_gen && (uint32_t) strtoul(marker, NULL, 10) == bcast_gen) {
 				if (!switch_event_get_header(event, "Hangup-Cause")) {
 					const char *peer_cause = switch_channel_get_variable(channel, "last_bridge_hangup_cause");
 
