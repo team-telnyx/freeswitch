@@ -1161,10 +1161,10 @@ FST_CORE_BEGIN(".")
 			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr1_oa, sizeof(cmr1_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
 			amrwb_check_ft(&codec, SWITCH_TRUE, 1);
 
-			/* above the mode-set: replaces the request, the highest allowed mode below it (TS 26.114 7.5.2.1.2.2) */
+			/* outside the mode-set: ignored, the previous request stays (RFC 4867 4.3.1) */
 			out_len = sizeof(out);
 			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr8_oa, sizeof(cmr8_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
-			amrwb_check_ft(&codec, SWITCH_TRUE, 2);
+			amrwb_check_ft(&codec, SWITCH_TRUE, 1);
 
 			out_len = sizeof(out);
 			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr1_oa, sizeof(cmr1_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
@@ -1183,17 +1183,17 @@ FST_CORE_BEGIN(".")
 			amrwb_check_ft(&codec, SWITCH_TRUE, 2);
 			switch_core_codec_destroy(&codec);
 
-			/* non-contiguous mode-set: a request between its modes gets the allowed one below it */
+			/* non-contiguous mode-set: requests between its modes are ignored */
 			fst_requires(amrwb_init(&codec, "mode-set=0,2,8;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
 			out_len = sizeof(out);
 			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr5_oa, sizeof(cmr5_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
-			amrwb_check_ft(&codec, SWITCH_TRUE, 2);
+			amrwb_check_ft(&codec, SWITCH_TRUE, 8);
 			out_len = sizeof(out);
 			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr2_oa, sizeof(cmr2_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
 			amrwb_check_ft(&codec, SWITCH_TRUE, 2);
 			out_len = sizeof(out);
 			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr1_oa, sizeof(cmr1_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
-			amrwb_check_ft(&codec, SWITCH_TRUE, 0);
+			amrwb_check_ft(&codec, SWITCH_TRUE, 2);
 			out_len = sizeof(out);
 			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr0_oa, sizeof(cmr0_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
 			amrwb_check_ft(&codec, SWITCH_TRUE, 0);
@@ -1368,7 +1368,8 @@ FST_CORE_BEGIN(".")
 		}
 		FST_TEST_END()
 
-		/* re-INVITE: a new codec only when octet-align, the answered or encoded mode-set, or the mode-change parameters change */
+		/* re-INVITE: a new codec only when octet-align, the answered, encoded or signalled mode-set, or the mode-change
+		 * parameters change */
 		FST_TEST_BEGIN(amrwb_reports_fmtp_framing_changes)
 		{
 			switch_codec_t codec = { 0 };
@@ -1386,9 +1387,9 @@ FST_CORE_BEGIN(".")
 			fst_check(r && !strcmp(r, "true"));
 			r = amrwb_changes_framing(&codec, "mode-set=0,1;octet-align=1");
 			fst_check(r && !strcmp(r, "true"));
-			/* no mode-set: we answer and encode the configured 0,1,2, as before */
+			/* no mode-set: we answer and encode the configured 0,1,2 as before, but the peer no longer signals one */
 			r = amrwb_changes_framing(&codec, "octet-align=1");
-			fst_check(r && !strcmp(r, "false"));
+			fst_check(r && !strcmp(r, "true"));
 			/* period 1: no restriction, as before */
 			r = amrwb_changes_framing(&codec, "mode-set=0,1,2;octet-align=1;mode-change-period=1");
 			fst_check(r && !strcmp(r, "false"));
@@ -1401,10 +1402,13 @@ FST_CORE_BEGIN(".")
 			fst_check(r && !strcmp(r, "true"));
 			switch_core_codec_destroy(&codec);
 
-			/* offer without mode-set, re-offer with the mode-set we answered */
+			/* offer without mode-set, re-offer with the mode-set we answered: the peer now signals it, so CMRs
+			 * outside it are ignored from then on */
 			fst_requires(amrwb_init(&codec, "octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
-			r = amrwb_changes_framing(&codec, "mode-set=0,1,2;octet-align=1");
+			r = amrwb_changes_framing(&codec, "octet-align=1");
 			fst_check(r && !strcmp(r, "false"));
+			r = amrwb_changes_framing(&codec, "mode-set=0,1,2;octet-align=1");
+			fst_check(r && !strcmp(r, "true"));
 			r = amrwb_changes_framing(&codec, "mode-set=0,1;octet-align=1");
 			fst_check(r && !strcmp(r, "true"));
 			switch_core_codec_destroy(&codec);
@@ -1777,6 +1781,51 @@ FST_CORE_BEGIN(".")
 			amrwb_check_ft(&codec, SWITCH_TRUE, 7);
 			amrwb_adjust(&codec, "decrease");
 			amrwb_check_ft(&codec, SWITCH_TRUE, 7);
+			switch_core_codec_destroy(&codec);
+
+			fst_requires(amrwb_reload(NULL) == SWITCH_STATUS_SUCCESS);
+		}
+		FST_TEST_END()
+
+		/* mode-set-overwrite: the offer has 0,1,2, we answer 0,2,4,7 and encode within 0,2. A request
+		 * the peer may send (its own mode-set) is followed within ours, others are ignored */
+		FST_TEST_BEGIN(amrwb_overwrite_follows_cmr_of_the_offered_mode_set)
+		{
+			switch_codec_t codec = { 0 };
+			static const unsigned char cmr1_oa[] = { 0x10, 0x7c };
+			static const unsigned char cmr2_oa[] = { 0x20, 0x7c };
+			static const unsigned char cmr7_oa[] = { 0x70, 0x7c };
+			static const unsigned char cmr15_oa[] = { 0xf0, 0x7c };
+			unsigned char out[SWITCH_RECOMMENDED_BUFFER_SIZE];
+			uint32_t out_len, rate = 16000;
+			unsigned int flag = 0;
+
+			fst_requires(amrwb_reload("<param name=\"mode-set\" value=\"0,2,4,7\"/><param name=\"mode-set-overwrite\" value=\"1\"/>"
+									  "<param name=\"mode-set-overwrite-with-default-bitrate\" value=\"0\"/>") == SWITCH_STATUS_SUCCESS);
+
+			fst_requires(amrwb_init(&codec, "mode-set=0,1,2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "mode-set=0,2,4,7;"));
+			amrwb_check_ft(&codec, SWITCH_TRUE, 2);
+
+			/* in the offered mode-set, not encoded: the allowed mode below it */
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr1_oa, sizeof(cmr1_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			amrwb_check_ft(&codec, SWITCH_TRUE, 0);
+
+			/* in our answer only, outside the offered mode-set: ignored */
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr7_oa, sizeof(cmr7_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			amrwb_check_ft(&codec, SWITCH_TRUE, 0);
+
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr2_oa, sizeof(cmr2_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			amrwb_check_ft(&codec, SWITCH_TRUE, 2);
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr1_oa, sizeof(cmr1_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			amrwb_check_ft(&codec, SWITCH_TRUE, 0);
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr15_oa, sizeof(cmr15_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			amrwb_check_ft(&codec, SWITCH_TRUE, 2);
 			switch_core_codec_destroy(&codec);
 
 			fst_requires(amrwb_reload(NULL) == SWITCH_STATUS_SUCCESS);
