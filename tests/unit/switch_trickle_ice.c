@@ -5994,6 +5994,7 @@ FCT_BGN()
 			char local_pwd[256] = "";
 			char remote_pwd[256] = "";
 			char nomination_id[13] = "";
+			char accepted_host[80] = "";
 			uint8_t stun_packet[512];
 			switch_size_t stun_len;
 			switch_bool_t has_addr = SWITCH_FALSE;
@@ -6001,6 +6002,10 @@ FCT_BGN()
 			switch_port_t accepted_port;
 			int nomination_sink_fd;
 			int role_case;
+
+			fst_requires(switch_find_local_ip(accepted_host, sizeof(accepted_host), NULL,
+				AF_INET) == SWITCH_STATUS_SUCCESS);
+			fst_requires(strncmp(accepted_host, "127.", 4) != 0);
 
 			for (role_case = 0; role_case < 2; ++role_case) {
 				session = NULL;
@@ -6086,16 +6091,16 @@ FCT_BGN()
 					role_case ? SWITCH_TRUE : SWITCH_FALSE,
 					role_case ? SWITCH_TRUE : SWITCH_FALSE, SWITCH_TRUE);
 				fst_requires(switch_rtp_pvt_handle_ice_from(rtp, IPR_RTP,
-					"192.0.2.1", accepted_port, stun_packet, stun_len) ==
+					accepted_host, accepted_port, stun_packet, stun_len) ==
 					SWITCH_STATUS_SUCCESS);
 				if (!role_case) {
 					fst_requires(receive_stun_transaction_id(nomination_sink_fd,
 						nomination_id) == SWITCH_STATUS_SUCCESS);
 					stun_len = build_authenticated_ice_response(stun_packet,
-						sizeof(stun_packet), nomination_id, remote_pwd, "192.0.2.1",
+						sizeof(stun_packet), nomination_id, remote_pwd, accepted_host,
 						accepted_port);
 					fst_requires(switch_rtp_pvt_handle_ice_from(rtp, IPR_RTP,
-						"192.0.2.1", accepted_port, stun_packet, stun_len) ==
+						accepted_host, accepted_port, stun_packet, stun_len) ==
 						SWITCH_STATUS_SUCCESS);
 				}
 				has_addr = SWITCH_FALSE;
