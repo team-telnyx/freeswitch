@@ -542,10 +542,6 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 	if (cmd_hash == CMD_EXECUTE) {
 		switch_channel_clear_flag(channel, CF_STOP_BROADCAST);
 		switch_channel_clear_flag(channel, CF_BREAK);
-		/* Backstop only. The flag is cleared when the broadcast that set it
-		 * ends, below; this covers the narrow case of it being set by another
-		 * thread just after that clear ran. */
-		switch_channel_set_variable(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, NULL);
 	}
 
 	if (switch_true(event_lock)) {
@@ -606,8 +602,13 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 
 			if (!switch_channel_test_flag(channel, CF_BROADCAST)) {
 				switch_channel_set_flag(channel, CF_BROADCAST);
-				/* this frame is the outermost broadcast on the channel */
+				/* This frame is the outermost broadcast on the channel, so it
+				 * opens a generation here and closes it below. Opening moves the
+				 * generation off zero, which keeps zero meaning "no broadcast
+				 * has run": a peer-hangup marker set by hand from the dialplan
+				 * parses as zero and can then never match. */
 				raised_broadcast = 1;
+				switch_channel_inc_broadcast_generation(channel);
 				if (inner) {
 					inner--;
 				}
@@ -682,7 +683,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 											  "%s Stopping broadcast: bridge peer %s is gone\n",
 											  switch_channel_get_name(channel), peer_uuid);
-							switch_channel_set_variable(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, "true");
+							switch_channel_set_variable_printf(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, "%u",
+															   switch_channel_get_broadcast_generation(channel));
 							switch_channel_set_flag(channel, CF_STOP_BROADCAST);
 							switch_channel_set_flag(channel, CF_BREAK);
 						}
@@ -736,22 +738,21 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 				switch_channel_set_flag(channel, CF_BREAK);
 			}
 
-			/* The flag belongs to the broadcast that just ended, and a dialplan
-			 * playback later on this channel must not inherit it. Clearing on
-			 * CMD_EXECUTE entry alone cannot cover that, because a dialplan app
-			 * never reaches switch_ivr_parse_event().
-			 * Only the frame that raised CF_BROADCAST clears it. A priority
-			 * broadcast runs nested inside a running playback, and the playback
-			 * it nests in has to report the same peer hangup when it ends. Do
-			 * not test inner here: on a bridged channel it is zero in the nested
-			 * frame as well, because it only counts a broadcast that starts
-			 * while the channel is unbridged or holds the b leg.
-			 * This must also stay below the CF_BROADCAST clears above. The
-			 * bridge thread stamps the flag only while CF_BROADCAST is set, so a
-			 * clear placed above them can be overwritten during the b_uuid wait,
-			 * which lasts up to 5 seconds. */
+			/* Close this broadcast generation. The peer-hangup marker carries the
+			 * generation it was written for, so one left behind by a setter that
+			 * raced this cleanup no longer matches and is ignored, including by a
+			 * dialplan playback, which never reaches switch_ivr_parse_event().
+			 * Only the frame that raised CF_BROADCAST closes it, so a nested
+			 * priority broadcast and the playback it nests in share one
+			 * generation and both still report the same peer hangup. Do not test
+			 * inner here: on a bridged channel it is zero in the nested frame
+			 * too, because it only counts a broadcast that starts while the
+			 * channel is unbridged or holds the b leg.
+			 * Must stay below the CF_BROADCAST clears above: a setter reads the
+			 * generation only after it sees CF_BROADCAST, so closing after the
+			 * flag is down is what makes a late write detectable. */
 			if (raised_broadcast) {
-				switch_channel_set_variable(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, NULL);
+				switch_channel_inc_broadcast_generation(channel);
 			}
 
 			switch_channel_audio_sync(channel);

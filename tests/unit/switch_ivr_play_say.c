@@ -131,6 +131,67 @@ static void on_playback_stop_watch(switch_event_t *event)
 	}
 }
 
+/* Two null-endpoint legs, parked the way the session harness does, then bridged
+ * so a real audio_bridge_thread runs on each. Returns 0 if the fixture could not
+ * be established; whatever was created is still left for the teardown. */
+static int bring_up_bridged_pair(switch_core_session_t **legs, switch_channel_t **chans)
+{
+	switch_call_cause_t cause = SWITCH_CAUSE_NORMAL_CLEARING;
+	int i;
+
+	for (i = 0; i < 2; i++) {
+		if (switch_ivr_originate(NULL, &legs[i], &cause, "null/+15553334444", 2,
+								 NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) != SWITCH_STATUS_SUCCESS || !legs[i]) {
+			return 0;
+		}
+		chans[i] = switch_core_session_get_channel(legs[i]);
+		switch_channel_set_variable(chans[i], "send_silence_when_idle", "-1");
+		/* park it the way the session harness does, so uuid_bridge takes over
+		 * from a known state. The _timeout form only: the plain
+		 * switch_channel_wait_for_state is an unbounded for(;;). */
+		switch_channel_set_state(chans[i], CS_SOFT_EXECUTE);
+		if (!switch_channel_wait_for_state_timeout(chans[i], CS_SOFT_EXECUTE, 5000) || !switch_channel_up(chans[i])) {
+			return 0;
+		}
+	}
+
+	if (switch_ivr_uuid_bridge(switch_core_session_get_uuid(legs[0]),
+							   switch_core_session_get_uuid(legs[1])) != SWITCH_STATUS_SUCCESS) {
+		return 0;
+	}
+
+	/* both legs must really be inside audio_bridge_thread, or this measures
+	 * something else entirely */
+	if (switch_channel_wait_for_flag(chans[0], CF_BRIDGED, SWITCH_TRUE, 5000, NULL) != SWITCH_STATUS_SUCCESS ||
+		switch_channel_wait_for_flag(chans[1], CF_BRIDGED, SWITCH_TRUE, 5000, NULL) != SWITCH_STATUS_SUCCESS) {
+		return 0;
+	}
+
+	return 1;
+}
+
+static void tear_down_bridged_pair(switch_core_session_t **legs, switch_channel_t **chans)
+{
+	int i;
+
+	for (i = 0; i < 2; i++) {
+		if (legs[i]) {
+			if (switch_channel_ready(chans[i])) {
+				switch_channel_hangup(chans[i], SWITCH_CAUSE_NORMAL_CLEARING);
+			}
+			switch_core_session_rwunlock(legs[i]);
+		}
+	}
+}
+
+static void reset_playback_watch(void)
+{
+	*playback_watch_status = '\0';
+	*playback_watch_cause = '\0';
+	playback_watch_events = 0;
+	playback_watch_with_cause = 0;
+}
+
 /*
  * One run of the broadcast-stop scenario over a real two-leg bridge.
  * bcast_index picks which leg carries the broadcast, so the caller can drive
@@ -158,42 +219,14 @@ static int run_peer_hangup_lead_frames_case(int bcast_index, int customer_stop, 
 {
 	switch_core_session_t *legs[2] = { NULL, NULL };
 	switch_channel_t *chans[2] = { NULL, NULL };
-	switch_call_cause_t cause = SWITCH_CAUSE_NORMAL_CLEARING;
 	switch_event_t *event = NULL;
 	int ok = 0;
-	int i, waited;
+	int waited;
 
 	*in_window = 0;
-	*playback_watch_status = '\0';
-	*playback_watch_cause = '\0';
-	playback_watch_events = 0;
-	playback_watch_with_cause = 0;
+	reset_playback_watch();
 
-	for (i = 0; i < 2; i++) {
-		if (switch_ivr_originate(NULL, &legs[i], &cause, "null/+15553334444", 2,
-								 NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) != SWITCH_STATUS_SUCCESS || !legs[i]) {
-			goto done;
-		}
-		chans[i] = switch_core_session_get_channel(legs[i]);
-		switch_channel_set_variable(chans[i], "send_silence_when_idle", "-1");
-		/* park it the way the session harness does, so uuid_bridge takes over
-		 * from a known state. The _timeout form only: the plain
-		 * switch_channel_wait_for_state is an unbounded for(;;). */
-		switch_channel_set_state(chans[i], CS_SOFT_EXECUTE);
-		if (!switch_channel_wait_for_state_timeout(chans[i], CS_SOFT_EXECUTE, 5000) || !switch_channel_up(chans[i])) {
-			goto done;
-		}
-	}
-
-	if (switch_ivr_uuid_bridge(switch_core_session_get_uuid(legs[0]),
-							   switch_core_session_get_uuid(legs[1])) != SWITCH_STATUS_SUCCESS) {
-		goto done;
-	}
-
-	/* both legs must really be inside audio_bridge_thread, or this measures
-	 * something else entirely */
-	if (switch_channel_wait_for_flag(chans[0], CF_BRIDGED, SWITCH_TRUE, 5000, NULL) != SWITCH_STATUS_SUCCESS ||
-		switch_channel_wait_for_flag(chans[1], CF_BRIDGED, SWITCH_TRUE, 5000, NULL) != SWITCH_STATUS_SUCCESS) {
+	if (!bring_up_bridged_pair(legs, chans)) {
 		goto done;
 	}
 
@@ -264,14 +297,7 @@ static int run_peer_hangup_lead_frames_case(int bcast_index, int customer_stop, 
 	/* no-op once the queue took ownership and NULLed it */
 	switch_event_destroy(&event);
 
-	for (i = 0; i < 2; i++) {
-		if (legs[i]) {
-			if (switch_channel_ready(chans[i])) {
-				switch_channel_hangup(chans[i], SWITCH_CAUSE_NORMAL_CLEARING);
-			}
-			switch_core_session_rwunlock(legs[i]);
-		}
-	}
+	tear_down_bridged_pair(legs, chans);
 
 	return ok;
 }
@@ -294,36 +320,13 @@ static int run_nested_priority_case(void)
 {
 	switch_core_session_t *legs[2] = { NULL, NULL };
 	switch_channel_t *chans[2] = { NULL, NULL };
-	switch_call_cause_t cause = SWITCH_CAUSE_NORMAL_CLEARING;
 	switch_event_t *event = NULL;
 	int ok = 0;
-	int i, waited;
+	int waited;
 
-	*playback_watch_status = '\0';
-	*playback_watch_cause = '\0';
-	playback_watch_events = 0;
-	playback_watch_with_cause = 0;
+	reset_playback_watch();
 
-	for (i = 0; i < 2; i++) {
-		if (switch_ivr_originate(NULL, &legs[i], &cause, "null/+15553334444", 2,
-								 NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) != SWITCH_STATUS_SUCCESS || !legs[i]) {
-			goto done;
-		}
-		chans[i] = switch_core_session_get_channel(legs[i]);
-		switch_channel_set_variable(chans[i], "send_silence_when_idle", "-1");
-		switch_channel_set_state(chans[i], CS_SOFT_EXECUTE);
-		if (!switch_channel_wait_for_state_timeout(chans[i], CS_SOFT_EXECUTE, 5000) || !switch_channel_up(chans[i])) {
-			goto done;
-		}
-	}
-
-	if (switch_ivr_uuid_bridge(switch_core_session_get_uuid(legs[0]),
-							   switch_core_session_get_uuid(legs[1])) != SWITCH_STATUS_SUCCESS) {
-		goto done;
-	}
-
-	if (switch_channel_wait_for_flag(chans[0], CF_BRIDGED, SWITCH_TRUE, 5000, NULL) != SWITCH_STATUS_SUCCESS ||
-		switch_channel_wait_for_flag(chans[1], CF_BRIDGED, SWITCH_TRUE, 5000, NULL) != SWITCH_STATUS_SUCCESS) {
+	if (!bring_up_bridged_pair(legs, chans)) {
 		goto done;
 	}
 
@@ -385,14 +388,104 @@ static int run_nested_priority_case(void)
 	*playback_watch_uuid = '\0';
 	switch_event_destroy(&event);
 
-	for (i = 0; i < 2; i++) {
-		if (legs[i]) {
-			if (switch_channel_ready(chans[i])) {
-				switch_channel_hangup(chans[i], SWITCH_CAUSE_NORMAL_CLEARING);
-			}
-			switch_core_session_rwunlock(legs[i]);
-		}
+	tear_down_bridged_pair(legs, chans);
+
+	return ok;
+}
+
+/*
+ * A setter on another thread checks CF_BROADCAST, then stalls while the
+ * broadcast it saw finishes and cleans up, then resumes and writes the marker.
+ * The write itself is what survives, so the case is reproduced here without
+ * threads: run a broadcast, keep the generation that was current inside it,
+ * let it end, then write the marker with that generation, which is exactly
+ * what the resumed setter would have written.
+ *
+ * A dialplan playback on the surviving leg must then report no cause, whether
+ * it ends on its own or the customer stops it. A dialplan app never reaches
+ * switch_ivr_parse_event(), so nothing clears the marker for it; only the
+ * generation makes the stale value unreadable.
+ *
+ * Returns 0 if the fixture could not be established, so nothing was measured.
+ */
+static int run_stale_setter_case(int customer_stop, char *cause_out, switch_size_t cause_len)
+{
+	switch_core_session_t *legs[2] = { NULL, NULL };
+	switch_channel_t *chans[2] = { NULL, NULL };
+	switch_event_t *event = NULL;
+	uint32_t stale_gen = 0;
+	int ok = 0;
+	int waited;
+
+	*cause_out = '\0';
+	reset_playback_watch();
+
+	if (!bring_up_bridged_pair(legs, chans)) {
+		goto done;
 	}
+
+	/* a short broadcast, only to open and close one generation */
+	if (switch_event_create(&event, SWITCH_EVENT_COMMAND) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "call-command", "execute");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-name", "playback");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-arg", "silence_stream://200");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "event-lock", "true");
+	if (switch_core_session_queue_private_event(legs[0], &event, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+
+	for (waited = 0; waited < 10000 && !switch_channel_test_flag(chans[0], CF_BROADCAST); waited += 100) {
+		switch_sleep(100000);
+	}
+	if (!switch_channel_test_flag(chans[0], CF_BROADCAST)) {
+		goto done;
+	}
+
+	/* what the stalled setter read, before the broadcast cleaned up */
+	stale_gen = switch_channel_get_broadcast_generation(chans[0]);
+
+	for (waited = 0; waited < 10000 && switch_channel_test_flag(chans[0], CF_BROADCAST); waited += 100) {
+		switch_sleep(100000);
+	}
+	if (switch_channel_test_flag(chans[0], CF_BROADCAST)) {
+		goto done;
+	}
+
+	/* the resumed setter. Both legs are still up: nothing went away. */
+	switch_channel_set_variable_printf(chans[0], SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, "%u", stale_gen);
+
+	reset_playback_watch();
+	switch_set_string(playback_watch_uuid, switch_core_session_get_uuid(legs[0]));
+	if (switch_event_bind("stale_setter", SWITCH_EVENT_PLAYBACK_STOP, SWITCH_EVENT_SUBCLASS_ANY,
+						  on_playback_stop_watch, NULL) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+
+	if (customer_stop) {
+		/* the stop the customer asks for, raised before the file opens so the
+		 * playback breaks on its first frame without another thread */
+		switch_channel_set_flag(chans[0], CF_BREAK);
+	}
+
+	/* the dialplan path: straight into the app, never switch_ivr_parse_event() */
+	switch_ivr_play_file(legs[0], NULL, "silence_stream://400", NULL);
+
+	for (waited = 0; waited < 5000 && !playback_watch_events; waited += 100) {
+		switch_sleep(100000);
+	}
+
+	switch_copy_string(cause_out, playback_watch_cause, cause_len);
+	ok = playback_watch_events ? 1 : 0;
+
+  done:
+
+	switch_event_unbind_callback(on_playback_stop_watch);
+	*playback_watch_uuid = '\0';
+	switch_event_destroy(&event);
+
+	tear_down_bridged_pair(legs, chans);
 
 	return ok;
 }
@@ -931,6 +1024,30 @@ FST_CORE_BEGIN("./conf_playsay")
 			fst_requires(run_nested_priority_case());
 			fst_xcheck(playback_watch_events == 2, "expect a PLAYBACK_STOP from the nested playback and from the one it nested in");
 			fst_xcheck(playback_watch_with_cause == 2, "expect both playbacks to report the peer hangup, not only the innermost");
+		}
+		FST_TEST_END()
+
+		/*
+		 * The marker is written by threads that cannot hold the broadcast still
+		 * while they write: switch_channel_test_flag() releases flag_mutex
+		 * before it returns, and the variable setter takes profile_mutex, so the
+		 * check and the write are not one transaction. A setter that resumes
+		 * after the broadcast it saw has gone must not leave a marker that a
+		 * later playback reads, or a leg that survives on park_after_bridge
+		 * reports a hangup for a playback that nothing interrupted.
+		 */
+		FST_TEST_BEGIN(stale_peer_hangup_marker_is_not_read_by_a_later_playback)
+		{
+			char cause[64] = "";
+
+			fst_requires_module("mod_commands");
+			fst_requires_module("mod_loopback");
+
+			fst_requires(run_stale_setter_case(0, cause, sizeof(cause)));
+			fst_xcheck(!*cause, "a playback that ended on its own must not report a cause from a stale marker");
+
+			fst_requires(run_stale_setter_case(1, cause, sizeof(cause)));
+			fst_xcheck(!*cause, "a customer-stopped playback must not report a cause from a stale marker");
 		}
 		FST_TEST_END()
 	}

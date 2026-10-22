@@ -165,6 +165,7 @@ struct switch_channel {
 	switch_channel_state_t state;
 	switch_channel_state_t running_state;
 	switch_atomic_t transfer_generation;
+	switch_atomic_t broadcast_generation;
 	/* Under state_mutex: the transfer generation current when another thread last set a
 	   state other than CS_ROUTING. See note_state_from_another_thread(). */
 	uint32_t superseding_generation;
@@ -2567,6 +2568,20 @@ SWITCH_DECLARE(uint32_t) switch_channel_get_transfer_generation(switch_channel_t
 	switch_assert(channel != NULL);
 
 	return switch_atomic_read(&channel->transfer_generation);
+}
+
+SWITCH_DECLARE(void) switch_channel_inc_broadcast_generation(switch_channel_t *channel)
+{
+	switch_assert(channel != NULL);
+
+	switch_atomic_inc(&channel->broadcast_generation);
+}
+
+SWITCH_DECLARE(uint32_t) switch_channel_get_broadcast_generation(switch_channel_t *channel)
+{
+	switch_assert(channel != NULL);
+
+	return switch_atomic_read(&channel->broadcast_generation);
 }
 
 /*
