@@ -394,6 +394,115 @@ static int run_nested_priority_case(void)
 }
 
 /*
+ * The nested priority broadcast finishes first, and the peer hangs up only
+ * afterwards, while the playback it nested in is still running.
+ *
+ * switch_ivr_parse_event() clears CF_BROADCAST when "inner" is zero, and inner
+ * is zero in a nested frame on a bridged channel, because it only counts a
+ * broadcast that starts while the channel is unbridged or holds the b leg. So
+ * the nested frame can take the flag down while the outer playback is still
+ * playing. The hangup-state stop and the bridge-exit marker both test that
+ * flag, so a peer hangup arriving in that state would arm nothing and the outer
+ * playback would run to the end of its file: the zombie call this change exists
+ * to stop.
+ *
+ * Reports through flag_down_after_nested whether the flag really was down once
+ * the nested playback had ended, so the case states what it measured instead of
+ * only passing.
+ *
+ * Returns 0 if the fixture could not be established, so nothing was measured.
+ */
+static int run_nested_completes_first_case(int *flag_down_after_nested, char *cause_out, switch_size_t cause_len)
+{
+	switch_core_session_t *legs[2] = { NULL, NULL };
+	switch_channel_t *chans[2] = { NULL, NULL };
+	switch_event_t *event = NULL;
+	int ok = 0;
+	int waited;
+
+	*flag_down_after_nested = 0;
+	*cause_out = '\0';
+	reset_playback_watch();
+
+	if (!bring_up_bridged_pair(legs, chans)) {
+		goto done;
+	}
+
+	switch_set_string(playback_watch_uuid, switch_core_session_get_uuid(legs[0]));
+	if (switch_event_bind("nested_completes_first", SWITCH_EVENT_PLAYBACK_STOP, SWITCH_EVENT_SUBCLASS_ANY,
+						  on_playback_stop_watch, NULL) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+
+	/* the outer broadcast, long enough that it cannot end on its own before
+	 * this case finishes */
+	if (switch_event_create(&event, SWITCH_EVENT_COMMAND) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "call-command", "execute");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-name", "playback");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-arg", "silence_stream://30000");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "event-lock", "true");
+	if (switch_core_session_queue_private_event(legs[0], &event, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+
+	for (waited = 0; waited < 10000 && !switch_channel_test_flag(chans[0], CF_BROADCAST); waited += 100) {
+		switch_sleep(100000);
+	}
+	if (!switch_channel_test_flag(chans[0], CF_BROADCAST)) {
+		goto done;
+	}
+	switch_sleep(500000);
+
+	/* the nested one, on the priority queue the way hold music arrives, and
+	 * short, so it ends while the outer playback is still going */
+	if (switch_event_create(&event, SWITCH_EVENT_COMMAND) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "call-command", "execute");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-name", "playback");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-arg", "silence_stream://400");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "event-lock", "true");
+	if (switch_core_session_queue_private_event(legs[0], &event, SWITCH_TRUE) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+
+	/* the nested playback ends and its frame cleans up */
+	for (waited = 0; waited < 10000 && !playback_watch_events; waited += 100) {
+		switch_sleep(100000);
+	}
+	if (!playback_watch_events) {
+		goto done;
+	}
+	switch_sleep(400000);
+
+	*flag_down_after_nested = !switch_channel_test_flag(chans[0], CF_BROADCAST);
+
+	/* now the peer goes away, with the outer playback still running */
+	switch_channel_hangup(chans[1], SWITCH_CAUSE_USER_BUSY);
+
+	/* well under the outer file's remaining time, so a playback that does not
+	 * stop shows up as a missing second event rather than as a slow pass */
+	for (waited = 0; waited < 8000 && playback_watch_events < 2; waited += 100) {
+		switch_sleep(100000);
+	}
+
+	switch_copy_string(cause_out, playback_watch_cause, cause_len);
+	ok = playback_watch_events >= 2 ? 1 : 0;
+
+  done:
+
+	switch_event_unbind_callback(on_playback_stop_watch);
+	*playback_watch_uuid = '\0';
+	switch_event_destroy(&event);
+
+	tear_down_bridged_pair(legs, chans);
+
+	return ok;
+}
+
+/*
  * A setter on another thread checks CF_BROADCAST, then stalls while the
  * broadcast it saw finishes and cleans up, then resumes and writes the marker.
  * The write itself is what survives, so the case is reproduced here without
@@ -1036,6 +1145,28 @@ FST_CORE_BEGIN("./conf_playsay")
 		 * later playback reads, or a leg that survives on park_after_bridge
 		 * reports a hangup for a playback that nothing interrupted.
 		 */
+		/*
+		 * The nested priority broadcast ends first, then the peer hangs up with
+		 * the outer playback still running. The outer playback must still stop
+		 * and still report the peer's cause, whatever CF_BROADCAST looks like by
+		 * then.
+		 */
+		FST_TEST_BEGIN(peer_hangup_after_a_nested_broadcast_ends_stops_the_outer_playback)
+		{
+			char cause[64] = "";
+			int flag_down = 0;
+
+			fst_requires_module("mod_commands");
+			fst_requires_module("mod_loopback");
+
+			fst_requires(run_nested_completes_first_case(&flag_down, cause, sizeof(cause)));
+			fst_xcheck(!strcmp(cause, "USER_BUSY"),
+					   "the outer playback must report the peer's cause after a nested broadcast ended");
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+							  "nested cleanup left CF_BROADCAST %s\n", flag_down ? "clear" : "set");
+		}
+		FST_TEST_END()
+
 		FST_TEST_BEGIN(stale_peer_hangup_marker_is_not_read_by_a_later_playback)
 		{
 			char cause[64] = "";
