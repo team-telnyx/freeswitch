@@ -9908,6 +9908,9 @@ static switch_status_t perform_write(switch_core_session_t *session, switch_fram
 	switch_io_event_hook_write_frame_t *ptr;
 	switch_status_t status = SWITCH_STATUS_FALSE;
 	switch_media_handle_t *smh;
+	switch_rtp_t *rtp_session = NULL;
+	uint32_t sent = 0, ts = 0;
+	switch_bool_t kept = SWITCH_FALSE;
 
 	switch_assert(session != NULL);
 
@@ -9972,6 +9975,14 @@ static switch_status_t perform_write(switch_core_session_t *session, switch_fram
 	}
 
 
+	/* e.g. an AMR encoder keeping its mode changes on the frame-blocks the receiver counts: the RTP timestamp each
+	 * of its frames was sent with, or that one was not sent */
+	if (smh && frame->codec && frame->codec == session->write_codec && switch_core_codec_ready(frame->codec) &&
+		switch_test_flag(frame->codec, SWITCH_CODEC_FLAG_PEEK_SENT) &&
+		(rtp_session = smh->engines[SWITCH_MEDIA_TYPE_AUDIO].rtp_session)) {
+		sent = switch_rtp_get_sent_frames(rtp_session, NULL, NULL);
+	}
+
 	if (session->endpoint_interface->io_routines->write_frame) {
 		if ((status = session->endpoint_interface->io_routines->write_frame(session, frame, flags, stream_id)) == SWITCH_STATUS_SUCCESS) {
 			for (ptr = session->event_hooks.write_frame; ptr; ptr = ptr->next) {
@@ -9979,6 +9990,14 @@ static switch_status_t perform_write(switch_core_session_t *session, switch_fram
 					break;
 				}
 			}
+		}
+	}
+
+	if (rtp_session && switch_core_codec_ready(frame->codec)) {
+		if (switch_rtp_get_sent_frames(rtp_session, &ts, &kept) != sent) {
+			switch_core_codec_control(frame->codec, SCC_CODEC_SPECIFIC, SCCT_STRING, (void *) (kept ? "sent_kept" : "sent"), SCCT_INT, &ts, NULL, NULL);
+		} else {
+			switch_core_codec_control(frame->codec, SCC_CODEC_SPECIFIC, SCCT_STRING, (void *) "unsent", SCCT_NONE, NULL, NULL, NULL);
 		}
 	}
 

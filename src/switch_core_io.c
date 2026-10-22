@@ -312,6 +312,13 @@ cnt_with_cng:
 		goto done;
 	}
 
+	/* e.g. an AMR mode request: needed by the encoder whether or not this payload is decoded */
+	if (switch_test_flag((*frame)->codec, SWITCH_CODEC_FLAG_PEEK_RECEIVED) && (*frame)->datalen &&
+		!switch_test_flag(*frame, SFF_CNG) && !switch_test_flag(*frame, SFF_PLC) && !switch_test_flag(*frame, SFF_NOT_AUDIO) &&
+		!switch_test_flag(*frame, SFF_RTCP)) {
+		switch_core_codec_control((*frame)->codec, SCC_CODEC_SPECIFIC, SCCT_STRING, (void *) "received", SCCT_NONE, *frame, NULL, NULL);
+	}
+
 	if (session->bugs && !((*frame)->flags & SFF_CNG) && !((*frame)->flags & SFF_NOT_AUDIO)) {
 		switch_media_bug_t *bp;
 		switch_bool_t ok = SWITCH_TRUE;
