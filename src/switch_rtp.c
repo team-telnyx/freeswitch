@@ -3458,6 +3458,7 @@ static switch_bool_t ice_controlling_failover_handle_response(switch_rtp_t *rtp_
 	uint32_t failover_ms;
 	uint64_t selected_age_ms;
 	switch_bool_t current_tuple;
+	switch_bool_t response_sent_controlling = SWITCH_FALSE;
 
 	if (ice && (ice->controlling_failover_state == SWITCH_RTP_ICE_CONTROLLING_STARTUP_NOMINATING ||
 		ice->controlling_failover_state == SWITCH_RTP_ICE_CONTROLLING_RESTART_NOMINATING)) {
@@ -3519,8 +3520,15 @@ static switch_bool_t ice_controlling_failover_handle_response(switch_rtp_t *rtp_
 	 * proves neither bidirectional consent nor current-generation ownership and
 	 * must not suppress a controlling-side failover attempt. */
 	if (current_tuple && authenticated_response && ice_selected_pair_response_matches(ice, transaction_id,
-		from_addr, local_socket, local_port, local_family, SWITCH_FALSE, NULL)) {
+		from_addr, local_socket, local_port, local_family, SWITCH_FALSE,
+		&response_sent_controlling)) {
 		ice->selected_pair_last_response_us = now;
+		if (ice_restart_pending(rtp_session, ice)) {
+			if (response_sent_controlling && candidate_idx >= 0) {
+				ice_controlling_bootstrap_commit(rtp_session, ice, candidate_idx, now);
+			}
+			return SWITCH_FALSE;
+		}
 		if (rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX]) {
 			rtp_session->ice.rready = 1;
 			rtp_session->rtcp_ice.rready = 1;
