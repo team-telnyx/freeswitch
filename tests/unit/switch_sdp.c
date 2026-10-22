@@ -1308,13 +1308,13 @@ FST_CORE_BEGIN("./conf_sdp")
 			fst_requires(local_sdp);
 			fst_xcheck(strstr(local_sdp, "a=fmtp:") != NULL, "legacy: initial answer carries an fmtp");
 
-			/* Legacy drops the fmtp when a re-offer rebuilds the payload map. */
+			/* Keeping the codec across a re-offer that rebuilds the payload map keeps its fmtp. */
 			match = switch_core_media_negotiate_sdp(fst_session, offer_hold, &p, SDP_OFFER);
 			fst_requires(match == 1);
 			switch_core_media_gen_local_sdp(fst_session, SDP_ANSWER, rx_host, 12345, NULL, 1);
 			local_sdp = switch_channel_get_variable(fst_channel, "rtp_local_sdp_str");
 			fst_requires(local_sdp);
-			fst_xcheck(strstr(local_sdp, "a=fmtp:104") == NULL, "legacy: hold answer loses the AMR-WB fmtp");
+			fst_xcheck(strstr(local_sdp, "a=fmtp:104") != NULL, "legacy: hold answer still carries the AMR-WB fmtp");
 
 			/* Legacy matches on iananame alone, so the last implementation offered wins. */
 			match = switch_core_media_negotiate_sdp(fst_session, offer_both, &p, SDP_OFFER);
