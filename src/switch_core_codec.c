@@ -43,6 +43,19 @@ SWITCH_DECLARE(uint32_t) switch_core_codec_next_id(void)
 	return CODEC_ID++;
 }
 
+/* a read resampler made for another rate (or channel count) than the read codec's would keep converting to it;
+ * the read path makes a new one when needed. codec_read_mutex held */
+static void drop_stale_read_resampler(switch_core_session_t *session)
+{
+	switch_mutex_lock(session->resample_mutex);
+	if (session->read_resampler && (session->read_resampler->to_rate != (int) session->read_impl.actual_samples_per_second ||
+									session->read_resampler->channels != (int) session->read_impl.number_of_channels)) {
+		switch_resample_destroy(&session->read_resampler);
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Dropping the read resampler of the previous read codec\n");
+	}
+	switch_mutex_unlock(session->resample_mutex);
+}
+
 SWITCH_DECLARE(void) switch_core_session_unset_read_codec(switch_core_session_t *session)
 {
 	switch_mutex_t *mutex = NULL;
@@ -52,6 +65,10 @@ SWITCH_DECLARE(void) switch_core_session_unset_read_codec(switch_core_session_t 
 	if (mutex) switch_mutex_lock(mutex);
 	session->real_read_codec = session->read_codec = NULL;
 	session->raw_read_frame.codec = session->read_codec;
+	/* audio left for the previous read codec */
+	if (session->raw_read_buffer) {
+		switch_buffer_zero(session->raw_read_buffer);
+	}
 	session->raw_write_frame.codec = session->read_codec;
 	session->enc_read_frame.codec = session->read_codec;
 	session->enc_write_frame.codec = session->read_codec;
@@ -185,6 +202,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_set_real_read_codec(switch_c
 		switch_channel_set_variable(channel, "original_read_rate", tmp);
 
 		session->raw_read_frame.codec = session->read_codec;
+		/* audio left for the previous read codec */
+		if (session->raw_read_buffer) {
+			switch_buffer_zero(session->raw_read_buffer);
+		}
+		drop_stale_read_resampler(session);
 		session->raw_write_frame.codec = session->read_codec;
 		session->enc_read_frame.codec = session->read_codec;
 		session->enc_write_frame.codec = session->read_codec;
@@ -294,6 +316,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_set_read_codec(switch_core_s
 		switch_channel_set_variable(channel, "read_rate", tmp);
 
 		session->raw_read_frame.codec = session->read_codec;
+		/* audio left for the previous read codec */
+		if (session->raw_read_buffer) {
+			switch_buffer_zero(session->raw_read_buffer);
+		}
+		drop_stale_read_resampler(session);
 		session->raw_write_frame.codec = session->read_codec;
 		session->enc_read_frame.codec = session->read_codec;
 		session->enc_write_frame.codec = session->read_codec;

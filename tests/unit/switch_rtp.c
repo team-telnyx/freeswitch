@@ -1091,6 +1091,27 @@ FST_TEARDOWN_END()
 	}
 	FST_TEST_END()
 
+	/* a 3-frame packet every 60 ms read out as 3 chunks: its timestamp, then two written back to back with none */
+	FST_TEST_BEGIN(test_chunks_of_a_multi_frame_packet_get_consecutive_timestamps)
+	{
+		uint32_t in[9], out[9];
+		uint8_t m[9];
+		int delay[9], i;
+
+		for (i = 0; i < 9; i++) {
+			in[i] = (i % 3 == 0) ? 0x40000000 + (uint32_t) i * 160 : 0;
+			delay[i] = (i && i % 3 == 0) ? 60 : 0;
+		}
+		fst_requires(write_raw_audio_ts(in, delay, 9, out, m));
+		for (i = 0; i < 9; i++) {
+			fst_check_int_equals(out[i], 0x40000000 + (uint32_t) i * 160);
+		}
+		for (i = 1; i < 9; i++) {
+			fst_check_int_equals(m[i], 0);
+		}
+	}
+	FST_TEST_END()
+
 	/* locally generated audio before forwarding (e.g. ringback) leaves forwarded timestamps as they are */
 	FST_TEST_BEGIN(test_generated_audio_before_forwarding_keeps_forwarded_timestamps)
 	{

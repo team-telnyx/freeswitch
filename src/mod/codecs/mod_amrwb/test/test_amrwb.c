@@ -456,6 +456,20 @@ static int amrwb_answer_framing(switch_core_session_t *session, switch_bool_t pi
 	return amrwb_answer_on(session, pt, answer_fmtp, SDP_ANSWER);
 }
 
+static switch_frame_t amrwb_stub_frame;
+static int amrwb_stub_reads = 0;
+static uint32_t amrwb_stub_ts = 0;
+
+/* each packet right after the previous one */
+static switch_status_t amrwb_stub_read(switch_core_session_t *session, switch_frame_t **frame, switch_io_flag_t flags, int stream_id)
+{
+	amrwb_stub_reads++;
+	amrwb_stub_frame.timestamp = amrwb_stub_ts;
+	amrwb_stub_ts += amrwb_stub_frame.samples;
+	*frame = &amrwb_stub_frame;
+	return SWITCH_STATUS_SUCCESS;
+}
+
 FST_CORE_BEGIN(".")
 {
 	FST_SUITE_BEGIN(test_amrwb)
@@ -2617,6 +2631,107 @@ FST_CORE_BEGIN(".")
 		}
 		FST_TEST_END()
 
+
+		/* a payload of 3 frames is read out as 3 frames before the next packet is read */
+		FST_SESSION_BEGIN_RATE(amrwb_multi_frame_payload_is_read_out_before_the_next_packet, 16000)
+		{
+			switch_endpoint_interface_t *endpoint = switch_loadable_module_get_endpoint_interface("null");
+			switch_io_read_frame_t null_read = NULL;
+			switch_codec_t encoder = { 0 }, decoder = { 0 }, other = { 0 }, be = { 0 };
+			unsigned char frames[3][64], payload[512];
+			int16_t pcm[320];
+			uint32_t len, rate = 16000, total = 0;
+			unsigned int flag = 0;
+			switch_frame_t *read = NULL;
+			int f, i, reads = 0, changed_reads = 0, single_stamped = 0, chunks = 0, chunks_unstamped = 0;
+			uint32_t changed_len = 0;
+
+			fst_requires(endpoint);
+			for (i = 0; i < 320; i++) pcm[i] = (int16_t) (8000 * sin(2 * M_PI * 440 * i / 16000.0));
+			fst_requires(amrwb_init(&encoder, "octet-align=1", SWITCH_CODEC_FLAG_ENCODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			for (f = 0; f < 3; f++) {
+				len = sizeof(frames[f]);
+				fst_requires(switch_core_codec_encode(&encoder, NULL, pcm, sizeof(pcm), 16000, frames[f], &len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			}
+			switch_core_codec_destroy(&encoder);
+			fst_requires(amrwb_init(&decoder, "octet-align=1", SWITCH_CODEC_FLAG_DECODE, switch_core_session_get_pool(fst_session)) == SWITCH_STATUS_SUCCESS);
+
+			memset(&amrwb_stub_frame, 0, sizeof(amrwb_stub_frame));
+			amrwb_stub_frame.codec = &decoder;
+			amrwb_stub_frame.data = payload;
+			amrwb_stub_frame.datalen = amrwb_payload(frames, 3, SWITCH_TRUE, payload, sizeof(payload));
+			amrwb_stub_frame.buflen = sizeof(payload);
+			amrwb_stub_frame.samples = 3 * 320;
+			amrwb_stub_frame.rate = 16000;
+			amrwb_stub_frame.channels = 1;
+			amrwb_stub_frame.m = SWITCH_TRUE;
+
+			/* a read codec that encodes (SUCCESS, not NOOP): bandwidth efficient, the packets are octet aligned */
+			fst_requires(amrwb_init(&be, "octet-align=0", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, switch_core_session_get_pool(fst_session)) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_core_codec_init(&other, "L16", NULL, NULL, 8000, 20, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
+												NULL, switch_core_session_get_pool(fst_session)) == SWITCH_STATUS_SUCCESS);
+
+			/* nothing between the swap and its restore may leave the test early */
+			amrwb_stub_reads = 0;
+			amrwb_stub_ts = 0;
+			null_read = endpoint->io_routines->read_frame;
+			endpoint->io_routines->read_frame = amrwb_stub_read;
+			for (i = 0; i < 9; i++) {
+				if (switch_core_session_read_frame(fst_session, &read, SWITCH_IO_FLAG_NONE, 0) == SWITCH_STATUS_SUCCESS && read &&
+					!switch_test_flag(read, SFF_CNG)) {
+					total += read->datalen;
+					/* the chunks after a packet's first carry no timestamp: the writer stamps them */
+					if (i % 3) {
+						fst_check(!read->timestamp && !read->m);
+					}
+				}
+			}
+			reads = amrwb_stub_reads;
+
+			/* what is left for one read codec is dropped when another one is set: the next read reads a packet */
+			switch_core_session_read_frame(fst_session, &read, SWITCH_IO_FLAG_NONE, 0);
+			if (switch_core_session_set_read_codec(fst_session, &other) == SWITCH_STATUS_SUCCESS) {
+				changed_reads = amrwb_stub_reads;
+				changed_len = switch_core_session_read_frame(fst_session, &read, SWITCH_IO_FLAG_NONE, 0) == SWITCH_STATUS_SUCCESS && read ? read->datalen : 0;
+				changed_reads = amrwb_stub_reads - changed_reads;
+				switch_core_session_set_read_codec(fst_session, NULL);
+			}
+
+			/* re-encoded, after the 8 kHz codec (its resampler must not stay): a one-frame packet keeps its timestamp
+			 * and marker, the chunks of a 3-frame one get none */
+			if (switch_core_session_set_read_codec(fst_session, &be) == SWITCH_STATUS_SUCCESS) {
+				amrwb_stub_frame.datalen = amrwb_payload(frames, 1, SWITCH_TRUE, payload, sizeof(payload));
+				amrwb_stub_frame.samples = 320;
+				if (switch_core_session_read_frame(fst_session, &read, SWITCH_IO_FLAG_NONE, 0) == SWITCH_STATUS_SUCCESS && read &&
+					read->codec == &be && read->timestamp && read->m) {
+					single_stamped = 1;
+				}
+				amrwb_stub_frame.datalen = amrwb_payload(frames, 3, SWITCH_TRUE, payload, sizeof(payload));
+				amrwb_stub_frame.samples = 3 * 320;
+				for (i = 0; i < 3; i++) {
+					if (switch_core_session_read_frame(fst_session, &read, SWITCH_IO_FLAG_NONE, 0) == SWITCH_STATUS_SUCCESS && read &&
+						read->codec == &be) {
+						chunks++;
+						chunks_unstamped += !read->timestamp && !read->m;
+					}
+				}
+				switch_core_session_set_read_codec(fst_session, NULL);
+			}
+			endpoint->io_routines->read_frame = null_read;
+			UNPROTECT_INTERFACE(endpoint);
+
+			amrwb_check_int(reads, 3);
+			amrwb_check_int(total, 9 * 640);
+			amrwb_check_int(changed_reads, 1);
+			amrwb_check_int(changed_len, 320);
+			amrwb_check_int(single_stamped, 1);
+			amrwb_check_int(chunks, 3);
+			amrwb_check_int(chunks_unstamped, 3);
+			switch_core_codec_destroy(&be);
+			switch_core_codec_destroy(&other);
+			switch_core_codec_destroy(&decoder);
+		}
+		FST_SESSION_END()
 	}
 	FST_SUITE_END()
 }
