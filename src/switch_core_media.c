@@ -4870,6 +4870,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_set_codec(switch_core_session_
 	if (force != 2) {
 		switch_core_session_set_real_read_codec(session, &a_engine->read_codec);
 		switch_core_session_set_write_codec(session, &a_engine->write_codec);
+	} else {
+		/* the read codec was re-created in place: media bugs still decode with a copy of the old one */
+		switch_core_session_refresh_bug_codec(session);
 	}
 
 	a_engine->cur_payload_map->fmtp_out = switch_core_session_strdup(session, a_engine->write_codec.fmtp_out);

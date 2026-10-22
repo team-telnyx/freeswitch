@@ -333,6 +333,129 @@ static switch_status_t collect_remote_sdp_info_from_session(switch_core_session_
 	return SWITCH_STATUS_SUCCESS;
 }
 
+/* the null endpoint's read_frame, replaced for reads that return a given frame */
+static switch_io_read_frame_t null_read_frame = NULL;
+static switch_frame_t *next_frame = NULL;
+
+static switch_status_t next_frame_read(switch_core_session_t *session, switch_frame_t **frame, switch_io_flag_t flags, int stream_id)
+{
+	if (next_frame) {
+		*frame = next_frame;
+		next_frame = NULL;
+		return SWITCH_STATUS_SUCCESS;
+	}
+
+	return null_read_frame(session, frame, flags, stream_id);
+}
+
+/* the audio a media bug was given last */
+struct bug_audio {
+	int16_t data[SWITCH_RECOMMENDED_BUFFER_SIZE / 2];
+	uint32_t datalen;
+};
+
+static switch_bool_t read_bug_callback(switch_media_bug_t *bug, void *user_data, switch_abc_type_t type)
+{
+	struct bug_audio *audio = user_data;
+	switch_frame_t *frame;
+
+	if (type == SWITCH_ABC_TYPE_READ_REPLACE && (frame = switch_core_media_bug_get_read_replace_frame(bug)) && frame->datalen <= sizeof(audio->data)) {
+		memcpy(audio->data, frame->data, frame->datalen);
+		audio->datalen = frame->datalen;
+	}
+
+	return SWITCH_TRUE;
+}
+
+/* one AMR-WB payload of a sawtooth, encoded with the given fmtp */
+static uint32_t amrwb_test_payload(const char *fmtp, uint8_t *out, uint32_t out_size, switch_memory_pool_t *pool)
+{
+	switch_codec_t codec = { 0 };
+	int16_t pcm[320];
+	uint32_t out_len = out_size, rate = 16000, flag = 0;
+	int i;
+
+	for (i = 0; i < 320; i++) {
+		pcm[i] = (int16_t) ((i * 409) % 16000 - 8000);
+	}
+	if (switch_core_codec_init(&codec, "AMR-WB", NULL, fmtp, 16000, 20, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, NULL, pool) != SWITCH_STATUS_SUCCESS) {
+		return 0;
+	}
+	if (switch_core_codec_encode(&codec, NULL, pcm, sizeof(pcm), 16000, out, &out_len, &rate, &flag) != SWITCH_STATUS_SUCCESS) {
+		out_len = 0;
+	}
+	switch_core_codec_destroy(&codec);
+
+	return out_len;
+}
+
+/* a payload decoded by a new codec with the given fmtp */
+static uint32_t amrwb_reference_decode(const char *fmtp, uint8_t *payload, uint32_t len, int16_t *out, uint32_t out_size, switch_memory_pool_t *pool)
+{
+	switch_codec_t codec = { 0 };
+	uint32_t out_len = out_size, rate = 16000, flag = 0;
+
+	if (switch_core_codec_init(&codec, "AMR-WB", NULL, fmtp, 16000, 20, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, NULL, pool) != SWITCH_STATUS_SUCCESS) {
+		return 0;
+	}
+	if (switch_core_codec_decode(&codec, NULL, payload, len, 16000, out, &out_len, &rate, &flag) != SWITCH_STATUS_SUCCESS) {
+		out_len = 0;
+	}
+	switch_core_codec_destroy(&codec);
+
+	return out_len;
+}
+
+/* a codec with two implementations that differ only in the bitrate, and no matches_fmtp: a copy, which does not
+ * pass the bitrate, picks the one registered last */
+#define TWO_RATES_FILE "switch_sdp_two_rates"
+static int two_rates_inits = 0;
+
+static switch_status_t two_rates_init(switch_codec_t *codec, switch_codec_flag_t flags, const switch_codec_settings_t *codec_settings)
+{
+	two_rates_inits++;
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static switch_status_t two_rates_decode(switch_codec_t *codec, switch_codec_t *other_codec, void *encoded_data, uint32_t encoded_data_len,
+										uint32_t encoded_rate, void *decoded_data, uint32_t *decoded_data_len, uint32_t *decoded_rate,
+										unsigned int *flag)
+{
+	memset(decoded_data, 0, codec->implementation->decoded_bytes_per_packet);
+	*decoded_data_len = codec->implementation->decoded_bytes_per_packet;
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static switch_status_t two_rates_encode(switch_codec_t *codec, switch_codec_t *other_codec, void *decoded_data, uint32_t decoded_data_len,
+										uint32_t decoded_rate, void *encoded_data, uint32_t *encoded_data_len, uint32_t *encoded_rate,
+										unsigned int *flag)
+{
+	memset(encoded_data, 0, codec->implementation->encoded_bytes_per_packet);
+	*encoded_data_len = codec->implementation->encoded_bytes_per_packet;
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static switch_status_t two_rates_destroy(switch_codec_t *codec)
+{
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static switch_status_t two_rates_load(switch_loadable_module_interface_t **module_interface, switch_memory_pool_t *pool)
+{
+	switch_codec_interface_t *codec_interface;
+
+	*module_interface = switch_loadable_module_create_module_interface(pool, "mod_two_rates");
+	SWITCH_ADD_CODEC(codec_interface, "two rates");
+	switch_core_codec_add_implementation(pool, codec_interface, SWITCH_CODEC_TYPE_AUDIO, 115, "TWO-RATES", NULL,
+										 16000, 16000, 24000, 20000, 320, 640, 60, 1, 1,
+										 two_rates_init, two_rates_encode, two_rates_decode, two_rates_destroy);
+	switch_core_codec_add_implementation(pool, codec_interface, SWITCH_CODEC_TYPE_AUDIO, 115, "TWO-RATES", NULL,
+										 16000, 16000, 32000, 20000, 320, 640, 80, 1, 1,
+										 two_rates_init, two_rates_encode, two_rates_decode, two_rates_destroy);
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
 FST_CORE_BEGIN("./conf_sdp")
 {
 	FST_SUITE_BEGIN(switch_sdp)
@@ -865,6 +988,263 @@ FST_CORE_BEGIN("./conf_sdp")
 			local_sdp = switch_channel_get_variable(fst_channel, "rtp_local_sdp_str");
 			fst_requires(local_sdp);
 			fst_xcheck(strstr(local_sdp, "a=fmtp:104") != NULL, "hold answer still carries the AMR-WB fmtp");
+		}
+		FST_SESSION_END()
+
+		/*
+		 * With a media bug on the read stream, the bugs get the frames decoded by a copy
+		 * of the read codec. A re-offer that only changes the framing re-creates the read
+		 * codec in place; the copy has to follow, or the bugs get the audio decoded in the
+		 * old framing from then on.
+		 */
+		FST_SESSION_BEGIN(sdp_amrwb_framing_reset_refreshes_media_bug_codec)
+		{
+			switch_status_t status;
+			switch_media_handle_t *media_handle;
+			switch_core_media_params_t *mparams;
+			switch_codec_t *read_codec;
+			switch_endpoint_interface_t *endpoint;
+			switch_frame_t frame = { 0 }, *read_frame = NULL;
+			switch_media_bug_t *bug = NULL;
+			struct bug_audio audio = { { 0 } };
+			uint8_t payload_be[64], payload_oa[64];
+			uint32_t len_be, len_oa;
+			int16_t expected[320];
+			uint8_t match = 0, p = 0;
+
+			const char *offer_be =
+				"v=0\r\n"
+				"o=- 6 1 IN IP4 198.51.100.1\r\n"
+				"s=-\r\n"
+				"t=0 0\r\n"
+				"m=audio 56210 RTP/AVP 104\r\n"
+				"c=IN IP4 198.51.100.1\r\n"
+				"a=rtpmap:104 AMR-WB/16000\r\n"
+				"a=fmtp:104 mode-set=2\r\n"
+				"a=sendrecv\r\n";
+
+			const char *offer_oa =
+				"v=0\r\n"
+				"o=- 6 2 IN IP4 198.51.100.1\r\n"
+				"s=-\r\n"
+				"t=0 0\r\n"
+				"m=audio 56210 RTP/AVP 104\r\n"
+				"c=IN IP4 198.51.100.1\r\n"
+				"a=rtpmap:104 AMR-WB/16000\r\n"
+				"a=fmtp:104 octet-align=1; mode-set=2\r\n"
+				"a=sendrecv\r\n";
+
+			len_be = amrwb_test_payload("mode-set=2", payload_be, sizeof(payload_be), fst_pool);
+			len_oa = amrwb_test_payload("octet-align=1; mode-set=2", payload_oa, sizeof(payload_oa), fst_pool);
+			fst_requires(len_be && len_oa);
+
+			switch_channel_set_variable(fst_channel, "telnyx-strict-codec-match", "true");
+
+			mparams = switch_core_session_alloc(fst_session, sizeof(switch_core_media_params_t));
+			mparams->inbound_codec_string = switch_core_session_strdup(fst_session, "AMR-WB");
+			mparams->outbound_codec_string = switch_core_session_strdup(fst_session, "AMR-WB");
+			mparams->rtpip = switch_core_session_strdup(fst_session, (char *)rx_host);
+
+			status = switch_media_handle_create(&media_handle, fst_session, mparams);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+
+			status = switch_core_media_prepare_codecs(fst_session, SWITCH_FALSE);
+			fst_requires(status == SWITCH_STATUS_SUCCESS);
+
+			match = switch_core_media_negotiate_sdp(fst_session, offer_be, &p, SDP_OFFER);
+			fst_requires(match == 1);
+			read_codec = switch_core_session_get_read_codec(fst_session);
+			fst_requires(read_codec && switch_core_codec_ready(read_codec) && !strcasecmp(read_codec->implementation->iananame, "AMR-WB"));
+			/* the null endpoint keeps reading with its own L16 codec; a SIP channel reads with the negotiated one */
+			fst_requires(switch_core_session_set_read_codec(fst_session, read_codec) == SWITCH_STATUS_SUCCESS);
+
+			fst_requires(switch_core_media_bug_add(fst_session, "bug_codec_test", NULL, read_bug_callback, &audio, 0, SMBF_READ_REPLACE, &bug) == SWITCH_STATUS_SUCCESS);
+
+			fst_requires((endpoint = switch_loadable_module_get_endpoint_interface("null")));
+			fst_requires(endpoint->io_routines && endpoint->io_routines->read_frame);
+			null_read_frame = endpoint->io_routines->read_frame;
+			endpoint->io_routines->read_frame = next_frame_read;
+
+			frame.codec = read_codec;
+			frame.samples = 320;
+			frame.rate = 16000;
+			frame.channels = 1;
+
+			/* the first read with the bug copies the read codec */
+			frame.data = payload_be;
+			frame.datalen = frame.buflen = len_be;
+			next_frame = &frame;
+			status = switch_core_session_read_frame(fst_session, &read_frame, SWITCH_IO_FLAG_NONE, 0);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			fst_check(amrwb_reference_decode("mode-set=2", payload_be, len_be, expected, sizeof(expected), fst_pool) == sizeof(expected));
+			fst_check(audio.datalen == sizeof(expected) && !memcmp(audio.data, expected, sizeof(expected)));
+
+			/* framing changed: the read codec is re-created in place. Checks only until the null endpoint is restored */
+			match = switch_core_media_negotiate_sdp(fst_session, offer_oa, &p, SDP_OFFER);
+			fst_check(match == 1);
+			fst_check(switch_core_codec_ready(read_codec));
+			fst_check(read_codec->fmtp_in && strstr(read_codec->fmtp_in, "octet-align=1"));
+
+			frame.data = payload_oa;
+			frame.datalen = frame.buflen = len_oa;
+			frame.timestamp = 320;
+			next_frame = &frame;
+			audio.datalen = 0;
+			status = switch_core_session_read_frame(fst_session, &read_frame, SWITCH_IO_FLAG_NONE, 0);
+
+			endpoint->io_routines->read_frame = null_read_frame;
+			next_frame = NULL;
+			UNPROTECT_INTERFACE(endpoint);
+			switch_core_media_bug_remove(fst_session, &bug);
+			switch_core_session_set_read_codec(fst_session, NULL);
+
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			fst_check(amrwb_reference_decode("octet-align=1; mode-set=2", payload_oa, len_oa, expected, sizeof(expected), fst_pool) == sizeof(expected));
+			fst_xcheck(audio.datalen == sizeof(expected) && !memcmp(audio.data, expected, sizeof(expected)),
+					   "the media bug gets an octet-aligned payload after the re-offer decoded as octet-aligned");
+		}
+		FST_SESSION_END()
+
+		/*
+		 * A read codec re-created in place with another implementation and set again (mod_loopback's tech_init
+		 * when a frame of another codec reaches it): set_read_codec returns early on the same pointer, and the
+		 * media bugs' copy has to follow the frames' codec, or A-law is decoded as u-law.
+		 */
+		FST_SESSION_BEGIN(sdp_read_codec_recreated_in_place_refreshes_media_bug_codec)
+		{
+			switch_status_t status;
+			switch_codec_t *codec, reference = { 0 };
+			switch_endpoint_interface_t *endpoint;
+			switch_frame_t frame = { 0 }, *read_frame = NULL;
+			switch_media_bug_t *bug = NULL;
+			struct bug_audio audio = { { 0 } };
+			uint8_t payload[160];
+			int16_t expected[160];
+			uint32_t expected_len = sizeof(expected), rate = 8000, flag = 0;
+			int i, pcmu_ok = 0;
+
+			for (i = 0; i < 160; i++) {
+				payload[i] = (uint8_t) (i * 37 + 5);
+			}
+			codec = switch_core_session_alloc(fst_session, sizeof(*codec));
+			fst_requires(switch_core_codec_init(codec, "PCMU", NULL, NULL, 8000, 20, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
+												NULL, switch_core_session_get_pool(fst_session)) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_core_codec_init(&reference, "PCMA", NULL, NULL, 8000, 20, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
+												NULL, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_core_codec_decode(&reference, NULL, payload, sizeof(payload), 8000, expected, &expected_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			switch_core_codec_destroy(&reference);
+			fst_requires(expected_len == sizeof(expected));
+
+			fst_requires(switch_core_session_set_read_codec(fst_session, codec) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_core_media_bug_add(fst_session, "bug_codec_test", NULL, read_bug_callback, &audio, 0, SMBF_READ_REPLACE, &bug) == SWITCH_STATUS_SUCCESS);
+			fst_requires((endpoint = switch_loadable_module_get_endpoint_interface("null")));
+			fst_requires(endpoint->io_routines && endpoint->io_routines->read_frame);
+			null_read_frame = endpoint->io_routines->read_frame;
+			endpoint->io_routines->read_frame = next_frame_read;
+
+			frame.codec = codec;
+			frame.data = payload;
+			frame.datalen = frame.buflen = sizeof(payload);
+			frame.samples = 160;
+			frame.rate = 8000;
+			frame.channels = 1;
+
+			/* the first read with the bug copies PCMU. Checks only until the null endpoint is restored */
+			next_frame = &frame;
+			status = switch_core_session_read_frame(fst_session, &read_frame, SWITCH_IO_FLAG_NONE, 0);
+			pcmu_ok = status == SWITCH_STATUS_SUCCESS && audio.datalen == sizeof(expected);
+
+			/* as tech_init: destroyed, initialised again in the same struct, set again */
+			switch_core_codec_destroy(codec);
+			status = switch_core_codec_init(codec, "PCMA", NULL, NULL, 8000, 20, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
+											NULL, switch_core_session_get_pool(fst_session));
+			if (status == SWITCH_STATUS_SUCCESS) {
+				switch_core_session_set_read_codec(fst_session, codec);
+				next_frame = &frame;
+				audio.datalen = 0;
+				status = switch_core_session_read_frame(fst_session, &read_frame, SWITCH_IO_FLAG_NONE, 0);
+			}
+
+			endpoint->io_routines->read_frame = null_read_frame;
+			next_frame = NULL;
+			UNPROTECT_INTERFACE(endpoint);
+			switch_core_media_bug_remove(fst_session, &bug);
+			switch_core_session_set_read_codec(fst_session, NULL);
+			if (switch_core_codec_ready(codec)) {
+				switch_core_codec_destroy(codec);
+			}
+
+			fst_check(pcmu_ok);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+			fst_xcheck(audio.datalen == sizeof(expected) && !memcmp(audio.data, expected, sizeof(expected)),
+					   "the media bug gets the A-law payload decoded as A-law");
+		}
+		FST_SESSION_END()
+
+		/*
+		 * The media bugs' copy of the read codec may land on another implementation than the read codec (the copy
+		 * does not pass the bitrate). With the read codec unchanged, the copy is made once, not on every frame.
+		 */
+		FST_SESSION_BEGIN(sdp_media_bug_codec_copied_once_when_the_copy_picks_another_bitrate)
+		{
+			switch_status_t status = SWITCH_STATUS_SUCCESS;
+			switch_codec_t *codec;
+			switch_endpoint_interface_t *endpoint;
+			switch_frame_t frame = { 0 }, *read_frame = NULL;
+			switch_media_bug_t *bug = NULL;
+			struct bug_audio audio = { { 0 } };
+			uint8_t payload[60] = { 0 };
+			int i, inits_after_first = -1, inits_after_all = -1, codec_ok = 0, frames_ok = 1;
+
+			/* stays loaded: the session's recording keeps the bugs' copy, and so the module, until the session ends */
+			fst_requires(switch_loadable_module_build_dynamic((char *) TWO_RATES_FILE, two_rates_load, NULL, NULL, SWITCH_FALSE) == SWITCH_STATUS_SUCCESS);
+
+			codec = switch_core_session_alloc(fst_session, sizeof(*codec));
+			if (switch_core_codec_init_with_bitrate(codec, "TWO-RATES", NULL, NULL, 16000, 20, 1, 24000, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
+													NULL, switch_core_session_get_pool(fst_session)) == SWITCH_STATUS_SUCCESS) {
+				codec_ok = codec->implementation->bits_per_second == 24000;
+				switch_core_session_set_read_codec(fst_session, codec);
+				switch_core_media_bug_add(fst_session, "bug_codec_test", NULL, read_bug_callback, &audio, 0, SMBF_READ_REPLACE, &bug);
+
+				if ((endpoint = switch_loadable_module_get_endpoint_interface("null"))) {
+					null_read_frame = endpoint->io_routines->read_frame;
+					endpoint->io_routines->read_frame = next_frame_read;
+
+					frame.codec = codec;
+					frame.data = payload;
+					frame.datalen = frame.buflen = sizeof(payload);
+					frame.samples = 320;
+					frame.rate = 16000;
+					frame.channels = 1;
+
+					for (i = 0; i < 5; i++) {
+						frame.timestamp = i * 320;
+						next_frame = &frame;
+						audio.datalen = 0;
+						status = switch_core_session_read_frame(fst_session, &read_frame, SWITCH_IO_FLAG_NONE, 0);
+						frames_ok = frames_ok && status == SWITCH_STATUS_SUCCESS && audio.datalen == 640;
+						if (!i) {
+							inits_after_first = two_rates_inits;
+						}
+					}
+					inits_after_all = two_rates_inits;
+
+					endpoint->io_routines->read_frame = null_read_frame;
+					next_frame = NULL;
+					UNPROTECT_INTERFACE(endpoint);
+				}
+
+				if (bug) {
+					switch_core_media_bug_remove(fst_session, &bug);
+				}
+				switch_core_session_set_read_codec(fst_session, NULL);
+				switch_core_codec_destroy(codec);
+			}
+
+			fst_check(codec_ok);
+			fst_check(frames_ok);
+			fst_check(inits_after_first > 0);
+			fst_xcheck(inits_after_all == inits_after_first, "the media bug codec is copied once, not on every frame");
 		}
 		FST_SESSION_END()
 

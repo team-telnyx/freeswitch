@@ -498,6 +498,8 @@ cnt_with_cng:
 
 	if (switch_test_flag(session, SSF_READ_CODEC_RESET)) {
 		switch_core_codec_reset(session->read_codec);
+		/* with media bugs the frames are decoded by a copy of the read codec, reset it as well */
+		switch_core_session_refresh_bug_codec(session);
 		switch_clear_flag(session, SSF_READ_CODEC_RESET);
 	}
 
@@ -551,10 +553,20 @@ cnt_with_cng:
 						goto done;
 					}
 
+					/* the frames' codec re-created in place with another implementation (mod_loopback's tech_init sets it
+					 * again, and set_read_codec returns early on the same pointer): the copy follows it */
+					if (switch_core_codec_ready(&session->bug_codec) && switch_core_codec_ready(read_frame->codec) &&
+						session->bug_codec_src_impl != read_frame->codec->implementation) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Destroying BUG Codec %s:%d\n",
+										  session->bug_codec.implementation->iananame, session->bug_codec.implementation->ianacode);
+						switch_core_codec_destroy(&session->bug_codec);
+					}
+
 					if (!switch_core_codec_ready(&session->bug_codec) && switch_core_codec_ready(read_frame->codec)) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Setting BUG Codec %s:%d\n",
 										  read_frame->codec->implementation->iananame, read_frame->codec->implementation->ianacode);
 						switch_core_codec_copy(read_frame->codec, &session->bug_codec, NULL, NULL);
+						session->bug_codec_src_impl = read_frame->codec->implementation;
 						if (!switch_core_codec_ready(&session->bug_codec)) {
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "%s Error setting BUG codec %s!\n",
 											  switch_core_session_get_name(session), read_frame->codec->implementation->iananame);
