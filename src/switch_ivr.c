@@ -681,8 +681,9 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 							switch_core_session_rwunlock(peer_session);
 						} else {
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-											  "%s Stopping broadcast: bridge peer %s is gone\n",
-											  switch_channel_get_name(channel), peer_uuid);
+											  "%s Stopping broadcast: bridge peer %s is gone, broadcast generation %u\n",
+											  switch_channel_get_name(channel), peer_uuid,
+											  switch_channel_get_broadcast_generation(channel));
 							switch_channel_set_variable_printf(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, "%u",
 															   switch_channel_get_broadcast_generation(channel));
 							switch_channel_set_flag(channel, CF_STOP_BROADCAST);
@@ -706,7 +707,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 				switch_channel_set_variable_printf(channel, "total_loops", "%d", loops);
 
 				if (switch_core_session_execute_application_event(session, app_name, app_arg) != SWITCH_STATUS_SUCCESS) {
-					if (!inner || switch_channel_test_flag(channel, CF_STOP_BROADCAST)) switch_channel_clear_flag(channel, CF_BROADCAST);
+					if (raised_broadcast || switch_channel_test_flag(channel, CF_STOP_BROADCAST)) switch_channel_clear_flag(channel, CF_BROADCAST);
 					break;
 				}
 
@@ -729,7 +730,15 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 				}
 			}
 
-			if (!inner) {
+			/* Only the frame that raised the flag may drop it. inner does not
+			 * track nesting on a bridged channel: it counts a broadcast that
+			 * starts while the channel is unbridged or holds the b leg, so it is
+			 * zero in a nested frame there and that frame would clear a flag the
+			 * outer playback still needs. Every writer tests this flag, so
+			 * dropping it early loses a peer hangup arriving while the outer
+			 * playback is still running. raised_broadcast implies !inner, so
+			 * this is the same test everywhere else. */
+			if (raised_broadcast) {
 				switch_channel_clear_flag(channel, CF_BROADCAST);
 			}
 
@@ -748,9 +757,9 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 			 * inner here: on a bridged channel it is zero in the nested frame
 			 * too, because it only counts a broadcast that starts while the
 			 * channel is unbridged or holds the b leg.
-			 * Must stay below the CF_BROADCAST clears above: a setter reads the
-			 * generation only after it sees CF_BROADCAST, so closing after the
-			 * flag is down is what makes a late write detectable. */
+			 * Must stay below the CF_BROADCAST clears above: a setter writes the
+			 * marker only while it still sees CF_BROADCAST, so closing the
+			 * generation after the flag is down invalidates any such write. */
 			if (raised_broadcast) {
 				switch_channel_inc_broadcast_generation(channel);
 			}
