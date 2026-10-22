@@ -2245,7 +2245,6 @@ AC_CONFIG_FILES([Makefile
 		src/mod/event_handlers/mod_rayo/Makefile
 		src/mod/event_handlers/mod_smpp/Makefile
 		src/mod/event_handlers/mod_snmp/Makefile
-		src/mod/event_handlers/mod_event_zmq/Makefile
 		src/mod/formats/mod_imagick/Makefile
 		src/mod/formats/mod_local_stream/Makefile
 		src/mod/formats/mod_native_file/Makefile
@@ -2317,6 +2316,8 @@ AC_CONFIG_FILES([Makefile
 		libs/xmlrpc-c/stamp-h
 		scripts/gentls_cert])
 
+dnl Optional extra AC_CONFIG_FILES outputs (e.g. extra modules), written by the build; absent in a plain tree
+m4_sinclude([build/modules-extra.m4])dnl
 AM_CONDITIONAL(ISLINUX, [test `uname -s` = Linux])
 AM_CONDITIONAL(ISMAC, [test `uname -s` = Darwin])
 AM_CONDITIONAL(ISFREEBSD, [test `uname -s` = FreeBSD])

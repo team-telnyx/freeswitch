@@ -575,6 +575,15 @@ $(switch_builddir)/build/print_git_revision: $(switch_srcdir)/build/print_git_re
 
 src/switch_version.lo: src/include/switch_version.h
 
+# Optional build-provided version overrides in src/include/switch_version_local.h (not part of the source tree).
+# When the header exists, the version object is compiled with SWITCH_VERSION_LOCAL_H defined, so its compile command
+# records the header's presence, and it is rebuilt when the header changes. The target is named through a variable so
+# automake still generates its own compile rule for the object.
+switch_version_obj = src/libfreeswitch_la-switch_version.lo
+switch_version_local = $(sort $(wildcard $(switch_srcdir)/src/include/switch_version_local.h $(switch_builddir)/src/include/switch_version_local.h))
+$(switch_version_obj): $(switch_version_local)
+$(switch_version_obj): libfreeswitch_la_CFLAGS += $(if $(switch_version_local),-DSWITCH_VERSION_LOCAL_H)
+
 src/include/switch_version.h: src/include/switch_version.h.in Makefile $(switch_builddir)/build/print_git_revision $(libfreeswitch_la_SOURCES) $(library_include_HEADERS)
 	@cat $< > $@; \
 	if [ -d $(switch_srcdir)/.git ] && [ -n "$$(which git)" ]; then \
