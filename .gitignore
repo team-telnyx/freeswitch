@@ -106,6 +106,7 @@ Release/
 /build/getlib.sh
 /build/getg729.sh
 /build/getsounds.sh
+/build/modules-extra.m4
 /build/Makefile
 /build/Makefile.in
 /build/modmake.rules

@@ -61,6 +61,20 @@ static const char *amr_offer(switch_core_session_t *session, int version, const 
 		"a=sendrecv\r\n", version, fmtp);
 }
 
+/* an offer without a=fmtp: RFC 4867 defaults, bandwidth efficient */
+static const char *amr_offer_without_fmtp(switch_core_session_t *session, int version)
+{
+	return switch_core_session_sprintf(session,
+		"v=0\r\n"
+		"o=- 1 %d IN IP4 198.51.100.1\r\n"
+		"s=-\r\n"
+		"t=0 0\r\n"
+		"m=audio 56210 RTP/AVP 96\r\n"
+		"c=IN IP4 198.51.100.1\r\n"
+		"a=rtpmap:96 AMR/8000\r\n"
+		"a=sendrecv\r\n", version);
+}
+
 static const char *amr_offer_two_maps(switch_core_session_t *session, int version, const char *fmtp_96, const char *fmtp_97)
 {
 	return switch_core_session_sprintf(session,
@@ -276,6 +290,61 @@ static switch_status_t amr_reload_module(void)
 	return switch_loadable_module_load_module(SWITCH_GLOBAL_dirs.mod_dir, "mod_amr", SWITCH_TRUE, &err);
 }
 
+static char *amr_test_settings;
+
+static switch_xml_t amr_settings_config(const char *section, const char *tag_name, const char *key_name, const char *key_value,
+										switch_event_t *params, void *user_data)
+{
+	if (!amr_test_settings || zstr(section) || strcmp(section, "configuration") || zstr(key_value) || strcmp(key_value, "amr.conf")) {
+		return NULL;
+	}
+
+	return switch_xml_parse_str_dup(amr_test_settings);
+}
+
+static switch_status_t amr_load_settings(switch_memory_pool_t *pool, int volte, const char *mode_set, const char *fmtp_extra)
+{
+	switch_status_t status;
+
+	amr_test_settings = switch_core_sprintf(pool,
+		"<document type=\"freeswitch/xml\">"
+		"<section name=\"configuration\">"
+		"<configuration name=\"amr.conf\"><settings>"
+		"<param name=\"default-bitrate\" value=\"7\"/>"
+		"<param name=\"adjust-bitrate\" value=\"1\"/>"
+		"<param name=\"volte\" value=\"%d\"/>"
+		"%s%s%s%s%s%s"
+		"</settings></configuration>"
+		"</section>"
+		"</document>", volte,
+		mode_set ? "<param name=\"mode-set\" value=\"" : "", mode_set ? mode_set : "", mode_set ? "\"/>" : "",
+		fmtp_extra ? "<param name=\"fmtp-extra\" value=\"" : "", fmtp_extra ? fmtp_extra : "", fmtp_extra ? "\"/>" : "");
+
+	switch_xml_bind_search_function(amr_settings_config, switch_xml_parse_section_string("configuration"), NULL);
+	status = amr_reload_module();
+	switch_xml_unbind_search_function_ptr(amr_settings_config);
+	amr_test_settings = NULL;
+
+	return status;
+}
+
+static const char *amr_fmtp_out(switch_memory_pool_t *pool, const char *fmtp)
+{
+	switch_codec_t codec = { 0 };
+	switch_codec_settings_t codec_settings = {{ 0 }};
+	const char *fmtp_out;
+
+	if (switch_core_codec_init(&codec, "AMR", "mod_amr", fmtp, 8000, 20, 1,
+							   SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, &codec_settings, pool) != SWITCH_STATUS_SUCCESS) {
+		return "(codec init failed)";
+	}
+
+	fmtp_out = switch_core_strdup(pool, codec.fmtp_out ? codec.fmtp_out : "(null)");
+	switch_core_codec_destroy(&codec);
+
+	return fmtp_out;
+}
+
 FST_CORE_BEGIN(".")
 {
 	FST_SUITE_BEGIN(test_amr)
@@ -339,13 +408,55 @@ FST_CORE_BEGIN(".")
 		}
 		FST_SESSION_END()
 
-		FST_SESSION_BEGIN(amr_legacy_reoffer_keeps_stale_framing)
+		FST_SESSION_BEGIN(amr_reoffer_octet_aligned_to_bandwidth_efficient)
 		{
 			amr_reoffer_result_t result = amr_reoffer(fst_session, NULL, AMR_FMTP_OA, amr_offer(fst_session, 2, AMR_FMTP_BE), AMR_FMTP_BE);
 
 			fst_requires(result.negotiated);
-			fst_xcheck(!result.codec_reset, "without strict matching the codec is kept across the re-offer");
-			fst_xcheck(result.framing_stale, "the kept codec still runs the old framing");
+			fst_xcheck(result.codec_reset, "without strict matching a framing change still resets the codec");
+			fst_xcheck(!result.framing_stale, "the codec runs the new framing");
+			fst_xcheck(result.decoded, "bandwidth efficient frames decode after the re-offer");
+			fst_xcheck(result.answer_octet_align == 0, "the answer advertises bandwidth efficient framing");
+			fst_xcheck(result.stale_decode_failures == 0, "octet aligned frames sent before the answer do not fail to decode");
+		}
+		FST_SESSION_END()
+
+		FST_SESSION_BEGIN(amr_reoffer_bandwidth_efficient_to_octet_aligned)
+		{
+			amr_reoffer_result_t result = amr_reoffer(fst_session, NULL, AMR_FMTP_BE, amr_offer(fst_session, 2, AMR_FMTP_OA), AMR_FMTP_OA);
+
+			fst_requires(result.negotiated);
+			fst_xcheck(result.codec_reset, "without strict matching a framing change still resets the codec");
+			fst_xcheck(!result.framing_stale, "the codec runs the new framing");
+			fst_xcheck(result.decoded, "octet aligned frames decode after the re-offer");
+			fst_xcheck(result.answer_octet_align == 1, "the answer advertises octet aligned framing");
+			fst_xcheck(result.stale_decode_failures == 0, "bandwidth efficient frames sent before the answer do not fail to decode");
+		}
+		FST_SESSION_END()
+
+		FST_SESSION_BEGIN(amr_reoffer_fmtp_change_without_framing_change_keeps_codec)
+		{
+			amr_reoffer_result_t result = amr_reoffer(fst_session, NULL, AMR_FMTP_OA,
+													  amr_offer(fst_session, 2, AMR_FMTP_OA "; max-red=0"), AMR_FMTP_OA);
+
+			fst_requires(result.negotiated);
+			fst_xcheck(!result.codec_reset, "without strict matching an fmtp change the codec ignores keeps the codec");
+			fst_xcheck(result.decoded, "octet aligned frames still decode");
+			fst_xcheck(result.answer_octet_align == 1, "the answer keeps the a=fmtp of the codec it kept");
+		}
+		FST_SESSION_END()
+
+		/* a re-offer without a=fmtp (a hold re-INVITE, say) offers the RFC 4867 default, bandwidth efficient: an
+		 * octet-aligned codec is re-created, and the answer does not claim octet-align=1 */
+		FST_SESSION_BEGIN(amr_reoffer_without_fmtp_is_bandwidth_efficient)
+		{
+			amr_reoffer_result_t result = amr_reoffer(fst_session, NULL, AMR_FMTP_OA, amr_offer_without_fmtp(fst_session, 2), AMR_FMTP_BE);
+
+			fst_requires(result.negotiated);
+			fst_xcheck(result.codec_reset, "the codec is re-created bandwidth efficient");
+			fst_xcheck(!result.framing_stale, "the codec runs bandwidth efficient framing");
+			fst_xcheck(result.decoded, "bandwidth efficient frames decode after the re-offer");
+			fst_xcheck(result.answer_octet_align != 1, "the answer does not advertise octet aligned framing");
 		}
 		FST_SESSION_END()
 
@@ -410,6 +521,24 @@ FST_SESSION_BEGIN(amr_strict_reoffer_forced_framing_keeps_codec)
 		}
 		FST_SESSION_END()
 
+		/* with force-oa a re-offer without a=fmtp keeps the octet-aligned codec */
+		FST_SESSION_BEGIN(amr_reoffer_without_fmtp_with_force_oa_keeps_codec)
+		{
+			amr_reoffer_result_t result;
+
+			switch_xml_bind_search_function(amr_force_oa_config, switch_xml_parse_section_string("configuration"), NULL);
+			fst_requires(amr_reload_module() == SWITCH_STATUS_SUCCESS);
+
+			result = amr_reoffer(fst_session, NULL, AMR_FMTP_OA, amr_offer_without_fmtp(fst_session, 2), AMR_FMTP_OA);
+			switch_xml_unbind_search_function_ptr(amr_force_oa_config);
+
+			fst_requires(result.negotiated);
+			fst_xcheck(!result.codec_reset, "with force-oa the codec is kept");
+			fst_xcheck(result.decoded, "octet aligned frames still decode");
+			fst_xcheck(result.answer_octet_align == 1, "the answer keeps the a=fmtp of the codec it kept");
+		}
+		FST_SESSION_END()
+
 FST_TEST_BEGIN(amr_decode_octet_aligned_mode_7)
 		{
 			switch_codec_t read_codec = { 0 };
@@ -452,7 +581,61 @@ FST_TEST_BEGIN(amr_decode_octet_aligned_mode_7)
 			switch_core_codec_destroy(&read_codec);
 		}
 
-		FST_TEST_END()	}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(amr_answer_fmtp)
+		{
+			static const struct {
+				const char *offered;
+				const char *configured;
+				const char *mode_set;
+			} modes[] = {
+				{ NULL, NULL, NULL },
+				{ "0,2,7", NULL, "mode-set=0,2,7" },
+				{ NULL, "0,2,7", "mode-set=0,2,7" },
+				{ "0,2,7", "4,7", "mode-set=0,2,7" }
+			};
+			static const char *extras[] = { NULL, "mode-change-period=2" };
+			const char *empty_fmtp[] = { NULL, "" };
+			int m, volte, octet_align, e, f;
+
+			for (e = 0; e < 2; e++) {
+				for (volte = 0; volte < 2; volte++) {
+					for (m = 0; m < (int) (sizeof(modes) / sizeof(modes[0])); m++) {
+						if (amr_load_settings(fst_pool, volte, modes[m].configured, extras[e]) != SWITCH_STATUS_SUCCESS) {
+							fst_fail("mod_amr reloads with the test settings");
+							continue;
+						}
+
+						for (octet_align = 0; octet_align < 2; octet_align++) {
+							const char *offer = modes[m].offered ?
+								switch_core_sprintf(fst_pool, "octet-align=%d; mode-set=%s", octet_align, modes[m].offered) :
+								switch_core_sprintf(fst_pool, "octet-align=%d", octet_align);
+							const char *expected = switch_core_sprintf(fst_pool, "%s%soctet-align=%d%s%s%s",
+								modes[m].mode_set ? modes[m].mode_set : "", modes[m].mode_set ? ";" : "", octet_align,
+								volte ? ";max-red=0;mode-change-capability=2" : "",
+								extras[e] ? "; " : "", extras[e] ? extras[e] : "");
+
+							fst_check_string_equals(amr_fmtp_out(fst_pool, offer), expected);
+						}
+
+						if (!modes[m].offered && !modes[m].configured) {
+							for (f = 0; f < 2; f++) {
+								const char *expected = switch_core_sprintf(fst_pool, "octet-align=0%s%s%s",
+									volte ? ";max-red=0;mode-change-capability=2" : "",
+									extras[e] ? "; " : "", extras[e] ? extras[e] : "");
+
+								fst_check_string_equals(amr_fmtp_out(fst_pool, empty_fmtp[f]), expected);
+							}
+						}
+					}
+				}
+			}
+
+			fst_check(amr_reload_module() == SWITCH_STATUS_SUCCESS);
+		}
+		FST_TEST_END()
+	}
 	FST_SUITE_END()
 }
 FST_CORE_END()

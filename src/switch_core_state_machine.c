@@ -339,7 +339,6 @@ static void switch_core_standard_on_routing(switch_core_session_t *session)
 static void switch_core_standard_on_execute(switch_core_session_t *session)
 {
 	switch_caller_extension_t *extension;
-	const char *uuid;
 	const char *next_application_on_execute = NULL; 
 	const char *next_application_data_on_execute = NULL;
 
@@ -397,23 +396,11 @@ static void switch_core_standard_on_execute(switch_core_session_t *session)
 
 	}
 
+	/* The dialplan ended with the blind transfer still unconfirmed: report failure and park. */
 	if (switch_channel_ready(session->channel) && switch_channel_get_state(session->channel) == CS_EXECUTE &&
-		switch_channel_test_flag(session->channel, CF_CONFIRM_BLIND_TRANSFER) &&
-		(uuid = switch_channel_get_variable(session->channel, "blind_transfer_uuid"))) {
-		switch_core_session_t *other_session;
-
-		if ((other_session = switch_core_session_locate(uuid))) {
-			switch_core_session_message_t msg = { 0 };
-			msg.message_id = SWITCH_MESSAGE_INDICATE_BLIND_TRANSFER_RESPONSE;
-			msg.from = __FILE__;
-			msg.numeric_arg = 0;
-			switch_core_session_receive_message(other_session, &msg);
-			switch_core_session_rwunlock(other_session);
-
-			switch_channel_set_variable(session->channel, "park_timeout", "10:blind_transfer");
-			switch_channel_set_state(session->channel, CS_PARK);
-			switch_channel_clear_flag(session->channel, CF_CONFIRM_BLIND_TRANSFER);
-		}
+		switch_ivr_blind_transfer_ack(session, SWITCH_FALSE) == SWITCH_STATUS_SUCCESS) {
+		switch_channel_set_variable(session->channel, "park_timeout", "10:blind_transfer");
+		switch_channel_set_state(session->channel, CS_PARK);
 	}
 
 	if (switch_channel_ready(session->channel) && switch_channel_get_state(session->channel) == CS_EXECUTE) {
@@ -1006,6 +993,18 @@ SWITCH_DECLARE(void) switch_core_session_hangup_state(switch_core_session_t *ses
 
 	switch_channel_set_timestamps(session->channel);
 	switch_channel_set_callstate(session->channel, CCS_HANGUP);
+
+	/* A leg still waiting for blind-transfer confirmation is going away: tell the
+	   parked transferor the transfer failed, or it waits for park_timeout.
+	   switch_ivr_blind_transfer_ack() tests the flag and then clears it, so on this leg's
+	   own thread this fires at most once. With early hangup this runs on the caller's
+	   thread, where another sender of the result could pass the same test. The
+	   transferor's mod_sofia ignores the response if it has left the park. */
+	if (switch_ivr_blind_transfer_ack(session, SWITCH_FALSE) == SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+						  "%s hung up with blind transfer confirmation pending, sent the failure response to the transferor\n",
+						  switch_channel_get_name(session->channel));
+	}
 
 	/* Export JB stats before hangup handlers run, while JB still exists */
 	switch_core_media_export_jb_stats(session);

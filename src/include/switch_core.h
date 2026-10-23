@@ -363,6 +363,17 @@ SWITCH_DECLARE(void) switch_core_media_bug_inuse(switch_media_bug_t *bug, switch
 SWITCH_DECLARE(void *) switch_core_media_bug_get_user_data(_In_ switch_media_bug_t *bug);
 
 /*!
+  \brief Replace the private data of a media bug
+  \param bug the bug to set the data on
+  \param user_data the new private data, or NULL
+  \note A callback that releases its own user_data must clear it here first, or
+  the core hands the stale pointer back as SWITCH_ABC_TYPE_DESTROY_USER_DATA.
+  The store is unsynchronized, so call it only where no other thread can be
+  walking to this bug: from the bug's own callback, or once it is unlinked.
+*/
+SWITCH_DECLARE(void) switch_core_media_bug_set_user_data(_In_ switch_media_bug_t *bug, _In_opt_ void *user_data);
+
+/*!
   \brief Obtain a replace frame from a media bug
   \param bug the bug to get the data from
 */
@@ -1785,6 +1796,22 @@ SWITCH_DECLARE(switch_status_t) switch_core_codec_init_with_bitrate(switch_codec
 																	uint32_t flags,
 																	const switch_codec_settings_t *codec_settings,
 																	switch_memory_pool_t *pool);
+
+/*!
+  \brief Check whether a codec's interface has an implementation that switch_core_codec_init_with_bitrate would select
+  for the given request, without initializing one
+  \param codec an initialized codec handle whose interface is searched
+  \param codec_name the codec name the request would use
+  \param modname the module name the request would use (NULL for any)
+  \param fmtp the fmtp the request would use
+  \param rate the rate the request would use (0 for any)
+  \param ms the packet interval in milliseconds to check
+  \param channels the number of channels the request would use (0 for any)
+  \param bitrate the bitrate the request would use (0 for any)
+  \return SWITCH_TRUE if such an implementation exists
+*/
+SWITCH_DECLARE(switch_bool_t) switch_core_codec_ptime_supported(const switch_codec_t *codec, const char *codec_name, const char *modname,
+																 const char *fmtp, uint32_t rate, int ms, int channels, uint32_t bitrate);
 
 SWITCH_DECLARE(switch_status_t) switch_core_codec_copy(switch_codec_t *codec, switch_codec_t *new_codec,
 													   const switch_codec_settings_t *codec_settings, switch_memory_pool_t *pool);

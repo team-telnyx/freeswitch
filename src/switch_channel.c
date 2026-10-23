@@ -1851,6 +1851,20 @@ SWITCH_DECLARE(uint32_t) switch_channel_test_flag(switch_channel_t *channel, swi
 	return r;
 }
 
+SWITCH_DECLARE(switch_bool_t) switch_channel_test_and_clear_flag(switch_channel_t *channel, switch_channel_flag_t flag)
+{
+	switch_bool_t r;
+
+	switch_assert(channel && channel->flag_mutex);
+
+	switch_mutex_lock(channel->flag_mutex);
+	r = channel->flags[flag] ? SWITCH_TRUE : SWITCH_FALSE;
+	channel->flags[flag] = 0;
+	switch_mutex_unlock(channel->flag_mutex);
+
+	return r;
+}
+
 SWITCH_DECLARE(switch_bool_t) switch_channel_set_flag_partner(switch_channel_t *channel, switch_channel_flag_t flag)
 {
 	const char *uuid;
@@ -4309,6 +4323,17 @@ SWITCH_DECLARE(switch_status_t) switch_channel_perform_mark_answered(switch_chan
 		&& (other_session = switch_core_session_locate(uuid))) {
 		switch_core_session_kill_channel(other_session, SWITCH_SIG_BREAK);
 		switch_core_session_rwunlock(other_session);
+	}
+
+	/* A bridge to this leg started on early media and deferred a blind transfer confirmation
+	   (INDICATE_BRIDGE set the variable): report success now. A leg that is not bridged yet gets
+	   its success from the bridge start. */
+	if ((uuid = switch_channel_get_variable_dup(channel, "blind_transfer_deferred_uuid", SWITCH_TRUE, -1))) {
+		switch_channel_set_variable(channel, "blind_transfer_deferred_uuid", NULL);
+		if ((other_session = switch_core_session_locate(uuid))) {
+			switch_ivr_blind_transfer_ack(other_session, SWITCH_TRUE);
+			switch_core_session_rwunlock(other_session);
+		}
 	}
 
 	if (switch_true(switch_channel_get_variable(channel, SWITCH_PASSTHRU_PTIME_MISMATCH_VARIABLE))) {

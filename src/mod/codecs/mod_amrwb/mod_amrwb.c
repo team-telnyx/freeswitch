@@ -55,8 +55,9 @@
  *
  * A received mode request (CMR 0-8) replaces the previous one and caps the encoding mode at the
  * highest mode of the mode-set not above it (the lowest one if none is), honouring
- * mode-change-neighbor and mode-change-period; CMR 15 ends a request, 9-14 are ignored (RFC 4867
- * 4.3.1, TS 26.114 7.5.2.1.2.2). The session read codec, or the media bug copy of it, passes them to
+ * mode-change-neighbor and mode-change-period; CMR 15 ends a request. CMR 9-14, and a mode outside
+ * the mode-set of the received fmtp, are ignored (RFC 4867 4.3.1); with mode-set-overwrite a mode of
+ * that mode-set we do not encode is followed (TS 26.114 7.5.2.1.2.2). The session read codec, or the media bug copy of it, passes them to
  * the session write codec; a request stays across a codec reset (switch_core_codec_reset), as does
  * the encoder's mode stepping. Undecodable payloads (also: more than 3 bytes after the frames,
  * unless RTP padding) are concealed as lost frames, their CMR ignored, with a WARNING at the 1st,
@@ -189,6 +190,12 @@ typedef enum {
 #define SWITCH_AMRWB_CMR_NONE 15
 
 #define SWITCH_AMRWB_OUT_MAX_SIZE 62
+#define SWITCH_AMRWB_FRAME_US 20000
+#define SWITCH_AMRWB_FRAME_TS 320
+/* encodes without a report (not sent over RTP) before the phase goes back to counting encodes */
+#define SWITCH_AMRWB_UNSENT_MAX 50
+/* consecutive reports with the same offset from the input's timestamps before a block is taken from them */
+#define SWITCH_AMRWB_SRC_TRUSTED 2
 
 struct amrwb_context {
 	/* first: kept across switch_core_codec_reset, the other leg's encoder may hold the mutex */
@@ -197,6 +204,8 @@ struct amrwb_context {
 	void *encoder_state;
 	void *decoder_state;
 	uint16_t enc_modes;
+	/* the mode-set of the received fmtp (0: none, any mode): mode requests outside it are ignored */
+	uint16_t peer_modes;
 	switch_byte_t enc_mode;
 	uint32_t change_period;
 	switch_byte_t flags;
@@ -208,7 +217,25 @@ struct amrwb_context {
 	struct amrwb_cmr_slot *session_cmr;
 	uint32_t id;
 	switch_byte_t cur_mode;
+	/* frame-block of the next encode; with the RTP timestamps the core reports ("sent") the receiver's count */
 	uint32_t frames;
+	/* when the frame-block after the last encoded one is due (monotonic), 0 before the first */
+	switch_time_t frame_due;
+	uint32_t sent_frame;
+	uint32_t sent_ts;
+	switch_bool_t sent_valid;
+	/* encodes not reported yet, oldest first: queued or being sent */
+	uint32_t unsent;
+	/* the newest of them whose block is not known (from an encode after a pause or after a frame not sent);
+	 * unplaced_next: the next encode is such one too */
+	uint32_t unplaced;
+	switch_bool_t unplaced_next;
+	/* RTP timestamps the core keeps from the input of each encode not reported yet (0: none), oldest at src_head;
+	 * src_offset: what the reports add to them on the wire, trusted once src_seen consecutive reports agree */
+	uint32_t src_ts[SWITCH_AMRWB_UNSENT_MAX];
+	uint32_t src_head;
+	uint32_t src_offset;
+	uint32_t src_seen;
 	/* enc_mode lowered or raised by adjust-bitrate (kept across switch_core_codec_reset) */
 	switch_bool_t adjusted;
 	uint32_t concealed;
@@ -221,6 +248,8 @@ struct amrwb_context {
 		switch_byte_t octet_align;
 		uint16_t answer_modes;
 		uint16_t enc_modes;
+		/* the mode-set the peer signalled (0: none) */
+		uint16_t peer_modes;
 		switch_byte_t neighbor;
 		uint32_t period;
 		/* crc / robust-sorting offered (as 0): returned in the answer */
@@ -270,14 +299,53 @@ static switch_byte_t amrwb_clamp_mode(struct amrwb_context *context, int mode)
 	return context->enc_mode;
 }
 
-/* mode-change-neighbor: one allowed mode per step; mode-change-period N: steps at every Nth frame */
-static switch_byte_t amrwb_next_mode(struct amrwb_context *context, switch_byte_t target)
+/* the block of the frame-block ts on the wire, counted from the last one sent */
+static uint32_t amrwb_block_of(struct amrwb_context *context, uint32_t ts)
+{
+	int32_t delta = (int32_t) (ts - context->sent_ts);
+
+	return context->sent_frame + (uint32_t) (delta >= 0 ? (delta + SWITCH_AMRWB_FRAME_TS / 2) / SWITCH_AMRWB_FRAME_TS : -((SWITCH_AMRWB_FRAME_TS / 2 - delta) / SWITCH_AMRWB_FRAME_TS));
+}
+
+/* mode-change-neighbor: one allowed mode per step; mode-change-period N: steps at every Nth frame-block. Once
+ * the core reports sent timestamps, the encodes not reported yet go out on the blocks after the last one sent,
+ * and no step on a frame whose block is not known: after a pause (encoded half a block or more past due) or
+ * after a frame not sent, until the report of that frame places it. A frame whose input timestamp the core
+ * keeps (src_ts, 0 if none) is placed by it, once the reports show the offset it goes out with */
+static switch_byte_t amrwb_next_mode(struct amrwb_context *context, switch_byte_t target, uint32_t src_ts)
 {
 	int m = target, step;
+	switch_time_t now = switch_mono_micro_time_now();
+	int64_t late = context->frame_due ? (int64_t) (now - context->frame_due) : 0;
+	switch_bool_t placed, paused;
+	int32_t delta;
+
+	if (context->unsent >= SWITCH_AMRWB_UNSENT_MAX) {
+		context->sent_valid = SWITCH_FALSE;
+		context->unsent = context->unplaced = 0;
+		context->unplaced_next = SWITCH_FALSE;
+		context->src_seen = 0;
+	}
+	paused = context->sent_valid && late >= SWITCH_AMRWB_FRAME_US / 2;
+	placed = !context->sent_valid || (!paused && !context->unplaced && !context->unplaced_next);
+
+	/* within the 2 s the RTP layer keeps a timestamp jump without rebasing it */
+	if (src_ts && context->sent_valid && context->src_seen >= SWITCH_AMRWB_SRC_TRUSTED &&
+		(delta = (int32_t) (src_ts + context->src_offset - context->sent_ts)) > 0 && delta <= 2 * 16000) {
+		context->frames = amrwb_block_of(context, src_ts + context->src_offset);
+		context->unplaced = 0;
+		context->unplaced_next = SWITCH_FALSE;
+		paused = SWITCH_FALSE;
+		placed = SWITCH_TRUE;
+	}
+
+	if (!context->frame_due || late > -(SWITCH_AMRWB_FRAME_US / 2)) {
+		context->frame_due = now;
+	}
 
 	if (context->cur_mode >= SWITCH_AMRWB_MODES - 1) {
 		context->cur_mode = target;
-	} else if (context->cur_mode != target && (context->change_period < 2 || context->frames % context->change_period == 0)) {
+	} else if (context->cur_mode != target && (context->change_period < 2 || (placed && context->frames % context->change_period == 0))) {
 		if (switch_test_flag(context, AMRWB_OPT_MODE_CHANGE_NEIGHBOR)) {
 			step = target > context->cur_mode ? 1 : -1;
 			for (m = context->cur_mode + step; m != target && !amrwb_mode_allowed(context, m); m += step);
@@ -285,8 +353,75 @@ static switch_byte_t amrwb_next_mode(struct amrwb_context *context, switch_byte_
 		context->cur_mode = (switch_byte_t) m;
 	}
 	context->frames++;
+	context->frame_due += SWITCH_AMRWB_FRAME_US;
+	context->src_ts[(context->src_head + context->unsent) % SWITCH_AMRWB_UNSENT_MAX] = src_ts;
+	context->unsent++;
+	if (paused) {
+		context->unplaced = 1;
+	} else if (context->unplaced || context->unplaced_next) {
+		context->unplaced++;
+	}
+	context->unplaced_next = SWITCH_FALSE;
 
 	return context->cur_mode;
+}
+
+/* the input timestamp of the oldest encode not reported */
+static uint32_t amrwb_src_pop(struct amrwb_context *context)
+{
+	uint32_t src_ts = context->src_ts[context->src_head];
+
+	context->src_head = (context->src_head + 1) % SWITCH_AMRWB_UNSENT_MAX;
+	return src_ts;
+}
+
+/* the oldest encode not reported went out with RTP timestamp ts: its block is the receiver's, the blocks between
+ * two sent frames as their timestamps tell, and the encodes after it follow. kept: ts is the input's timestamp
+ * plus an offset */
+static void amrwb_sent(struct amrwb_context *context, uint32_t ts, switch_bool_t kept)
+{
+	uint32_t block, src_ts;
+
+	if (!context->unsent) {
+		return;
+	}
+	if (context->sent_valid) {
+		block = amrwb_block_of(context, ts);
+	} else {
+		block = context->frames - context->unsent;
+	}
+	src_ts = amrwb_src_pop(context);
+	if (!kept || !src_ts) {
+		context->src_seen = 0;
+	} else if (context->src_seen && ts - src_ts == context->src_offset) {
+		context->src_seen += context->src_seen < SWITCH_AMRWB_SRC_TRUSTED;
+	} else {
+		context->src_offset = ts - src_ts;
+		context->src_seen = 1;
+	}
+	context->unsent--;
+	context->frames = block + 1 + context->unsent;
+	context->sent_frame = block;
+	context->sent_ts = ts;
+	context->sent_valid = SWITCH_TRUE;
+	if (context->unplaced > context->unsent) {
+		context->unplaced = 0;
+	}
+}
+
+/* the oldest encode not reported was not sent: the blocks of the ones after it are not known until one is sent */
+static void amrwb_unsent(struct amrwb_context *context)
+{
+	if (!context->unsent) {
+		return;
+	}
+	amrwb_src_pop(context);
+	context->unsent--;
+	if (context->unsent) {
+		context->unplaced = context->unsent;
+	} else {
+		context->unplaced_next = SWITCH_TRUE;
+	}
 }
 
 /* CMR handoff from the session read codec to the session write codec: session memory, atomic access;
@@ -325,16 +460,9 @@ static struct amrwb_cmr_slot *amrwb_session_cmr(switch_codec_t *codec, struct am
 }
 
 /* CMR 15: no mode request; the session read codec publishes it for the session write codec */
-static void amrwb_set_cmr(switch_codec_t *codec, struct amrwb_context *context, uint8_t cmr)
+static void amrwb_store_cmr(switch_codec_t *codec, struct amrwb_context *context, uint8_t cmr)
 {
 	struct amrwb_cmr_slot *shared;
-
-	/* not a speech mode or 15 (no request): ignored (RFC 4867 4.3.1). A speech mode outside the
-	 * mode-set still replaces the previous request; the encoder uses the highest allowed mode not
-	 * above it (TS 26.114 7.5.2.1.2.2) */
-	if (cmr != SWITCH_AMRWB_CMR_NONE && cmr >= SWITCH_AMRWB_MODES - 1) {
-		return;
-	}
 
 	context->cmr = cmr;
 
@@ -342,6 +470,19 @@ static void amrwb_set_cmr(switch_codec_t *codec, struct amrwb_context *context, 
 		switch_atomic_set(&shared->owner, context->id);
 		switch_atomic_set(&shared->cmr, cmr);
 	}
+}
+
+/* a received CMR: not a speech mode or 15 (no request), or outside the mode-set the peer signalled:
+ * ignored, the previous request stays (RFC 4867 4.3.1). A mode of that mode-set that we do not encode
+ * (mode-set-overwrite) caps the encoder at the highest allowed mode not above it */
+static void amrwb_set_cmr(switch_codec_t *codec, struct amrwb_context *context, uint8_t cmr)
+{
+	if (cmr != SWITCH_AMRWB_CMR_NONE &&
+		(cmr >= SWITCH_AMRWB_MODES - 1 || (context->peer_modes && !(context->peer_modes & (1 << cmr))))) {
+		return;
+	}
+
+	amrwb_store_cmr(codec, context, cmr);
 }
 
 static uint32_t amrwb_bits(const uint8_t *buf, uint32_t pos, int n)
@@ -707,6 +848,7 @@ static void amrwb_fmtp_framing(const char *fmtp, struct amrwb_framing *framing)
 	if (framing->period < 2) {
 		framing->period = 0;
 	}
+	framing->peer_modes = offered;
 	amrwb_mode_sets(offered, &framing->answer_modes, &framing->enc_modes);
 }
 
@@ -756,6 +898,12 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 		switch_bool_t valid;
 		switch_byte_t cur_mode, enc_mode, cmr;
 		uint32_t frames;
+		switch_time_t frame_due;
+		uint32_t sent_frame, sent_ts;
+		uint32_t unsent, unplaced;
+		switch_bool_t sent_valid, unplaced_next;
+		uint32_t src_ts[SWITCH_AMRWB_UNSENT_MAX];
+		uint32_t src_head, src_offset, src_seen;
 		switch_bool_t adjusted;
 	} kept = { 0 };
 
@@ -769,6 +917,17 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 		kept.enc_mode = context->enc_mode;
 		kept.cmr = context->cmr;
 		kept.frames = context->frames;
+		kept.frame_due = context->frame_due;
+		kept.sent_frame = context->sent_frame;
+		kept.sent_ts = context->sent_ts;
+		kept.sent_valid = context->sent_valid;
+		kept.unsent = context->unsent;
+		kept.unplaced = context->unplaced;
+		kept.unplaced_next = context->unplaced_next;
+		memcpy(kept.src_ts, context->src_ts, sizeof(kept.src_ts));
+		kept.src_head = context->src_head;
+		kept.src_offset = context->src_offset;
+		kept.src_seen = context->src_seen;
 		kept.adjusted = context->adjusted;
 		switch_mutex_lock(context->decoded_sid_mutex);
 		memset(&context->encoder_state, 0, sizeof(*context) - offsetof(struct amrwb_context, encoder_state));
@@ -859,6 +1018,7 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 		}
 		amrwb_set_implementation(codec, switch_test_flag(context, AMRWB_OPT_OCTET_ALIGN) ? 1 : 0);
 
+		context->peer_modes = context->enc_modes;
 		amrwb_mode_sets(context->enc_modes, &answer_modes, &context->enc_modes);
 
 		fmtptmp_pos = switch_snprintf(fmtptmp, sizeof(fmtptmp), "mode-set=");
@@ -943,18 +1103,30 @@ static switch_status_t switch_amrwb_init(switch_codec_t *codec, switch_codec_fla
 		amrwb_fmtp_framing(codec->fmtp_in, &context->framing);
 		context->cur_mode = SWITCH_AMRWB_CMR_NONE;
 		context->destroyed = SWITCH_FALSE;
-		codec->flags |= SWITCH_CODEC_FLAG_NATIVE_DTX;
+		codec->flags |= SWITCH_CODEC_FLAG_NATIVE_DTX | SWITCH_CODEC_FLAG_PEEK_RECEIVED | SWITCH_CODEC_FLAG_PEEK_SENT;
 		codec->private_info = context;
 
 		/* after a reset the encoder goes on from the mode it sent (mode-change-neighbor and
-		 * -period hold across it), and a received mode request stays until the next one */
+		 * -period hold across it), and a received mode request stays until the next one, also
+		 * when the new mode-set does not have it */
 		if (kept.valid) {
 			if (kept.cur_mode < SWITCH_AMRWB_MODES - 1) {
 				context->cur_mode = amrwb_clamp_mode(context, kept.cur_mode);
 				context->frames = kept.frames;
+				context->frame_due = kept.frame_due;
+				context->sent_frame = kept.sent_frame;
+				context->sent_ts = kept.sent_ts;
+				context->sent_valid = kept.sent_valid;
+				context->unsent = kept.unsent;
+				context->unplaced = kept.unplaced;
+				context->unplaced_next = kept.unplaced_next;
+				memcpy(context->src_ts, kept.src_ts, sizeof(context->src_ts));
+				context->src_head = kept.src_head;
+				context->src_offset = kept.src_offset;
+				context->src_seen = kept.src_seen;
 			}
 			if (kept.cmr != SWITCH_AMRWB_CMR_NONE) {
-				amrwb_set_cmr(codec, context, kept.cmr);
+				amrwb_store_cmr(codec, context, kept.cmr);
 			}
 		}
 
@@ -1010,9 +1182,18 @@ static switch_status_t switch_amrwb_encode(switch_codec_t *codec,
 	uint32_t len;
 	switch_byte_t mode, cmr;
 	struct amrwb_cmr_slot *shared;
+	switch_frame_t *input = codec->cur_frame;
+	uint32_t src_ts = 0;
 
 	if (!context || context->destroyed) {
 		return SWITCH_STATUS_FALSE;
+	}
+
+	/* the core keeps the input's timestamp on the encoded frame when the input matches this codec's packet */
+	if (input && input->timestamp && input->codec && input->codec->implementation &&
+		input->codec->implementation->samples_per_packet == codec->implementation->samples_per_packet &&
+		input->codec->implementation->samples_per_second == codec->implementation->samples_per_second) {
+		src_ts = input->timestamp;
 	}
 
 	/* one frame (20 ms) per payload, as negotiated (ptime); less than 20 ms padded with silence */
@@ -1032,7 +1213,7 @@ static switch_status_t switch_amrwb_encode(switch_codec_t *codec,
 			mode = requested;
 		}
 	}
-	mode = amrwb_next_mode(context, mode);
+	mode = amrwb_next_mode(context, mode, src_ts);
 
 	if (E_IF_encode(context->encoder_state, mode, pcm, frames[0], 0) < 0) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMRWB encoder: E_IF_encode() ERROR!\n");
@@ -1210,13 +1391,29 @@ static switch_status_t switch_amrwb_control(switch_codec_t *codec,
 		{
 			const char *command = (const char *) cmd_data;
 
-			if (!zstr(command) && !strcasecmp(command, "fmtp_changes_framing") && rtype && ret_data) {
+			if (!zstr(command) && !strcasecmp(command, "received") && cmd_arg) {
+				/* a payload the core may not decode: its mode request still reaches the encoder */
+				switch_frame_t *frame = (switch_frame_t *) cmd_arg;
+				uint8_t frames[SWITCH_AMRWB_MAX_FRAMES][SWITCH_AMRWB_OUT_MAX_SIZE];
+				const uint8_t *payload = frame->data;
+				uint32_t used = 0;
+
+				if (payload && amrwb_unpack(payload, frame->datalen, switch_test_flag(context, AMRWB_OPT_OCTET_ALIGN) ? SWITCH_TRUE : SWITCH_FALSE, frames, &used) &&
+					(frame->datalen <= used + 3 || payload[frame->datalen - 1] == frame->datalen - used)) {
+					amrwb_set_cmr(codec, context, payload[0] >> 4);
+				}
+			} else if (!zstr(command) && (!strcasecmp(command, "sent") || !strcasecmp(command, "sent_kept")) && cmd_arg) {
+				amrwb_sent(context, *(uint32_t *) cmd_arg, !strcasecmp(command, "sent_kept"));
+			} else if (!zstr(command) && !strcasecmp(command, "unsent")) {
+				amrwb_unsent(context);
+			} else if (!zstr(command) && !strcasecmp(command, "fmtp_changes_framing") && rtype && ret_data) {
 				struct amrwb_framing framing;
 
 				amrwb_fmtp_framing((const char *) cmd_arg, &framing);
 				*rtype = SCCT_STRING;
 				*ret_data = (void *) ((framing.octet_align != context->framing.octet_align || framing.answer_modes != context->framing.answer_modes ||
-									   framing.enc_modes != context->framing.enc_modes || framing.neighbor != context->framing.neighbor ||
+									   framing.enc_modes != context->framing.enc_modes || framing.peer_modes != context->framing.peer_modes ||
+									   framing.neighbor != context->framing.neighbor ||
 									   framing.period != context->framing.period || framing.returned != context->framing.returned) ? "true" : "false");
 			}
 		}

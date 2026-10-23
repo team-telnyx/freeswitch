@@ -33,6 +33,7 @@
 #include <switch.h>
 #include <stdlib.h>
 #include <math.h>
+#include <poll.h>
 
 #include <test/switch_test.h>
 
@@ -221,6 +222,15 @@ static int amrwb_encoded_ft(switch_codec_t *codec, switch_bool_t octet_aligned)
 	}
 
 	return octet_aligned ? (encoded[1] >> 3) & 0x0f : ((encoded[0] & 0x07) << 1) | (encoded[1] >> 7);
+}
+
+/* encodes a frame of silence, then reports it sent with RTP timestamp ts as the core does; its frame type */
+static int amrwb_encode_sent(switch_codec_t *codec, uint32_t ts)
+{
+	int ft = amrwb_encoded_ft(codec, SWITCH_TRUE);
+
+	switch_core_codec_control(codec, SCC_CODEC_SPECIFIC, SCCT_STRING, (void *) "sent", SCCT_INT, &ts, NULL, NULL);
+	return ft;
 }
 
 /* encodes one frame: fst_check_int_equals evaluates its arguments twice */
@@ -454,6 +464,146 @@ static int amrwb_answer_framing(switch_core_session_t *session, switch_bool_t pi
 		return -1;
 	}
 	return amrwb_answer_on(session, pt, answer_fmtp, SDP_ANSWER);
+}
+
+/* a UDP socket on 127.0.0.1, its port in *port; -1 on failure */
+static int amrwb_udp_sink(switch_port_t *port)
+{
+	struct sockaddr_in addr = { 0 };
+	socklen_t addr_len = sizeof(addr);
+	int fd = socket(AF_INET, SOCK_DGRAM, 0);
+
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	if (fd < 0 || bind(fd, (struct sockaddr *) &addr, sizeof(addr)) < 0 || getsockname(fd, (struct sockaddr *) &addr, &addr_len) < 0) {
+		if (fd >= 0) close(fd);
+		return -1;
+	}
+	*port = ntohs(addr.sin_port);
+	return fd;
+}
+
+/* the session sends AMR-WB (octet aligned, mode-set=0,1,2, mode-change-period=2) over RTP to 127.0.0.1:port;
+ * its payload type, -1 on failure */
+static int amrwb_rtp_to(switch_core_session_t *session, switch_port_t port)
+{
+	char answer[512];
+	uint8_t proceed = 0;
+	int pt;
+
+	/* the test session's own L16 codecs would stay in front of the negotiated ones */
+	switch_core_session_unset_read_codec(session);
+	switch_core_session_unset_write_codec(session);
+	switch_channel_set_variable(switch_core_session_get_channel(session), "rtp_timer_name", "soft");
+	if (amrwb_session_media(session, NULL) != SWITCH_STATUS_SUCCESS) {
+		return -1;
+	}
+	switch_core_media_gen_local_sdp(session, SDP_OFFER, "127.0.0.1", 12345, NULL, 1);
+	if ((pt = amrwb_local_pt(session, "octet-align=1")) < 0) {
+		return -1;
+	}
+	switch_snprintf(answer, sizeof(answer),
+		"v=0\r\no=- 2 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=audio %d RTP/AVP %d\r\nc=IN IP4 127.0.0.1\r\n"
+		"a=rtpmap:%d AMR-WB/16000\r\na=fmtp:%d octet-align=1;mode-set=0,1,2;mode-change-period=2\r\na=sendrecv\r\n",
+		port, pt, pt, pt);
+	if (switch_core_media_negotiate_sdp(session, answer, &proceed, SDP_ANSWER) != 1 ||
+		switch_core_media_choose_ports(session, SWITCH_TRUE, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS ||
+		switch_core_media_activate_rtp(session) != SWITCH_STATUS_SUCCESS) {
+		return -1;
+	}
+	return pt;
+}
+
+/* the null endpoint's write_frame, replaced by one that sends over RTP as mod_sofia does */
+static switch_io_write_frame_t amrwb_null_write;
+
+static switch_status_t amrwb_media_write(switch_core_session_t *session, switch_frame_t *frame, switch_io_flag_t flags, int stream_id)
+{
+	return switch_core_media_write_frame(session, frame, flags, stream_id, SWITCH_MEDIA_TYPE_AUDIO);
+}
+
+/* on: the session's frames go out over RTP; off: back to the null endpoint's write */
+static switch_status_t amrwb_rtp_writes(switch_bool_t on)
+{
+	switch_endpoint_interface_t *endpoint = switch_loadable_module_get_endpoint_interface("null");
+
+	if (!endpoint) {
+		return SWITCH_STATUS_FALSE;
+	}
+	if (on && endpoint->io_routines->write_frame != amrwb_media_write) {
+		amrwb_null_write = endpoint->io_routines->write_frame;
+		endpoint->io_routines->write_frame = amrwb_media_write;
+	} else if (!on && endpoint->io_routines->write_frame == amrwb_media_write) {
+		endpoint->io_routines->write_frame = amrwb_null_write;
+	}
+	UNPROTECT_INTERFACE(endpoint);
+	return SWITCH_STATUS_SUCCESS;
+}
+
+/* the frame type and RTP timestamp of the next packet that arrives at fd within wait_ms, -1 if none */
+static int amrwb_rtp_recv(int fd, int wait_ms, uint32_t *ts)
+{
+	uint8_t packet[256];
+	struct pollfd pfd = { 0 };
+	ssize_t n;
+
+	pfd.fd = fd;
+	pfd.events = POLLIN;
+	if (poll(&pfd, 1, wait_ms) <= 0 || (n = recv(fd, packet, sizeof(packet), 0)) < 14 || (packet[0] & 0x1f)) {
+		return -1;
+	}
+	*ts = ((uint32_t) packet[4] << 24) | ((uint32_t) packet[5] << 16) | ((uint32_t) packet[6] << 8) | packet[7];
+	return (packet[13] >> 3) & 0x0f;
+}
+
+/* writes ms of silence to the session as an application does, as frames of codec (L16) with RTP timestamp ts (0:
+ * none) (the core encodes it with the write codec, with amrwb_rtp_writes on it goes out over RTP) */
+static switch_status_t amrwb_session_write(switch_core_session_t *session, switch_codec_t *codec, int ms, uint32_t ts)
+{
+	int16_t pcm[16 * 120] = { 0 };
+	switch_frame_t frame = { 0 };
+
+	frame.codec = codec;
+	frame.data = pcm;
+	frame.datalen = frame.buflen = (uint32_t) (16 * ms * sizeof(int16_t));
+	frame.samples = (uint32_t) (16 * ms);
+	frame.rate = 16000;
+	frame.channels = 1;
+	frame.timestamp = ts;
+	return switch_core_session_write_frame(session, &frame, SWITCH_IO_FLAG_NONE, 0);
+}
+
+/* writes 20 ms of silence to the session; the frame type and RTP timestamp of the packet that arrives at fd, -1 if
+ * none */
+static int amrwb_rtp_send(switch_core_session_t *session, int pt, int fd, uint32_t *ts)
+{
+	switch_codec_t l16 = { 0 };
+	switch_status_t status;
+
+	if (switch_core_codec_init(&l16, "L16", NULL, NULL, 16000, 20, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, NULL,
+							   switch_core_session_get_pool(session)) != SWITCH_STATUS_SUCCESS) {
+		return -1;
+	}
+	status = amrwb_session_write(session, &l16, 20, 0);
+	switch_core_codec_destroy(&l16);
+	if (status != SWITCH_STATUS_SUCCESS) {
+		return -1;
+	}
+	return amrwb_rtp_recv(fd, 1000, ts);
+}
+
+static switch_frame_t amrwb_stub_frame;
+static int amrwb_stub_reads = 0;
+static uint32_t amrwb_stub_ts = 0;
+
+/* each packet right after the previous one */
+static switch_status_t amrwb_stub_read(switch_core_session_t *session, switch_frame_t **frame, switch_io_flag_t flags, int stream_id)
+{
+	amrwb_stub_reads++;
+	amrwb_stub_frame.timestamp = amrwb_stub_ts;
+	amrwb_stub_ts += amrwb_stub_frame.samples;
+	*frame = &amrwb_stub_frame;
+	return SWITCH_STATUS_SUCCESS;
 }
 
 FST_CORE_BEGIN(".")
@@ -1147,10 +1297,10 @@ FST_CORE_BEGIN(".")
 			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr1_oa, sizeof(cmr1_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
 			amrwb_check_ft(&codec, SWITCH_TRUE, 1);
 
-			/* above the mode-set: replaces the request, the highest allowed mode below it (TS 26.114 7.5.2.1.2.2) */
+			/* outside the mode-set: ignored, the previous request stays (RFC 4867 4.3.1) */
 			out_len = sizeof(out);
 			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr8_oa, sizeof(cmr8_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
-			amrwb_check_ft(&codec, SWITCH_TRUE, 2);
+			amrwb_check_ft(&codec, SWITCH_TRUE, 1);
 
 			out_len = sizeof(out);
 			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr1_oa, sizeof(cmr1_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
@@ -1169,17 +1319,17 @@ FST_CORE_BEGIN(".")
 			amrwb_check_ft(&codec, SWITCH_TRUE, 2);
 			switch_core_codec_destroy(&codec);
 
-			/* non-contiguous mode-set: a request between its modes gets the allowed one below it */
+			/* non-contiguous mode-set: requests between its modes are ignored */
 			fst_requires(amrwb_init(&codec, "mode-set=0,2,8;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
 			out_len = sizeof(out);
 			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr5_oa, sizeof(cmr5_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
-			amrwb_check_ft(&codec, SWITCH_TRUE, 2);
+			amrwb_check_ft(&codec, SWITCH_TRUE, 8);
 			out_len = sizeof(out);
 			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr2_oa, sizeof(cmr2_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
 			amrwb_check_ft(&codec, SWITCH_TRUE, 2);
 			out_len = sizeof(out);
 			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr1_oa, sizeof(cmr1_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
-			amrwb_check_ft(&codec, SWITCH_TRUE, 0);
+			amrwb_check_ft(&codec, SWITCH_TRUE, 2);
 			out_len = sizeof(out);
 			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr0_oa, sizeof(cmr0_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
 			amrwb_check_ft(&codec, SWITCH_TRUE, 0);
@@ -1254,6 +1404,349 @@ FST_CORE_BEGIN(".")
 			switch_core_codec_destroy(&codec);
 		}
 		FST_TEST_END()
+
+		/* mode-change-period: blocks as the sent RTP timestamps count them; no change on a frame sent after a pause
+		 * until its timestamp is known */
+		FST_TEST_BEGIN(amrwb_mode_change_period_follows_the_sent_timestamps)
+		{
+			switch_codec_t codec = { 0 };
+			unsigned char cmr0[2] = { 0x00, 0x7c }, out[SWITCH_RECOMMENDED_BUFFER_SIZE];
+			uint32_t out_len, rate = 16000, base = 0xfffffe00;
+			unsigned int flag = 0;
+			int pass, ft, block;
+
+			/* 0: the timestamps jump over the pause (4 blocks, through the wrap); 1: contiguous (linear timestamps) */
+			for (pass = 0; pass < 2; pass++) {
+				fst_requires(amrwb_init(&codec, "mode-set=0,1,2;mode-change-period=2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+				amrwb_check_int(amrwb_encode_sent(&codec, base), 2);
+				out_len = sizeof(out);
+				fst_requires(switch_core_codec_decode(&codec, NULL, cmr0, sizeof(cmr0), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+				amrwb_check_int(amrwb_encode_sent(&codec, base + 320), 2);
+				switch_sleep(80000);
+				block = pass ? 2 : 5;
+				amrwb_check_int(amrwb_encode_sent(&codec, base + block * 320), 2);
+				for (block++, ft = 2; block < 10 && (ft = amrwb_encode_sent(&codec, base + block * 320)) == 2; block++);
+				fst_check_int_equals(ft, 0);
+				fst_check_int_equals(block % 2, 0);
+				switch_core_codec_destroy(&codec);
+			}
+		}
+		FST_TEST_END()
+
+		/* encodes not reported yet (queued, or not sent over RTP at all) go on from the last block sent */
+		FST_TEST_BEGIN(amrwb_mode_change_period_counts_unreported_encodes)
+		{
+			switch_codec_t codec = { 0 };
+			unsigned char cmr0[2] = { 0x00, 0x7c }, out[SWITCH_RECOMMENDED_BUFFER_SIZE];
+			uint32_t out_len = sizeof(out), rate = 16000;
+			unsigned int flag = 0;
+			int ft = 2, i;
+
+			fst_requires(amrwb_init(&codec, "mode-set=0,1,2;mode-change-period=2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			amrwb_check_int(amrwb_encode_sent(&codec, 0), 2);
+			fst_requires(switch_core_codec_decode(&codec, NULL, cmr0, sizeof(cmr0), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			for (i = 0; i < 60 && (ft = amrwb_encoded_ft(&codec, SWITCH_TRUE)) == 2; i++);
+			fst_check_int_equals(ft, 0);
+			/* blocks 1 (odd) and 2 */
+			fst_check_int_equals(i, 1);
+			switch_core_codec_destroy(&codec);
+		}
+		FST_TEST_END()
+
+		/* frames queued before they are sent (a 40 ms input to this 20 ms codec): each report places the oldest
+		 * one, the ones queued after it keep their blocks */
+		FST_TEST_BEGIN(amrwb_mode_change_period_with_queued_frames)
+		{
+			switch_codec_t codec = { 0 };
+			unsigned char cmr0[2] = { 0x00, 0x7c }, out[SWITCH_RECOMMENDED_BUFFER_SIZE];
+			uint32_t out_len = sizeof(out), rate = 16000, ts;
+			unsigned int flag = 0;
+
+			fst_requires(amrwb_init(&codec, "mode-set=0,1,2;mode-change-period=2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			amrwb_check_int(amrwb_encode_sent(&codec, 0), 2);
+			/* blocks 1 and 2 encoded, then sent */
+			amrwb_check_ft(&codec, SWITCH_TRUE, 2);
+			amrwb_check_ft(&codec, SWITCH_TRUE, 2);
+			ts = 320;
+			switch_core_codec_control(&codec, SCC_CODEC_SPECIFIC, SCCT_STRING, (void *) "sent", SCCT_INT, &ts, NULL, NULL);
+			ts = 640;
+			switch_core_codec_control(&codec, SCC_CODEC_SPECIFIC, SCCT_STRING, (void *) "sent", SCCT_INT, &ts, NULL, NULL);
+			fst_requires(switch_core_codec_decode(&codec, NULL, cmr0, sizeof(cmr0), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			/* blocks 3 and 4 encoded; block 3 sent before block 4 is encoded would not change it either */
+			amrwb_check_ft(&codec, SWITCH_TRUE, 2);
+			ts = 960;
+			switch_core_codec_control(&codec, SCC_CODEC_SPECIFIC, SCCT_STRING, (void *) "sent", SCCT_INT, &ts, NULL, NULL);
+			amrwb_check_ft(&codec, SWITCH_TRUE, 0);
+			switch_core_codec_destroy(&codec);
+		}
+		FST_TEST_END()
+
+		/* a frame not sent: the next one's block is not known (with linear timestamps it takes the block of the one
+		 * not sent) until it is sent */
+		FST_TEST_BEGIN(amrwb_mode_change_period_after_a_frame_not_sent)
+		{
+			switch_codec_t codec = { 0 };
+			unsigned char cmr0[2] = { 0x00, 0x7c }, out[SWITCH_RECOMMENDED_BUFFER_SIZE];
+			uint32_t out_len = sizeof(out), rate = 16000;
+			unsigned int flag = 0;
+
+			fst_requires(amrwb_init(&codec, "mode-set=0,1,2;mode-change-period=2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			amrwb_check_int(amrwb_encode_sent(&codec, 0), 2);
+			amrwb_check_ft(&codec, SWITCH_TRUE, 2);
+			switch_core_codec_control(&codec, SCC_CODEC_SPECIFIC, SCCT_STRING, (void *) "unsent", SCCT_NONE, NULL, NULL, NULL);
+			fst_requires(switch_core_codec_decode(&codec, NULL, cmr0, sizeof(cmr0), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			/* counted block 2, but not known: no change; sent as block 1 */
+			amrwb_check_int(amrwb_encode_sent(&codec, 320), 2);
+			amrwb_check_int(amrwb_encode_sent(&codec, 640), 0);
+			switch_core_codec_destroy(&codec);
+		}
+		FST_TEST_END()
+
+		/* a received mode request reaches the encoder also when the core returns the payload undecoded */
+		FST_TEST_BEGIN(amrwb_cmr_reaches_the_encoder_without_a_decode)
+		{
+			switch_codec_t writer = { 0 }, reader = { 0 };
+			switch_core_session_t *session;
+			switch_endpoint_interface_t *endpoint;
+			switch_io_read_frame_t null_read;
+			unsigned char cmr0[2] = { 0x00, 0x7c };
+			/* CMR 0, then 5 bytes that are neither frames nor RTP padding */
+			unsigned char bad[7] = { 0x00, 0x7c, 1, 2, 3, 4, 9 };
+			switch_frame_t *read = NULL;
+			int ft;
+
+			fst_requires((session = amrwb_cmr_session(&reader, &writer, fst_pool)));
+			fst_requires((endpoint = switch_loadable_module_get_endpoint_interface("null")));
+			memset(&amrwb_stub_frame, 0, sizeof(amrwb_stub_frame));
+			amrwb_stub_frame.codec = &reader;
+			amrwb_stub_frame.data = cmr0;
+			amrwb_stub_frame.datalen = sizeof(cmr0);
+			amrwb_stub_frame.buflen = sizeof(cmr0);
+			amrwb_stub_frame.samples = 320;
+			amrwb_stub_frame.rate = 16000;
+			amrwb_stub_frame.channels = 1;
+
+			null_read = endpoint->io_routines->read_frame;
+			endpoint->io_routines->read_frame = amrwb_stub_read;
+			amrwb_stub_frame.data = bad;
+			amrwb_stub_frame.datalen = sizeof(bad);
+			switch_core_session_read_frame(session, &read, SWITCH_IO_FLAG_NONE, 0);
+			ft = amrwb_encoded_ft(&writer, SWITCH_TRUE);
+			amrwb_stub_frame.data = cmr0;
+			amrwb_stub_frame.datalen = sizeof(cmr0);
+			switch_core_session_read_frame(session, &read, SWITCH_IO_FLAG_NONE, 0);
+			endpoint->io_routines->read_frame = null_read;
+			UNPROTECT_INTERFACE(endpoint);
+
+			/* a payload that does not unpack carries no request */
+			fst_check_int_equals(ft, 2);
+			/* returned as received: not decoded */
+			fst_check(read == &amrwb_stub_frame);
+			ft = amrwb_encoded_ft(&writer, SWITCH_TRUE);
+			fst_check_int_equals(ft, 0);
+			amrwb_cmr_session_end(session, &reader, &writer);
+		}
+		FST_TEST_END()
+
+		/* through the core and RTP, with the soft timer's timestamps and with linear ones: every mode change on the
+		 * wire is on an even frame-block, also after a pause */
+		FST_SESSION_BEGIN_RATE(amrwb_mode_changes_on_the_wire_keep_the_period, 16000)
+		{
+			unsigned char cmr[2] = { 0x00, 0x7c }, out[SWITCH_RECOMMENDED_BUFFER_SIZE];
+			uint32_t out_len, rate = 16000, ts, first = 0;
+			unsigned int flag = 0;
+			switch_port_t port = 0;
+			switch_rtp_t *rtp;
+			int fd, pt, ft, prev = -1, i, pass;
+
+			fst_requires((fd = amrwb_udp_sink(&port)) >= 0);
+			fst_requires((pt = amrwb_rtp_to(fst_session, port)) >= 0);
+			fst_requires((rtp = switch_core_media_get_rtp_session(fst_session, SWITCH_MEDIA_TYPE_AUDIO)));
+			fst_requires(amrwb_rtp_writes(SWITCH_TRUE) == SWITCH_STATUS_SUCCESS);
+			for (pass = 0; pass < 2; pass++) {
+				if (pass) {
+					switch_rtp_intentional_bugs(rtp, RTP_BUG_SEND_LINEAR_TIMESTAMPS);
+				}
+				/* CMR 15 (back up to mode 2), then after 6 frames CMR 0 and a pause */
+				for (i = 0; i < 16; i++) {
+					if (i == 0 || i == 6) {
+						cmr[0] = i ? 0x00 : 0xf0;
+						out_len = sizeof(out);
+						fst_requires(switch_core_codec_decode(switch_core_session_get_read_codec(fst_session), NULL, cmr, sizeof(cmr), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+					}
+					if (i == 6) {
+						switch_sleep(90000);
+					}
+					fst_requires((ft = amrwb_rtp_send(fst_session, pt, fd, &ts)) >= 0);
+					if (prev < 0) {
+						first = ts;
+					} else if (ft != prev) {
+						fst_xcheck((((ts - first) / 320) % 2) == 0, "mode change on an odd frame-block");
+					}
+					if (i == 5) {
+						fst_check_int_equals(ft, 2);
+					}
+					prev = ft;
+				}
+				fst_check_int_equals(ft, 0);
+			}
+			amrwb_rtp_writes(SWITCH_FALSE);
+			close(fd);
+		}
+		FST_SESSION_END()
+
+		/* 40 ms input to the 20 ms write codec: the core encodes two frames at a time and its write thread sends them
+		 * one per 20 ms; every mode change on the wire is still on an even frame-block */
+		FST_SESSION_BEGIN_RATE(amrwb_mode_changes_on_the_wire_with_queued_frames, 16000)
+		{
+			unsigned char cmr[2] = { 0x00, 0x7c }, out[SWITCH_RECOMMENDED_BUFFER_SIZE];
+			uint32_t out_len, rate = 16000, ts, first = 0;
+			unsigned int flag = 0;
+			switch_port_t port = 0;
+			switch_codec_t l16 = { 0 }, l16_20 = { 0 };
+			switch_time_t start, until;
+			int fd, ft, prev = -1, i, packets = 0, changes = 0, odd = 0;
+
+			fst_requires((fd = amrwb_udp_sink(&port)) >= 0);
+			fst_requires(amrwb_rtp_to(fst_session, port) >= 0);
+			fst_requires(switch_core_codec_init(&l16, "L16", NULL, NULL, 16000, 40, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, NULL, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_core_codec_init(&l16_20, "L16", NULL, NULL, 16000, 20, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, NULL, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(amrwb_rtp_writes(SWITCH_TRUE) == SWITCH_STATUS_SUCCESS);
+			start = switch_micro_time_now();
+			for (i = 0; i < 40; i++) {
+				/* a new request every 6 inputs (240 ms): 0, then none (back up to mode 2), ... */
+				if (i % 6 == 0) {
+					cmr[0] = (i / 6) % 2 ? 0xf0 : 0x00;
+					out_len = sizeof(out);
+					switch_core_codec_decode(switch_core_session_get_read_codec(fst_session), NULL, cmr, sizeof(cmr), 16000, out, &out_len, &rate, &flag);
+				}
+				if (amrwb_session_write(fst_session, &l16, 40, 0) != SWITCH_STATUS_SUCCESS) {
+					break;
+				}
+				/* once the write thread queues: one 20 ms frame more, an odd number of frames queued from then on */
+				if (i == 3 && amrwb_session_write(fst_session, &l16_20, 20, 0) != SWITCH_STATUS_SUCCESS) {
+					break;
+				}
+				for (until = start + (i + 1) * 40000; switch_micro_time_now() < until; ) {
+					if ((ft = amrwb_rtp_recv(fd, (int) ((until - switch_micro_time_now()) / 1000) + 1, &ts)) < 0) {
+						continue;
+					}
+					if (!packets++) {
+						first = ts;
+					} else if (ft != prev) {
+						changes++;
+						odd += (((ts - first) / 320) % 2) != 0;
+					}
+					prev = ft;
+				}
+			}
+			amrwb_rtp_writes(SWITCH_FALSE);
+			switch_core_codec_destroy(&l16);
+			switch_core_codec_destroy(&l16_20);
+			close(fd);
+
+			fst_check_int_equals(i, 40);
+			fst_check(packets >= 70);
+			fst_check(changes >= 4);
+			fst_xcheck(odd == 0, "mode change on an odd frame-block");
+		}
+		FST_SESSION_END()
+
+		/* input with its own RTP timestamps: an input on time that skips a source block is placed by its timestamp
+		 * when the core keeps it on the wire, and by the count with linear timestamps; every mode change still goes
+		 * out on an even frame-block */
+		FST_SESSION_BEGIN_RATE(amrwb_mode_change_on_the_wire_after_a_skipped_source_block, 16000)
+		{
+			unsigned char cmr[2] = { 0x00, 0x7c }, out[SWITCH_RECOMMENDED_BUFFER_SIZE];
+			uint32_t out_len, rate = 16000, src, ts, first = 0, last = 0;
+			unsigned int flag = 0;
+			switch_port_t port = 0;
+			switch_codec_t l16 = { 0 };
+			switch_rtp_t *rtp;
+			int fd, ft = -1, prev = -1, i, pass;
+
+			fst_requires((fd = amrwb_udp_sink(&port)) >= 0);
+			fst_requires(amrwb_rtp_to(fst_session, port) >= 0);
+			fst_requires((rtp = switch_core_media_get_rtp_session(fst_session, SWITCH_MEDIA_TYPE_AUDIO)));
+			fst_requires(switch_core_codec_init(&l16, "L16", NULL, NULL, 16000, 20, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, NULL, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(amrwb_rtp_writes(SWITCH_TRUE) == SWITCH_STATUS_SUCCESS);
+			for (pass = 0; pass < 2; pass++) {
+				if (pass) {
+					switch_rtp_intentional_bugs(rtp, RTP_BUG_SEND_LINEAR_TIMESTAMPS);
+				}
+				src = 16000 + (uint32_t) pass * 32000;
+				/* CMR 15 (back up to mode 2), source blocks 0, 1, then CMR 0 and blocks 3, 4, ...; after the switch to
+				 * linear timestamps one frame first, its report shows they are not kept */
+				for (i = pass ? -1 : 0; i < 10; i++) {
+					if (i == 0 || i == 2) {
+						cmr[0] = i ? 0x00 : 0xf0;
+						out_len = sizeof(out);
+						switch_core_codec_decode(switch_core_session_get_read_codec(fst_session), NULL, cmr, sizeof(cmr), 16000, out, &out_len, &rate, &flag);
+					}
+					fst_requires(amrwb_session_write(fst_session, &l16, 20, src + (uint32_t) ((i < 2 ? i : i + 1) * 320)) == SWITCH_STATUS_SUCCESS);
+					fst_requires((ft = amrwb_rtp_recv(fd, 1000, &ts)) >= 0);
+					if (prev < 0) {
+						first = ts;
+					} else if (ft != prev) {
+						fst_xcheck((((ts - first) / 320) % 2) == 0, "mode change on an odd frame-block");
+					}
+					if (i == 2) {
+						/* the skipped block is on the wire too, or not with linear timestamps */
+						fst_check_int_equals(ts - last, pass ? 320 : 640);
+					}
+					prev = ft;
+					last = ts;
+				}
+				fst_check_int_equals(ft, 0);
+			}
+			amrwb_rtp_writes(SWITCH_FALSE);
+			switch_core_codec_destroy(&l16);
+			close(fd);
+		}
+		FST_SESSION_END()
+
+		/* normalised timestamps: the input's are not kept, so an on-time input after a skipped source block (blocks 0,
+		 * 1, 2, then CMR 0 and block 4, sent as wire block 3) is placed by the count */
+		FST_SESSION_BEGIN_RATE(amrwb_mode_change_on_the_wire_with_normalised_timestamps, 16000)
+		{
+			unsigned char cmr0[2] = { 0x00, 0x7c }, out[SWITCH_RECOMMENDED_BUFFER_SIZE];
+			uint32_t out_len = sizeof(out), rate = 16000, ts, first = 0, last = 0;
+			unsigned int flag = 0;
+			switch_port_t port = 0;
+			switch_codec_t l16 = { 0 };
+			switch_rtp_t *rtp;
+			int fd, ft = -1, prev = -1, i;
+
+			fst_requires((fd = amrwb_udp_sink(&port)) >= 0);
+			fst_requires(amrwb_rtp_to(fst_session, port) >= 0);
+			fst_requires((rtp = switch_core_media_get_rtp_session(fst_session, SWITCH_MEDIA_TYPE_AUDIO)));
+			switch_rtp_intentional_bugs(rtp, RTP_BUG_SEND_NORMALISED_TIMESTAMPS);
+			fst_requires(switch_core_codec_init(&l16, "L16", NULL, NULL, 16000, 20, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, NULL, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_requires(amrwb_rtp_writes(SWITCH_TRUE) == SWITCH_STATUS_SUCCESS);
+			for (i = 0; i < 10; i++) {
+				if (i == 3) {
+					switch_core_codec_decode(switch_core_session_get_read_codec(fst_session), NULL, cmr0, sizeof(cmr0), 16000, out, &out_len, &rate, &flag);
+				}
+				fst_requires(amrwb_session_write(fst_session, &l16, 20, 16000 + (uint32_t) ((i < 3 ? i : i + 1) * 320)) == SWITCH_STATUS_SUCCESS);
+				fst_requires((ft = amrwb_rtp_recv(fd, 1000, &ts)) >= 0);
+				if (prev < 0) {
+					first = ts;
+				} else if (ft != prev) {
+					fst_xcheck((((ts - first) / 320) % 2) == 0, "mode change on an odd frame-block");
+				}
+				if (i == 3) {
+					/* the skipped block is not on the wire */
+					fst_check_int_equals(ts - last, 320);
+				}
+				prev = ft;
+				last = ts;
+			}
+			fst_check_int_equals(ft, 0);
+			amrwb_rtp_writes(SWITCH_FALSE);
+			switch_core_codec_destroy(&l16);
+			close(fd);
+		}
+		FST_SESSION_END()
 
 		FST_TEST_BEGIN(amrwb_only_the_read_codec_passes_cmr_to_the_write_codec)
 		{
@@ -1354,7 +1847,8 @@ FST_CORE_BEGIN(".")
 		}
 		FST_TEST_END()
 
-		/* re-INVITE: a new codec only when octet-align, the answered or encoded mode-set, or the mode-change parameters change */
+		/* re-INVITE: a new codec only when octet-align, the answered, encoded or signalled mode-set, or the mode-change
+		 * parameters change */
 		FST_TEST_BEGIN(amrwb_reports_fmtp_framing_changes)
 		{
 			switch_codec_t codec = { 0 };
@@ -1372,9 +1866,9 @@ FST_CORE_BEGIN(".")
 			fst_check(r && !strcmp(r, "true"));
 			r = amrwb_changes_framing(&codec, "mode-set=0,1;octet-align=1");
 			fst_check(r && !strcmp(r, "true"));
-			/* no mode-set: we answer and encode the configured 0,1,2, as before */
+			/* no mode-set: we answer and encode the configured 0,1,2 as before, but the peer no longer signals one */
 			r = amrwb_changes_framing(&codec, "octet-align=1");
-			fst_check(r && !strcmp(r, "false"));
+			fst_check(r && !strcmp(r, "true"));
 			/* period 1: no restriction, as before */
 			r = amrwb_changes_framing(&codec, "mode-set=0,1,2;octet-align=1;mode-change-period=1");
 			fst_check(r && !strcmp(r, "false"));
@@ -1387,10 +1881,13 @@ FST_CORE_BEGIN(".")
 			fst_check(r && !strcmp(r, "true"));
 			switch_core_codec_destroy(&codec);
 
-			/* offer without mode-set, re-offer with the mode-set we answered */
+			/* offer without mode-set, re-offer with the mode-set we answered: the peer now signals it, so CMRs
+			 * outside it are ignored from then on */
 			fst_requires(amrwb_init(&codec, "octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
-			r = amrwb_changes_framing(&codec, "mode-set=0,1,2;octet-align=1");
+			r = amrwb_changes_framing(&codec, "octet-align=1");
 			fst_check(r && !strcmp(r, "false"));
+			r = amrwb_changes_framing(&codec, "mode-set=0,1,2;octet-align=1");
+			fst_check(r && !strcmp(r, "true"));
 			r = amrwb_changes_framing(&codec, "mode-set=0,1;octet-align=1");
 			fst_check(r && !strcmp(r, "true"));
 			switch_core_codec_destroy(&codec);
@@ -1763,6 +2260,51 @@ FST_CORE_BEGIN(".")
 			amrwb_check_ft(&codec, SWITCH_TRUE, 7);
 			amrwb_adjust(&codec, "decrease");
 			amrwb_check_ft(&codec, SWITCH_TRUE, 7);
+			switch_core_codec_destroy(&codec);
+
+			fst_requires(amrwb_reload(NULL) == SWITCH_STATUS_SUCCESS);
+		}
+		FST_TEST_END()
+
+		/* mode-set-overwrite: the offer has 0,1,2, we answer 0,2,4,7 and encode within 0,2. A request
+		 * the peer may send (its own mode-set) is followed within ours, others are ignored */
+		FST_TEST_BEGIN(amrwb_overwrite_follows_cmr_of_the_offered_mode_set)
+		{
+			switch_codec_t codec = { 0 };
+			static const unsigned char cmr1_oa[] = { 0x10, 0x7c };
+			static const unsigned char cmr2_oa[] = { 0x20, 0x7c };
+			static const unsigned char cmr7_oa[] = { 0x70, 0x7c };
+			static const unsigned char cmr15_oa[] = { 0xf0, 0x7c };
+			unsigned char out[SWITCH_RECOMMENDED_BUFFER_SIZE];
+			uint32_t out_len, rate = 16000;
+			unsigned int flag = 0;
+
+			fst_requires(amrwb_reload("<param name=\"mode-set\" value=\"0,2,4,7\"/><param name=\"mode-set-overwrite\" value=\"1\"/>"
+									  "<param name=\"mode-set-overwrite-with-default-bitrate\" value=\"0\"/>") == SWITCH_STATUS_SUCCESS);
+
+			fst_requires(amrwb_init(&codec, "mode-set=0,1,2;octet-align=1", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			fst_check(codec.fmtp_out && strstr(codec.fmtp_out, "mode-set=0,2,4,7;"));
+			amrwb_check_ft(&codec, SWITCH_TRUE, 2);
+
+			/* in the offered mode-set, not encoded: the allowed mode below it */
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr1_oa, sizeof(cmr1_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			amrwb_check_ft(&codec, SWITCH_TRUE, 0);
+
+			/* in our answer only, outside the offered mode-set: ignored */
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr7_oa, sizeof(cmr7_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			amrwb_check_ft(&codec, SWITCH_TRUE, 0);
+
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr2_oa, sizeof(cmr2_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			amrwb_check_ft(&codec, SWITCH_TRUE, 2);
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr1_oa, sizeof(cmr1_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			amrwb_check_ft(&codec, SWITCH_TRUE, 0);
+			out_len = sizeof(out);
+			fst_requires(switch_core_codec_decode(&codec, NULL, (void *) cmr15_oa, sizeof(cmr15_oa), 16000, out, &out_len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			amrwb_check_ft(&codec, SWITCH_TRUE, 2);
 			switch_core_codec_destroy(&codec);
 
 			fst_requires(amrwb_reload(NULL) == SWITCH_STATUS_SUCCESS);
@@ -2617,6 +3159,107 @@ FST_CORE_BEGIN(".")
 		}
 		FST_TEST_END()
 
+
+		/* a payload of 3 frames is read out as 3 frames before the next packet is read */
+		FST_SESSION_BEGIN_RATE(amrwb_multi_frame_payload_is_read_out_before_the_next_packet, 16000)
+		{
+			switch_endpoint_interface_t *endpoint = switch_loadable_module_get_endpoint_interface("null");
+			switch_io_read_frame_t null_read = NULL;
+			switch_codec_t encoder = { 0 }, decoder = { 0 }, other = { 0 }, be = { 0 };
+			unsigned char frames[3][64], payload[512];
+			int16_t pcm[320];
+			uint32_t len, rate = 16000, total = 0;
+			unsigned int flag = 0;
+			switch_frame_t *read = NULL;
+			int f, i, reads = 0, changed_reads = 0, single_stamped = 0, chunks = 0, chunks_unstamped = 0;
+			uint32_t changed_len = 0;
+
+			fst_requires(endpoint);
+			for (i = 0; i < 320; i++) pcm[i] = (int16_t) (8000 * sin(2 * M_PI * 440 * i / 16000.0));
+			fst_requires(amrwb_init(&encoder, "octet-align=1", SWITCH_CODEC_FLAG_ENCODE, fst_pool) == SWITCH_STATUS_SUCCESS);
+			for (f = 0; f < 3; f++) {
+				len = sizeof(frames[f]);
+				fst_requires(switch_core_codec_encode(&encoder, NULL, pcm, sizeof(pcm), 16000, frames[f], &len, &rate, &flag) == SWITCH_STATUS_SUCCESS);
+			}
+			switch_core_codec_destroy(&encoder);
+			fst_requires(amrwb_init(&decoder, "octet-align=1", SWITCH_CODEC_FLAG_DECODE, switch_core_session_get_pool(fst_session)) == SWITCH_STATUS_SUCCESS);
+
+			memset(&amrwb_stub_frame, 0, sizeof(amrwb_stub_frame));
+			amrwb_stub_frame.codec = &decoder;
+			amrwb_stub_frame.data = payload;
+			amrwb_stub_frame.datalen = amrwb_payload(frames, 3, SWITCH_TRUE, payload, sizeof(payload));
+			amrwb_stub_frame.buflen = sizeof(payload);
+			amrwb_stub_frame.samples = 3 * 320;
+			amrwb_stub_frame.rate = 16000;
+			amrwb_stub_frame.channels = 1;
+			amrwb_stub_frame.m = SWITCH_TRUE;
+
+			/* a read codec that encodes (SUCCESS, not NOOP): bandwidth efficient, the packets are octet aligned */
+			fst_requires(amrwb_init(&be, "octet-align=0", SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, switch_core_session_get_pool(fst_session)) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_core_codec_init(&other, "L16", NULL, NULL, 8000, 20, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
+												NULL, switch_core_session_get_pool(fst_session)) == SWITCH_STATUS_SUCCESS);
+
+			/* nothing between the swap and its restore may leave the test early */
+			amrwb_stub_reads = 0;
+			amrwb_stub_ts = 0;
+			null_read = endpoint->io_routines->read_frame;
+			endpoint->io_routines->read_frame = amrwb_stub_read;
+			for (i = 0; i < 9; i++) {
+				if (switch_core_session_read_frame(fst_session, &read, SWITCH_IO_FLAG_NONE, 0) == SWITCH_STATUS_SUCCESS && read &&
+					!switch_test_flag(read, SFF_CNG)) {
+					total += read->datalen;
+					/* the chunks after a packet's first carry no timestamp: the writer stamps them */
+					if (i % 3) {
+						fst_check(!read->timestamp && !read->m);
+					}
+				}
+			}
+			reads = amrwb_stub_reads;
+
+			/* what is left for one read codec is dropped when another one is set: the next read reads a packet */
+			switch_core_session_read_frame(fst_session, &read, SWITCH_IO_FLAG_NONE, 0);
+			if (switch_core_session_set_read_codec(fst_session, &other) == SWITCH_STATUS_SUCCESS) {
+				changed_reads = amrwb_stub_reads;
+				changed_len = switch_core_session_read_frame(fst_session, &read, SWITCH_IO_FLAG_NONE, 0) == SWITCH_STATUS_SUCCESS && read ? read->datalen : 0;
+				changed_reads = amrwb_stub_reads - changed_reads;
+				switch_core_session_set_read_codec(fst_session, NULL);
+			}
+
+			/* re-encoded, after the 8 kHz codec (its resampler must not stay): a one-frame packet keeps its timestamp
+			 * and marker, the chunks of a 3-frame one get none */
+			if (switch_core_session_set_read_codec(fst_session, &be) == SWITCH_STATUS_SUCCESS) {
+				amrwb_stub_frame.datalen = amrwb_payload(frames, 1, SWITCH_TRUE, payload, sizeof(payload));
+				amrwb_stub_frame.samples = 320;
+				if (switch_core_session_read_frame(fst_session, &read, SWITCH_IO_FLAG_NONE, 0) == SWITCH_STATUS_SUCCESS && read &&
+					read->codec == &be && read->timestamp && read->m) {
+					single_stamped = 1;
+				}
+				amrwb_stub_frame.datalen = amrwb_payload(frames, 3, SWITCH_TRUE, payload, sizeof(payload));
+				amrwb_stub_frame.samples = 3 * 320;
+				for (i = 0; i < 3; i++) {
+					if (switch_core_session_read_frame(fst_session, &read, SWITCH_IO_FLAG_NONE, 0) == SWITCH_STATUS_SUCCESS && read &&
+						read->codec == &be) {
+						chunks++;
+						chunks_unstamped += !read->timestamp && !read->m;
+					}
+				}
+				switch_core_session_set_read_codec(fst_session, NULL);
+			}
+			endpoint->io_routines->read_frame = null_read;
+			UNPROTECT_INTERFACE(endpoint);
+
+			amrwb_check_int(reads, 3);
+			amrwb_check_int(total, 9 * 640);
+			amrwb_check_int(changed_reads, 1);
+			amrwb_check_int(changed_len, 320);
+			amrwb_check_int(single_stamped, 1);
+			amrwb_check_int(chunks, 3);
+			amrwb_check_int(chunks_unstamped, 3);
+			switch_core_codec_destroy(&be);
+			switch_core_codec_destroy(&other);
+			switch_core_codec_destroy(&decoder);
+		}
+		FST_SESSION_END()
 	}
 	FST_SUITE_END()
 }
