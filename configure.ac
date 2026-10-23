@@ -195,6 +195,15 @@ AC_ARG_WITH([storagedir],
 AC_SUBST(storagedir)
 AC_DEFINE_UNQUOTED([SWITCH_STORAGE_DIR],"${storagedir}",[where to put storage files])
 
+# mod_crashpad support
+AC_ARG_WITH([crashpad-root],
+	[AS_HELP_STRING([--with-crashpad-root=DIR], [Path to a prebuilt Crashpad source+build tree for mod_crashpad (default: /opt/crashpad)])], [CRASHPAD_ROOT="$withval"], [CRASHPAD_ROOT="/opt/crashpad"])
+AC_SUBST(CRASHPAD_ROOT)
+
+AC_ARG_WITH([crashpad-out],
+	[AS_HELP_STRING([--with-crashpad-out=DIR], [Path to the Crashpad ninja output dir (default: $CRASHPAD_ROOT/out/Default)])], [CRASHPAD_OUT="$withval"], [CRASHPAD_OUT="$CRASHPAD_ROOT/out/Default"])
+AC_SUBST(CRASHPAD_OUT)
+
 AC_ARG_WITH([cachedir],
 	[AS_HELP_STRING([--with-cachedir=DIR], [Put cache files into this location (default: $prefix/cache)])], [cachedir="$withval"], [cachedir="${default_cachedir}"])
 AC_SUBST(cachedir)
