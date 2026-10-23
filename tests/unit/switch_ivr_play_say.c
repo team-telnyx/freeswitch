@@ -100,6 +100,505 @@ static switch_status_t partial_play_and_collect_input_callback(switch_core_sessi
 	return status;
 }
 
+/*
+ * Watches PLAYBACK_STOP for one specific channel, recording both the playback
+ * status and any hangup cause the event carried. The two tests below assert
+ * opposite things about the cause: a peer hangup must report one, and a stop
+ * the customer asked for must not, although both report a break.
+ */
+static char playback_watch_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1] = "";
+static char playback_watch_status[32] = "";
+static char playback_watch_cause[64] = "";
+static int playback_watch_events = 0;
+static int playback_watch_with_cause = 0;
+
+static void on_playback_stop_watch(switch_event_t *event)
+{
+	const char *uuid = switch_event_get_header(event, "Unique-ID");
+
+	if (uuid && *playback_watch_uuid && !strcmp(uuid, playback_watch_uuid)) {
+		const char *cause = switch_event_get_header(event, "Hangup-Cause");
+
+		if (!zstr(cause)) {
+			++playback_watch_with_cause;
+		}
+
+		/* before the status and the count: the callers wait on those, and would
+		 * read a stale cause if either went up first */
+		switch_set_string(playback_watch_cause, switch_str_nil(cause));
+		switch_set_string(playback_watch_status, switch_str_nil(switch_event_get_header(event, "Playback-Status")));
+		++playback_watch_events;
+	}
+}
+
+/* Two null-endpoint legs, parked the way the session harness does, then bridged
+ * so a real audio_bridge_thread runs on each. Returns 0 if the fixture could not
+ * be established; whatever was created is still left for the teardown. */
+static int bring_up_bridged_pair(switch_core_session_t **legs, switch_channel_t **chans)
+{
+	switch_call_cause_t cause = SWITCH_CAUSE_NORMAL_CLEARING;
+	int i;
+
+	for (i = 0; i < 2; i++) {
+		if (switch_ivr_originate(NULL, &legs[i], &cause, "null/+15553334444", 2,
+								 NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) != SWITCH_STATUS_SUCCESS || !legs[i]) {
+			return 0;
+		}
+		chans[i] = switch_core_session_get_channel(legs[i]);
+		switch_channel_set_variable(chans[i], "send_silence_when_idle", "-1");
+		/* park it the way the session harness does, so uuid_bridge takes over
+		 * from a known state. The _timeout form only: the plain
+		 * switch_channel_wait_for_state is an unbounded for(;;). */
+		switch_channel_set_state(chans[i], CS_SOFT_EXECUTE);
+		if (!switch_channel_wait_for_state_timeout(chans[i], CS_SOFT_EXECUTE, 5000) || !switch_channel_up(chans[i])) {
+			return 0;
+		}
+	}
+
+	if (switch_ivr_uuid_bridge(switch_core_session_get_uuid(legs[0]),
+							   switch_core_session_get_uuid(legs[1])) != SWITCH_STATUS_SUCCESS) {
+		return 0;
+	}
+
+	/* both legs must really be inside audio_bridge_thread, or this measures
+	 * something else entirely */
+	if (switch_channel_wait_for_flag(chans[0], CF_BRIDGED, SWITCH_TRUE, 5000, NULL) != SWITCH_STATUS_SUCCESS ||
+		switch_channel_wait_for_flag(chans[1], CF_BRIDGED, SWITCH_TRUE, 5000, NULL) != SWITCH_STATUS_SUCCESS) {
+		return 0;
+	}
+
+	return 1;
+}
+
+static void tear_down_bridged_pair(switch_core_session_t **legs, switch_channel_t **chans)
+{
+	int i;
+
+	for (i = 0; i < 2; i++) {
+		if (legs[i]) {
+			if (switch_channel_ready(chans[i])) {
+				switch_channel_hangup(chans[i], SWITCH_CAUSE_NORMAL_CLEARING);
+			}
+			switch_core_session_rwunlock(legs[i]);
+		}
+	}
+}
+
+static void reset_playback_watch(void)
+{
+	*playback_watch_status = '\0';
+	*playback_watch_cause = '\0';
+	playback_watch_events = 0;
+	playback_watch_with_cause = 0;
+}
+
+/*
+ * One run of the broadcast-stop scenario over a real two-leg bridge.
+ * bcast_index picks which leg carries the broadcast, so the caller can drive
+ * both directions.
+ *
+ * customer_stop picks why the playback ends. 0 kills the bridge peer inside
+ * the lead-frames window, which is the bug under test, hanging up with
+ * USER_BUSY so the reported cause cannot be confused with the fallback. 1
+ * leaves both legs up and raises the stop the customer asks for, which must
+ * report no cause at all.
+ *
+ * Leaves the outcome in playback_watch_status, "break" once the stop landed
+ * and still empty if the playback never ended, and the reported hangup cause
+ * in playback_watch_cause, still empty when the event carried none.
+ *
+ * Plain C rather than fct macros: fst_requires expands to a bare "break",
+ * which inside a loop would escape only that loop and let the caller run on
+ * with half-built fixtures.
+ *
+ * Returns 0 if the fixture could not be established, so nothing was measured.
+ * Sets *in_window to 1 if the hangup really did land before CF_BROADCAST. It
+ * is not meaningful when customer_stop is set, which waits for CF_BROADCAST.
+ */
+static int run_peer_hangup_lead_frames_case(int bcast_index, int customer_stop, int *in_window)
+{
+	switch_core_session_t *legs[2] = { NULL, NULL };
+	switch_channel_t *chans[2] = { NULL, NULL };
+	switch_event_t *event = NULL;
+	int ok = 0;
+	int waited;
+
+	*in_window = 0;
+	reset_playback_watch();
+
+	if (!bring_up_bridged_pair(legs, chans)) {
+		goto done;
+	}
+
+	switch_set_string(playback_watch_uuid, switch_core_session_get_uuid(legs[bcast_index]));
+	if (switch_event_bind("peer_gone_broadcast", SWITCH_EVENT_PLAYBACK_STOP, SWITCH_EVENT_SUBCLASS_ANY,
+						  on_playback_stop_watch, NULL) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+
+	/* shaped exactly like the command switch_ivr_broadcast queues, with the
+	 * lead-frames window widened so the hangup lands inside it
+	 * deterministically instead of racing 100ms */
+	if (switch_event_create(&event, SWITCH_EVENT_COMMAND) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "call-command", "execute");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-name", "playback");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-arg", "silence_stream://20000");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "event-lock", "true");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "lead-frames", "150");
+	if (switch_core_session_queue_private_event(legs[bcast_index], &event, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+
+	/* let the bridge thread pick it up and settle into the wait */
+	switch_sleep(1500000);
+
+	/* the window under test is "dequeued, but CF_BROADCAST not raised yet" */
+	*in_window = (switch_core_session_private_event_count(legs[bcast_index]) == 0 &&
+				  !switch_channel_test_flag(chans[bcast_index], CF_BROADCAST));
+
+	if (customer_stop) {
+		/* Shaped like the stop a customer asks for. uuid_break takes exactly
+		 * one of two branches, so wait for CF_BROADCAST and take the same one
+		 * it would: stop_broadcast alone, which raises CF_BREAK itself. The
+		 * point here is the reported cause, not the pre-CF_BROADCAST window.
+		 * Both legs stay up. */
+		for (waited = 0; waited < 10000 && !switch_channel_test_flag(chans[bcast_index], CF_BROADCAST); waited += 100) {
+			switch_sleep(100000);
+		}
+		if (!switch_channel_test_flag(chans[bcast_index], CF_BROADCAST)) {
+			goto done;
+		}
+		switch_channel_stop_broadcast(chans[bcast_index]);
+	} else {
+		/* USER_BUSY, not NORMAL_CLEARING: NORMAL_CLEARING is also the fallback
+		 * in switch_ivr_play_file_detailed(), so asserting it would pass even if
+		 * the peer's real cause were never carried. */
+		switch_channel_hangup(chans[!bcast_index], SWITCH_CAUSE_USER_BUSY);
+	}
+
+	/* Fixed: the lead-frames wait ends, the peer check raises the stop, and
+	 * the app breaks on its first frame -- PLAYBACK_STOP within ~2s of the
+	 * hangup. Regressed: nothing interrupts the bridge thread and
+	 * PLAYBACK_STOP only arrives after the whole 20s file. The 12s bound sits
+	 * well clear of the 6000ms lead-frames cap and well short of the file. */
+	for (waited = 0; waited < 12000 && !*playback_watch_status; waited += 100) {
+		switch_sleep(100000);
+	}
+
+	ok = 1;
+
+  done:
+
+	/* no-op when never bound */
+	switch_event_unbind_callback(on_playback_stop_watch);
+	*playback_watch_uuid = '\0';
+	/* no-op once the queue took ownership and NULLed it */
+	switch_event_destroy(&event);
+
+	tear_down_bridged_pair(legs, chans);
+
+	return ok;
+}
+
+/*
+ * A priority broadcast runs nested inside a running playback, and hold music is
+ * queued that way. switch_core_session_dequeue_private_event() takes the
+ * priority queue first and gates it on CF_EVENT_LOCK_PRI alone, so the
+ * event-lock the outer broadcast holds does not stop it, and the playback frame
+ * loop dequeues it through switch_ivr_parse_all_events().
+ *
+ * One peer hangup then cuts both playbacks short, so both have to report it.
+ * The customer sees the outer one, so a marker that only the innermost playback
+ * can read leaves the reported playback looking like a file that played to the
+ * end.
+ *
+ * Returns 0 if the fixture could not be established, so nothing was measured.
+ */
+static int run_nested_priority_case(void)
+{
+	switch_core_session_t *legs[2] = { NULL, NULL };
+	switch_channel_t *chans[2] = { NULL, NULL };
+	switch_event_t *event = NULL;
+	int ok = 0;
+	int waited;
+
+	reset_playback_watch();
+
+	if (!bring_up_bridged_pair(legs, chans)) {
+		goto done;
+	}
+
+	switch_set_string(playback_watch_uuid, switch_core_session_get_uuid(legs[0]));
+	if (switch_event_bind("nested_priority_broadcast", SWITCH_EVENT_PLAYBACK_STOP, SWITCH_EVENT_SUBCLASS_ANY,
+						  on_playback_stop_watch, NULL) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+
+	/* the outer broadcast: the one the customer started. event-lock, the way
+	 * switch_ivr_broadcast() queues it, which holds CF_EVENT_LOCK and not
+	 * CF_EVENT_LOCK_PRI. */
+	if (switch_event_create(&event, SWITCH_EVENT_COMMAND) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "call-command", "execute");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-name", "playback");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-arg", "silence_stream://20000");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "event-lock", "true");
+	if (switch_core_session_queue_private_event(legs[0], &event, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+
+	/* it has to be playing, not still in the lead-frames wait, or the nested
+	 * command lands in a window this case is not about */
+	for (waited = 0; waited < 10000 && !switch_channel_test_flag(chans[0], CF_BROADCAST); waited += 100) {
+		switch_sleep(100000);
+	}
+	if (!switch_channel_test_flag(chans[0], CF_BROADCAST)) {
+		goto done;
+	}
+	switch_sleep(500000);
+
+	/* the nested one, on the priority queue, shaped like hold music */
+	if (switch_event_create(&event, SWITCH_EVENT_COMMAND) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "call-command", "execute");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-name", "playback");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-arg", "silence_stream://20000");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "event-lock", "true");
+	if (switch_core_session_queue_private_event(legs[0], &event, SWITCH_TRUE) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+	switch_sleep(1500000);
+
+	switch_channel_hangup(chans[1], SWITCH_CAUSE_USER_BUSY);
+
+	/* both playbacks end: the nested one, then the one it nested in */
+	for (waited = 0; waited < 12000 && playback_watch_events < 2; waited += 100) {
+		switch_sleep(100000);
+	}
+
+	ok = 1;
+
+  done:
+
+	switch_event_unbind_callback(on_playback_stop_watch);
+	*playback_watch_uuid = '\0';
+	switch_event_destroy(&event);
+
+	tear_down_bridged_pair(legs, chans);
+
+	return ok;
+}
+
+/*
+ * The nested priority broadcast finishes first, and the peer hangs up only
+ * afterwards, while the playback it nested in is still running.
+ *
+ * switch_ivr_parse_event() clears CF_BROADCAST when "inner" is zero, and inner
+ * is zero in a nested frame on a bridged channel, because it only counts a
+ * broadcast that starts while the channel is unbridged or holds the b leg. So
+ * the nested frame can take the flag down while the outer playback is still
+ * playing. The hangup-state stop and the bridge-exit marker both test that
+ * flag, so a peer hangup arriving in that state would arm nothing and the outer
+ * playback would run to the end of its file: the zombie call this change exists
+ * to stop.
+ *
+ * Reports through flag_down_after_nested whether the flag really was down once
+ * the nested playback had ended, so the case states what it measured instead of
+ * only passing.
+ *
+ * Returns 0 if the fixture could not be established, so nothing was measured.
+ */
+static int run_nested_completes_first_case(int *flag_down_after_nested, char *cause_out, switch_size_t cause_len)
+{
+	switch_core_session_t *legs[2] = { NULL, NULL };
+	switch_channel_t *chans[2] = { NULL, NULL };
+	switch_event_t *event = NULL;
+	int ok = 0;
+	int waited;
+
+	*flag_down_after_nested = 0;
+	*cause_out = '\0';
+	reset_playback_watch();
+
+	if (!bring_up_bridged_pair(legs, chans)) {
+		goto done;
+	}
+
+	switch_set_string(playback_watch_uuid, switch_core_session_get_uuid(legs[0]));
+	if (switch_event_bind("nested_completes_first", SWITCH_EVENT_PLAYBACK_STOP, SWITCH_EVENT_SUBCLASS_ANY,
+						  on_playback_stop_watch, NULL) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+
+	/* the outer broadcast, long enough that it cannot end on its own before
+	 * this case finishes */
+	if (switch_event_create(&event, SWITCH_EVENT_COMMAND) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "call-command", "execute");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-name", "playback");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-arg", "silence_stream://30000");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "event-lock", "true");
+	if (switch_core_session_queue_private_event(legs[0], &event, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+
+	for (waited = 0; waited < 10000 && !switch_channel_test_flag(chans[0], CF_BROADCAST); waited += 100) {
+		switch_sleep(100000);
+	}
+	if (!switch_channel_test_flag(chans[0], CF_BROADCAST)) {
+		goto done;
+	}
+	switch_sleep(500000);
+
+	/* the nested one, on the priority queue the way hold music arrives, and
+	 * short, so it ends while the outer playback is still going */
+	if (switch_event_create(&event, SWITCH_EVENT_COMMAND) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "call-command", "execute");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-name", "playback");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-arg", "silence_stream://400");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "event-lock", "true");
+	if (switch_core_session_queue_private_event(legs[0], &event, SWITCH_TRUE) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+
+	/* the nested playback ends and its frame cleans up */
+	for (waited = 0; waited < 10000 && !playback_watch_events; waited += 100) {
+		switch_sleep(100000);
+	}
+	if (!playback_watch_events) {
+		goto done;
+	}
+	switch_sleep(400000);
+
+	*flag_down_after_nested = !switch_channel_test_flag(chans[0], CF_BROADCAST);
+
+	/* now the peer goes away, with the outer playback still running */
+	switch_channel_hangup(chans[1], SWITCH_CAUSE_USER_BUSY);
+
+	/* well under the outer file's remaining time, so a playback that does not
+	 * stop shows up as a missing second event rather than as a slow pass */
+	for (waited = 0; waited < 8000 && playback_watch_events < 2; waited += 100) {
+		switch_sleep(100000);
+	}
+
+	switch_copy_string(cause_out, playback_watch_cause, cause_len);
+	ok = playback_watch_events >= 2 ? 1 : 0;
+
+  done:
+
+	switch_event_unbind_callback(on_playback_stop_watch);
+	*playback_watch_uuid = '\0';
+	switch_event_destroy(&event);
+
+	tear_down_bridged_pair(legs, chans);
+
+	return ok;
+}
+
+/*
+ * A setter on another thread checks CF_BROADCAST, then stalls while the
+ * broadcast it saw finishes and cleans up, then resumes and writes the marker.
+ * The write itself is what survives, so the case is reproduced here without
+ * threads: run a broadcast, keep the generation that was current inside it,
+ * let it end, then write the marker with that generation, which is exactly
+ * what the resumed setter would have written.
+ *
+ * A dialplan playback on the surviving leg must then report no cause, whether
+ * it ends on its own or the customer stops it. A dialplan app never reaches
+ * switch_ivr_parse_event(), so nothing clears the marker for it; only the
+ * generation makes the stale value unreadable.
+ *
+ * Returns 0 if the fixture could not be established, so nothing was measured.
+ */
+static int run_stale_setter_case(int customer_stop, char *cause_out, switch_size_t cause_len)
+{
+	switch_core_session_t *legs[2] = { NULL, NULL };
+	switch_channel_t *chans[2] = { NULL, NULL };
+	switch_event_t *event = NULL;
+	uint32_t stale_gen = 0;
+	int ok = 0;
+	int waited;
+
+	*cause_out = '\0';
+	reset_playback_watch();
+
+	if (!bring_up_bridged_pair(legs, chans)) {
+		goto done;
+	}
+
+	/* a short broadcast, only to open and close one generation */
+	if (switch_event_create(&event, SWITCH_EVENT_COMMAND) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "call-command", "execute");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-name", "playback");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "execute-app-arg", "silence_stream://200");
+	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "event-lock", "true");
+	if (switch_core_session_queue_private_event(legs[0], &event, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+
+	for (waited = 0; waited < 10000 && !switch_channel_test_flag(chans[0], CF_BROADCAST); waited += 100) {
+		switch_sleep(100000);
+	}
+	if (!switch_channel_test_flag(chans[0], CF_BROADCAST)) {
+		goto done;
+	}
+
+	/* what the stalled setter read, before the broadcast cleaned up */
+	stale_gen = switch_channel_get_broadcast_generation(chans[0]);
+
+	for (waited = 0; waited < 10000 && switch_channel_test_flag(chans[0], CF_BROADCAST); waited += 100) {
+		switch_sleep(100000);
+	}
+	if (switch_channel_test_flag(chans[0], CF_BROADCAST)) {
+		goto done;
+	}
+
+	/* the resumed setter. Both legs are still up: nothing went away. */
+	switch_channel_set_variable_printf(chans[0], SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, "%u", stale_gen);
+
+	reset_playback_watch();
+	switch_set_string(playback_watch_uuid, switch_core_session_get_uuid(legs[0]));
+	if (switch_event_bind("stale_setter", SWITCH_EVENT_PLAYBACK_STOP, SWITCH_EVENT_SUBCLASS_ANY,
+						  on_playback_stop_watch, NULL) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+
+	if (customer_stop) {
+		/* the stop the customer asks for, raised before the file opens so the
+		 * playback breaks on its first frame without another thread */
+		switch_channel_set_flag(chans[0], CF_BREAK);
+	}
+
+	/* the dialplan path: straight into the app, never switch_ivr_parse_event() */
+	switch_ivr_play_file(legs[0], NULL, "silence_stream://400", NULL);
+
+	for (waited = 0; waited < 5000 && !playback_watch_events; waited += 100) {
+		switch_sleep(100000);
+	}
+
+	switch_copy_string(cause_out, playback_watch_cause, cause_len);
+	ok = playback_watch_events ? 1 : 0;
+
+  done:
+
+	switch_event_unbind_callback(on_playback_stop_watch);
+	*playback_watch_uuid = '\0';
+	switch_event_destroy(&event);
+
+	tear_down_bridged_pair(legs, chans);
+
+	return ok;
+}
+
 FST_CORE_BEGIN("./conf_playsay")
 {
 	FST_SUITE_BEGIN(switch_ivr_play_say)
@@ -548,6 +1047,142 @@ FST_CORE_BEGIN("./conf_playsay")
 			switch_event_destroy(&event);
 		}
 		FST_SESSION_END()
+
+
+		/*
+		 * peer_hangup_during_lead_frames_ends_bridged_broadcast: guard for the
+		 * zombie-call race, over a real two-leg bridge with a real
+		 * audio_bridge_thread on each leg, run in both directions.
+		 *
+		 * The zombie is produced by the bridge thread itself: it dequeues the
+		 * broadcast, waits out lead-frames, and only then raises
+		 * CF_BROADCAST. A peer hangup inside that wait arms nothing --
+		 * switch_channel_stop_broadcast() is gated on CF_BROADCAST -- so the
+		 * thread used to play the whole file before returning to the bridge
+		 * loop where it would finally notice the peer was gone.
+		 *
+		 * The assertion is on PLAYBACK_STOP -- that it arrives promptly and
+		 * reports a break -- rather than on teardown timing, so it does not
+		 * depend on hangup_after_bridge semantics.
+		 */
+		FST_TEST_BEGIN(peer_hangup_during_lead_frames_ends_bridged_broadcast)
+		{
+			int in_window = 0;
+
+			fst_requires_module("mod_commands");
+			fst_requires_module("mod_loopback");
+
+			/* direction 1: the bridge originator carries the broadcast */
+			fst_requires(run_peer_hangup_lead_frames_case(0, 0, &in_window));
+			fst_xcheck(in_window, "A-leg: expect the peer hangup to land before CF_BROADCAST is raised");
+			fst_xcheck(*playback_watch_status, "A-leg: expect the playback to end once the bridge peer is gone, not after the whole file");
+			fst_xcheck(!strcmp(playback_watch_status, "break"), "A-leg: expect PLAYBACK_STOP to report a break, not a file played to the end");
+			fst_xcheck(!strcmp(playback_watch_cause, "USER_BUSY"), "A-leg: expect PLAYBACK_STOP to carry the peer's real cause, not the fallback");
+
+			/* direction 2: the bridge originatee carries the broadcast */
+			fst_requires(run_peer_hangup_lead_frames_case(1, 0, &in_window));
+			fst_xcheck(in_window, "B-leg: expect the peer hangup to land before CF_BROADCAST is raised");
+			fst_xcheck(*playback_watch_status, "B-leg: expect the playback to end once the bridge peer is gone, not after the whole file");
+			fst_xcheck(!strcmp(playback_watch_status, "break"), "B-leg: expect PLAYBACK_STOP to report a break, not a file played to the end");
+			fst_xcheck(!strcmp(playback_watch_cause, "USER_BUSY"), "B-leg: expect PLAYBACK_STOP to carry the peer's real cause, not the fallback");
+		}
+		FST_TEST_END()
+
+		/*
+		 * The other half of the same contract. A playback stop the customer
+		 * asked for reports a break too, so the break alone must not be read as
+		 * a hangup. Nothing hangs up here: both legs stay up, and the stop is
+		 * raised on the leg that is playing.
+		 *
+		 * This guards the marker's lifetime as much as its set sites. A marker
+		 * that is set when no leg went away, or that outlives the playback it
+		 * belongs to, shows up here as a cause on a live leg.
+		 */
+		FST_TEST_BEGIN(customer_stop_during_bridged_broadcast_reports_no_cause)
+		{
+			int in_window = 0;
+
+			fst_requires_module("mod_commands");
+			fst_requires_module("mod_loopback");
+
+			fst_requires(run_peer_hangup_lead_frames_case(0, 1, &in_window));
+			fst_xcheck(*playback_watch_status, "A-leg: expect the customer stop to end the playback");
+			fst_xcheck(!strcmp(playback_watch_status, "break"), "A-leg: expect a customer stop to report a break");
+			fst_xcheck(!*playback_watch_cause, "A-leg: expect no hangup cause on a customer stop, or it reads as a hangup");
+
+			fst_requires(run_peer_hangup_lead_frames_case(1, 1, &in_window));
+			fst_xcheck(*playback_watch_status, "B-leg: expect the customer stop to end the playback");
+			fst_xcheck(!strcmp(playback_watch_status, "break"), "B-leg: expect a customer stop to report a break");
+			fst_xcheck(!*playback_watch_cause, "B-leg: expect no hangup cause on a customer stop, or it reads as a hangup");
+		}
+		FST_TEST_END()
+
+		/*
+		 * The marker has to outlive a nested playback. Hold music is queued on
+		 * the priority private queue, which the event-lock of a running
+		 * broadcast does not hold shut, so it plays nested inside the playback
+		 * the customer started. One peer hangup cuts both short. A marker that
+		 * the innermost playback consumes leaves the outer PLAYBACK_STOP, the
+		 * one the customer is told about, with no cause at all.
+		 */
+		FST_TEST_BEGIN(nested_priority_broadcast_reports_peer_hangup_on_both_playbacks)
+		{
+			fst_requires_module("mod_commands");
+			fst_requires_module("mod_loopback");
+
+			fst_requires(run_nested_priority_case());
+			fst_xcheck(playback_watch_events == 2, "expect a PLAYBACK_STOP from the nested playback and from the one it nested in");
+			fst_xcheck(playback_watch_with_cause == 2, "expect both playbacks to report the peer hangup, not only the innermost");
+			fst_xcheck(!strcmp(playback_watch_cause, "USER_BUSY"),
+					   "expect the outer playback to carry the peer's real cause, not the fallback");
+		}
+		FST_TEST_END()
+
+		/*
+		 * The marker is written by threads that cannot hold the broadcast still
+		 * while they write: switch_channel_test_flag() releases flag_mutex
+		 * before it returns, and the variable setter takes profile_mutex, so the
+		 * check and the write are not one transaction. A setter that resumes
+		 * after the broadcast it saw has gone must not leave a marker that a
+		 * later playback reads, or a leg that survives on park_after_bridge
+		 * reports a hangup for a playback that nothing interrupted.
+		 */
+		/*
+		 * The nested priority broadcast ends first, then the peer hangs up with
+		 * the outer playback still running. The outer playback must still stop
+		 * and still report the peer's cause, whatever CF_BROADCAST looks like by
+		 * then.
+		 */
+		FST_TEST_BEGIN(peer_hangup_after_a_nested_broadcast_ends_stops_the_outer_playback)
+		{
+			char cause[64] = "";
+			int flag_down = 0;
+
+			fst_requires_module("mod_commands");
+			fst_requires_module("mod_loopback");
+
+			fst_requires(run_nested_completes_first_case(&flag_down, cause, sizeof(cause)));
+			fst_xcheck(!strcmp(cause, "USER_BUSY"),
+					   "the outer playback must report the peer's cause after a nested broadcast ended");
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+							  "nested cleanup left CF_BROADCAST %s\n", flag_down ? "clear" : "set");
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(stale_peer_hangup_marker_is_not_read_by_a_later_playback)
+		{
+			char cause[64] = "";
+
+			fst_requires_module("mod_commands");
+			fst_requires_module("mod_loopback");
+
+			fst_requires(run_stale_setter_case(0, cause, sizeof(cause)));
+			fst_xcheck(!*cause, "a playback that ended on its own must not report a cause from a stale marker");
+
+			fst_requires(run_stale_setter_case(1, cause, sizeof(cause)));
+			fst_xcheck(!*cause, "a customer-stopped playback must not report a cause from a stale marker");
+		}
+		FST_TEST_END()
 	}
 	FST_SUITE_END()
 }
