@@ -974,6 +974,7 @@ SWITCH_DECLARE(void) switch_core_session_hangup_state(switch_core_session_t *ses
 	switch_channel_set_hangup_time(session->channel);
 
 	switch_core_media_bug_remove_all(session);
+
 	switch_channel_stop_broadcast(session->channel);
 
 	/* A bridged peer may be blocked in a broadcast playback loop and cannot

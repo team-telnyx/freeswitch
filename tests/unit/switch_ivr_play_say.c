@@ -1133,6 +1133,8 @@ FST_CORE_BEGIN("./conf_playsay")
 			fst_requires(run_nested_priority_case());
 			fst_xcheck(playback_watch_events == 2, "expect a PLAYBACK_STOP from the nested playback and from the one it nested in");
 			fst_xcheck(playback_watch_with_cause == 2, "expect both playbacks to report the peer hangup, not only the innermost");
+			fst_xcheck(!strcmp(playback_watch_cause, "USER_BUSY"),
+					   "expect the outer playback to carry the peer's real cause, not the fallback");
 		}
 		FST_TEST_END()
 
