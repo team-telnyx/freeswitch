@@ -129,6 +129,7 @@ static struct {
 	char *ip;
 	uint16_t port;
 	char *password;
+	char *secondary_password;	/* optional secondary password for rotation */
 	int done;
 	int threads;
 	char *acl[MAX_ACL];
@@ -168,6 +169,69 @@ static uint32_t next_id(void)
 
 SWITCH_DECLARE_GLOBAL_STRING_FUNC(set_pref_ip, prefs.ip);
 SWITCH_DECLARE_GLOBAL_STRING_FUNC(set_pref_pass, prefs.password);
+SWITCH_DECLARE_GLOBAL_STRING_FUNC(set_pref_secondary_pass, prefs.secondary_password);
+
+/* Accept the primary or optional secondary password; locked against reloadxml swaps */
+static switch_bool_t auth_check_password(const char *pass)
+{
+	switch_bool_t ok = SWITCH_FALSE;
+
+	if (zstr(pass)) return SWITCH_FALSE;
+
+	switch_mutex_lock(globals.listener_mutex);
+	if (prefs.password && !strcmp(prefs.password, pass)) {
+		ok = SWITCH_TRUE;
+	} else if (!zstr(prefs.secondary_password) && !strcmp(prefs.secondary_password, pass)) {
+		ok = SWITCH_TRUE;
+	}
+	switch_mutex_unlock(globals.listener_mutex);
+
+	return ok;
+}
+
+/* Re-read password params on reloadxml so rotation needs no module reload */
+static void reload_passwords(void)
+{
+	char *cf = "event_socket.conf";
+	switch_xml_t cfg, xml, settings, param;
+	const char *new_primary = NULL, *new_secondary = NULL;
+
+	if (!(xml = switch_xml_open_cfg(cf, &cfg, NULL))) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Open of %s failed, passwords unchanged\n", cf);
+		return;
+	}
+
+	if ((settings = switch_xml_child(cfg, "settings"))) {
+		for (param = switch_xml_child(settings, "param"); param; param = param->next) {
+			const char *var = switch_xml_attr_soft(param, "name");
+			const char *val = switch_xml_attr_soft(param, "value");
+
+			if (!strcmp(var, "password")) {
+				new_primary = val;
+			} else if (!strcmp(var, "secondary-password")) {
+				new_secondary = val;
+			}
+		}
+	}
+
+	switch_mutex_lock(globals.listener_mutex);
+	if (!zstr(new_primary)) {
+		set_pref_pass(new_primary);
+	}
+	/* removing secondary-password from config disables it */
+	if (!zstr(new_secondary)) {
+		set_pref_secondary_pass(new_secondary);
+	} else {
+		switch_safe_free(prefs.secondary_password);
+	}
+	switch_mutex_unlock(globals.listener_mutex);
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+		"event_socket passwords re-read from config (secondary %s)\n",
+		zstr(new_secondary) ? "disabled" : "enabled");
+
+	switch_xml_free(xml);
+}
 
 static void *SWITCH_THREAD_FUNC listener_run(switch_thread_t *thread, void *obj);
 static switch_status_t launch_listener_thread(listener_t *listener);
@@ -361,6 +425,10 @@ static void event_handler(switch_event_t *event)
 	switch_status_t qstatus;
 
 	switch_assert(event != NULL);
+
+	if (event->event_id == SWITCH_EVENT_RELOADXML) {
+		reload_passwords();
+	}
 
 	if (!listen_list.ready) {
 		return;
@@ -699,6 +767,7 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_event_socket_shutdown)
 
 	switch_safe_free(prefs.ip);
 	switch_safe_free(prefs.password);
+	switch_safe_free(prefs.secondary_password);
 
 	return SWITCH_STATUS_SUCCESS;
 }
@@ -1866,10 +1935,12 @@ static switch_status_t parse_command(listener_t *listener, switch_event_t **even
 
 			pass = cmd + 5;
 
-			if (!strcmp(prefs.password, pass)) {
+			if (auth_check_password(pass)) {
 				switch_set_flag_locked(listener, LFLAG_AUTHED);
 				switch_snprintf(reply, reply_len, "+OK accepted");
 			} else {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+					"ESL auth failure from %s\n", listener->remote_ip);
 				switch_snprintf(reply, reply_len, "-ERR invalid");
 				switch_clear_flag_locked(listener, LFLAG_RUNNING);
 			}
@@ -3016,6 +3087,8 @@ static int config(void)
 					prefs.port = (uint16_t) atoi(val);
 				} else if (!strcmp(var, "password")) {
 					set_pref_pass(val);
+				} else if (!strcmp(var, "secondary-password")) {
+					if (!zstr(val)) { set_pref_secondary_pass(val); }
 				} else if (!strcasecmp(var, "apply-inbound-acl") && ! zstr(val)) {
 					if (prefs.acl_count < MAX_ACL) {
 						prefs.acl[prefs.acl_count++] = strdup(val);
