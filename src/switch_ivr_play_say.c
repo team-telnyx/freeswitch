@@ -1275,8 +1275,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_play_file_detailed(switch_core_sessio
 	const char *timer_name;
 	const char *prebuf;
 	const char *alt = NULL;
-	const char *marker;
-	uint32_t bcast_gen;
+	const char *marker = NULL;
+	uint32_t bcast_gen = 0;
 	const char *sleep_val;
 	const char *play_delimiter_val;
 	char play_delimiter = 0;
