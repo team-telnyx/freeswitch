@@ -836,6 +836,273 @@ static void blind_transfer_run(const char *ip, const char *target_scenario, cons
 	stop_t38_sipp(&c);
 }
 
+/* The stale-bond test watches PLAYBACK_STOP on one leg only. */
+static struct {
+	pthread_mutex_t mutex;
+	char uuid[SWITCH_UUID_FORMATTED_LENGTH + 1];
+	int stops;
+	char cause[64];
+	char status[64];
+} sb_watch = { PTHREAD_MUTEX_INITIALIZER, "", 0, "", "" };
+
+typedef struct {
+	int started;
+	int found_legs;
+	int bridged;
+	int parked;
+	int playing;
+	int killed;
+	int stops_after_hangup;
+	char cause_after_hangup[64];
+	int stops_at_end;
+	char cause_at_end[64];
+	char status_at_end[64];
+	int a_ok;
+	int b_ok;
+	int c_ok;
+	int settled;
+} sb_result_t;
+
+static void sb_playback_stop_handler(switch_event_t *event)
+{
+	const char *uuid = switch_event_get_header(event, "Unique-ID");
+	const char *cause = switch_event_get_header(event, "Hangup-Cause");
+	const char *status = switch_event_get_header(event, "Playback-Status");
+
+	pthread_mutex_lock(&sb_watch.mutex);
+	if (uuid && *sb_watch.uuid && !strcmp(uuid, sb_watch.uuid)) {
+		++sb_watch.stops;
+		switch_copy_string(sb_watch.cause, cause ? cause : "", sizeof(sb_watch.cause));
+		switch_copy_string(sb_watch.status, status ? status : "", sizeof(sb_watch.status));
+	}
+	pthread_mutex_unlock(&sb_watch.mutex);
+}
+
+/* Runs one API command and copies its reply; SWITCH_TRUE when the reply starts with +OK. */
+static switch_bool_t sb_api_reply(const char *cmd, const char *arg, char *buf, switch_size_t buflen)
+{
+	switch_stream_handle_t stream = { 0 };
+	switch_bool_t ok;
+
+	SWITCH_STANDARD_STREAM(stream);
+	switch_api_execute(cmd, arg, NULL, &stream);
+	ok = (stream.data && !strncmp((char *) stream.data, "+OK", 3)) ? SWITCH_TRUE : SWITCH_FALSE;
+	if (buf && buflen) {
+		switch_copy_string(buf, stream.data ? (char *) stream.data : "", buflen);
+	}
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "%s %s: %s\n", cmd, arg,
+					  stream.data ? (char *) stream.data : "(no reply)");
+	switch_safe_free(stream.data);
+	return ok;
+}
+
+/* Waits up to about 5 s for one channel that holds the variable, and copies its uuid. */
+static switch_bool_t sb_find_leg(const char *var_name, char *buf, switch_size_t buflen)
+{
+	int loop_count = 100;
+
+	*buf = '\0';
+	while (!*buf && loop_count--) {
+		switch_console_callback_match_t *matches = switch_core_session_findall_matching_var(var_name, NULL);
+
+		if (matches) {
+			if (matches->head) {
+				switch_copy_string(buf, matches->head->val, buflen);
+			}
+			switch_console_free_matches(&matches);
+		}
+		if (!*buf) {
+			switch_sleep(50 * 1000);
+		}
+	}
+	return *buf ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
+/* Waits up to about 5 s for the leg's bridge bond to hold want, or any bond when want is NULL. */
+static switch_bool_t sb_wait_bond(const char *uuid, const char *want, char *buf, switch_size_t buflen)
+{
+	int loop_count = 100;
+	switch_bool_t found = SWITCH_FALSE;
+
+	*buf = '\0';
+	while (!found && loop_count--) {
+		switch_core_session_t *session = switch_core_session_locate(uuid);
+
+		if (session) {
+			if (switch_channel_get_partner_uuid_copy(switch_core_session_get_channel(session), buf, buflen)) {
+				found = (!want || !strcmp(buf, want)) ? SWITCH_TRUE : SWITCH_FALSE;
+			}
+			switch_core_session_rwunlock(session);
+		}
+		if (!found) {
+			switch_sleep(50 * 1000);
+		}
+	}
+	return found;
+}
+
+/* Waits up to about 5 s for the channel to hold CF_BROADCAST. */
+static switch_bool_t sb_wait_broadcast(const char *uuid)
+{
+	int loop_count = 100;
+	switch_bool_t found = SWITCH_FALSE;
+
+	while (!found && loop_count--) {
+		switch_core_session_t *session = switch_core_session_locate(uuid);
+
+		if (session) {
+			found = switch_channel_test_flag(switch_core_session_get_channel(session), CF_BROADCAST) ? SWITCH_TRUE : SWITCH_FALSE;
+			switch_core_session_rwunlock(session);
+		}
+		if (!found) {
+			switch_sleep(50 * 1000);
+		}
+	}
+	return found;
+}
+
+/* Copies the uuid that an originate reply carries after its "+OK ". */
+static void sb_uuid_from_reply(const char *reply, char *buf, switch_size_t buflen)
+{
+	const char *p = reply ? strchr(reply, ' ') : NULL;
+	char *end;
+
+	*buf = '\0';
+	if (!p) {
+		return;
+	}
+	switch_copy_string(buf, p + 1, buflen);
+	if ((end = strchr(buf, '\n'))) {
+		*end = '\0';
+	}
+	if ((end = strchr(buf, '\r'))) {
+		*end = '\0';
+	}
+}
+
+/* A leg -> B2BUA -> B leg are bridged, then uuid_bridge moves the B leg into a second call with
+   the C leg. The A leg parks and keeps a bond that still names the B leg. A playback on the B leg
+   then belongs to the B leg -> C leg call, so the A leg hangup must not stop it. */
+static void sb_run(const char *ip, sb_result_t *r)
+{
+	char a_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1] = "";
+	char b_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1] = "";
+	char c_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1] = "";
+	char bond[SWITCH_UUID_FORMATTED_LENGTH + 1] = "";
+	char reply[512] = "";
+	char *arg = NULL;
+	pid_t a = -1, b = -1, c = -1;
+	int loop_count = 300;
+
+	pthread_mutex_lock(&sb_watch.mutex);
+	sb_watch.uuid[0] = '\0';
+	sb_watch.stops = 0;
+	sb_watch.cause[0] = '\0';
+	sb_watch.status[0] = '\0';
+	pthread_mutex_unlock(&sb_watch.mutex);
+	switch_event_bind("sb_playback", SWITCH_EVENT_PLAYBACK_STOP, NULL, sb_playback_stop_handler, NULL);
+
+	if (!bt_profile_ready() || start_bt_sipp(ip, "sipp-scenarios/uas_answer_hold.xml", "5064", NULL, NULL, NULL, &c) ||
+		start_bt_sipp(ip, "sipp-scenarios/uas_answer_hold.xml", "5063", NULL, NULL, NULL, &b)) {
+		goto end;
+	}
+	switch_sleep(500 * 1000);
+	if (start_bt_sipp(ip, "sipp-scenarios/uac_answer_wait_bye.xml", "5062", "7878780003", "1000", NULL, &a)) {
+		goto end;
+	}
+	r->started = 1;
+
+	/* The A leg and the B leg name each other once the bridge runs. */
+	if (!sb_find_leg("playback_stale_bond_a", a_uuid, sizeof(a_uuid)) ||
+		!sb_wait_bond(a_uuid, NULL, b_uuid, sizeof(b_uuid))) {
+		goto end;
+	}
+
+	/* The C leg waits in its park until uuid_bridge takes it. */
+	arg = switch_mprintf("sofia/external/7878780004@%s:5064 &park", ip);
+	if (!sb_api_reply("originate", arg, reply, sizeof(reply))) {
+		switch_safe_free(arg);
+		goto end;
+	}
+	switch_safe_free(arg);
+	sb_uuid_from_reply(reply, c_uuid, sizeof(c_uuid));
+	if (!*c_uuid) {
+		goto end;
+	}
+	r->found_legs = 1;
+
+	/* Move the B leg into the B leg -> C leg call. The A leg parks and keeps its old bond. */
+	arg = switch_mprintf("%s %s", b_uuid, c_uuid);
+	r->bridged = sb_api_reply("uuid_bridge", arg, NULL, 0) &&
+		sb_wait_bond(b_uuid, c_uuid, bond, sizeof(bond)) ? 1 : 0;
+	switch_safe_free(arg);
+	if (!r->bridged) {
+		goto end;
+	}
+
+	/* The A leg bridge exit stops a broadcast on its peer by itself, so let the A leg reach its
+	   park before the playback starts. Then only the hangup can stop this playback. */
+	if (!bt_wait_running_state(a_uuid, CS_PARK)) {
+		goto end;
+	}
+	r->parked = 1;
+
+	/* Watch this leg before the playback starts, so no stop is missed. */
+	pthread_mutex_lock(&sb_watch.mutex);
+	switch_copy_string(sb_watch.uuid, b_uuid, sizeof(sb_watch.uuid));
+	pthread_mutex_unlock(&sb_watch.mutex);
+
+	arg = switch_mprintf("%s playback::silence_stream://10000 aleg", b_uuid);
+	r->playing = sb_api_reply("uuid_broadcast", arg, NULL, 0) && sb_wait_broadcast(b_uuid) ? 1 : 0;
+	switch_safe_free(arg);
+	if (!r->playing) {
+		goto end;
+	}
+
+	r->killed = sb_api_reply("uuid_kill", a_uuid, NULL, 0) ? 1 : 0;
+
+	/* One second is far longer than the playback needs to end on a stop that the hangup raises. */
+	switch_sleep(1000 * 1000);
+	pthread_mutex_lock(&sb_watch.mutex);
+	r->stops_after_hangup = sb_watch.stops;
+	switch_copy_string(r->cause_after_hangup, sb_watch.cause, sizeof(r->cause_after_hangup));
+	pthread_mutex_unlock(&sb_watch.mutex);
+
+	/* Then let the file reach its own end. */
+	while (loop_count--) {
+		pthread_mutex_lock(&sb_watch.mutex);
+		r->stops_at_end = sb_watch.stops;
+		switch_copy_string(r->cause_at_end, sb_watch.cause, sizeof(r->cause_at_end));
+		switch_copy_string(r->status_at_end, sb_watch.status, sizeof(r->status_at_end));
+		pthread_mutex_unlock(&sb_watch.mutex);
+		if (r->stops_at_end) {
+			break;
+		}
+		switch_sleep(50 * 1000);
+	}
+
+	sb_api_reply("uuid_kill", b_uuid, NULL, 0);
+	sb_api_reply("uuid_kill", c_uuid, NULL, 0);
+
+ end:
+	/* Only a started peer: wait_t38_sipp() calls waitpid() on the pid, and a pid of -1 there
+	   would reap another peer's SIPp. */
+	r->a_ok = a > 0 && bt_sipp_ok(&a, 25000);
+	r->b_ok = b > 0 && bt_sipp_ok(&b, 25000);
+	r->c_ok = c > 0 && bt_sipp_ok(&c, 25000);
+
+	loop_count = 100;
+	while (loop_count-- && switch_core_session_count()) {
+		switch_sleep(50 * 1000);
+	}
+	r->settled = !switch_core_session_count();
+
+	switch_event_unbind_callback(sb_playback_stop_handler);
+	stop_t38_sipp(&a);
+	stop_t38_sipp(&b);
+	stop_t38_sipp(&c);
+}
+
 static void show_event(switch_event_t *event) {
 	char *str;
 	/*print the event*/
@@ -908,6 +1175,12 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 				fst_requires_module("mod_dptools");
 				fst_requires_module("mod_commands");
 				fst_requires_module("mod_sndfile");
+			} else if (getenv("FST_PLAYBACK_BOND_ONLY")) {
+				fst_requires_module("mod_sofia");
+				fst_requires_module("mod_dialplan_xml");
+				fst_requires_module("mod_dptools");
+				fst_requires_module("mod_commands");
+				fst_requires_module("mod_tone_stream");
 			} else if (getenv("FST_T38_ONLY") || getenv("FST_BLIND_TRANSFER_ONLY")) {
 				fst_requires_module("mod_sofia");
 				fst_requires_module("mod_dialplan_xml");
@@ -1283,6 +1556,28 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 			fst_xcheck(r.results == 0, "a result was sent to the re-parked REFER sender");
 			fst_xcheck(!r.referrer_blind_transfer_hangup, "the re-parked REFER sender was hung up with BLIND_TRANSFER");
 			fst_xcheck(r.a_ok && r.b_ok && r.c_ok, "a SIPp peer failed (B fails on any NOTIFY); inspect the *_blind_transfer_*_errors.log files");
+		}
+		FST_TEST_END()
+
+		/* Without the fix the A leg hangup finds the B leg through its stale bond, stops the
+		   playback of the B leg -> C leg call, and stamps a hangup cause on its PLAYBACK_STOP. */
+		FST_TEST_BEGIN(peer_hangup_does_not_stop_the_playback_of_a_later_bridge)
+		{
+			sb_result_t r = { 0 };
+
+			sb_run(switch_core_get_variable("local_ip_v4"), &r);
+			fst_xcheck(r.started, "Unable to start the SIPp peers");
+			fst_xcheck(r.found_legs, "the A leg, its bond or the C leg was not found");
+			fst_xcheck(r.bridged, "uuid_bridge did not move the B leg into the second call");
+			fst_xcheck(r.parked, "the A leg did not reach its park after its bridge ended");
+			fst_xcheck(r.playing, "the playback did not start on the B leg");
+			fst_xcheck(r.killed, "uuid_kill did not hang the A leg up");
+			fst_xcheck(r.stops_after_hangup == 0, "the A leg hangup stopped the playback of the second call");
+			fst_xcheck(!*r.cause_after_hangup, "the A leg hangup stamped a hangup cause on that playback");
+			fst_xcheck(r.stops_at_end == 1, "the playback did not report exactly one PLAYBACK_STOP");
+			fst_xcheck(!*r.cause_at_end, "the playback reported a hangup cause although both legs of its call were up");
+			fst_xcheck(!strcmp(r.status_at_end, "done"), "the playback did not reach the end of its file");
+			fst_xcheck(r.a_ok && r.b_ok && r.c_ok, "a SIPp peer failed; inspect the *_errors.log files");
 		}
 		FST_TEST_END()
 
