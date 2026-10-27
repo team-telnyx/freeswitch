@@ -677,6 +677,17 @@
       </condition>
     </extension>
 
+    <!-- Stale-bond test: the peer sends early media and never answers, so the bridge exit of
+         this leg hangs it up before it reads park_after_bridge. -->
+    <extension name="playback_stale_bond_early_peer">
+      <condition field="destination_number" expression="^7878780005$">
+        <action application="set" data="park_after_bridge=true"/>
+        <action application="set" data="playback_stale_bond_a=1"/>
+        <action application="answer"/>
+        <action application="bridge" data="{bridge_early_media=true}sofia/external/7878780005@$${local_ip_v4}:5063"/>
+      </condition>
+    </extension>
+
     <extension name="blind_transfer_confirm_target">
       <condition field="destination_number" expression="^7878780002$">
         <action application="set" data="hangup_after_bridge=true"/>
