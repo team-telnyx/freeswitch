@@ -1251,6 +1251,37 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_release_file_handle(switch_core_sessi
 #define FILE_BLOCKSIZE 1024 * 8
 #define FILE_BUFSIZE 1024 * 64
 
+/* SWITCH_TRUE when the bridge exit lets this leg outlive its bridge, so the leg is
+ * not hanging up and its stopped playback must report no hangup cause.
+ *
+ * The two bridge exit sides do not read the same variables, so only what both of
+ * them honour counts here. The originatee side reads park_after_bridge and
+ * transfer_after_bridge alone, so the two early variables decide nothing there.
+ * The originator side reads all four, but it hangs the leg up before it reads any
+ * of them when the peer did not answer, and again when hangup_after_bridge is
+ * explicit. A leg this function accepts therefore survives on both sides. A leg it
+ * rejects reports the cause, which is the safe answer for a leg that hangs up.
+ *
+ * marker_tail is what follows the generation in the marker: ":1" when the peer that
+ * armed the marker had answered. */
+static switch_bool_t playback_leg_outlives_bridge(switch_channel_t *channel, const char *marker_tail)
+{
+	const char *hup;
+
+	if (!marker_tail || strcmp(marker_tail, ":1")) {
+		return SWITCH_FALSE;
+	}
+
+	hup = switch_channel_get_variable(channel, SWITCH_HANGUP_AFTER_BRIDGE_VARIABLE);
+
+	if (hup && !strcasecmp(hup, "explicit")) {
+		return SWITCH_FALSE;
+	}
+
+	return (switch_true(switch_channel_get_variable(channel, SWITCH_PARK_AFTER_BRIDGE_VARIABLE)) ||
+			!zstr(switch_channel_get_variable(channel, SWITCH_TRANSFER_AFTER_BRIDGE_VARIABLE))) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
 SWITCH_DECLARE(switch_status_t) switch_ivr_play_file_detailed(switch_core_session_t *session, switch_file_handle_t *fh, const char *file, switch_input_args_t *args, const char **error)
 {
 	switch_channel_t *channel = switch_core_session_get_channel(session);
@@ -1276,6 +1307,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_play_file_detailed(switch_core_sessio
 	const char *prebuf;
 	const char *alt = NULL;
 	const char *marker = NULL;
+	char *marker_tail = NULL;
 	uint32_t bcast_gen = 0;
 	const char *sleep_val;
 	const char *play_delimiter_val;
@@ -2083,15 +2115,11 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_play_file_detailed(switch_core_sessio
 
 			/* A break only: a file that reached its end reports done and must not
 			 * carry a cause. A zero generation means no broadcast has run, so a
-			 * marker that is not a number never matches.
-			 * The four variables are what the bridge exit reads to let a leg
-			 * outlive its bridge, and such a leg is not hanging up. */
+			 * marker that is not a number never matches. A leg that outlives its
+			 * bridge is not hanging up, so it reports no cause. */
 			if (status == SWITCH_STATUS_BREAK && marker && bcast_gen &&
-				(uint32_t) strtoul(marker, NULL, 10) == bcast_gen &&
-				!switch_true(switch_channel_get_variable(channel, SWITCH_PARK_AFTER_BRIDGE_VARIABLE)) &&
-				!switch_true(switch_channel_get_variable(channel, SWITCH_PARK_AFTER_EARLY_BRIDGE_VARIABLE)) &&
-				zstr(switch_channel_get_variable(channel, SWITCH_TRANSFER_AFTER_BRIDGE_VARIABLE)) &&
-				zstr(switch_channel_get_variable(channel, SWITCH_TRANSFER_AFTER_EARLY_BRIDGE_VARIABLE))) {
+				(uint32_t) strtoul(marker, &marker_tail, 10) == bcast_gen &&
+				!playback_leg_outlives_bridge(channel, marker_tail)) {
 				if (!switch_event_get_header(event, "Hangup-Cause")) {
 					const char *peer_cause = switch_channel_get_variable(channel, "last_bridge_hangup_cause");
 

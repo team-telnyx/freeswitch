@@ -984,9 +984,13 @@ SWITCH_DECLARE(void) switch_core_session_hangup_state(switch_core_session_t *ses
 			if (bond_back && !strcmp(bond_back, switch_core_session_get_uuid(session)) &&
 				switch_channel_test_flag(partner_channel, CF_BROADCAST)) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-								  "%s Stopping broadcast on bridge partner %s due to hangup, broadcast generation %u\n",
-								  switch_channel_get_name(session->channel), switch_channel_get_name(partner_channel), partner_gen);
-				switch_channel_set_variable_printf(partner_channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, "%u", partner_gen);
+								  "%s Stopping broadcast on bridge partner %s due to hangup, broadcast generation %u, answered %d\n",
+								  switch_channel_get_name(session->channel), switch_channel_get_name(partner_channel), partner_gen,
+								  switch_channel_test_flag(session->channel, CF_ANSWERED) ? 1 : 0);
+				/* The partner bridge exit lets an originator outlive the bridge only when
+				 * this leg answered, so the marker carries that too. */
+				switch_channel_set_variable_printf(partner_channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, "%u:%d", partner_gen,
+												   switch_channel_test_flag(session->channel, CF_ANSWERED) ? 1 : 0);
 				switch_channel_stop_broadcast(partner_channel);
 			}
 
