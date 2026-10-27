@@ -849,7 +849,7 @@ typedef struct {
 	int started;
 	int found_legs;
 	int bridged;
-	int parked;
+	int prepared;
 	int playing;
 	int killed;
 	int stops_after_hangup;
@@ -1065,15 +1065,15 @@ static void sb_run(const char *ip, int rebridge, const char *var, const char *va
 
 		/* The A leg bridge exit stops a broadcast on its peer by itself, so let the A leg
 		   reach its park before the playback starts. Then only the hangup can stop it. */
-		r->parked = bt_wait_running_state(a_uuid, CS_PARK) ? 1 : 0;
+		r->prepared = bt_wait_running_state(a_uuid, CS_PARK) ? 1 : 0;
 	} else {
 		/* The variable the bridge exit of the playing leg reads. */
 		arg = switch_mprintf("%s %s %s", play_uuid, var, val);
 		r->bridged = 1;
-		r->parked = sb_api_reply("uuid_setvar", arg, NULL, 0) ? 1 : 0;
+		r->prepared = sb_api_reply("uuid_setvar", arg, NULL, 0) ? 1 : 0;
 		switch_safe_free(arg);
 	}
-	if (!r->parked) {
+	if (!r->prepared) {
 		goto end;
 	}
 
@@ -1594,7 +1594,7 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 			fst_xcheck(r.started, "Unable to start the SIPp peers");
 			fst_xcheck(r.found_legs, "the A leg, its bond or the C leg was not found");
 			fst_xcheck(r.bridged, "uuid_bridge did not move the B leg into the second call");
-			fst_xcheck(r.parked, "the A leg did not reach its park after its bridge ended");
+			fst_xcheck(r.prepared, "the A leg did not reach its park after its bridge ended");
 			fst_xcheck(r.playing, "the playback did not start on the B leg");
 			fst_xcheck(r.killed, "uuid_kill did not hang the A leg up");
 			fst_xcheck(r.stops_after_hangup == 0, "the A leg hangup stopped the playback of the second call");
@@ -1614,7 +1614,7 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 			sb_run(switch_core_get_variable("local_ip_v4"), 0, "park_after_bridge", "true", 0, 0, &r);
 			fst_xcheck(r.started, "Unable to start the SIPp peers");
 			fst_xcheck(r.found_legs, "the A leg or its bond was not found");
-			fst_xcheck(r.parked, "uuid_setvar did not set park_after_bridge on the B leg");
+			fst_xcheck(r.prepared, "uuid_setvar did not set park_after_bridge on the B leg");
 			fst_xcheck(r.playing, "the playback did not start on the B leg");
 			fst_xcheck(r.killed, "uuid_kill did not hang the A leg up");
 			fst_xcheck(r.stops_after_hangup == 1, "the A leg hangup did not stop the B leg playback");
@@ -1634,7 +1634,7 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 			sb_run(switch_core_get_variable("local_ip_v4"), 0, "park_after_early_bridge", "true", 0, 0, &r);
 			fst_xcheck(r.started, "Unable to start the SIPp peers");
 			fst_xcheck(r.found_legs, "the A leg or its bond was not found");
-			fst_xcheck(r.parked, "uuid_setvar did not set park_after_early_bridge on the B leg");
+			fst_xcheck(r.prepared, "uuid_setvar did not set park_after_early_bridge on the B leg");
 			fst_xcheck(r.playing, "the playback did not start on the B leg");
 			fst_xcheck(r.killed, "uuid_kill did not hang the A leg up");
 			fst_xcheck(r.stops_after_hangup == 1, "the A leg hangup did not stop the B leg playback");
@@ -1654,7 +1654,7 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 			sb_run(switch_core_get_variable("local_ip_v4"), 0, "hangup_after_bridge", "explicit", 1, 0, &r);
 			fst_xcheck(r.started, "Unable to start the SIPp peers");
 			fst_xcheck(r.found_legs, "the A leg or its bond was not found");
-			fst_xcheck(r.parked, "uuid_setvar did not set hangup_after_bridge on the A leg");
+			fst_xcheck(r.prepared, "uuid_setvar did not set hangup_after_bridge on the A leg");
 			fst_xcheck(r.playing, "the playback did not start on the A leg");
 			fst_xcheck(r.killed, "uuid_kill did not hang the B leg up");
 			fst_xcheck(r.stops_after_hangup == 1, "the B leg hangup did not stop the A leg playback");
@@ -1674,7 +1674,7 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 			sb_run(switch_core_get_variable("local_ip_v4"), 0, "park_after_bridge", "true", 1, 1, &r);
 			fst_xcheck(r.started, "Unable to start the SIPp peers");
 			fst_xcheck(r.found_legs, "the A leg or its bond was not found");
-			fst_xcheck(r.parked, "uuid_setvar did not set park_after_bridge on the A leg");
+			fst_xcheck(r.prepared, "uuid_setvar did not set park_after_bridge on the A leg");
 			fst_xcheck(r.playing, "the playback did not start on the A leg");
 			fst_xcheck(r.killed, "uuid_kill did not hang the B leg up");
 			fst_xcheck(r.stops_after_hangup == 1, "the B leg hangup did not stop the A leg playback");
