@@ -95,6 +95,7 @@
 #define RTP_MAGIC_NUMBER 42
 #define WARN_SRTP_ERRS 10
 #define MAX_SRTP_ERRS 100
+#define RTP_MAX_REJECTED_PACKETS_PER_READ 20
 #define RTP_MOS_PACKET_LOSS_PENALTY 2.5
 #define RTP_MOS_JITTER_PENALTY 2.0
 #define RTP_PUBLISH_STATS_INTERVAL_MS 5000
@@ -500,6 +501,14 @@ struct switch_rtp {
 	uint32_t ts;
 	//uint32_t last_clock_ts;
 	uint32_t last_write_ts;
+	uint32_t sent_frames;
+	uint32_t sent_frame_ts;
+	switch_bool_t sent_frame_ts_kept;
+	uint32_t raw_ts_offset;		/* added to forwarded audio ts after generated frames */
+	uint8_t raw_ts_forwarded;
+	uint8_t raw_ts_generated;
+	uint32_t raw_ts_anchor;		/* last forwarded audio ts sent */
+	switch_time_t raw_ts_anchor_time;
 	uint32_t last_read_ts;
 	uint32_t prev_read_ts;
 	uint32_t last_cng_ts;
@@ -509,6 +518,11 @@ struct switch_rtp {
 	uint32_t max_next_write_samplecount;
 	uint32_t queue_delay;
 	switch_time_t last_write_timestamp;
+	uint32_t raw_ts_rebase_offset;
+	uint32_t raw_ts_rebase_anchor_ts;
+	switch_time_t raw_ts_rebase_anchor_time;
+	uint8_t raw_ts_rebase_anchor_valid;
+	uint32_t raw_ts_rate;
 	uint32_t flags[SWITCH_RTP_FLAG_INVALID];
 	uint8_t bundle_has_video;
 	switch_memory_pool_t *pool;
@@ -5010,12 +5024,105 @@ SWITCH_DECLARE(void) switch_rtp_init(switch_memory_pool_t *pool)
 	global_init = 1;
 }
 
-static uint8_t get_next_write_ts(switch_rtp_t *rtp_session, uint32_t timestamp)
+static uint32_t raw_ts_offset(switch_rtp_t *rtp_session, uint32_t rate)
+{
+	return rtp_session->raw_ts_rate == rate ? rtp_session->raw_ts_rebase_offset : 0;
+}
+
+static uint32_t rebase_raw_write_ts(switch_rtp_t *rtp_session, uint32_t src_ts, uint32_t rate, uint32_t *offset)
+{
+	uint8_t anchor_valid = rtp_session->raw_ts_rate == rate && rtp_session->raw_ts_rebase_anchor_valid;
+	uint32_t out = src_ts + raw_ts_offset(rtp_session, rate);
+	uint32_t ref = anchor_valid ? rtp_session->raw_ts_rebase_anchor_ts : rtp_session->last_write_ts;
+	int64_t delta = (int32_t) (out - ref);
+	int64_t limit = (int64_t) rate * 2;
+
+	*offset = raw_ts_offset(rtp_session, rate);
+
+	if (delta >= -limit && delta <= limit) {
+		return out;
+	}
+
+	if (delta > 0 && anchor_valid) {
+		switch_time_t elapsed_usec = switch_time_ref() - rtp_session->raw_ts_rebase_anchor_time;
+
+		if (elapsed_usec > 0) {
+			int64_t elapsed = (int64_t) elapsed_usec * rate / 1000000;
+			int64_t tolerance = rate / 5;
+
+			if (tolerance < (int64_t) rtp_session->samples_per_interval * 3) {
+				tolerance = (int64_t) rtp_session->samples_per_interval * 3;
+			}
+			/* A late packet after the pause only makes elapsed larger, so there is no
+			 * upper bound on elapsed. The tolerance covers the packet before the pause
+			 * arriving late, which makes elapsed shorter than the source gap. */
+			if (delta <= elapsed + tolerance) {
+				return out;
+			}
+		}
+	}
+
+	out = ref + rtp_session->samples_per_interval;
+	*offset = out - src_ts;
+
+	return out;
+}
+
+/* RAW_WRITE audio: generated frames (ts 0) follow the time since the last forwarded frame (whole
+ * intervals, rounded down, at least one past the last ts sent); forwarded frames after them never go
+ * backwards. 0 means "no timestamp" further down: a result of 0 is sent as 0xffffffff and what follows
+ * is shifted by -1. The rebase on jump (raw_ts_offset()) is added after this, so compare with the last
+ * ts sent before it. */
+static uint32_t raw_write_audio_ts(switch_rtp_t *rtp_session, uint32_t ts)
+{
+	switch_time_t now = switch_mono_micro_time_now();
+	uint32_t last = rtp_session->last_write_ts - raw_ts_offset(rtp_session, rtp_session->samples_per_second);
+	uint32_t out;
+
+	if (!ts) {
+		uint32_t elapsed;
+
+		if (!rtp_session->raw_ts_forwarded) {
+			return 0;
+		}
+		rtp_session->raw_ts_generated = 1;
+		elapsed = (uint32_t) ((uint64_t) (now - rtp_session->raw_ts_anchor_time) * rtp_session->samples_per_second / 1000000);
+		out = rtp_session->raw_ts_anchor + elapsed / rtp_session->samples_per_interval * rtp_session->samples_per_interval;
+		if ((int32_t) (out - last) < (int32_t) rtp_session->samples_per_interval) {
+			out = last + rtp_session->samples_per_interval;
+		}
+		if (!out) {
+			rtp_session->raw_ts_offset--;
+			rtp_session->raw_ts_anchor--;
+			out = 0xffffffff;
+		}
+		return out;
+	}
+
+	if (rtp_session->raw_ts_generated) {
+		if ((int32_t) (ts + rtp_session->raw_ts_offset - last) <= 0) {
+			rtp_session->raw_ts_offset = last + rtp_session->samples_per_interval - ts;
+		}
+		rtp_session->raw_ts_generated = 0;
+	}
+	rtp_session->raw_ts_forwarded = 1;
+	out = ts + rtp_session->raw_ts_offset;
+	if (!out) {
+		rtp_session->raw_ts_offset--;
+		out = 0xffffffff;
+	}
+	rtp_session->raw_ts_anchor = out;
+	rtp_session->raw_ts_anchor_time = now;
+
+	return out;
+}
+
+static uint8_t get_next_write_ts(switch_rtp_t *rtp_session, uint32_t timestamp, switch_bool_t timestamp_given)
 {
 	uint8_t m = 0, changed = 0;
 
 	if (!(rtp_session->rtp_bugs & RTP_BUG_SEND_LINEAR_TIMESTAMPS)) {
-		if (timestamp) {
+		if (timestamp_given) {
 			rtp_session->ts = (uint32_t) timestamp;
 			changed++;
 		} else if (switch_rtp_test_flag(rtp_session, SWITCH_RTP_FLAG_USE_TIMER)) {
@@ -5772,7 +5879,7 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 		data[0] = 65;
 		rtp_session->cn++;
 
-		get_next_write_ts(rtp_session, 0);
+		get_next_write_ts(rtp_session, 0, SWITCH_FALSE);
 		rtp_session->send_msg.header.ts = htonl(rtp_session->ts);
 
 		switch_rtp_write_manual(rtp_session, (void *) data, 2, 0, rtp_session->cng_pt, ntohl(rtp_session->send_msg.header.ts), &frame_flags);
@@ -11262,7 +11369,8 @@ static int get_recv_payload(switch_rtp_t *rtp_session)
 #define return_cng_frame() do_cng = 1; goto timer_check
 
 static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t *bytes, switch_frame_flag_t *flags,
-									   payload_map_t **pmapP, switch_status_t poll_status, switch_bool_t return_jb_packet)
+									   payload_map_t **pmapP, switch_status_t poll_status, switch_bool_t return_jb_packet,
+									   switch_bool_t *retry_rejected)
 {
 	switch_status_t status = SWITCH_STATUS_FALSE;
 	uint32_t ts = 0;
@@ -11273,6 +11381,7 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 	int tries = 0;
 	int block = 0;
 	int accelerate = 0;
+	int rejected_packets = 0;
 
 	switch_assert(bytes);
 
@@ -11335,7 +11444,8 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 
 	memset(&rtp_session->last_rtp_hdr, 0, sizeof(rtp_session->last_rtp_hdr));
 
-	if (rtp_session->fork.fork_rx.active) {
+	/* A post-timer retry must retain the pre-read fork snapshot. */
+	if (rtp_session->fork.fork_rx.active && !(retry_rejected && *retry_rejected)) {
 		// To apply media bug modification to fork stream
 		// get the last read frame data instead
 		if (rtp_session->last_poll_status == SWITCH_STATUS_SUCCESS)  {
@@ -11361,6 +11471,16 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 		}
 		rtp_session->last_poll_status = poll_status;
 	}
+
+	if (retry_rejected) *retry_rejected = SWITCH_FALSE;
+
+	recv_again:
+	/* Re-read after the previous fork frame was saved so skipped packets cannot overwrite it. */
+	*bytes = sizeof(rtp_msg_t);
+	rtp_session->has_rtp = 0;
+	rtp_session->has_ice = 0;
+	rtp_session->has_rtcp = 0;
+	memset(&rtp_session->last_rtp_hdr, 0, sizeof(rtp_session->last_rtp_hdr));
 
 	if (poll_status == SWITCH_STATUS_SUCCESS) {
 		status = switch_socket_recvfrom(rtp_session->from_addr, rtp_session->sock_input, 0, (void *) &rtp_session->recv_msg, bytes);
@@ -11460,10 +11580,19 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 				}
 
 				if (!accept_packet) {
+					int fdr = 0;
+					switch_status_t rejected_poll_status;
+
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG1,
 									  "Invalid Packet SEQ: %d TS: %d PT:%d ignored\n",
 									  ntohs(rtp_session->recv_msg.header.seq), ntohl(rtp_session->last_rtp_hdr.ts), rtp_session->last_rtp_hdr.pt);
 					*bytes = 0;
+					/* Bound rejection draining to packets already queued. */
+					if (++rejected_packets < RTP_MAX_REJECTED_PACKETS_PER_READ && rtp_session->read_pollfd) {
+						rejected_poll_status = switch_poll(rtp_session->read_pollfd, 1, &fdr, 0);
+						if (rejected_poll_status == SWITCH_STATUS_SUCCESS) goto recv_again;
+						if (retry_rejected && rejected_poll_status == SWITCH_STATUS_TIMEOUT) *retry_rejected = SWITCH_TRUE;
+					}
 				}
 			}
 
@@ -13065,6 +13194,7 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 	while (switch_rtp_ready(rtp_session)) {
 		int do_cng = 0;
 		int read_pretriggered = 0;
+		switch_bool_t retry_rejected = SWITCH_FALSE;
 		int has_rtcp = 0;
 		int got_rtp_poll = 0;
 
@@ -13080,7 +13210,7 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 
 			if (rtp_session->jb && !rtp_session->pause_jb && jb_valid(rtp_session)) {
 				while (switch_rtp_ready(rtp_session) && switch_poll(rtp_session->read_pollfd, 1, &fdr, 0) == SWITCH_STATUS_SUCCESS) {
-					status = read_rtp_packet(rtp_session, &bytes, flags, pmapP, SWITCH_STATUS_SUCCESS, SWITCH_FALSE);
+					status = read_rtp_packet(rtp_session, &bytes, flags, pmapP, SWITCH_STATUS_SUCCESS, SWITCH_FALSE, NULL);
 
 					if (status == SWITCH_STATUS_GENERR) {
 						ret = -1;
@@ -13108,7 +13238,7 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 			} else if ((rtp_session->flags[SWITCH_RTP_FLAG_AUTOFLUSH] || rtp_session->flags[SWITCH_RTP_FLAG_STICKY_FLUSH])) {
 
 				if (switch_poll(rtp_session->read_pollfd, 1, &fdr, 0) == SWITCH_STATUS_SUCCESS) {
-					status = read_rtp_packet(rtp_session, &bytes, flags, pmapP, SWITCH_STATUS_SUCCESS, SWITCH_FALSE);
+					status = read_rtp_packet(rtp_session, &bytes, flags, pmapP, SWITCH_STATUS_SUCCESS, SWITCH_FALSE, &retry_rejected);
 					if (status == SWITCH_STATUS_GENERR) {
 						ret = -1;
 						goto end;
@@ -13121,7 +13251,7 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 					}
 
 					/* switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "Initial (%i) %d\n", status, bytes); */
-					if (status != SWITCH_STATUS_FALSE) {
+					if (status != SWITCH_STATUS_FALSE && !retry_rejected) {
 						read_pretriggered = 1;
 					}
 
@@ -13282,7 +13412,7 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 			} else {
 				
 				
-				status = read_rtp_packet(rtp_session, &bytes, flags, pmapP, poll_status, got_jb);
+				status = read_rtp_packet(rtp_session, &bytes, flags, pmapP, poll_status, got_jb, &retry_rejected);
 
 				if (status == SWITCH_STATUS_GENERR) {
 					ret = -1;
@@ -14152,6 +14282,10 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 	switch_size_t bytes;
 	uint8_t send = 1;
 	uint32_t this_ts = 0;
+	uint32_t raw_ts_rebase_offset = 0;
+	uint32_t raw_ts_rate = 0;
+	uint8_t raw_ts_rebase = 0;
+	switch_bool_t timestamp_given = SWITCH_FALSE;
 	int ret;
 	switch_time_t now;
 	uint8_t m = 0;
@@ -14233,6 +14367,8 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 		video_frame_last_timestamp = &rtp_session->video_frame_last_timestamp;
 	}
 
+	raw_ts_rate = rtp_session->samples_per_second;
+
 	if (rtp_session->flags[SWITCH_RTP_FLAG_USE_TIMER]) {
 		//switch_core_timer_sync(&rtp_session->write_timer);
 	}
@@ -14244,7 +14380,15 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 		bytes = datalen;
 
 		m = (uint8_t) send_msg->header.m;
-		if (!write_state && !(rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS)) {
+		if (!write_state && !force_video && !(rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS) &&
+			rtp_session->flags[SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP] && !rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
+			if (flags && (*flags & SFF_RFC2833)) {
+				send_msg->header.ts = htonl(ntohl(send_msg->header.ts) + raw_ts_offset(rtp_session, raw_ts_rate));
+			} else {
+				send_msg->header.ts = htonl(rebase_raw_write_ts(rtp_session, ntohl(send_msg->header.ts), raw_ts_rate, &raw_ts_rebase_offset));
+				raw_ts_rebase = 1;
+			}
+		} else if (!write_state && !(rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS)) {
 			{
 				uint32_t ts_delta;
 				this_ts = ntohl(send_msg->header.ts);
@@ -14317,6 +14461,17 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 		send_msg->ebody = NULL;
 		send_msg->header.pt = payload;
 
+		timestamp_given = timestamp != 0;
+
+		if (!write_state && !force_video && timestamp && rtp_session->flags[SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP] && rtp_session->flags[SWITCH_RTP_FLAG_RAW_WRITE] &&
+			!(rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS) && !rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
+			if (*flags & SFF_RFC2833) {
+				timestamp += raw_ts_offset(rtp_session, raw_ts_rate);
+			} else {
+				timestamp = rebase_raw_write_ts(rtp_session, timestamp, raw_ts_rate, &raw_ts_rebase_offset);
+				raw_ts_rebase = 1;
+			}
+		}
 		if (write_state) {
 			if (timestamp) {
 				*ts = timestamp;
@@ -14325,7 +14480,7 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 			}
 			m = 0;
 		} else {
-			m = get_next_write_ts(rtp_session, timestamp);
+			m = get_next_write_ts(rtp_session, timestamp, timestamp_given);
 			*ts = rtp_session->ts;
 		}
 #if DEBUG_RTP
@@ -14975,6 +15130,31 @@ fork_done:
 		*last_write_ts = this_ts;
 		*reset = 0;
 
+		/* Shared BUNDLE video must not publish audio send/timestamp state. */
+		if (!write_state && !force_video && !rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
+			rtp_session->sent_frame_ts = this_ts;
+			rtp_session->sent_frame_ts_kept = timestamp_given &&
+				!(rtp_session->rtp_bugs & (RTP_BUG_SEND_LINEAR_TIMESTAMPS | RTP_BUG_SEND_NORMALISED_TIMESTAMPS));
+			rtp_session->sent_frames++;
+
+			if (rtp_session->flags[SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP] && rtp_session->raw_ts_rate != raw_ts_rate) {
+				rtp_session->raw_ts_rebase_offset = 0;
+				rtp_session->raw_ts_rebase_anchor_valid = 0;
+				rtp_session->raw_ts_rate = raw_ts_rate;
+			}
+
+			if (raw_ts_rebase) {
+				rtp_session->raw_ts_rebase_offset = raw_ts_rebase_offset;
+			}
+
+			if (rtp_session->flags[SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP] && !rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] && !(flags && (*flags & SFF_RFC2833))) {
+				rtp_session->raw_ts_rebase_anchor_ts = this_ts;
+				rtp_session->raw_ts_rebase_anchor_time = switch_time_ref();
+				rtp_session->raw_ts_rebase_anchor_valid = 1;
+			}
+
+		}
+
 		if (!write_state && rtp_session->rtp_bugs & RTP_BUG_SEND_NORMALISED_TIMESTAMPS) {
 			normalised_ts_commit(rtp_session, this_ts);
 		}
@@ -15594,6 +15774,10 @@ SWITCH_DECLARE(int) switch_rtp_write_frame_ex_state(switch_rtp_t *rtp_session, s
 		} else {
 			ts = 0;
 		}
+		if (!write_state && !force_video && rtp_session->flags[SWITCH_RTP_FLAG_RAW_WRITE] &&
+			!rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
+			ts = raw_write_audio_ts(rtp_session, ts);
+		}
 	}
 
 	/*
@@ -15992,6 +16176,21 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_write_raw(switch_rtp_t *rtp_session, 
 SWITCH_DECLARE(uint32_t) switch_rtp_get_ssrc(switch_rtp_t *rtp_session)
 {
 	return rtp_session->ssrc;
+}
+
+SWITCH_DECLARE(uint32_t) switch_rtp_get_sent_frames(switch_rtp_t *rtp_session, uint32_t *ts, switch_bool_t *kept)
+{
+	if (!rtp_session) {
+		return 0;
+	}
+	if (ts) {
+		*ts = rtp_session->sent_frame_ts;
+	}
+	if (kept) {
+		*kept = rtp_session->sent_frame_ts_kept;
+	}
+
+	return rtp_session->sent_frames;
 }
 
 SWITCH_DECLARE(uint32_t) switch_rtp_get_remote_ssrc(switch_rtp_t *rtp_session)

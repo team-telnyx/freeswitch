@@ -7,3 +7,4 @@
 /include/switch_swigable_cpp.h
 /include/switch_version.h
 /include/switch_version.h.in
+/include/switch_version_local.h

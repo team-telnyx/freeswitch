@@ -36,6 +36,7 @@
 #include "switch.h"
 #include "switch_core.h"
 #include "private/switch_core_pvt.h"
+#include "private/switch_apr_pvt.h"
 
 #define DEBUG_THREAD_POOL
 
@@ -969,18 +970,32 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_perform_receive_message(swit
 
 		if (message->message_id == SWITCH_MESSAGE_INDICATE_BRIDGE &&
 			switch_channel_test_flag(session->channel, CF_CONFIRM_BLIND_TRANSFER)) {
-			switch_core_session_t *other_session;
-			const char *uuid = switch_channel_get_variable(session->channel, "blind_transfer_uuid");
+			/* string_arg carries the bridge peer uuid (absent only for conference/
+			   eavesdrop, which keep the legacy success). A peer that can't be
+			   located is already at CS_HANGUP and never answered: defer. */
+			switch_core_session_t *peer_session;
+			int peer_answered = zstr(message->string_arg);
 
-			switch_channel_clear_flag(session->channel, CF_CONFIRM_BLIND_TRANSFER);
+			if (!peer_answered && (peer_session = switch_core_session_locate(message->string_arg))) {
+				switch_channel_t *peer_channel = switch_core_session_get_channel(peer_session);
 
-			if (!zstr(uuid) && (other_session = switch_core_session_locate(uuid))) {
-				switch_core_session_message_t msg = { 0 };
-				msg.message_id = SWITCH_MESSAGE_INDICATE_BLIND_TRANSFER_RESPONSE;
-				msg.from = __FILE__;
-				msg.numeric_arg = 1;
-				switch_core_session_receive_message(other_session, &msg);
-				switch_core_session_rwunlock(other_session);
+				/* tell the peer whom to confirm when it answers (bridge_to does not survive a
+				   hand-off of the bridge, for example to the T.38 gateway). Set it before the
+				   CF_ANSWERED test, so an answer between the two still finds it. */
+				switch_channel_set_variable(peer_channel, "blind_transfer_deferred_uuid", switch_core_session_get_uuid(session));
+				if ((peer_answered = switch_channel_test_flag(peer_channel, CF_ANSWERED))) {
+					switch_channel_set_variable(peer_channel, "blind_transfer_deferred_uuid", NULL);
+				}
+				switch_core_session_rwunlock(peer_session);
+			}
+
+			if (!peer_answered) {
+				/* early media only: defer; leave CF_CONFIRM_BLIND_TRANSFER set so the
+				   answer-time producer (mark_answered) or a failure producer fires later */
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+								  "Deferring blind transfer confirmation until the peer answers\n");
+			} else {
+				switch_ivr_blind_transfer_ack(session, SWITCH_TRUE);
 			}
 		}
 	}
@@ -1452,91 +1467,61 @@ SWITCH_DECLARE(uint32_t) switch_core_session_flush_and_publish_private_events(sw
 	return x;
 }
 
+typedef struct {
+	char **cmds;
+	int cmdlen;
+} private_media_match_t;
+
+static int private_media_event_matches(void *item, void *match_data)
+{
+	private_media_match_t *m = (private_media_match_t *) match_data;
+	const char *app_name = item ? switch_event_get_header((switch_event_t *) item, "execute-app-name") : NULL;
+	int index;
+
+	for (index = 0; !zstr(app_name) && index < m->cmdlen; ++index) {
+		if (!strcasecmp(app_name, m->cmds[index])) {
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
+static uint32_t flush_and_publish_private_media_queue(switch_core_session_t *session, switch_queue_t *queue, private_media_match_t *m)
+{
+	void *removed[SWITCH_EVENT_QUEUE_LEN];
+	unsigned int nremoved = 0, i;
+
+	if ((switch_status_t) switch_apr_queue_extract(queue, private_media_event_matches, m, removed, SWITCH_EVENT_QUEUE_LEN, &nremoved) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to flush the private media commands\n");
+	}
+
+	for (i = 0; i < nremoved; i++) {
+		switch_event_t *interrupt_event = NULL;
+		switch_event_t *command_event = (switch_event_t *) removed[i];
+
+		if (switch_event_create(&interrupt_event, SWITCH_EVENT_COMMAND_INTERRUPTED) == SWITCH_STATUS_SUCCESS) {
+			switch_channel_event_set_data(session->channel, interrupt_event);
+			switch_event_add_header_string(interrupt_event, SWITCH_STACK_BOTTOM, "Unique-ID", session->uuid_str);
+			switch_event_add_header_string(interrupt_event, SWITCH_STACK_BOTTOM, "execute-app-name", switch_event_get_header(command_event, "execute-app-name"));
+			switch_event_add_header_string(interrupt_event, SWITCH_STACK_BOTTOM, "execute-app-arg", switch_event_get_header(command_event, "execute-app-arg"));
+			switch_event_fire(&interrupt_event);
+		}
+		switch_event_destroy(&command_event);
+	}
+
+	return nremoved;
+}
+
 SWITCH_DECLARE(uint32_t) switch_core_session_flush_and_publish_private_media_events(switch_core_session_t *session, char *cmds[], int cmdlen)
 {
-	switch_status_t status = SWITCH_STATUS_FALSE;
-	switch_queue_t *queue_pri, *queue;
-	int x = 0;
-	void *pop;
-	int index = 0;
-	int matches = 0;
-	
+	uint32_t x = 0;
+
 	if (session->private_event_queue) {
-		switch_memory_pool_t *pool = switch_core_session_get_pool(session);
+		private_media_match_t m = { cmds, cmdlen };
 
-		if (switch_queue_size(session->private_event_queue_pri)) {
-			switch_queue_create(&queue_pri, SWITCH_EVENT_QUEUE_LEN, pool);
-			while ((status = (switch_status_t) switch_queue_trypop(session->private_event_queue_pri, &pop)) == SWITCH_STATUS_SUCCESS) {
-				if (pop) {
-					switch_event_t *interrupt_event = NULL;
-					switch_event_t *command_event = (switch_event_t *) pop;
-					const char *app_name = switch_event_get_header(command_event, "execute-app-name");
-
-					for(index = 0; index < cmdlen; ++index) {
-						if (!strcasecmp(app_name, cmds[index])) {
-							matches = 1;
-							break;
-						}
-					}
-					if (matches) {
-						if (switch_event_create(&interrupt_event, SWITCH_EVENT_COMMAND_INTERRUPTED) == SWITCH_STATUS_SUCCESS) {
-							switch_channel_event_set_data(session->channel, interrupt_event);
-							switch_event_add_header_string(interrupt_event, SWITCH_STACK_BOTTOM, "Unique-ID", session->uuid_str);
-							switch_event_add_header_string(interrupt_event, SWITCH_STACK_BOTTOM, "execute-app-name", switch_event_get_header(command_event, "execute-app-name"));
-							switch_event_add_header_string(interrupt_event, SWITCH_STACK_BOTTOM, "execute-app-arg", switch_event_get_header(command_event, "execute-app-arg"));
-							switch_event_fire(&interrupt_event);
-						}
-						x++;
-					}else {
-						switch_event_t *clone_pri = NULL;
-						switch_event_dup(&clone_pri, command_event);
-						switch_queue_trypush(queue_pri, clone_pri);
-					}
-					switch_event_destroy(&command_event);
-				}
-				matches = 0;
-			}
-			if (queue_pri){
-				session->private_event_queue_pri = queue_pri;
-			}
-		}
-
-		if (switch_queue_size(session->private_event_queue)) {
-			switch_queue_create(&queue, SWITCH_EVENT_QUEUE_LEN, pool);
-			while ((status = (switch_status_t) switch_queue_trypop(session->private_event_queue, &pop)) == SWITCH_STATUS_SUCCESS) {
-				if (pop) {
-					switch_event_t *interrupt_event = NULL;
-					switch_event_t *command_event = (switch_event_t *) pop;
-					const char *app_name = switch_event_get_header(command_event, "execute-app-name");
-
-					for(index = 0; index < cmdlen; ++index) {
-						if (!strcasecmp(app_name, cmds[index])) {
-							matches = 1;
-							break;
-						}
-					}
-					if (matches) {
-						if (switch_event_create(&interrupt_event, SWITCH_EVENT_COMMAND_INTERRUPTED) == SWITCH_STATUS_SUCCESS) {
-							switch_channel_event_set_data(session->channel, interrupt_event);
-							switch_event_add_header_string(interrupt_event, SWITCH_STACK_BOTTOM, "Unique-ID", session->uuid_str);
-							switch_event_add_header_string(interrupt_event, SWITCH_STACK_BOTTOM, "execute-app-name", app_name);
-							switch_event_add_header_string(interrupt_event, SWITCH_STACK_BOTTOM, "execute-app-arg", switch_event_get_header(command_event, "execute-app-arg"));
-							switch_event_fire(&interrupt_event);
-						}
-						x++;
-					}else {
-						switch_event_t *clone = NULL;
-						switch_event_dup(&clone, command_event);
-						switch_queue_trypush(queue, clone);
-					}
-					switch_event_destroy(&command_event);
-				}
-				matches = 0;
-			}
-			if (queue){
-				session->private_event_queue = queue;
-			}
-		}
+		x += flush_and_publish_private_media_queue(session, session->private_event_queue_pri, &m);
+		x += flush_and_publish_private_media_queue(session, session->private_event_queue, &m);
 		check_media(session);
 	}
 

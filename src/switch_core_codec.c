@@ -43,6 +43,19 @@ SWITCH_DECLARE(uint32_t) switch_core_codec_next_id(void)
 	return CODEC_ID++;
 }
 
+/* a read resampler made for another rate (or channel count) than the read codec's would keep converting to it;
+ * the read path makes a new one when needed. codec_read_mutex held */
+static void drop_stale_read_resampler(switch_core_session_t *session)
+{
+	switch_mutex_lock(session->resample_mutex);
+	if (session->read_resampler && (session->read_resampler->to_rate != (int) session->read_impl.actual_samples_per_second ||
+									session->read_resampler->channels != (int) session->read_impl.number_of_channels)) {
+		switch_resample_destroy(&session->read_resampler);
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Dropping the read resampler of the previous read codec\n");
+	}
+	switch_mutex_unlock(session->resample_mutex);
+}
+
 SWITCH_DECLARE(void) switch_core_session_unset_read_codec(switch_core_session_t *session)
 {
 	switch_mutex_t *mutex = NULL;
@@ -52,6 +65,10 @@ SWITCH_DECLARE(void) switch_core_session_unset_read_codec(switch_core_session_t 
 	if (mutex) switch_mutex_lock(mutex);
 	session->real_read_codec = session->read_codec = NULL;
 	session->raw_read_frame.codec = session->read_codec;
+	/* audio left for the previous read codec */
+	if (session->raw_read_buffer) {
+		switch_buffer_zero(session->raw_read_buffer);
+	}
 	session->raw_write_frame.codec = session->read_codec;
 	session->enc_read_frame.codec = session->read_codec;
 	session->enc_write_frame.codec = session->read_codec;
@@ -90,6 +107,18 @@ SWITCH_DECLARE(void) switch_core_session_unset_write_codec(switch_core_session_t
 	session->real_write_codec = session->write_codec = NULL;
 	if (mutex) switch_mutex_unlock(mutex);
 	switch_mutex_unlock(session->codec_write_mutex);
+}
+
+void switch_core_session_refresh_bug_codec(switch_core_session_t *session)
+{
+	/* force media bugs to copy the read codec from the next frame */
+	switch_thread_rwlock_wrlock(session->bug_rwlock);
+	if (switch_core_codec_ready(&session->bug_codec)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Destroying BUG Codec %s:%d\n",
+			session->bug_codec.implementation->iananame, session->bug_codec.implementation->ianacode);
+		switch_core_codec_destroy(&session->bug_codec);
+	}
+	switch_thread_rwlock_unlock(session->bug_rwlock);
 }
 
 SWITCH_DECLARE(switch_status_t) switch_core_session_set_real_read_codec(switch_core_session_t *session, switch_codec_t *codec)
@@ -151,15 +180,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_set_real_read_codec(switch_c
 			}
 		}
 
-		/* force media bugs to copy the read codec from the next frame */
-		switch_thread_rwlock_wrlock(session->bug_rwlock);
-		if (switch_core_codec_ready(&session->bug_codec)) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Destroying BUG Codec %s:%d\n",
-				session->bug_codec.implementation->iananame, session->bug_codec.implementation->ianacode);
-			switch_core_codec_destroy(&session->bug_codec);
-		}
-
-		switch_thread_rwlock_unlock(session->bug_rwlock);
+		switch_core_session_refresh_bug_codec(session);
 	} else {
 		status = SWITCH_STATUS_FALSE;
 		goto end;
@@ -185,6 +206,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_set_real_read_codec(switch_c
 		switch_channel_set_variable(channel, "original_read_rate", tmp);
 
 		session->raw_read_frame.codec = session->read_codec;
+		/* audio left for the previous read codec */
+		if (session->raw_read_buffer) {
+			switch_buffer_zero(session->raw_read_buffer);
+		}
+		drop_stale_read_resampler(session);
 		session->raw_write_frame.codec = session->read_codec;
 		session->enc_read_frame.codec = session->read_codec;
 		session->enc_write_frame.codec = session->read_codec;
@@ -294,6 +320,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_set_read_codec(switch_core_s
 		switch_channel_set_variable(channel, "read_rate", tmp);
 
 		session->raw_read_frame.codec = session->read_codec;
+		/* audio left for the previous read codec */
+		if (session->raw_read_buffer) {
+			switch_buffer_zero(session->raw_read_buffer);
+		}
+		drop_stale_read_resampler(session);
 		session->raw_write_frame.codec = session->read_codec;
 		session->enc_read_frame.codec = session->read_codec;
 		session->enc_write_frame.codec = session->read_codec;
@@ -752,6 +783,59 @@ SWITCH_DECLARE(switch_status_t) switch_core_codec_init_with_bitrate(switch_codec
 	return SWITCH_STATUS_NOTIMPL;
 }
 
+SWITCH_DECLARE(switch_bool_t) switch_core_codec_ptime_supported(const switch_codec_t *codec, const char *codec_name, const char *modname,
+																 const char *fmtp, uint32_t rate, int ms, int channels, uint32_t bitrate)
+{
+	const switch_codec_implementation_t *running, *iptr;
+	switch_codec_interface_t *codec_interface;
+	switch_bool_t supported = SWITCH_FALSE;
+	int g722;
+
+	if (!codec || zstr(codec_name) || ms <= 0) {
+		return SWITCH_FALSE;
+	}
+
+	running = codec->implementation;
+
+	if (!running || !codec->codec_interface || zstr(running->iananame)) {
+		return SWITCH_FALSE;
+	}
+
+	if (strchr(codec_name, '.') || !strncasecmp(codec_name, "PROXY", 5) || strcasecmp(codec_name, running->iananame)) {
+		return SWITCH_FALSE;
+	}
+
+	if (!zstr(modname) && (zstr(codec->codec_interface->modname) || strcasecmp(modname, codec->codec_interface->modname))) {
+		return SWITCH_FALSE;
+	}
+
+	g722 = !strcasecmp(codec_name, "g722");
+
+	if (rate && rate != (g722 ? running->samples_per_second : running->actual_samples_per_second)) {
+		return SWITCH_FALSE;
+	}
+
+	/* the interface the rebuild will use: switch_core_codec_init_with_bitrate() looks it up by name the same way */
+	if (!(codec_interface = switch_loadable_module_get_codec_interface(codec_name, modname))) {
+		return SWITCH_FALSE;
+	}
+
+	for (iptr = codec_interface->implementations; iptr; iptr = iptr->next) {
+		uint32_t crate = g722 ? iptr->samples_per_second : iptr->actual_samples_per_second;
+		if ((!rate || rate == crate) && (!bitrate || bitrate == (uint32_t)iptr->bits_per_second) &&
+			(ms == (int)(iptr->microseconds_per_packet / 1000)) && (!channels || channels == iptr->number_of_channels)) {
+			if (!iptr->matches_fmtp || SWITCH_STATUS_SUCCESS == iptr->matches_fmtp(iptr->fmtp, fmtp)) {
+				supported = SWITCH_TRUE;
+				break;
+			}
+		}
+	}
+
+	UNPROTECT_INTERFACE(codec_interface);
+
+	return supported;
+}
+
 SWITCH_DECLARE(switch_status_t) switch_core_codec_encode(switch_codec_t *codec,
 														 switch_codec_t *other_codec,
 														 void *decoded_data,
@@ -823,6 +907,41 @@ SWITCH_DECLARE(switch_status_t) switch_core_codec_decode(switch_codec_t *codec,
 	status = codec->implementation->decode(codec, other_codec, encoded_data, encoded_data_len, encoded_rate,
 										   decoded_data, decoded_data_len, decoded_rate, flag);
 	if (codec->mutex) switch_mutex_unlock(codec->mutex);
+
+	/* Post-condition for the concealment path. With no encoded bytes to work
+	 * from, a decoder can produce at most one packet of concealment, so anything
+	 * larger means it returned without writing through decoded_data_len - our
+	 * callers pass in the size of their buffer (raw_write_frame.datalen =
+	 * raw_write_frame.buflen), and that preset value then travels on as "this
+	 * much valid audio". switch_core_session_write_frame() resamples it for the
+	 * far leg, which on an 8000 -> 16000 transcode doubles it past the write
+	 * buffer, fails the write, and ends the bridge - a codec bug should never be
+	 * able to do that. Drop the frame instead; both read and write paths already
+	 * treat SWITCH_STATUS_BREAK as "no audio this tick". Seen with mod_bcg729's
+	 * G.729 PLC branch on G722 <-> G729 bridges. */
+	if (encoded_data_len == 0 && (status == SWITCH_STATUS_SUCCESS || status == SWITCH_STATUS_RESAMPLE) &&
+		codec->implementation->decoded_bytes_per_packet &&
+		*decoded_data_len > codec->implementation->decoded_bytes_per_packet) {
+		/* A codec that gets this wrong gets it wrong on every silent packet, so log
+		 * once per codec handle rather than a line per 20 ms for the life of the
+		 * call. Per handle, not process-wide: a handle is per leg, so every affected
+		 * call still reports, and one call cannot silence another or a different
+		 * codec. codec->session is set for the media paths that transcode and NULL
+		 * for a bare switch_core_codec_init() (tests, file handles), so tag the line
+		 * with the leg when we have one. */
+		if (!(codec->flags & SWITCH_CODEC_FLAG_CONCEAL_OVERRUN_LOGGED)) {
+			codec->flags |= SWITCH_CODEC_FLAG_CONCEAL_OVERRUN_LOGGED;
+			switch_log_printf(codec->session ? SWITCH_CHANNEL_ID_SESSION : SWITCH_CHANNEL_ID_LOG,
+							  __FILE__, __SWITCH_FUNC__, __LINE__, (const char *) codec->session,
+							  SWITCH_LOG_CRIT,
+							  "Codec %s decoded a zero-length frame into %u bytes, more than one %u byte packet - dropping\n",
+							  codec->implementation->iananame, *decoded_data_len,
+							  codec->implementation->decoded_bytes_per_packet);
+		}
+
+		*decoded_data_len = 0;
+		return SWITCH_STATUS_BREAK;
+	}
 
 	return status;
 }

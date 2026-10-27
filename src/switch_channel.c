@@ -164,6 +164,11 @@ struct switch_channel {
 	switch_core_session_t *session;
 	switch_channel_state_t state;
 	switch_channel_state_t running_state;
+	switch_atomic_t transfer_generation;
+	/* Under state_mutex: the transfer generation current when another thread last set a
+	   state other than CS_ROUTING. See note_state_from_another_thread(). */
+	uint32_t superseding_generation;
+	uint8_t superseding_valid;
 	switch_channel_callstate_t callstate;
 	uint32_t flags[CF_FLAG_MAX];
 	uint32_t caps[CC_FLAG_MAX];
@@ -1845,6 +1850,20 @@ SWITCH_DECLARE(uint32_t) switch_channel_test_flag(switch_channel_t *channel, swi
 	return r;
 }
 
+SWITCH_DECLARE(switch_bool_t) switch_channel_test_and_clear_flag(switch_channel_t *channel, switch_channel_flag_t flag)
+{
+	switch_bool_t r;
+
+	switch_assert(channel && channel->flag_mutex);
+
+	switch_mutex_lock(channel->flag_mutex);
+	r = channel->flags[flag] ? SWITCH_TRUE : SWITCH_FALSE;
+	channel->flags[flag] = 0;
+	switch_mutex_unlock(channel->flag_mutex);
+
+	return r;
+}
+
 SWITCH_DECLARE(switch_bool_t) switch_channel_set_flag_partner(switch_channel_t *channel, switch_channel_flag_t flag)
 {
 	const char *uuid;
@@ -2522,6 +2541,71 @@ static inline void careful_set(switch_channel_t *channel, switch_channel_state_t
 	}
 }
 
+/*
+ * Transfer generation: marks a caller profile installed by a transfer as not yet routed.
+ *
+ * A flag cannot carry this - the state machine clears flags entering any state handler,
+ * so an unrelated state can consume it. A counter is not consumable; ROUTING snapshots
+ * it and compares. It wraps, hence != and never > or <.
+ *
+ * Atomic so the increment cannot be lost. The read is an unordered plain load and
+ * orders nothing by itself. Where the session thread is asleep the wake supplies the
+ * edge; where it is running, nothing does, and a bump is simply observed on some later
+ * iteration - the guards are level-triggered, so a late read costs a pass, not a
+ * transfer. state_mutex must not be used here: perform_set_running_state() holds it
+ * across an event fire.
+ */
+SWITCH_DECLARE(void) switch_channel_inc_transfer_generation(switch_channel_t *channel)
+{
+	switch_assert(channel != NULL);
+
+	switch_atomic_inc(&channel->transfer_generation);
+}
+
+SWITCH_DECLARE(uint32_t) switch_channel_get_transfer_generation(switch_channel_t *channel)
+{
+	switch_assert(channel != NULL);
+
+	return switch_atomic_read(&channel->transfer_generation);
+}
+
+/*
+ * Who moved the channel after the latest transfer: its own session thread, or a command
+ * from another thread. The state alone cannot say - CS_CONSUME_MEDIA is both what the
+ * ROUTING handler picks for an originated leg and what switch_ivr_multi_threaded_bridge()
+ * sets on a peer - so the state machine asks this instead of testing for particular
+ * states.
+ *
+ * Recorded under state_mutex, in the same critical section as the state it describes, so
+ * the generation read here and the state that stands are ordered the same way against a
+ * transfer's own set_state(CS_ROUTING). A same-state set counts: a bridge that finds its
+ * peer already in CS_CONSUME_MEDIA has still claimed it. CS_ROUTING is the transfer's own
+ * request, and CS_HANGUP and later win on their own, so neither is recorded.
+ */
+static inline void note_state_from_another_thread(switch_channel_t *channel, switch_channel_state_t state)
+{
+	if (state == CS_ROUTING || state >= CS_HANGUP || !channel->session || switch_core_session_in_thread(channel->session)) {
+		return;
+	}
+
+	channel->superseding_generation = switch_atomic_read(&channel->transfer_generation);
+	channel->superseding_valid = 1;
+}
+
+SWITCH_DECLARE(switch_bool_t) switch_channel_transfer_superseded(switch_channel_t *channel)
+{
+	switch_bool_t superseded;
+
+	switch_assert(channel != NULL);
+
+	switch_mutex_lock(channel->state_mutex);
+	superseded = (channel->superseding_valid &&
+				  channel->superseding_generation == switch_atomic_read(&channel->transfer_generation)) ? SWITCH_TRUE : SWITCH_FALSE;
+	switch_mutex_unlock(channel->state_mutex);
+
+	return superseded;
+}
+
 SWITCH_DECLARE(switch_channel_state_t) switch_channel_perform_set_running_state(switch_channel_t *channel, switch_channel_state_t state,
 																				const char *file, const char *func, int line)
 {
@@ -2589,6 +2673,7 @@ SWITCH_DECLARE(switch_channel_state_t) switch_channel_perform_set_state(switch_c
 	switch_assert(last_state <= CS_DESTROY);
 
 	if (last_state == state) {
+		note_state_from_another_thread(channel, state);
 		goto done;
 	}
 
@@ -2775,6 +2860,7 @@ SWITCH_DECLARE(switch_channel_state_t) switch_channel_perform_set_state(switch_c
 						  channel->name, state_names[last_state], state_names[state]);
 
 		careful_set(channel, &channel->state, state);
+		note_state_from_another_thread(channel, state);
 
 		if (state == CS_HANGUP && !channel->hangup_cause) {
 			channel->hangup_cause = SWITCH_CAUSE_NORMAL_CLEARING;
@@ -3523,6 +3609,19 @@ SWITCH_DECLARE(switch_caller_extension_t *) switch_channel_get_queued_extension(
 	return caller_extension;
 }
 
+SWITCH_DECLARE(switch_bool_t) switch_channel_has_queued_extension(switch_channel_t *channel)
+{
+	switch_bool_t queued;
+
+	switch_assert(channel != NULL);
+
+	switch_mutex_lock(channel->profile_mutex);
+	queued = channel->queued_extension ? SWITCH_TRUE : SWITCH_FALSE;
+	switch_mutex_unlock(channel->profile_mutex);
+
+	return queued;
+}
+
 SWITCH_DECLARE(void) switch_channel_transfer_to_extension(switch_channel_t *channel, switch_caller_extension_t *caller_extension)
 {
 	switch_mutex_lock(channel->profile_mutex);
@@ -3530,7 +3629,23 @@ SWITCH_DECLARE(void) switch_channel_transfer_to_extension(switch_channel_t *chan
 	switch_mutex_unlock(channel->profile_mutex);
 
 	switch_channel_set_flag(channel, CF_TRANSFER);
+	/* Same handoff as switch_ivr_session_transfer(); see the counter. */
+	switch_channel_inc_transfer_generation(channel);
 	switch_channel_set_state(channel, CS_ROUTING);
+
+	/* set_state() is a silent no-op when the channel is already CS_ROUTING, and it is the
+	   only thing here that would have woken the session thread - so a cross-thread call
+	   landing on a channel already in routing leaves the queued extension stranded
+	   against a sleeping thread. Bare wake, matching switch_ivr_session_transfer(): the
+	   full signal_state_change() would also run the endpoint state_change io routine,
+	   every registered hook, and switch_core_session_kill_channel(SWITCH_SIG_BREAK) -
+	   which breaks a pending read - for a transition that may not have happened.
+
+	   Called on the session thread too (switch_ivr_parse_event()'s xferext arm runs
+	   there); session->mutex is SWITCH_MUTEX_NESTED, so the trylock inside succeeds
+	   recursively, signals a condvar with no waiter, and unlocks. A no-op, by design:
+	   on that thread the loop's own guards carry the handoff. */
+	switch_core_session_wake_session_thread(channel->session);
 }
 
 SWITCH_DECLARE(void) switch_channel_set_caller_extension(switch_channel_t *channel, switch_caller_extension_t *caller_extension)
@@ -4193,6 +4308,17 @@ SWITCH_DECLARE(switch_status_t) switch_channel_perform_mark_answered(switch_chan
 		&& (other_session = switch_core_session_locate(uuid))) {
 		switch_core_session_kill_channel(other_session, SWITCH_SIG_BREAK);
 		switch_core_session_rwunlock(other_session);
+	}
+
+	/* A bridge to this leg started on early media and deferred a blind transfer confirmation
+	   (INDICATE_BRIDGE set the variable): report success now. A leg that is not bridged yet gets
+	   its success from the bridge start. */
+	if ((uuid = switch_channel_get_variable_dup(channel, "blind_transfer_deferred_uuid", SWITCH_TRUE, -1))) {
+		switch_channel_set_variable(channel, "blind_transfer_deferred_uuid", NULL);
+		if ((other_session = switch_core_session_locate(uuid))) {
+			switch_ivr_blind_transfer_ack(other_session, SWITCH_TRUE);
+			switch_core_session_rwunlock(other_session);
+		}
 	}
 
 	if (switch_true(switch_channel_get_variable(channel, SWITCH_PASSTHRU_PTIME_MISMATCH_VARIABLE))) {

@@ -71,15 +71,22 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 {
 	switch_io_event_hook_read_frame_t *ptr;
 	switch_status_t status = SWITCH_STATUS_FALSE;
-	int need_codec, perfect, do_bugs = 0, do_resample = 0, is_cng = 0, tap_only = 0, is_inuse = 0;
-	switch_codec_implementation_t codec_impl;
+	int need_codec, perfect, do_bugs = 0, do_resample = 0, is_cng = 0, tap_only = 0, is_inuse = 0, drain = 0;
+	switch_codec_implementation_t codec_impl = { 0 };
 	switch_frame_t *fork_frame = NULL;
 	unsigned int flag = 0;
 	int i;
+	/* The mutex actually locked below. switch_core_codec_destroy() memsets the codec,
+	 * mutex pointer included, without holding codec_read_mutex, so re-reading
+	 * session->read_codec->mutex to unlock can yield NULL. */
+	switch_mutex_t *read_codec_mutex = NULL;
+	switch_time_t short_since = 0;
 
 	switch_assert(session != NULL);
 
-	tap_only = switch_test_flag(session, SSF_MEDIA_BUG_TAP_ONLY);
+	switch_thread_rwlock_rdlock(session->bug_rwlock);
+	tap_only = session->bug_tap_only;
+	switch_thread_rwlock_unlock(session->bug_rwlock);
 
 	switch_os_yield();
 
@@ -134,7 +141,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 		return SWITCH_STATUS_FALSE;
 	}
 
-	switch_mutex_lock(session->read_codec->mutex);
+	read_codec_mutex = session->read_codec->mutex;
+	switch_mutex_lock(read_codec_mutex);
 
   top:
 
@@ -184,8 +192,21 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 		goto even_more_done;
 	}
 
+	/* a packet decoded to more than one packet's worth of audio: hand out the rest before reading the next one */
+	if (session->raw_read_buffer && switch_buffer_inuse(session->raw_read_buffer) >= session->read_impl.decoded_bytes_per_packet) {
+		session->raw_read_frame.datalen = 0;
+		session->raw_read_frame.timestamp = 0;
+		session->raw_read_frame.m = SWITCH_FALSE;
+		session->raw_read_frame.flags = 0;
+		*frame = &session->raw_read_frame;
+		status = SWITCH_STATUS_SUCCESS;
+		drain = 1;
+		goto drain;
+	}
+
 	if (session->endpoint_interface->io_routines->read_frame) {
-		switch_mutex_unlock(session->read_codec->mutex);
+		switch_mutex_unlock(read_codec_mutex);
+		read_codec_mutex = NULL;
 		switch_mutex_unlock(session->codec_read_mutex);
 		if ((status = session->endpoint_interface->io_routines->read_frame(session, frame, flags, stream_id)) == SWITCH_STATUS_SUCCESS) {
 			for (ptr = session->event_hooks.read_frame; ptr; ptr = ptr->next) {
@@ -217,7 +238,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 					switch_yield(session->read_impl.microseconds_per_packet);
 					return SWITCH_STATUS_SUCCESS;
 				}
-				switch_mutex_lock(session->read_codec->mutex);
+				read_codec_mutex = session->read_codec->mutex;
+				switch_mutex_lock(read_codec_mutex);
 				(*frame)->codec = session->read_codec;
 				status = SWITCH_STATUS_SUCCESS;
 				is_inuse = 1;
@@ -248,7 +270,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 			return SWITCH_STATUS_FALSE;
 		}
 
-		switch_mutex_lock(session->read_codec->mutex);
+		read_codec_mutex = session->read_codec->mutex;
+		switch_mutex_lock(read_codec_mutex);
 		if (!switch_core_codec_ready(session->read_codec)) {
 			*frame = NULL;
 			status = SWITCH_STATUS_FALSE;
@@ -287,6 +310,13 @@ cnt_with_cng:
 	if (!switch_core_codec_ready(session->read_codec) || !switch_core_codec_ready((*frame)->codec)) {
 		status = SWITCH_STATUS_FALSE;
 		goto done;
+	}
+
+	/* e.g. an AMR mode request: needed by the encoder whether or not this payload is decoded */
+	if (switch_test_flag((*frame)->codec, SWITCH_CODEC_FLAG_PEEK_RECEIVED) && (*frame)->datalen &&
+		!switch_test_flag(*frame, SFF_CNG) && !switch_test_flag(*frame, SFF_PLC) && !switch_test_flag(*frame, SFF_NOT_AUDIO) &&
+		!switch_test_flag(*frame, SFF_RTCP)) {
+		switch_core_codec_control((*frame)->codec, SCC_CODEC_SPECIFIC, SCCT_STRING, (void *) "received", SCCT_NONE, *frame, NULL, NULL);
 	}
 
 	if (session->bugs && !((*frame)->flags & SFF_CNG) && !((*frame)->flags & SFF_NOT_AUDIO)) {
@@ -417,21 +447,33 @@ cnt_with_cng:
 
 
 		goto done;
-	} else if (session->bugs && !need_codec) {
-		do_bugs = 1;
-		need_codec = 1;
+	} else if (!need_codec) {
+		switch_thread_rwlock_rdlock(session->bug_rwlock);
+		if (session->bugs) {
+			do_bugs = 1;
+			need_codec = 1;
+		}
+		switch_thread_rwlock_unlock(session->bug_rwlock);
 	}
 
 	if (switch_test_flag(*frame, SFF_CNG)) {
-		if (!session->bugs && !session->plc) {
+		int have_bugs;
+
+		switch_thread_rwlock_rdlock(session->bug_rwlock);
+		have_bugs = (session->bugs != NULL);
+		switch_thread_rwlock_unlock(session->bug_rwlock);
+
+		if (!have_bugs && !session->plc) {
 			/* Check if other session has bugs */
 			unsigned int other_session_bugs = 0;
 			switch_core_session_t *other_session = NULL;
 			if (switch_channel_test_flag(switch_core_session_get_channel(session), CF_BRIDGED) &&
 				switch_core_session_get_partner(session, &other_session) == SWITCH_STATUS_SUCCESS) {
-				if (other_session->bugs && !switch_test_flag(other_session, SSF_MEDIA_BUG_TAP_ONLY)) {
+				switch_thread_rwlock_rdlock(other_session->bug_rwlock);
+				if (other_session->bugs && !other_session->bug_tap_only) {
 					other_session_bugs = 1;
 				}
+				switch_thread_rwlock_unlock(other_session->bug_rwlock);
 				switch_core_session_rwunlock(other_session);
 			}
 
@@ -464,12 +506,16 @@ cnt_with_cng:
 
 	if (switch_test_flag(session, SSF_READ_CODEC_RESET)) {
 		switch_core_codec_reset(session->read_codec);
+		/* with media bugs the frames are decoded by a copy of the read codec, reset it as well */
+		switch_core_session_refresh_bug_codec(session);
 		switch_clear_flag(session, SSF_READ_CODEC_RESET);
 	}
 
 
 	if (status == SWITCH_STATUS_SUCCESS && need_codec) {
-		switch_frame_t *enc_frame, *read_frame = *frame;
+		switch_frame_t *enc_frame, *read_frame;
+
+		read_frame = *frame;
 
 		switch_set_flag(session, SSF_READ_TRANSCODE);
 
@@ -483,6 +529,13 @@ cnt_with_cng:
 
 		if (read_frame->codec || (is_cng && session->plc)) {
 			session->raw_read_frame.datalen = session->raw_read_frame.buflen;
+			/* room for the channel expansion below, which is done in place: a codec may decode more than one
+			 * packet's worth of audio (e.g. several AMR frames in one payload) */
+			if (read_frame->codec && session->read_impl.number_of_channels > read_frame->codec->implementation->number_of_channels) {
+				uint32_t in_ch = read_frame->codec->implementation->number_of_channels, out_ch = session->read_impl.number_of_channels;
+
+				session->raw_read_frame.datalen = session->raw_read_frame.buflen / 2 / out_ch * 2 * in_ch;
+			}
 
 			if (is_cng) {
 				if (session->plc) {
@@ -508,10 +561,20 @@ cnt_with_cng:
 						goto done;
 					}
 
+					/* the frames' codec re-created in place with another implementation (mod_loopback's tech_init sets it
+					 * again, and set_read_codec returns early on the same pointer): the copy follows it */
+					if (switch_core_codec_ready(&session->bug_codec) && switch_core_codec_ready(read_frame->codec) &&
+						session->bug_codec_src_impl != read_frame->codec->implementation) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Destroying BUG Codec %s:%d\n",
+										  session->bug_codec.implementation->iananame, session->bug_codec.implementation->ianacode);
+						switch_core_codec_destroy(&session->bug_codec);
+					}
+
 					if (!switch_core_codec_ready(&session->bug_codec) && switch_core_codec_ready(read_frame->codec)) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Setting BUG Codec %s:%d\n",
 										  read_frame->codec->implementation->iananame, read_frame->codec->implementation->ianacode);
 						switch_core_codec_copy(read_frame->codec, &session->bug_codec, NULL, NULL);
+						session->bug_codec_src_impl = read_frame->codec->implementation;
 						if (!switch_core_codec_ready(&session->bug_codec)) {
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "%s Error setting BUG codec %s!\n",
 											  switch_core_session_get_name(session), read_frame->codec->implementation->iananame);
@@ -867,16 +930,42 @@ cnt_with_cng:
 			goto done;
 		}
 
+	  drain:
+		if (drain) {
+			read_frame = *frame;
+		}
+
 		if (session->read_codec) {
-			if (session->read_resampler) {
+			if (session->read_resampler && !drain) {
 				short *data = read_frame->data;
+				uint32_t out_bytes;
+
 				switch_mutex_lock(session->resample_mutex);
 				switch_resample_process(session->read_resampler, data, (int) read_frame->datalen / 2 / session->read_resampler->channels);
-				memcpy(data, session->read_resampler->to, session->read_resampler->to_len * 2 * session->read_resampler->channels);
+				out_bytes = session->read_resampler->to_len * 2 * session->read_resampler->channels;
 				read_frame->samples = session->read_resampler->to_len;
 				read_frame->channels = session->read_resampler->channels;
-				read_frame->datalen = session->read_resampler->to_len * 2 * session->read_resampler->channels;
 				read_frame->rate = session->read_resampler->to_rate;
+
+				if (out_bytes > read_frame->buflen) {
+					/* more than the frame holds (a codec may decode several packets' worth, and upsampling multiplies
+					 * it): it cannot be a whole packet, so it goes to the read buffer below anyway; put it there directly */
+					if (!session->raw_read_buffer) {
+						switch_size_t bytes = session->read_impl.decoded_bytes_per_packet;
+						switch_buffer_create_dynamic(&session->raw_read_buffer, bytes * SWITCH_BUFFER_BLOCK_FRAMES, bytes * SWITCH_BUFFER_START_FRAMES, 0);
+					}
+
+					if (!switch_buffer_write(session->raw_read_buffer, session->read_resampler->to, out_bytes)) {
+						switch_mutex_unlock(session->resample_mutex);
+						status = SWITCH_STATUS_MEMERR;
+						goto done;
+					}
+
+					read_frame->datalen = 0;
+				} else {
+					memcpy(data, session->read_resampler->to, out_bytes);
+					read_frame->datalen = out_bytes;
+				}
 				switch_mutex_unlock(session->resample_mutex);
 			}
 
@@ -971,6 +1060,10 @@ cnt_with_cng:
 						session->enc_read_frame.seq = read_frame->seq;
 						session->enc_read_frame.m = read_frame->m;
 						session->enc_read_frame.payload = session->read_impl.ianacode;
+					} else {
+						/* not one packet's audio: the writer stamps it */
+						session->enc_read_frame.timestamp = 0;
+						session->enc_read_frame.m = SWITCH_FALSE;
 					}
 					*frame = &session->enc_read_frame;
 					if (!fork_frame) fork_frame = &session->enc_read_frame;
@@ -999,6 +1092,17 @@ cnt_with_cng:
 					status = SWITCH_STATUS_GENERR;
 					break;
 				}
+			} else if ((flags & SWITCH_IO_FLAG_BOUNDED_READ)) {
+				switch_time_t now = switch_mono_micro_time_now();
+
+				if (!short_since) {
+					short_since = now;
+				} else if (now < short_since || now - short_since >= session->read_impl.microseconds_per_packet) {
+					*frame = &runtime.dummy_cng_frame;
+					status = SWITCH_STATUS_SUCCESS;
+					goto even_more_done;
+				}
+				goto top;
 			} else {
 				goto top;
 			}
@@ -1084,7 +1188,10 @@ cnt_with_cng:
 		}
 	}
 
-	switch_mutex_unlock(session->read_codec->mutex);
+	/* Not session->read_codec->mutex: the codec may have been zeroed since. */
+	if (read_codec_mutex) {
+		switch_mutex_unlock(read_codec_mutex);
+	}
 	switch_mutex_unlock(session->codec_read_mutex);
 
 
