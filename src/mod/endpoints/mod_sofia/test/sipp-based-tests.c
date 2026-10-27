@@ -1103,6 +1103,125 @@ static void sb_run(const char *ip, sb_result_t *r)
 	stop_t38_sipp(&c);
 }
 
+typedef struct {
+	int started;
+	int found_legs;
+	int parked_set;
+	int playing;
+	int killed;
+	int stops;
+	char cause[64];
+	char status[64];
+	int peer_up;
+	int a_ok;
+	int b_ok;
+	int settled;
+} sb_parked_result_t;
+
+/* Waits up to about 5 s for one PLAYBACK_STOP on the watched leg. */
+static void sb_wait_stop(sb_parked_result_t *r)
+{
+	int loop_count = 100;
+
+	while (loop_count--) {
+		pthread_mutex_lock(&sb_watch.mutex);
+		r->stops = sb_watch.stops;
+		switch_copy_string(r->cause, sb_watch.cause, sizeof(r->cause));
+		switch_copy_string(r->status, sb_watch.status, sizeof(r->status));
+		pthread_mutex_unlock(&sb_watch.mutex);
+		if (r->stops) {
+			break;
+		}
+		switch_sleep(50 * 1000);
+	}
+}
+
+/* SWITCH_TRUE while the channel is up and carries no hangup signal. */
+static switch_bool_t sb_leg_up(const char *uuid)
+{
+	switch_core_session_t *session = switch_core_session_locate(uuid);
+	switch_bool_t up = SWITCH_FALSE;
+
+	if (session) {
+		up = switch_channel_down_nosig(switch_core_session_get_channel(session)) ? SWITCH_FALSE : SWITCH_TRUE;
+		switch_core_session_rwunlock(session);
+	}
+	return up;
+}
+
+/* A leg -> B2BUA -> B leg are bridged and the B leg carries park_after_bridge, so the B leg
+   outlives the bridge. A playback runs on the B leg and the A leg hangs up. The B leg is not
+   hanging up, so its PLAYBACK_STOP must not report a hangup cause. */
+static void sb_run_parked_peer(const char *ip, sb_parked_result_t *r)
+{
+	char a_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1] = "";
+	char b_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1] = "";
+	char *arg = NULL;
+	pid_t a = -1, b = -1;
+	int loop_count = 100;
+
+	pthread_mutex_lock(&sb_watch.mutex);
+	sb_watch.uuid[0] = '\0';
+	sb_watch.stops = 0;
+	sb_watch.cause[0] = '\0';
+	sb_watch.status[0] = '\0';
+	pthread_mutex_unlock(&sb_watch.mutex);
+	switch_event_bind("sb_playback", SWITCH_EVENT_PLAYBACK_STOP, NULL, sb_playback_stop_handler, NULL);
+
+	if (!bt_profile_ready() || start_bt_sipp(ip, "sipp-scenarios/uas_answer_hold.xml", "5063", NULL, NULL, NULL, &b)) {
+		goto end;
+	}
+	switch_sleep(500 * 1000);
+	if (start_bt_sipp(ip, "sipp-scenarios/uac_answer_wait_bye.xml", "5062", "7878780003", "1000", NULL, &a)) {
+		goto end;
+	}
+	r->started = 1;
+
+	if (!sb_find_leg("playback_stale_bond_a", a_uuid, sizeof(a_uuid)) ||
+		!sb_wait_bond(a_uuid, NULL, b_uuid, sizeof(b_uuid))) {
+		goto end;
+	}
+	r->found_legs = 1;
+
+	/* Make the playing leg outlive its bridge. */
+	arg = switch_mprintf("%s park_after_bridge true", b_uuid);
+	r->parked_set = sb_api_reply("uuid_setvar", arg, NULL, 0) ? 1 : 0;
+	switch_safe_free(arg);
+	if (!r->parked_set) {
+		goto end;
+	}
+
+	pthread_mutex_lock(&sb_watch.mutex);
+	switch_copy_string(sb_watch.uuid, b_uuid, sizeof(sb_watch.uuid));
+	pthread_mutex_unlock(&sb_watch.mutex);
+
+	arg = switch_mprintf("%s playback::silence_stream://10000 aleg", b_uuid);
+	r->playing = sb_api_reply("uuid_broadcast", arg, NULL, 0) && sb_wait_broadcast(b_uuid) ? 1 : 0;
+	switch_safe_free(arg);
+	if (!r->playing) {
+		goto end;
+	}
+
+	r->killed = sb_api_reply("uuid_kill", a_uuid, NULL, 0) ? 1 : 0;
+	sb_wait_stop(r);
+	r->peer_up = sb_leg_up(b_uuid) ? 1 : 0;
+
+	sb_api_reply("uuid_kill", b_uuid, NULL, 0);
+
+ end:
+	r->a_ok = a > 0 && bt_sipp_ok(&a, 25000);
+	r->b_ok = b > 0 && bt_sipp_ok(&b, 25000);
+
+	while (loop_count-- && switch_core_session_count()) {
+		switch_sleep(50 * 1000);
+	}
+	r->settled = !switch_core_session_count();
+
+	switch_event_unbind_callback(sb_playback_stop_handler);
+	stop_t38_sipp(&a);
+	stop_t38_sipp(&b);
+}
+
 static void show_event(switch_event_t *event) {
 	char *str;
 	/*print the event*/
@@ -1578,6 +1697,25 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 			fst_xcheck(!*r.cause_at_end, "the playback reported a hangup cause although both legs of its call were up");
 			fst_xcheck(!strcmp(r.status_at_end, "done"), "the playback did not reach the end of its file");
 			fst_xcheck(r.a_ok && r.b_ok && r.c_ok, "a SIPp peer failed; inspect the *_errors.log files");
+		}
+		FST_TEST_END()
+
+		/* The B leg carries park_after_bridge, so it outlives the bridge and keeps taking
+		   commands. It is not hanging up, so its playback must not report a hangup cause. */
+		FST_TEST_BEGIN(peer_hangup_reports_no_cause_on_a_leg_that_outlives_the_bridge)
+		{
+			sb_parked_result_t r = { 0 };
+
+			sb_run_parked_peer(switch_core_get_variable("local_ip_v4"), &r);
+			fst_xcheck(r.started, "Unable to start the SIPp peers");
+			fst_xcheck(r.found_legs, "the A leg or its bond was not found");
+			fst_xcheck(r.parked_set, "uuid_setvar did not set park_after_bridge on the B leg");
+			fst_xcheck(r.playing, "the playback did not start on the B leg");
+			fst_xcheck(r.killed, "uuid_kill did not hang the A leg up");
+			fst_xcheck(r.stops == 1, "the B leg playback did not report exactly one PLAYBACK_STOP");
+			fst_xcheck(r.peer_up, "the B leg did not outlive the bridge");
+			fst_xcheck(!*r.cause, "the B leg playback reported a hangup cause although the B leg is still up");
+			fst_xcheck(r.a_ok && r.b_ok, "a SIPp peer failed; inspect the *_errors.log files");
 		}
 		FST_TEST_END()
 

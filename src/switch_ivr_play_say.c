@@ -2091,7 +2091,16 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_play_file_detailed(switch_core_sessio
 			 * and a dialplan that writes it gets what it asked for. */
 			if (status == SWITCH_STATUS_BREAK && marker && bcast_gen &&
 				(uint32_t) strtoul(marker, NULL, 10) == bcast_gen) {
-				if (!switch_event_get_header(event, "Hangup-Cause")) {
+				/* A leg that outlives its bridge is not hanging up, so its playback
+				 * reports no cause. The bridge exit hangs a leg up unless one of
+				 * these four variables is set, so they are what says it survives. */
+				switch_bool_t survives =
+					switch_true(switch_channel_get_variable(channel, SWITCH_PARK_AFTER_BRIDGE_VARIABLE)) ||
+					switch_true(switch_channel_get_variable(channel, SWITCH_PARK_AFTER_EARLY_BRIDGE_VARIABLE)) ||
+					!zstr(switch_channel_get_variable(channel, SWITCH_TRANSFER_AFTER_BRIDGE_VARIABLE)) ||
+					!zstr(switch_channel_get_variable(channel, SWITCH_TRANSFER_AFTER_EARLY_BRIDGE_VARIABLE));
+
+				if (!survives && !switch_event_get_header(event, "Hangup-Cause")) {
 					const char *peer_cause = switch_channel_get_variable(channel, "last_bridge_hangup_cause");
 
 					switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Hangup-Cause",
