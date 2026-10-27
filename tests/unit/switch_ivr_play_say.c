@@ -510,10 +510,21 @@ static int run_nested_completes_first_case(int *flag_down_after_nested, char *ca
  * let it end, then write the marker with that generation, which is exactly
  * what the resumed setter would have written.
  *
- * A dialplan playback on the surviving leg must then report no cause, whether
- * it ends on its own or the customer stops it. A dialplan app never reaches
- * switch_ivr_parse_event(), so nothing clears the marker for it; only the
+ * A later playback on the surviving leg must then report no cause, whether it
+ * ends on its own or the customer stops it. It enters switch_ivr_play_file()
+ * directly, so it never reaches switch_ivr_parse_event() and nothing clears
+ * the marker for it, which is the entry a dialplan app takes as well; only the
  * generation makes the stale value unreadable.
+ *
+ * It runs on this thread, not on the leg's own thread, which is still in
+ * audio_bridge_thread: a dialplan app would have the session to itself. So two
+ * threads read frames on the session, switch_core_session_read_frame() hands
+ * whichever loses codec_read_mutex a CNG frame, and the bridge thread can
+ * consume the break the customer_stop half raises, in which case that half
+ * measures a playback that ran to its end. Both halves therefore assert only
+ * the one thing that holds on either outcome: no cause is reported. Giving the
+ * playback the session to itself needs a fixture that ends the bridge without
+ * ending the leg.
  *
  * Returns 0 if the fixture could not be established, so nothing was measured.
  */
@@ -578,7 +589,8 @@ static int run_stale_setter_case(int customer_stop, char *cause_out, switch_size
 		switch_channel_set_flag(chans[0], CF_BREAK);
 	}
 
-	/* the dialplan path: straight into the app, never switch_ivr_parse_event() */
+	/* straight into the app, never switch_ivr_parse_event(), the way a dialplan
+	 * playback reaches it, but on this thread rather than the leg's own */
 	switch_ivr_play_file(legs[0], NULL, "silence_stream://400", NULL);
 
 	for (waited = 0; waited < 5000 && !playback_watch_events; waited += 100) {
@@ -1139,15 +1151,6 @@ FST_CORE_BEGIN("./conf_playsay")
 		FST_TEST_END()
 
 		/*
-		 * The marker is written by threads that cannot hold the broadcast still
-		 * while they write: switch_channel_test_flag() releases flag_mutex
-		 * before it returns, and the variable setter takes profile_mutex, so the
-		 * check and the write are not one transaction. A setter that resumes
-		 * after the broadcast it saw has gone must not leave a marker that a
-		 * later playback reads, or a leg that survives on park_after_bridge
-		 * reports a hangup for a playback that nothing interrupted.
-		 */
-		/*
 		 * The nested priority broadcast ends first, then the peer hangs up with
 		 * the outer playback still running. The outer playback must still stop
 		 * and still report the peer's cause, whatever CF_BROADCAST looks like by
@@ -1169,6 +1172,15 @@ FST_CORE_BEGIN("./conf_playsay")
 		}
 		FST_TEST_END()
 
+		/*
+		 * The marker is written by threads that cannot hold the broadcast still
+		 * while they write: switch_channel_test_flag() releases flag_mutex
+		 * before it returns, and the variable setter takes profile_mutex, so the
+		 * check and the write are not one transaction. A setter that resumes
+		 * after the broadcast it saw has gone must not leave a marker that a
+		 * later playback reads, or a leg that survives on park_after_bridge
+		 * reports a hangup for a playback that nothing interrupted.
+		 */
 		FST_TEST_BEGIN(stale_peer_hangup_marker_is_not_read_by_a_later_playback)
 		{
 			char cause[64] = "";

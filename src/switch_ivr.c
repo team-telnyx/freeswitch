@@ -605,8 +605,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 				/* This frame is the outermost broadcast on the channel, so it
 				 * opens a generation here and closes it below. Opening moves the
 				 * generation off zero, which keeps zero meaning "no broadcast
-				 * has run": a peer-hangup marker set by hand from the dialplan
-				 * parses as zero and can then never match. */
+				 * has run": a peer-hangup marker that holds anything but a
+				 * number parses as zero and can then never match. */
 				raised_broadcast = 1;
 				switch_channel_inc_broadcast_generation(channel);
 				if (inner) {

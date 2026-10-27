@@ -2081,10 +2081,16 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_play_file_detailed(switch_core_sessio
 			marker = switch_channel_get_variable(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE);
 			bcast_gen = switch_channel_get_broadcast_generation(channel);
 
-			/* A zero generation means no broadcast has run on this channel, so a
-			 * marker set by hand from the dialplan, which parses as zero, can
-			 * never match one written by the core. */
-			if (marker && bcast_gen && (uint32_t) strtoul(marker, NULL, 10) == bcast_gen) {
+			/* Only on a break: that is the status this stop reports below, and a
+			 * file that reached its end reports done, which must not carry a
+			 * cause as well.
+			 * A zero generation means no broadcast has run on this channel, so a
+			 * marker that holds anything but a number, which strtoul() reads as
+			 * zero, never matches. A marker set by hand to the number of the
+			 * live generation does match: the variable is the core's to write,
+			 * and a dialplan that writes it gets what it asked for. */
+			if (status == SWITCH_STATUS_BREAK && marker && bcast_gen &&
+				(uint32_t) strtoul(marker, NULL, 10) == bcast_gen) {
 				if (!switch_event_get_header(event, "Hangup-Cause")) {
 					const char *peer_cause = switch_channel_get_variable(channel, "last_bridge_hangup_cause");
 
