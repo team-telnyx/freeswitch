@@ -602,11 +602,9 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 
 			if (!switch_channel_test_flag(channel, CF_BROADCAST)) {
 				switch_channel_set_flag(channel, CF_BROADCAST);
-				/* This frame is the outermost broadcast on the channel, so it
-				 * opens a generation here and closes it below. Opening moves the
-				 * generation off zero, which keeps zero meaning "no broadcast
-				 * has run": a peer-hangup marker that holds anything but a
-				 * number parses as zero and can then never match. */
+				/* The outermost broadcast frame opens the generation here and
+				 * closes it below. Zero stays reserved for "no broadcast has
+				 * run", so a marker that is not a number never matches. */
 				raised_broadcast = 1;
 				switch_channel_inc_broadcast_generation(channel);
 				if (inner) {
