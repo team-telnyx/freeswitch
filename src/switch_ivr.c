@@ -682,7 +682,9 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 											  "%s Stopping broadcast: bridge peer %s is gone, broadcast generation %u\n",
 											  switch_channel_get_name(channel), peer_uuid,
 											  switch_channel_get_broadcast_generation(channel));
-							switch_channel_set_variable_printf(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, "%u",
+							/* The peer is gone, so its answered state cannot be read. Report the
+							 * cause rather than withhold one a leg that hangs up needs. */
+							switch_channel_set_variable_printf(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, "%u:0",
 															   switch_channel_get_broadcast_generation(channel));
 							switch_channel_set_flag(channel, CF_STOP_BROADCAST);
 							switch_channel_set_flag(channel, CF_BREAK);

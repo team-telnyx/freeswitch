@@ -2278,9 +2278,11 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_multi_threaded_bridge(switch_core_ses
 
 				if (switch_channel_down_nosig(caller_channel) && switch_channel_test_flag(peer_channel, CF_BROADCAST)) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-									  "%s Marking peer hangup on bridge peer %s, broadcast generation %u\n",
-									  switch_channel_get_name(caller_channel), switch_channel_get_name(peer_channel), peer_gen);
-					switch_channel_set_variable_printf(peer_channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, "%u", peer_gen);
+									  "%s Marking peer hangup on bridge peer %s, broadcast generation %u, answered %d\n",
+									  switch_channel_get_name(caller_channel), switch_channel_get_name(peer_channel), peer_gen,
+									  switch_channel_test_flag(caller_channel, CF_ANSWERED) ? 1 : 0);
+					switch_channel_set_variable_printf(peer_channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, "%u:%d", peer_gen,
+													   switch_channel_test_flag(caller_channel, CF_ANSWERED) ? 1 : 0);
 				}
 			}
 
