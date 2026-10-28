@@ -215,9 +215,8 @@ static void reload_passwords(void)
 	}
 
 	switch_mutex_lock(globals.listener_mutex);
-	if (!zstr(new_primary)) {
-		set_pref_pass(new_primary);
-	}
+	/* mirror restart semantics: a missing or empty password falls back to the built-in default */
+	set_pref_pass(zstr(new_primary) ? "ClueCon" : new_primary);
 	/* removing secondary-password from config disables it */
 	if (!zstr(new_secondary)) {
 		set_pref_secondary_pass(new_secondary);
@@ -3065,6 +3064,14 @@ static int config(void)
 	char *cf = "event_socket.conf";
 	switch_xml_t cfg, xml, settings, param;
 
+	/* serialize against reload_passwords(): the RELOADXML event raised by load/reload
+	   can dispatch while config() runs; without the lock the same prefs strings could
+	   be freed twice or the memset could leak what the callback allocated */
+	switch_mutex_lock(globals.listener_mutex);
+
+	switch_safe_free(prefs.ip);
+	switch_safe_free(prefs.password);
+	switch_safe_free(prefs.secondary_password);
 	memset(&prefs, 0, sizeof(prefs));
 
 	if (!(xml = switch_xml_open_cfg(cf, &cfg, NULL))) {
@@ -3126,6 +3133,8 @@ static int config(void)
 	if (!prefs.port) {
 		prefs.port = 8021;
 	}
+
+	switch_mutex_unlock(globals.listener_mutex);
 
 	return 0;
 }
