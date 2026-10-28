@@ -684,7 +684,7 @@
         <action application="set" data="park_after_bridge=true"/>
         <action application="set" data="playback_stale_bond_a=1"/>
         <action application="answer"/>
-        <action application="bridge" data="{bridge_early_media=true}sofia/external/7878780005@$${local_ip_v4}:5063"/>
+        <action application="bridge" data="sofia/external/7878780005@$${local_ip_v4}:5063"/>
       </condition>
     </extension>
 
