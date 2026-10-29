@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!-- Blind transfer test, C (the first transfer target, left in early media when A is re-routed):
+     183 with SDP, answers 1 s later, then ends the call with its own BYE 500 ms after the ACK
+     (it is parked, nothing else hangs it up). A BYE from FreeSWITCH first ends it too. -->
+<scenario name="blind transfer target: early media, left behind, then answer">
+  <recv request="INVITE" crlf="true">
+    <action>
+      <ereg regexp="\n(m|Contact): *[^\r\n]*sip:([a-zA-Z0-9_.@:+-]+)" search_in="msg" check_it="true" assign_to="c0,c1,fs_contact"/>
+      <ereg regexp="\n(f|From): *([^\r\n]+)" search_in="msg" check_it="true" assign_to="f0,f1,inv_from"/>
+      <ereg regexp="\n(t|To): *([^\r\n]+)" search_in="msg" check_it="true" assign_to="t0,t1,inv_to"/>
+    </action>
+  </recv>
+
+  <send>
+    <![CDATA[
+
+      SIP/2.0 100 Trying
+      [last_Via:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <pause milliseconds="200"/>
+
+  <send>
+    <![CDATA[
+
+      SIP/2.0 183 Session Progress
+      [last_Via:]
+      [last_From:]
+      [last_To:];tag=[pid]C[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:target@[local_ip]:[local_port]>
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=C 1 1 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[local_ip_type] [local_ip]
+      t=0 0
+      m=audio [auto_media_port] RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+      a=sendrecv
+    ]]>
+  </send>
+
+  <pause milliseconds="1000"/>
+
+  <send retrans="500">
+    <![CDATA[
+
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_From:]
+      [last_To:];tag=[pid]C[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:target@[local_ip]:[local_port]>
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=C 1 1 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[local_ip_type] [local_ip]
+      t=0 0
+      m=audio [auto_media_port] RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+      a=sendrecv
+    ]]>
+  </send>
+
+  <recv request="ACK"/>
+
+  <recv request="BYE" timeout="500" ontimeout="own_bye"/>
+  <send next="end">
+    <![CDATA[
+
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <label id="own_bye"/>
+  <send retrans="500">
+    <![CDATA[
+
+      BYE sip:[$fs_contact] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+      From: [$inv_to];tag=[pid]C[call_number]
+      To: [$inv_from]
+      Call-ID: [call_id]
+      CSeq: 102 BYE
+      Max-Forwards: 70
+      Content-Length: 0
+
+    ]]>
+  </send>
+  <recv response="200"/>
+
+  <label id="end"/>
+  <Reference variables="c0,c1,f0,f1,t0,t1"/>
+</scenario>

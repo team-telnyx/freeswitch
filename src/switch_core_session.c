@@ -980,8 +980,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_perform_receive_message(swit
 				switch_channel_t *peer_channel = switch_core_session_get_channel(peer_session);
 
 				/* tell the peer whom to confirm when it answers (bridge_to does not survive a
-				   hand-off of the bridge, for example to the T.38 gateway). Set it before the
-				   CF_ANSWERED test, so an answer between the two still finds it. */
+				   hand-off of the bridge, for example to the T.38 gateway), and record on this
+				   leg the peer it now waits for: a later bridge to another peer replaces it, so
+				   the answer of a peer this leg has left confirms nothing. Set both before the
+				   CF_ANSWERED test, so an answer between the two still finds them. */
+				switch_channel_set_variable(session->channel, "blind_transfer_deferred_peer", message->string_arg);
 				switch_channel_set_variable(peer_channel, "blind_transfer_deferred_uuid", switch_core_session_get_uuid(session));
 				if ((peer_answered = switch_channel_test_flag(peer_channel, CF_ANSWERED))) {
 					switch_channel_set_variable(peer_channel, "blind_transfer_deferred_uuid", NULL);

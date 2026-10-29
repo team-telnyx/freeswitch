@@ -590,8 +590,9 @@ static struct {
 	char status[64];
 	switch_time_t result_at;
 	switch_time_t target_answered_at;
+	switch_time_t second_target_answered_at;
 	int referrer_blind_transfer_hangup;
-} bt_watch = { PTHREAD_MUTEX_INITIALIZER, 0, "", 0, 0, 0 };
+} bt_watch = { PTHREAD_MUTEX_INITIALIZER, 0, "", 0, 0, 0, 0 };
 
 static switch_status_t bt_watch_logger(const switch_log_node_t *node, switch_log_level_t level)
 {
@@ -609,6 +610,9 @@ static switch_status_t bt_watch_logger(const switch_log_node_t *node, switch_log
 	} else if (strstr(node->data, "/7878780002") && strstr(node->data, "entering state [") &&
 			   strstr(node->data, "][200]") && !bt_watch.target_answered_at) {
 		bt_watch.target_answered_at = node->timestamp;
+	} else if (strstr(node->data, "/7878780006") && strstr(node->data, "entering state [") &&
+			   strstr(node->data, "][200]") && !bt_watch.second_target_answered_at) {
+		bt_watch.second_target_answered_at = node->timestamp;
 	} else if (strstr(node->data, "Hangup sofia/") && strstr(node->data, "/7878780001") && strstr(node->data, "[BLIND_TRANSFER]")) {
 		bt_watch.referrer_blind_transfer_hangup = 1;
 	}
@@ -621,20 +625,25 @@ typedef struct {
 	int a_ok;
 	int b_ok;
 	int c_ok;
+	int d_ok;
 	int results;
 	char status[64];
 	switch_time_t result_at;
 	switch_time_t target_answered_at;
+	switch_time_t second_target_answered_at;
 	int referrer_blind_transfer_hangup;
 	int settled;
 	int moved;
 } bt_result_t;
 
-/* What blind_transfer_run() does to the REFER sender once its REFER has parked it. */
+/* What blind_transfer_run() does to the REFER sender once its REFER has parked it, or, for
+   BT_MOVE_REROUTE_*, to the transferred leg A once it is bridged to C on early media. */
 typedef enum {
 	BT_MOVE_NONE,
 	BT_MOVE_TRANSFER,			/* uuid_transfer out of the park */
-	BT_MOVE_TRANSFER_REPARK		/* uuid_transfer out of the park, then uuid_park */
+	BT_MOVE_TRANSFER_REPARK,	/* uuid_transfer out of the park, then uuid_park */
+	BT_MOVE_REROUTE_ANSWER,		/* C parks after the bridge; A to a second target D (SIPp on 5065) that answers */
+	BT_MOVE_REROUTE_BUSY		/* the same, D rejects with 486 */
 } bt_move_t;
 
 static int start_bt_sipp(const char *ip, const char *scenario, const char *port, const char *target, const char *hold_ms,
@@ -782,13 +791,58 @@ static switch_bool_t bt_move_referrer(bt_move_t move)
 	return ok;
 }
 
-/* C and B listen first; A calls and hangs up hold_ms after the answer. B passes only if its
-   first request after the 202 is one NOTIFY carrying expected_frag, or, with expected_frag
-   "none", if it gets no NOTIFY at all. move says what happens to B once its REFER parks it. */
+/* Finds the transfer target C that holds the deferred confirmation (blind_transfer_deferred_uuid,
+   set on the early-media bridge to the transferred leg A's uuid), sets park_after_bridge on C so
+   it survives A leaving the bridge, and moves A with uuid_transfer to 7878780006, which bridges D. */
+static switch_bool_t bt_reroute_transferred_leg(void)
+{
+	char a_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1] = "";
+	char *arg;
+	int loop_count = 250;
+	switch_bool_t ok;
+
+	while (!*a_uuid && loop_count--) {
+		switch_console_callback_match_t *matches = switch_core_session_findall_matching_var("blind_transfer_deferred_uuid", NULL);
+
+		if (matches) {
+			if (matches->head) {
+				switch_core_session_t *c_session = switch_core_session_locate(matches->head->val);
+
+				if (c_session) {
+					switch_channel_t *c_channel = switch_core_session_get_channel(c_session);
+
+					switch_channel_set_variable(c_channel, "park_after_bridge", "true");
+					switch_copy_string(a_uuid, switch_str_nil(switch_channel_get_variable(c_channel, "blind_transfer_deferred_uuid")), sizeof(a_uuid));
+					switch_core_session_rwunlock(c_session);
+				}
+			}
+			switch_console_free_matches(&matches);
+		}
+		if (!*a_uuid) {
+			switch_sleep(20 * 1000);
+		}
+	}
+	if (!*a_uuid) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "no transfer target with a deferred confirmation was found\n");
+		return SWITCH_FALSE;
+	}
+
+	arg = switch_mprintf("%s 7878780006 XML default", a_uuid);
+	ok = bt_api_ok("uuid_transfer", arg);
+	switch_safe_free(arg);
+	return ok;
+}
+
+/* C and B (and D for BT_MOVE_REROUTE_*) listen first; A calls and hangs up hold_ms after the
+   answer. B passes only if its first request after the 202 is one NOTIFY carrying expected_frag,
+   or, with expected_frag "none", if it gets no NOTIFY at all. move says what happens to B once
+   its REFER parks it, or to A once it is bridged to C on early media. */
 static void blind_transfer_run(const char *ip, const char *target_scenario, const char *hold_ms, const char *expected_frag,
 							   bt_move_t move, bt_result_t *r)
 {
-	pid_t a = -1, b = -1, c = -1;
+	pid_t a = -1, b = -1, c = -1, d = -1;
+	const char *d_scenario = move == BT_MOVE_REROUTE_ANSWER ? "sipp-scenarios/uas_blind_transfer_target_early_answer.xml" :
+		move == BT_MOVE_REROUTE_BUSY ? "sipp-scenarios/uas_blind_transfer_target_early_busy.xml" : NULL;
 	int loop_count = 100;
 
 	pthread_mutex_lock(&bt_watch.mutex);
@@ -796,12 +850,14 @@ static void blind_transfer_run(const char *ip, const char *target_scenario, cons
 	bt_watch.status[0] = '\0';
 	bt_watch.result_at = 0;
 	bt_watch.target_answered_at = 0;
+	bt_watch.second_target_answered_at = 0;
 	bt_watch.referrer_blind_transfer_hangup = 0;
 	pthread_mutex_unlock(&bt_watch.mutex);
 	switch_log_bind_logger(bt_watch_logger, SWITCH_LOG_DEBUG, SWITCH_FALSE);
 
 	if (!bt_profile_ready() || start_bt_sipp(ip, target_scenario, "5064", NULL, NULL, NULL, &c) ||
-		start_bt_sipp(ip, "sipp-scenarios/uas_blind_transfer_referrer.xml", "5063", NULL, NULL, expected_frag, &b)) {
+		start_bt_sipp(ip, "sipp-scenarios/uas_blind_transfer_referrer.xml", "5063", NULL, NULL, expected_frag, &b) ||
+		(d_scenario && start_bt_sipp(ip, d_scenario, "5065", NULL, NULL, NULL, &d))) {
 		goto end;
 	}
 	switch_sleep(500 * 1000);
@@ -809,12 +865,15 @@ static void blind_transfer_run(const char *ip, const char *target_scenario, cons
 		goto end;
 	}
 	r->started = 1;
-	if (move != BT_MOVE_NONE) {
+	if (d_scenario) {
+		r->moved = bt_reroute_transferred_leg();
+	} else if (move != BT_MOVE_NONE) {
 		r->moved = bt_move_referrer(move);
 	}
 	r->a_ok = bt_sipp_ok(&a, 25000);
 	r->b_ok = bt_sipp_ok(&b, 15000);
 	r->c_ok = bt_sipp_ok(&c, 15000);
+	r->d_ok = !d_scenario || bt_sipp_ok(&d, 15000);
 
 	/* Let the last channels finish before the results are read and the next test starts. */
 	while (loop_count-- && switch_core_session_count()) {
@@ -829,11 +888,13 @@ static void blind_transfer_run(const char *ip, const char *target_scenario, cons
 	switch_copy_string(r->status, bt_watch.status, sizeof(r->status));
 	r->result_at = bt_watch.result_at;
 	r->target_answered_at = bt_watch.target_answered_at;
+	r->second_target_answered_at = bt_watch.second_target_answered_at;
 	r->referrer_blind_transfer_hangup = bt_watch.referrer_blind_transfer_hangup;
 	pthread_mutex_unlock(&bt_watch.mutex);
 	stop_t38_sipp(&a);
 	stop_t38_sipp(&b);
 	stop_t38_sipp(&c);
+	stop_t38_sipp(&d);
 }
 
 static void show_event(switch_event_t *event) {
@@ -1283,6 +1344,42 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 			fst_xcheck(r.results == 0, "a result was sent to the re-parked REFER sender");
 			fst_xcheck(!r.referrer_blind_transfer_hangup, "the re-parked REFER sender was hung up with BLIND_TRANSFER");
 			fst_xcheck(r.a_ok && r.b_ok && r.c_ok, "a SIPp peer failed (B fails on any NOTIFY); inspect the *_blind_transfer_*_errors.log files");
+		}
+		FST_TEST_END()
+
+		/* A is re-routed while C is in early media; C survives (park_after_bridge) and answers
+		   first, then D answers: B gets one 200 OK, after D's answer, not after C's. */
+		FST_TEST_BEGIN(blind_transfer_rerouted_then_second_target_answers)
+		{
+			bt_result_t r = { 0 };
+
+			blind_transfer_run(switch_core_get_variable("local_ip_v4"), "sipp-scenarios/uas_blind_transfer_target_left_answer.xml", "8000",
+							   "SIP/2.0 200 OK", BT_MOVE_REROUTE_ANSWER, &r);
+			fst_xcheck(r.started, "Unable to start the SIPp peers");
+			fst_xcheck(r.moved, "the transferred leg was not re-routed while the first target was in early media");
+			fst_xcheck(r.results == 1, "the REFER sender did not get exactly one result");
+			fst_xcheck(strstr(r.status, "SIP/2.0 200 OK") != NULL, "the result is not 200 OK");
+			fst_xcheck(r.target_answered_at && r.second_target_answered_at && r.target_answered_at < r.second_target_answered_at,
+					   "the first target did not answer before the second one");
+			fst_xcheck(r.result_at >= r.second_target_answered_at, "200 OK was sent before the second target answered");
+			fst_xcheck(r.a_ok && r.b_ok && r.c_ok && r.d_ok, "a SIPp peer failed; inspect the *_blind_transfer_*_errors.log files");
+		}
+		FST_TEST_END()
+
+		/* The same, D rejects with 486: the late answer of C must not report success; B gets
+		   one result, D's 486. */
+		FST_TEST_BEGIN(blind_transfer_rerouted_then_second_target_busy)
+		{
+			bt_result_t r = { 0 };
+
+			blind_transfer_run(switch_core_get_variable("local_ip_v4"), "sipp-scenarios/uas_blind_transfer_target_left_answer.xml", "6000",
+							   "SIP/2.0 486 Busy Here", BT_MOVE_REROUTE_BUSY, &r);
+			fst_xcheck(r.started, "Unable to start the SIPp peers");
+			fst_xcheck(r.moved, "the transferred leg was not re-routed while the first target was in early media");
+			fst_xcheck(r.target_answered_at && r.result_at > r.target_answered_at, "the first target did not answer before the result");
+			fst_xcheck(r.results == 1, "the REFER sender did not get exactly one result");
+			fst_xcheck(strstr(r.status, "SIP/2.0 486 Busy Here") != NULL, "the result is not 486 Busy Here");
+			fst_xcheck(r.a_ok && r.b_ok && r.c_ok && r.d_ok, "a SIPp peer failed; inspect the *_blind_transfer_*_errors.log files");
 		}
 		FST_TEST_END()
 

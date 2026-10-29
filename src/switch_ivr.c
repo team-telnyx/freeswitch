@@ -2275,6 +2275,9 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_session_transfer(switch_core_session_
 	/* reset temp hold music */
 	switch_channel_set_variable(channel, SWITCH_TEMP_HOLD_MUSIC_VARIABLE, NULL);
 
+	/* a deferred blind transfer confirmation waits for the next bridge, not for the peer left behind */
+	switch_channel_set_variable(channel, "blind_transfer_deferred_peer", NULL);
+
 	switch_channel_execute_on(channel, "execute_on_blind_transfer");
 
 	if ((profile = switch_channel_get_caller_profile(channel))) {

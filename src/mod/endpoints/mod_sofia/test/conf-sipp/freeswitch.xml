@@ -674,6 +674,14 @@
       </condition>
     </extension>
 
+    <!-- A re-routed (uuid_transfer) away from the first target C: bridges a second target D (SIPp on 5065). -->
+    <extension name="blind_transfer_confirm_reroute">
+      <condition field="destination_number" expression="^7878780006$">
+        <action application="set" data="hangup_after_bridge=true"/>
+        <action application="bridge" data="sofia/external/7878780006@$${local_ip_v4}:5065"/>
+      </condition>
+    </extension>
+
 	<extension name="sipp">
 		<condition>
 		   <action application="info"/>
