@@ -1678,6 +1678,10 @@ FST_CORE_BEGIN("./conf_sdp")
 				"a=rtcp-mux\r\n"
 				"a=mid:video\r\n";
 			uint8_t match, proceed;
+			switch_frame_t audio = { 0 };
+			uint8_t audio_data[160] = { 0 };
+			uint32_t sent_ts;
+			switch_bool_t kept;
 
 			mparams = switch_core_session_alloc(fst_session, sizeof(switch_core_media_params_t));
 			mparams->inbound_codec_string = switch_core_session_strdup(fst_session, "PCMU,PROXY-VID");
@@ -1692,6 +1696,7 @@ FST_CORE_BEGIN("./conf_sdp")
 			switch_channel_set_flag(fst_channel, CF_ICE);
 			switch_channel_set_flag(fst_channel, CF_VIDEO);
 			switch_channel_set_variable(fst_channel, "rtp-bundle", "auto");
+			switch_channel_set_variable(fst_channel, "rtp_rebase_timestamps_on_jump", "true");
 
 			proceed = 0;
 			match = switch_core_media_negotiate_sdp(fst_session, audio_only_offer, &proceed, SDP_OFFER);
@@ -1702,6 +1707,22 @@ FST_CORE_BEGIN("./conf_sdp")
 			fst_check(switch_core_media_video_is_bundled(fst_session) == SWITCH_FALSE);
 			separate_video_rtp = switch_core_media_get_rtp_session(fst_session, SWITCH_MEDIA_TYPE_VIDEO);
 			fst_requires(separate_video_rtp != NULL);
+			audio_rtp = switch_core_media_get_rtp_session(fst_session, SWITCH_MEDIA_TYPE_AUDIO);
+			fst_requires(audio_rtp != NULL);
+			fst_requires(switch_rtp_test_flag(audio_rtp, SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP));
+			switch_rtp_set_flag(audio_rtp, SWITCH_RTP_FLAG_RAW_WRITE);
+			switch_rtp_clear_flag(audio_rtp, SWITCH_RTP_FLAG_PAUSE);
+			switch_rtp_clear_flag(audio_rtp, SWITCH_RTP_FLAG_MUTE);
+			audio.data = audio_data;
+			audio.datalen = audio.buflen = sizeof(audio_data);
+			audio.payload = 0;
+			audio.timestamp = 1000;
+			fst_requires(switch_rtp_write_frame(audio_rtp, &audio) > 0);
+			audio.timestamp = 1000000;
+			fst_requires(switch_rtp_write_frame(audio_rtp, &audio) > 0);
+			switch_rtp_get_sent_frames(audio_rtp, &sent_ts, &kept);
+			fst_requires(sent_ts == 1160);
+
 
 			proceed = 0;
 			match = switch_core_media_negotiate_sdp(fst_session, full_offer, &proceed, SDP_OFFER);
@@ -1714,6 +1735,12 @@ FST_CORE_BEGIN("./conf_sdp")
 			fst_requires(audio_rtp != NULL);
 			fst_check(video_rtp == audio_rtp);
 			fst_check(switch_core_media_video_is_bundled(fst_session) == SWITCH_TRUE);
+			fst_check(switch_rtp_test_flag(audio_rtp, SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP));
+			audio.timestamp += 160;
+			fst_requires(switch_rtp_write_frame(audio_rtp, &audio) > 0);
+			switch_rtp_get_sent_frames(audio_rtp, &sent_ts, &kept);
+			fst_check(sent_ts == 1320);
+
 
 			proceed = 0;
 			match = switch_core_media_negotiate_sdp(fst_session, audio_only_reoffer, &proceed, SDP_OFFER);

@@ -96,6 +96,12 @@ static switch_status_t vbr_setup(vbr_call_t *c, const char *codecs, const char *
 
 	switch_media_handle_set_media_flag(media_handle, SCMF_AUTOFIX_TIMING);
 	switch_channel_set_variable(c->channel, "absolute_codec_string", codecs);
+	if (strstr(media, "a=group:BUNDLE")) {
+		switch_channel_set_flag(c->channel, CF_ICE);
+		switch_channel_set_flag(c->channel, CF_VIDEO);
+		switch_channel_set_variable(c->channel, "rtp-bundle", "auto");
+	}
+
 	switch_channel_set_variable(c->channel, "rtp_timer_name", "soft");
 	switch_channel_set_variable(c->channel, "jitterbuffer_msec", "60:200");
 	switch_channel_set_variable(c->channel, "media_timeout", "0");
@@ -103,8 +109,13 @@ static switch_status_t vbr_setup(vbr_call_t *c, const char *codecs, const char *
 
 	if (switch_core_media_prepare_codecs(c->session, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS ||
 		switch_core_media_negotiate_sdp(c->session, vbr_sdp(c->session, media), &p, SDP_OFFER) != 1 ||
-		switch_core_media_choose_ports(c->session, SWITCH_TRUE, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS ||
-		switch_core_media_activate_rtp(c->session) != SWITCH_STATUS_SUCCESS) {
+		switch_core_media_choose_ports(c->session, SWITCH_TRUE, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
+		return SWITCH_STATUS_FALSE;
+	}
+	if (strstr(media, "a=group:BUNDLE")) {
+		switch_core_media_gen_local_sdp(c->session, SDP_ANSWER, "127.0.0.1", 0, NULL, 1);
+	}
+	if (switch_core_media_activate_rtp(c->session) != SWITCH_STATUS_SUCCESS) {
 		return SWITCH_STATUS_FALSE;
 	}
 
@@ -290,6 +301,8 @@ static const char *vbr_codec_name(vbr_call_t *c)
 #define AMRWB_MEDIA "m=audio 9 RTP/AVP 96\r\na=rtpmap:96 AMR-WB/16000\r\na=fmtp:96 octet-align=0; mode-set=0,1,2\r\na=ptime:20\r\n"
 #define OPUS_MEDIA(pt) "m=audio 9 RTP/AVP " #pt "\r\na=rtpmap:" #pt " opus/48000/2\r\na=fmtp:" #pt " useinbandfec=1; minptime=10; maxptime=40\r\na=ptime:20\r\n"
 
+static vbr_call_t bundle_call;
+
 FST_CORE_DB_BEGIN("./conf_vbr")
 {
 	FST_SUITE_BEGIN(switch_vbr_ptime_rtp)
@@ -304,8 +317,47 @@ FST_CORE_DB_BEGIN("./conf_vbr")
 
 		FST_TEARDOWN_BEGIN()
 		{
+			vbr_end(&bundle_call);
 		}
 		FST_TEARDOWN_END()
+
+		FST_TEST_BEGIN(opus_bundle_queue_gaps_preserve_ptime_history)
+		{
+			vbr_call_t *c = &bundle_call;
+			switch_rtp_t *rtp;
+			int i, gaps;
+			const char *media =
+				"a=group:BUNDLE audio video\r\n"
+				"a=extmap:7 urn:ietf:params:rtp-hdrext:sdes:mid\r\n"
+				OPUS_MEDIA(116)
+				"a=rtcp-mux\r\na=mid:audio\r\n"
+				"m=video 42092 RTP/AVP 31\r\n"
+				"a=rtpmap:31 PROXY-VID/90000\r\na=rtcp-mux\r\na=mid:video\r\n";
+
+			fst_requires(vbr_start(c, "opus,PROXY-VID", media, 48000, NULL) == SWITCH_STATUS_SUCCESS);
+			fst_requires(switch_core_media_video_is_bundled(c->session));
+			rtp = switch_core_media_get_rtp_session(c->session, SWITCH_MEDIA_TYPE_AUDIO);
+			switch_rtp_pause_jitter_buffer(rtp, SWITCH_TRUE);
+			c->sent = 3; /* Each send now performs exactly one queued media read. */
+			switch_rtp_clear_flag(rtp, SWITCH_RTP_FLAG_USE_TIMER);
+			/* Complete the initial codec reset before measuring inference. */
+			vbr_send(c, 116, 20, 1, 120);
+			vbr_send(c, 116, 20, 1, 120);
+			fst_requires(c->last_read_seq == c->seq);
+			switch_core_media_reset_autofix(c->session, SWITCH_MEDIA_TYPE_AUDIO);
+			for (i = 0; i < 8; i++) {
+				vbr_send(c, 116, 40, 1, 240);
+				fst_check(c->last_read_seq == c->seq);
+				gaps = c->cng_frames;
+				fst_check(vbr_read(c) == -1); /* No packet: intentionally empty queue. */
+				fst_check(c->cng_frames == gaps + 1);
+			}
+			/* Apply the codec reset requested by the eighth real packet. */
+			vbr_send(c, 116, 40, 1, 240);
+			fst_check(c->alive);
+			fst_check(vbr_ptime(c) == 40);
+		}
+		FST_TEST_END()
 
 		FST_TEST_BEGIN(amrwb_speech_after_silence_keeps_the_call)
 		{

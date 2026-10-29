@@ -948,7 +948,7 @@ static void *SWITCH_THREAD_FUNC toggle_mid_state(switch_thread_t *thread, void *
 
 /* Exercise both clocks through the shared transport, including generated audio
  * after video. Keep ownership here so a failed check still tears down the call. */
-static switch_bool_t bundle_audio_write_state_case(const char **why)
+static switch_bool_t bundle_audio_write_state_case(const char **why, switch_bool_t rebase, switch_bool_t raw_video)
 {
 	switch_core_session_t *session = NULL;
 	switch_memory_pool_t *test_pool = NULL;
@@ -957,6 +957,7 @@ static switch_bool_t bundle_audio_write_state_case(const char **why)
 	switch_call_cause_t cause;
 	switch_port_t sink_port;
 	switch_frame_t video = { 0 };
+	switch_rtp_packet_t video_packet = { 0 };
 	uint8_t data = 0xaa;
 	uint32_t audio_ts, report_ts, video_ts, first_video_ts = 0, count;
 	switch_bool_t kept, ok = SWITCH_FALSE;
@@ -972,7 +973,7 @@ static switch_bool_t bundle_audio_write_state_case(const char **why)
 	sink_fd = make_udp_sink(&sink_port);
 	if (sink_fd < 0) goto end;
 	*why = "shared RTP";
-	shared_rtp = new_raw_write_rtp(test_pool, sink_port, SWITCH_FALSE);
+	shared_rtp = new_raw_write_rtp(test_pool, sink_port, rebase);
 	if (!shared_rtp) goto end;
 	switch_rtp_set_bundle_has_video(shared_rtp, SWITCH_TRUE);
 	switch_rtp_set_bundle_audio_pt(shared_rtp, TEST_PT);
@@ -980,7 +981,7 @@ static switch_bool_t bundle_audio_write_state_case(const char **why)
 
 	for (i = 0; i < 3; i++) {
 		*why = "audio timestamp and send report";
-		if (!payload_write_ts(shared_rtp, sink_fd, 1000 + i * 320, &audio_ts) || audio_ts != 1000 + i * 320) goto end;
+		if (!payload_write_ts(shared_rtp, sink_fd, rebase && i ? 1000000 + (i - 1) * 320 : 1000 + i * 320, &audio_ts) || audio_ts != 1000 + i * 320) goto end;
 		count = switch_rtp_get_sent_frames(shared_rtp, &report_ts, &kept);
 		if (count != (uint32_t)(i + 1) || report_ts != audio_ts || !kept) goto end;
 
@@ -988,6 +989,17 @@ static switch_bool_t bundle_audio_write_state_case(const char **why)
 		video.datalen = video.buflen = 1;
 		video.payload = 96;
 		video.timestamp = 900000 + i * 3000;
+		if (raw_video) {
+			video_packet.header.version = 2;
+			video_packet.header.pt = 96;
+			video_packet.header.ts = htonl(video.timestamp);
+			video_packet.header.ssrc = htonl(0x55667788);
+			video_packet.body[0] = data;
+			video.packet = &video_packet;
+			video.packetlen = 13;
+			video.data = video_packet.body;
+			video.flags = SFF_RAW_RTP;
+		}
 		*why = "video write";
 		if (switch_rtp_write_frame_ex_state(shared_rtp, &video, video_state,
 			0x55667788, 0, NULL, SWITCH_TRUE, 96) <= 0) goto end;
@@ -1888,10 +1900,28 @@ FST_TEARDOWN_END()
 	}
 	FST_TEST_END()
 
+	FST_TEST_BEGIN(test_bundle_payload_video_preserves_rebased_audio)
+	{
+		const char *why = NULL;
+		switch_bool_t ok = bundle_audio_write_state_case(&why, SWITCH_TRUE, SWITCH_FALSE);
+		if (!ok) fprintf(stderr, "BUNDLE rebase: %s\n", why);
+		fst_check(ok);
+	}
+	FST_TEST_END()
+
+	FST_TEST_BEGIN(test_bundle_raw_video_preserves_rebased_audio)
+	{
+		const char *why = NULL;
+		switch_bool_t ok = bundle_audio_write_state_case(&why, SWITCH_TRUE, SWITCH_TRUE);
+		if (!ok) fprintf(stderr, "BUNDLE rebase: %s\n", why);
+		fst_check(ok);
+	}
+	FST_TEST_END()
+
 	FST_TEST_BEGIN(test_bundle_video_preserves_audio_write_state)
 	{
 		const char *why = NULL;
-		switch_bool_t ok = bundle_audio_write_state_case(&why);
+		switch_bool_t ok = bundle_audio_write_state_case(&why, SWITCH_FALSE, SWITCH_FALSE);
 
 		fst_xcheck(ok, why ? why : "independent BUNDLE audio/video write state");
 	}

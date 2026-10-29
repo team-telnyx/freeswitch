@@ -4702,6 +4702,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 	int do_cng = 0;
 	int fire_readable = 0;
 	switch_bool_t bundle_direct_read_active = SWITCH_FALSE;
+	switch_bool_t bundle_audio_queue_gap = SWITCH_FALSE;
 	switch_rtp_engine_t *bundle_direct_veng = NULL;
 
 	switch_assert(session);
@@ -4855,6 +4856,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 			} else {
 				/* A queue timeout is an ordinary audio gap. Return one CNG frame
 				 * instead of looping forever inside this read call. */
+				bundle_audio_queue_gap = SWITCH_TRUE;
 				switch_set_flag((&engine->read_frame), SFF_CNG);
 				engine->read_frame.datalen = engine->read_impl.encoded_bytes_per_packet;
 				if (engine->read_frame.data && engine->read_frame.datalen <= engine->read_frame.buflen) {
@@ -5460,7 +5462,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 		bundle_direct_veng = NULL;
 	}
 
-	if (type == SWITCH_MEDIA_TYPE_AUDIO && switch_test_flag((&engine->read_frame), SFF_CNG)) {
+	/* A local BUNDLE queue gap is not a received CNG/discontinuity. */
+	if (type == SWITCH_MEDIA_TYPE_AUDIO && !bundle_audio_queue_gap && switch_test_flag((&engine->read_frame), SFF_CNG)) {
 		engine->vbr_ptime.last_ts = 0;
 	}
 
@@ -15814,12 +15817,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 				bundle_drain_thread_start(session);
 				switch_mutex_unlock(smh->bundle_drain_mutex);
 
-				/* Video on the audio session would move the audio timestamp mapping: keep it off there */
-				if (switch_rtp_test_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP)) {
-					switch_rtp_clear_flag(a_engine->rtp_session, SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP);
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-									  "rtp_rebase_timestamps_on_jump disabled: video shares the audio RTP session (rtp_use_bundle)\n");
-				}
 			} else {
 				if (v_engine->bundled_with_audio) {
 					/* Stop drain thread before disabling BUNDLE */
