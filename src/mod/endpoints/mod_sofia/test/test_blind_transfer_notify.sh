@@ -17,4 +17,6 @@ rc=0
 ./sipp-based-tests blind_transfer_caller_hangup_while_ringing || rc=1
 ./sipp-based-tests blind_transfer_referrer_moved_before_result || rc=1
 ./sipp-based-tests blind_transfer_referrer_reparked_before_result || rc=1
+./sipp-based-tests blind_transfer_rerouted_then_second_target_answers || rc=1
+./sipp-based-tests blind_transfer_rerouted_then_second_target_busy || rc=1
 exit $rc
