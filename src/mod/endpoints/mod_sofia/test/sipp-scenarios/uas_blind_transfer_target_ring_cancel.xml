@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!-- Blind transfer test, C (the transfer target): 180 without SDP, never answers; waits for the CANCEL. -->
+<scenario name="blind transfer target: ringing then cancel">
+  <recv request="INVITE" crlf="true">
+    <action>
+      <ereg regexp="\nCSeq: *([0-9]+)" search_in="msg" check_it="true" assign_to="s0,inv_cseq"/>
+    </action>
+  </recv>
+
+  <send>
+    <![CDATA[
+
+      SIP/2.0 100 Trying
+      [last_Via:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <pause milliseconds="200"/>
+
+  <send>
+    <![CDATA[
+
+      SIP/2.0 180 Ringing
+      [last_Via:]
+      [last_From:]
+      [last_To:];tag=[pid]C[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:target@[local_ip]:[local_port]>
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <recv request="CANCEL" timeout="15000"/>
+
+  <send>
+    <![CDATA[
+
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <send>
+    <![CDATA[
+
+      SIP/2.0 487 Request Terminated
+      [last_Via:]
+      [last_From:]
+      [last_To:];tag=[pid]C[call_number]
+      [last_Call-ID:]
+      CSeq: [$inv_cseq] INVITE
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <recv request="ACK"/>
+
+  <Reference variables="s0"/>
+</scenario>

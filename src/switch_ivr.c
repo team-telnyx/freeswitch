@@ -2366,7 +2366,31 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_session_transfer(switch_core_session_
 			switch_channel_set_caller_profile(channel, new_profile); 	
 		}
 
+		/* Level-triggered handoff: set_state() alone can be lost, see the counter. */
+		switch_channel_inc_transfer_generation(channel);
+
+		/* Refusal for CS_ROUTING is exactly last_state >= CS_HANGUP. Test it with a
+		   pre-read: set_state() returns channel->state read after it drops state_mutex
+		   and after waking the session thread, so it can read back CS_EXECUTE on success
+		   or CS_HANGUP on a transfer that did take. */
+		if (switch_channel_get_state(channel) >= CS_HANGUP) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
+							  "Transfer of %s to %s[%s@%s] refused, channel is in state %s\n",
+							  switch_channel_get_name(channel), use_dialplan, extension, use_context,
+							  switch_channel_state_name(switch_channel_get_state(channel)));
+			switch_ivr_fire_transfer_event(session, "transfer::failed", extension, use_dialplan, use_context,
+										   "Channel is not in a transferable state");
+			return SWITCH_STATUS_FALSE;
+		}
+
 		switch_channel_set_state(channel, CS_ROUTING);
+
+		/* set_state() is a silent no-op when the channel is already CS_ROUTING, so wake
+		   the thread ourselves or the bump above is stranded. Bare wake, not
+		   signal_state_change(): that also runs state_change io routines and hooks, which
+		   are not all state-guarded, for a transition that may not have happened. */
+		switch_core_session_wake_session_thread(session);
+
 		switch_channel_audio_sync(channel);
 
 		msg.message_id = SWITCH_MESSAGE_INDICATE_TRANSFER;
@@ -4543,16 +4567,19 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_blind_transfer_ack(switch_core_sessio
 		switch_core_session_t *other_session;
 		const char *uuid = switch_channel_get_variable(channel, "blind_transfer_uuid");
 
-		switch_channel_clear_flag(channel, CF_CONFIRM_BLIND_TRANSFER);
-
 		if (!zstr(uuid) && (other_session = switch_core_session_locate(uuid))) {
-			switch_core_session_message_t msg = { 0 };
-			msg.message_id = SWITCH_MESSAGE_INDICATE_BLIND_TRANSFER_RESPONSE;
-			msg.from = __FILE__;
-			msg.numeric_arg = success;
-			switch_core_session_receive_message(other_session, &msg);
+			if (switch_channel_test_and_clear_flag(channel, CF_CONFIRM_BLIND_TRANSFER)) {
+				switch_core_session_message_t msg = { 0 };
+				msg.message_id = SWITCH_MESSAGE_INDICATE_BLIND_TRANSFER_RESPONSE;
+				msg.from = __FILE__;
+				msg.numeric_arg = success;
+				switch_core_session_receive_message(other_session, &msg);
+				status = SWITCH_STATUS_SUCCESS;
+			}
 			switch_core_session_rwunlock(other_session);
-			status = SWITCH_STATUS_SUCCESS;
+		} else {
+			/* REFER sender is gone: clear the flag so no later producer can fire */
+			switch_channel_clear_flag(channel, CF_CONFIRM_BLIND_TRANSFER);
 		}
 	}
 

@@ -1222,6 +1222,18 @@ SWITCH_DECLARE(char *) switch_url_encode_opt(const char *url, char *buf, size_t 
 SWITCH_DECLARE(char *) switch_url_encode(const char *url, char *buf, size_t len);
 SWITCH_DECLARE(char *) switch_url_decode(char *s);
 
+/*!
+  \brief Render a file target in a form that is safe to log
+  \param target the target as the caller gave it, parameter groups and all
+  \param buf buffer to write the redacted form into
+  \param buflen size of buf
+  \return buf, or a literal when there was nothing usable to render
+
+  Strips the leading {} and [] parameter groups, then reduces a URL to scheme://host,
+  dropping userinfo, path, query and anything past a space.  Local paths are left alone.
+*/
+SWITCH_DECLARE(const char *) switch_redact_file_target(const char *target, char *buf, switch_size_t buflen);
+
 SWITCH_DECLARE(char *) switch_core_url_encode_opt(switch_memory_pool_t *pool, const char *url, switch_bool_t double_encode);
 SWITCH_DECLARE(char *) switch_core_url_encode(switch_memory_pool_t *pool, const char *url);
 SWITCH_DECLARE(char *) switch_core_session_url_encode_opt(switch_core_session_t *session, const char *url, switch_bool_t double_encode);

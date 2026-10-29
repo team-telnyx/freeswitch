@@ -33,6 +33,13 @@
 #include <switch.h>
 #include <test/switch_test.h>
 #include <stdlib.h>
+#include <errno.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <pthread.h>
+
+extern char **environ;
 
 int test_success = 0;
 int test_sofia_debug = 1;
@@ -167,6 +174,668 @@ static void kill_sipp(void)
 	switch_sleep(1000 * 1000);
 }
 
+/* Keep this peer in the foreground so its exit status belongs to this test. */
+static int start_t38_sipp(const char *ip, pid_t *pid)
+{
+	char *target = switch_mprintf("%s:5080", ip);
+	char *argv[] = {
+		"sipp", target, "-nr", "-p", "5062", "-m", "1", "-s", "1212121212",
+		"-recv_timeout", "10000", "-timeout", "15s", "-timeout_error", "-nostdin",
+		"-sf", "sipp-scenarios/uac_t38_identical_refresh.xml", "-trace_err", NULL
+	};
+	int result = posix_spawnp(pid, "sipp", NULL, NULL, argv, environ);
+
+	switch_safe_free(target);
+	return result;
+}
+
+/* Return 1 only after reaping the owned child; 0 is timeout, -1 is wait failure. */
+static int wait_t38_sipp(pid_t *pid, int *status, int timeout_ms)
+{
+	int remaining = timeout_ms / 100;
+	pid_t result;
+
+	do {
+		result = waitpid(*pid, status, WNOHANG);
+		if (result == *pid) {
+			*pid = -1;
+			return 1;
+		}
+		if (result < 0 && errno != EINTR) {
+			if (errno == ECHILD) {
+				*pid = -1;
+			}
+			return -1;
+		}
+		if (remaining) {
+			switch_sleep(100 * 1000);
+		}
+	} while (remaining--);
+
+	return 0;
+}
+
+static int stop_t38_sipp(pid_t *pid)
+{
+	int status;
+
+	if (*pid <= 0) {
+		return 1;
+	}
+	/* Never signal a process by name: other tests may have their own SIPp. */
+	if (wait_t38_sipp(pid, &status, 0) == 1) {
+		return 1;
+	}
+	if (*pid <= 0) {
+		return 0;
+	}
+	kill(*pid, SIGTERM);
+	if (wait_t38_sipp(pid, &status, 2000) == 1) {
+		return 1;
+	}
+	if (*pid <= 0) {
+		return 0;
+	}
+	kill(*pid, SIGKILL);
+	return wait_t38_sipp(pid, &status, 2000) == 1;
+}
+
+static int start_delayed_offer_sipp(const char *ip, const char *number, const char *scenario, pid_t *pid)
+{
+	char *target = switch_mprintf("%s:5090", ip);
+	char *argv[] = {
+		"sipp", target, "-nr", "-p", "5062", "-m", "1", "-s", (char *)number,
+		"-recv_timeout", "15000", "-timeout", "20s", "-timeout_error", "-nostdin",
+		"-sf", (char *)scenario, "-trace_err", NULL
+	};
+	int result = posix_spawnp(pid, "sipp", NULL, NULL, argv, environ);
+
+	switch_safe_free(target);
+	return result;
+}
+
+typedef struct {
+	const char *cmd;
+	char *arg;
+	char *reply;
+	switch_time_t started_at;
+	switch_time_t elapsed_ms;
+	pthread_t thread;
+	int started;
+} api_call_t;
+
+static void *api_call_run(void *obj)
+{
+	api_call_t *call = (api_call_t *)obj;
+	switch_stream_handle_t stream = { 0 };
+	switch_time_t start = switch_time_now();
+
+	call->started_at = start;
+	SWITCH_STANDARD_STREAM(stream);
+	switch_api_execute(call->cmd, call->arg, NULL, &stream);
+	call->elapsed_ms = (switch_time_now() - start) / 1000;
+	call->reply = stream.data ? strdup((char *)stream.data) : strdup("");
+	switch_safe_free(stream.data);
+	return NULL;
+}
+
+static void api_call_start(api_call_t *call, const char *cmd, const char *fmt, const char *uuid)
+{
+	call->cmd = cmd;
+	call->arg = switch_mprintf(fmt, uuid);
+	call->started = !pthread_create(&call->thread, NULL, api_call_run, call);
+}
+
+static void api_call_join(api_call_t *call)
+{
+	if (call->started) {
+		pthread_join(call->thread, NULL);
+		call->started = 0;
+	}
+}
+
+static void api_call_finish(api_call_t *call)
+{
+	api_call_join(call);
+	switch_safe_free(call->arg);
+	switch_safe_free(call->reply);
+}
+
+static switch_bool_t api_call_ok(api_call_t *call)
+{
+	return (call->reply && !strncmp(call->reply, "+OK", 3)) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
+/* Inbound no-SDP call on the delayed-offer profile, parked after ring_ready. */
+static switch_core_session_t *delayed_offer_wait_parked(char *uuid)
+{
+	switch_core_session_t *session = NULL;
+	int loop_count = 100;
+
+	test_wait_for_uuid(uuid);
+	if (zstr(uuid) || !(session = switch_core_session_locate(uuid))) {
+		return NULL;
+	}
+	while (loop_count--) {
+		const char *app = switch_channel_get_variable(switch_core_session_get_channel(session), "current_application");
+		if (app && !strcmp(app, "park")) {
+			break;
+		}
+		switch_sleep(20 * 1000);
+	}
+	return session;
+}
+
+/* Joins of the pending answer logged by the endpoint for one call: proof that a request reached the
+   endpoint while the answer was still waiting for its ACK. */
+static struct {
+	pthread_mutex_t mutex;
+	char uuid[100];
+	const char *needle;
+	int joins;
+	switch_time_t last_join;
+	int hook_runs;
+} join_watch = { PTHREAD_MUTEX_INITIALIZER, "", NULL, 0, 0, 0 };
+
+static switch_status_t join_watch_logger(const switch_log_node_t *node, switch_log_level_t level)
+{
+	if (node->data && node->userdata) {
+		pthread_mutex_lock(&join_watch.mutex);
+		if (!zstr(join_watch.uuid) && !strcmp(node->userdata, join_watch.uuid)) {
+			if (join_watch.needle && strstr(node->data, join_watch.needle)) {
+				join_watch.joins++;
+				join_watch.last_join = node->timestamp;
+			}
+			if (strstr(node->file, "mod_dptools.c") && strstr(node->data, "pre-answer-hook-") &&
+				strstr(node->data, join_watch.uuid)) {
+				join_watch.hook_runs++;
+			}
+		}
+		pthread_mutex_unlock(&join_watch.mutex);
+	}
+	return SWITCH_STATUS_SUCCESS;
+}
+
+typedef enum {
+	ACK_RACE_RECORD_ONLY,
+	ACK_RACE_DUPLICATE_ANSWER
+} ack_race_extra_t;
+
+typedef struct {
+	int sipp_started;
+	int parked;
+	int sipp_ok;
+	int up;
+	int media;
+	switch_time_t answered_at;
+	int joins;
+	switch_time_t last_join;
+	int hook_runs;
+	api_call_t answer;
+	api_call_t record;
+	api_call_t extra;
+} ack_race_t;
+
+/* Answer an offerless call (offer in our 200 OK) while the peer holds its ACK for 600 ms, and send media
+   requests from other threads before that ACK arrives. */
+static void delayed_offer_ack_race(const char *ip, ack_race_extra_t extra, ack_race_t *r)
+{
+	switch_core_session_t *session = NULL;
+	switch_channel_t *channel = NULL;
+	char uuid[100] = "";
+	pid_t sipp_pid = -1;
+	int sipp_status = 0;
+
+	if (start_delayed_offer_sipp(ip, "3434343434", "sipp-scenarios/uac_delayed_offer_slow_ack.xml", &sipp_pid) != 0) {
+		return;
+	}
+	r->sipp_started = 1;
+
+	if (!(session = delayed_offer_wait_parked(uuid))) {
+		goto end;
+	}
+	r->parked = 1;
+	channel = switch_core_session_get_channel(session);
+	pthread_mutex_lock(&join_watch.mutex);
+	switch_set_string(join_watch.uuid, uuid);
+	join_watch.needle = "waiting for the pending answer";
+	join_watch.joins = 0;
+	join_watch.last_join = 0;
+	pthread_mutex_unlock(&join_watch.mutex);
+	switch_log_bind_logger(join_watch_logger, SWITCH_LOG_DEBUG, SWITCH_FALSE);
+
+	api_call_start(&r->answer, "uuid_answer", "%s", uuid);
+	switch_sleep(150 * 1000);
+	api_call_start(&r->record, "uuid_record", "%s start /tmp/delayed_offer_ack_wait.wav", uuid);
+	if (extra == ACK_RACE_DUPLICATE_ANSWER) {
+		switch_sleep(50 * 1000);
+		api_call_start(&r->extra, "uuid_answer", "%s", uuid);
+	}
+	api_call_join(&r->answer);
+	api_call_join(&r->record);
+	api_call_join(&r->extra);
+
+	switch_sleep(200 * 1000);
+	switch_log_unbind_logger(join_watch_logger);
+	pthread_mutex_lock(&join_watch.mutex);
+	r->joins = join_watch.joins;
+	r->last_join = join_watch.last_join;
+	join_watch.uuid[0] = '\0';
+	pthread_mutex_unlock(&join_watch.mutex);
+	r->answered_at = switch_channel_get_timetable(channel) ? switch_channel_get_timetable(channel)->answered : 0;
+	r->up = switch_channel_ready(channel) && switch_channel_test_flag(channel, CF_ANSWERED);
+	r->media = switch_core_media_ready(session, SWITCH_MEDIA_TYPE_AUDIO);
+
+	switch_channel_hangup(channel, SWITCH_CAUSE_NORMAL_CLEARING);
+	r->sipp_ok = wait_t38_sipp(&sipp_pid, &sipp_status, 10000) == 1 && WIFEXITED(sipp_status) && WEXITSTATUS(sipp_status) == 0;
+
+ end:
+	stop_t38_sipp(&sipp_pid);
+	if (session) {
+		if (!switch_channel_down_nosig(channel)) {
+			switch_channel_hangup(channel, SWITCH_CAUSE_NORMAL_CLEARING);
+		}
+		switch_core_session_rwunlock(session);
+	}
+}
+
+/* Each racing request reached the endpoint while the answer was still waiting for its ACK: the endpoint
+   logged a join of the pending answer for it, before the ACK completed the answer. */
+static switch_bool_t ack_race_joined(ack_race_t *r, int requests)
+{
+	return (r->joins >= requests && r->answered_at && r->last_join < r->answered_at) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
+/* Inbound offerless call whose offer went out in a reliable 183 (sent by the first media request, or by
+   ring_ready when the dialplan promotes it); the peer holds the PRACK for 600 ms while an answer and another
+   media request arrive. */
+static void early_offer_prack_race(const char *ip, const char *number, switch_bool_t ring_ready_offer, ack_race_t *r)
+{
+	switch_core_session_t *session = NULL;
+	switch_channel_t *channel = NULL;
+	char uuid[100] = "";
+	pid_t sipp_pid = -1;
+	int sipp_status = 0;
+
+	if (start_delayed_offer_sipp(ip, number, "sipp-scenarios/uac_early_offer_slow_prack.xml", &sipp_pid) != 0) {
+		return;
+	}
+	r->sipp_started = 1;
+
+	if (!(session = delayed_offer_wait_parked(uuid))) {
+		goto end;
+	}
+	r->parked = 1;
+	channel = switch_core_session_get_channel(session);
+	pthread_mutex_lock(&join_watch.mutex);
+	switch_set_string(join_watch.uuid, uuid);
+	join_watch.needle = "early-offer: waiting for the PRACK answer";
+	join_watch.joins = 0;
+	join_watch.last_join = 0;
+	join_watch.hook_runs = 0;
+	pthread_mutex_unlock(&join_watch.mutex);
+	switch_log_bind_logger(join_watch_logger, SWITCH_LOG_DEBUG, SWITCH_FALSE);
+
+	if (!ring_ready_offer) {
+		api_call_start(&r->extra, "uuid_record", "%s start /tmp/early_offer_prack_wait_1.wav", uuid);
+		switch_sleep(300 * 1000);
+	}
+	api_call_start(&r->answer, "uuid_answer", "%s", uuid);
+	switch_sleep(100 * 1000);
+	api_call_start(&r->record, "uuid_record", "%s start /tmp/early_offer_prack_wait_2.wav", uuid);
+	api_call_join(&r->answer);
+	api_call_join(&r->record);
+	api_call_join(&r->extra);
+
+	switch_sleep(200 * 1000);
+	switch_log_unbind_logger(join_watch_logger);
+	pthread_mutex_lock(&join_watch.mutex);
+	r->joins = join_watch.joins;
+	r->last_join = join_watch.last_join;
+	r->hook_runs = join_watch.hook_runs;
+	join_watch.uuid[0] = '\0';
+	pthread_mutex_unlock(&join_watch.mutex);
+	r->answered_at = switch_channel_get_timetable(channel) ? switch_channel_get_timetable(channel)->answered : 0;
+	r->up = switch_channel_ready(channel) && switch_channel_test_flag(channel, CF_ANSWERED);
+	r->media = switch_core_media_ready(session, SWITCH_MEDIA_TYPE_AUDIO);
+
+	switch_channel_hangup(channel, SWITCH_CAUSE_NORMAL_CLEARING);
+	r->sipp_ok = wait_t38_sipp(&sipp_pid, &sipp_status, 10000) == 1 && WIFEXITED(sipp_status) && WEXITSTATUS(sipp_status) == 0;
+
+ end:
+	stop_t38_sipp(&sipp_pid);
+	if (session) {
+		if (!switch_channel_down_nosig(channel)) {
+			switch_channel_hangup(channel, SWITCH_CAUSE_NORMAL_CLEARING);
+		}
+		switch_core_session_rwunlock(session);
+	}
+}
+
+/* Offer in a reliable 183 sent by `first` (uuid_ring_ready or uuid_record), PRACK held 600 ms, with the
+   dialplan's execute_on_* hook re-entering the endpoint; then, if `answer`, uuid_answer. */
+static void early_offer_hook_race(const char *ip, const char *number, const char *first, switch_bool_t answer, ack_race_t *r)
+{
+	switch_core_session_t *session = NULL;
+	switch_channel_t *channel = NULL;
+	char uuid[100] = "";
+	pid_t sipp_pid = -1;
+	int sipp_status = 0;
+	int loop_count = 300;
+
+	if (start_delayed_offer_sipp(ip, number, "sipp-scenarios/uac_early_offer_slow_prack.xml", &sipp_pid) != 0) {
+		return;
+	}
+	r->sipp_started = 1;
+
+	if (!(session = delayed_offer_wait_parked(uuid))) {
+		goto end;
+	}
+	r->parked = 1;
+	channel = switch_core_session_get_channel(session);
+	pthread_mutex_lock(&join_watch.mutex);
+	switch_set_string(join_watch.uuid, uuid);
+	join_watch.needle = "early-offer: waiting for the PRACK answer";
+	join_watch.joins = 0;
+	join_watch.last_join = 0;
+	pthread_mutex_unlock(&join_watch.mutex);
+	switch_log_bind_logger(join_watch_logger, SWITCH_LOG_DEBUG, SWITCH_FALSE);
+
+	api_call_start(&r->extra, first, !strcmp(first, "uuid_record") ? "%s start /tmp/early_offer_hook.wav" : "%s", uuid);
+	api_call_join(&r->extra);
+	if (answer) {
+		api_call_start(&r->answer, "uuid_answer", "%s", uuid);
+		api_call_join(&r->answer);
+	}
+	while (loop_count-- && switch_channel_ready(channel) && !switch_channel_test_flag(channel, CF_ANSWERED)) {
+		switch_sleep(10 * 1000);
+	}
+
+	switch_sleep(200 * 1000);
+	switch_log_unbind_logger(join_watch_logger);
+	pthread_mutex_lock(&join_watch.mutex);
+	r->joins = join_watch.joins;
+	join_watch.uuid[0] = '\0';
+	pthread_mutex_unlock(&join_watch.mutex);
+	r->answered_at = switch_channel_get_timetable(channel) ? switch_channel_get_timetable(channel)->answered : 0;
+	r->up = switch_channel_ready(channel) && switch_channel_test_flag(channel, CF_ANSWERED);
+	r->media = switch_core_media_ready(session, SWITCH_MEDIA_TYPE_AUDIO);
+
+	switch_channel_hangup(channel, SWITCH_CAUSE_NORMAL_CLEARING);
+	r->sipp_ok = wait_t38_sipp(&sipp_pid, &sipp_status, 10000) == 1 && WIFEXITED(sipp_status) && WEXITSTATUS(sipp_status) == 0;
+
+ end:
+	stop_t38_sipp(&sipp_pid);
+	if (session) {
+		if (!switch_channel_down_nosig(channel)) {
+			switch_channel_hangup(channel, SWITCH_CAUSE_NORMAL_CLEARING);
+		}
+		switch_core_session_rwunlock(session);
+	}
+}
+
+static void ack_race_free(ack_race_t *r)
+{
+	api_call_finish(&r->answer);
+	api_call_finish(&r->record);
+	api_call_finish(&r->extra);
+}
+
+/* Blind transfer with confirm_blind_transfer (test dialplan 7878780001/7878780002): SIPp A calls B,
+   B sends REFER, C is the transfer target. The result is read from the endpoint's log, and SIPp B
+   checks the NOTIFY it receives against the expected sipfrag. */
+static struct {
+	pthread_mutex_t mutex;
+	int results;
+	char status[64];
+	switch_time_t result_at;
+	switch_time_t target_answered_at;
+	int referrer_blind_transfer_hangup;
+} bt_watch = { PTHREAD_MUTEX_INITIALIZER, 0, "", 0, 0, 0 };
+
+static switch_status_t bt_watch_logger(const switch_log_node_t *node, switch_log_level_t level)
+{
+	const char *found;
+
+	if (!node->data) {
+		return SWITCH_STATUS_SUCCESS;
+	}
+	pthread_mutex_lock(&bt_watch.mutex);
+	if ((found = strstr(node->data, "Completing blind transfer with status: "))) {
+		if (!bt_watch.results++) {
+			switch_copy_string(bt_watch.status, found + strlen("Completing blind transfer with status: "), sizeof(bt_watch.status));
+			bt_watch.result_at = node->timestamp;
+		}
+	} else if (strstr(node->data, "/7878780002") && strstr(node->data, "entering state [") &&
+			   strstr(node->data, "][200]") && !bt_watch.target_answered_at) {
+		bt_watch.target_answered_at = node->timestamp;
+	} else if (strstr(node->data, "Hangup sofia/") && strstr(node->data, "/7878780001") && strstr(node->data, "[BLIND_TRANSFER]")) {
+		bt_watch.referrer_blind_transfer_hangup = 1;
+	}
+	pthread_mutex_unlock(&bt_watch.mutex);
+	return SWITCH_STATUS_SUCCESS;
+}
+
+typedef struct {
+	int started;
+	int a_ok;
+	int b_ok;
+	int c_ok;
+	int results;
+	char status[64];
+	switch_time_t result_at;
+	switch_time_t target_answered_at;
+	int referrer_blind_transfer_hangup;
+	int settled;
+	int moved;
+} bt_result_t;
+
+/* What blind_transfer_run() does to the REFER sender once its REFER has parked it. */
+typedef enum {
+	BT_MOVE_NONE,
+	BT_MOVE_TRANSFER,			/* uuid_transfer out of the park */
+	BT_MOVE_TRANSFER_REPARK		/* uuid_transfer out of the park, then uuid_park */
+} bt_move_t;
+
+static int start_bt_sipp(const char *ip, const char *scenario, const char *port, const char *target, const char *hold_ms,
+						 const char *expected_frag, pid_t *pid)
+{
+	char *remote = target ? switch_mprintf("%s:5080", ip) : NULL;
+	char *argv[32];
+	int i = 0, result;
+
+	argv[i++] = "sipp";
+	if (remote) {
+		argv[i++] = remote;
+		argv[i++] = "-s";
+		argv[i++] = (char *)target;
+		argv[i++] = "-d";
+		argv[i++] = (char *)hold_ms;
+	}
+	argv[i++] = "-i";
+	argv[i++] = (char *)ip;
+	argv[i++] = "-p";
+	argv[i++] = (char *)port;
+	argv[i++] = "-sf";
+	argv[i++] = (char *)scenario;
+	argv[i++] = "-m";
+	argv[i++] = "1";
+	argv[i++] = "-nr";
+	argv[i++] = "-recv_timeout";
+	argv[i++] = "20000";
+	argv[i++] = "-timeout";
+	argv[i++] = "25s";
+	argv[i++] = "-timeout_error";
+	argv[i++] = "-nostdin";
+	argv[i++] = "-trace_err";
+	if (expected_frag) {
+		argv[i++] = "-set";
+		argv[i++] = "expected_frag";
+		argv[i++] = (char *)expected_frag;
+	}
+	argv[i] = NULL;
+	result = posix_spawnp(pid, "sipp", NULL, NULL, argv, environ);
+	if (result != 0) {
+		*pid = -1;
+	}
+	switch_safe_free(remote);
+	return result;
+}
+
+static int bt_sipp_ok(pid_t *pid, int timeout_ms)
+{
+	int status = 0;
+
+	return wait_t38_sipp(pid, &status, timeout_ms) == 1 && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+/* The profile finishes starting after its SIP socket already accepts calls: wait until the call path can use it. */
+static switch_bool_t bt_profile_ready(void)
+{
+	int loop_count = 100;
+	switch_bool_t ready = SWITCH_FALSE;
+
+	while (!ready && loop_count--) {
+		switch_stream_handle_t stream = { 0 };
+
+		SWITCH_STANDARD_STREAM(stream);
+		switch_api_execute("sofia", "status profile external", NULL, &stream);
+		ready = (stream.data && !strstr((char *)stream.data, "Invalid")) ? SWITCH_TRUE : SWITCH_FALSE;
+		switch_safe_free(stream.data);
+		if (!ready) {
+			switch_sleep(100 * 1000);
+		}
+	}
+	return ready;
+}
+
+/* Runs one API command; SWITCH_TRUE when it answers +OK. */
+static switch_bool_t bt_api_ok(const char *cmd, const char *arg)
+{
+	switch_stream_handle_t stream = { 0 };
+	switch_bool_t ok;
+
+	SWITCH_STANDARD_STREAM(stream);
+	switch_api_execute(cmd, arg, NULL, &stream);
+	ok = (stream.data && !strncmp((char *)stream.data, "+OK", 3)) ? SWITCH_TRUE : SWITCH_FALSE;
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "%s %s: %s\n", cmd, arg, stream.data ? (char *)stream.data : "(no reply)");
+	switch_safe_free(stream.data);
+	return ok;
+}
+
+/* Waits up to about 3 s for the leg to run in the given state (state and running state). */
+static switch_bool_t bt_wait_running_state(const char *uuid, switch_channel_state_t want)
+{
+	int loop_count = 60;
+	switch_bool_t found = SWITCH_FALSE;
+
+	while (!found && loop_count--) {
+		switch_core_session_t *session = switch_core_session_locate(uuid);
+
+		if (session) {
+			switch_channel_t *channel = switch_core_session_get_channel(session);
+
+			found = (switch_channel_get_state(channel) == want && switch_channel_get_running_state(channel) == want) ? SWITCH_TRUE : SWITCH_FALSE;
+			switch_core_session_rwunlock(session);
+		}
+		if (!found) {
+			switch_sleep(50 * 1000);
+		}
+	}
+	return found;
+}
+
+/* Finds the REFER sender (the only leg with sip_blind_transfer_event), waits until it runs in
+   the REFER's park, and moves it out with uuid_transfer; for BT_MOVE_TRANSFER_REPARK it then
+   waits until the leg runs the transfer and parks it again with uuid_park. */
+static switch_bool_t bt_move_referrer(bt_move_t move)
+{
+	char uuid[SWITCH_UUID_FORMATTED_LENGTH + 1] = "";
+	char *arg;
+	int loop_count = 60;
+	switch_bool_t ok = SWITCH_FALSE;
+
+	while (!*uuid && loop_count--) {
+		switch_console_callback_match_t *matches = switch_core_session_findall_matching_var("sip_blind_transfer_event", NULL);
+
+		if (matches) {
+			if (matches->head) {
+				switch_copy_string(uuid, matches->head->val, sizeof(uuid));
+			}
+			switch_console_free_matches(&matches);
+		}
+		if (!*uuid) {
+			switch_sleep(50 * 1000);
+		}
+	}
+	if (!*uuid || !bt_wait_running_state(uuid, CS_PARK)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "the REFER sender [%s] was not found in its park\n", uuid);
+		return SWITCH_FALSE;
+	}
+
+	arg = switch_mprintf("%s sleep:6000 inline", uuid);
+	ok = bt_api_ok("uuid_transfer", arg);
+	switch_safe_free(arg);
+	if (ok && move == BT_MOVE_TRANSFER_REPARK) {
+		ok = bt_wait_running_state(uuid, CS_EXECUTE) && bt_api_ok("uuid_park", uuid) && bt_wait_running_state(uuid, CS_PARK);
+	}
+	return ok;
+}
+
+/* C and B listen first; A calls and hangs up hold_ms after the answer. B passes only if its
+   first request after the 202 is one NOTIFY carrying expected_frag, or, with expected_frag
+   "none", if it gets no NOTIFY at all. move says what happens to B once its REFER parks it. */
+static void blind_transfer_run(const char *ip, const char *target_scenario, const char *hold_ms, const char *expected_frag,
+							   bt_move_t move, bt_result_t *r)
+{
+	pid_t a = -1, b = -1, c = -1;
+	int loop_count = 100;
+
+	pthread_mutex_lock(&bt_watch.mutex);
+	bt_watch.results = 0;
+	bt_watch.status[0] = '\0';
+	bt_watch.result_at = 0;
+	bt_watch.target_answered_at = 0;
+	bt_watch.referrer_blind_transfer_hangup = 0;
+	pthread_mutex_unlock(&bt_watch.mutex);
+	switch_log_bind_logger(bt_watch_logger, SWITCH_LOG_DEBUG, SWITCH_FALSE);
+
+	if (!bt_profile_ready() || start_bt_sipp(ip, target_scenario, "5064", NULL, NULL, NULL, &c) ||
+		start_bt_sipp(ip, "sipp-scenarios/uas_blind_transfer_referrer.xml", "5063", NULL, NULL, expected_frag, &b)) {
+		goto end;
+	}
+	switch_sleep(500 * 1000);
+	if (start_bt_sipp(ip, "sipp-scenarios/uac_blind_transfer_caller.xml", "5062", "7878780001", hold_ms, NULL, &a)) {
+		goto end;
+	}
+	r->started = 1;
+	if (move != BT_MOVE_NONE) {
+		r->moved = bt_move_referrer(move);
+	}
+	r->a_ok = bt_sipp_ok(&a, 25000);
+	r->b_ok = bt_sipp_ok(&b, 15000);
+	r->c_ok = bt_sipp_ok(&c, 15000);
+
+	/* Let the last channels finish before the results are read and the next test starts. */
+	while (loop_count-- && switch_core_session_count()) {
+		switch_sleep(50 * 1000);
+	}
+	r->settled = !switch_core_session_count();
+
+ end:
+	switch_log_unbind_logger(bt_watch_logger);
+	pthread_mutex_lock(&bt_watch.mutex);
+	r->results = bt_watch.results;
+	switch_copy_string(r->status, bt_watch.status, sizeof(r->status));
+	r->result_at = bt_watch.result_at;
+	r->target_answered_at = bt_watch.target_answered_at;
+	r->referrer_blind_transfer_hangup = bt_watch.referrer_blind_transfer_hangup;
+	pthread_mutex_unlock(&bt_watch.mutex);
+	stop_t38_sipp(&a);
+	stop_t38_sipp(&b);
+	stop_t38_sipp(&c);
+}
+
 static void show_event(switch_event_t *event) {
 	char *str;
 	/*print the event*/
@@ -233,16 +902,29 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 
 			switch_core_set_variable("spawn_instead_of_system", "true");
 
-			fst_requires_module("mod_sndfile");
-			fst_requires_module("mod_voicemail");
-			fst_requires_module("mod_sofia");
-			fst_requires_module("mod_loopback");
-			fst_requires_module("mod_console");
-			fst_requires_module("mod_dptools");
-			fst_requires_module("mod_dialplan_xml");
-			fst_requires_module("mod_commands");
-			fst_requires_module("mod_say_en");
-			fst_requires_module("mod_tone_stream");
+			if (getenv("FST_DELAYED_OFFER_ONLY")) {
+				fst_requires_module("mod_sofia");
+				fst_requires_module("mod_dialplan_xml");
+				fst_requires_module("mod_dptools");
+				fst_requires_module("mod_commands");
+				fst_requires_module("mod_sndfile");
+			} else if (getenv("FST_T38_ONLY") || getenv("FST_BLIND_TRANSFER_ONLY")) {
+				fst_requires_module("mod_sofia");
+				fst_requires_module("mod_dialplan_xml");
+				fst_requires_module("mod_dptools");
+				fst_requires_module("mod_commands");
+			} else {
+				fst_requires_module("mod_sndfile");
+				fst_requires_module("mod_voicemail");
+				fst_requires_module("mod_sofia");
+				fst_requires_module("mod_loopback");
+				fst_requires_module("mod_console");
+				fst_requires_module("mod_dptools");
+				fst_requires_module("mod_dialplan_xml");
+				fst_requires_module("mod_commands");
+				fst_requires_module("mod_say_en");
+				fst_requires_module("mod_tone_stream");
+			}
 
 		}
 		FST_SETUP_END()
@@ -305,6 +987,302 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 				/* sipp should timeout, attempt kill, just in case.*/
 				kill_sipp();
 			}
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(t38_identical_session_refresh_keeps_image)
+		{
+			const char *local_ip_v4 = switch_core_get_variable("local_ip_v4");
+			switch_core_session_t *session = NULL;
+			switch_channel_t *channel = NULL;
+			switch_t38_options_t *t38_options = NULL;
+			switch_core_session_message_t msg = { 0 };
+			switch_status_t status;
+			char uuid[100] = "";
+			pid_t sipp_pid = -1;
+			int sipp_status = 0;
+			int result;
+			int loop_count = 200;
+			switch_bool_t t38_active = SWITCH_FALSE;
+
+			result = start_t38_sipp(local_ip_v4, &sipp_pid);
+			fst_xcheck(result == 0, "Unable to start SIPp T.38 peer");
+			if (result != 0) {
+				/* posix_spawnp does not define the PID on failure. */
+				sipp_pid = -1;
+				goto t38_cleanup;
+			}
+
+			test_wait_for_uuid(uuid);
+			fst_xcheck(!zstr(uuid), "SIPp call did not create a FreeSWITCH channel");
+			if (zstr(uuid)) {
+				goto t38_cleanup;
+			}
+			session = switch_core_session_locate(uuid);
+			fst_xcheck(session != NULL, "Unable to locate SIPp call session");
+			if (!session) {
+				goto t38_cleanup;
+			}
+
+			channel = switch_core_session_get_channel(session);
+			status = switch_channel_wait_for_flag(channel, CF_ANSWERED, SWITCH_TRUE, 5000, NULL);
+			fst_xcheck(status == SWITCH_STATUS_SUCCESS, "Initial audio call was not answered");
+			if (status != SWITCH_STATUS_SUCCESS) {
+				goto t38_cleanup;
+			}
+
+			switch_channel_set_variable(channel, "fax_enable_t38", "true");
+			/* Model the fax application's capability, not successful negotiation. */
+			switch_channel_set_app_flag_key("T38", channel, CF_APP_T38_POSSIBLE);
+			t38_options = switch_core_session_alloc(session, sizeof(*t38_options));
+			t38_options->T38FaxVersion = 0;
+			t38_options->T38MaxBitRate = 14400;
+			t38_options->T38FaxFillBitRemoval = 1;
+			t38_options->T38FaxRateManagement = switch_core_session_strdup(session, "transferredTCF");
+			t38_options->T38FaxMaxBuffer = 2000;
+			t38_options->T38FaxMaxDatagram = 400;
+			t38_options->T38FaxUdpEC = switch_core_session_strdup(session, "t38UDPRedundancy");
+			switch_channel_set_private(channel, "t38_options", t38_options);
+			switch_channel_set_app_flag_key("T38", channel, CF_APP_T38_REQ);
+
+			msg.from = __FILE__;
+			msg.message_id = SWITCH_MESSAGE_INDICATE_REQUEST_IMAGE_MEDIA;
+			status = switch_core_session_receive_message(session, &msg);
+			fst_xcheck(status == SWITCH_STATUS_SUCCESS, "Failed to request T.38 image media");
+			if (status != SWITCH_STATUS_SUCCESS) {
+				goto t38_cleanup;
+			}
+
+			while (loop_count-- && !switch_channel_down_nosig(channel)) {
+				if (switch_channel_test_flag(channel, CF_IMAGE_SDP) &&
+					switch_channel_test_app_flag_key("T38", channel, CF_APP_T38)) {
+					t38_active = SWITCH_TRUE;
+					break;
+				}
+				switch_sleep(10 * 1000);
+			}
+			fst_xcheck(t38_active, "T.38 negotiation never became active");
+
+			result = wait_t38_sipp(&sipp_pid, &sipp_status, 15000);
+			fst_xcheck(result == 1, "SIPp did not finish within the T.38 test deadline");
+			fst_xcheck(result == 1 && WIFEXITED(sipp_status) && WEXITSTATUS(sipp_status) == 0,
+					"SIPp T.38 scenario failed; inspect uac_t38_identical_refresh_*_errors.log");
+
+		 t38_cleanup:
+			fst_xcheck(stop_t38_sipp(&sipp_pid), "Unable to reap the owned SIPp process");
+			if (session) {
+				if (!switch_channel_down_nosig(channel)) {
+					switch_channel_hangup(channel, SWITCH_CAUSE_NORMAL_CLEARING);
+				}
+				switch_core_session_rwunlock(session);
+			}
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(delayed_offer_media_request_during_ack_wait)
+		{
+			ack_race_t r = { 0 };
+
+			delayed_offer_ack_race(switch_core_get_variable("local_ip_v4"), ACK_RACE_RECORD_ONLY, &r);
+			fst_xcheck(r.sipp_started && r.parked, "SIPp call did not reach park");
+			fst_xcheck(ack_race_joined(&r, 1), "record request did not reach the endpoint while the ACK was pending");
+			fst_xcheck(api_call_ok(&r.answer) && r.answer.elapsed_ms < 3000, "uuid_answer did not complete when the ACK arrived");
+			fst_xcheck(api_call_ok(&r.record), "uuid_record failed");
+			fst_xcheck(r.up && r.media, "call not up with media after the ACK");
+			fst_xcheck(r.sipp_ok, "SIPp delayed-offer scenario failed; inspect uac_delayed_offer_slow_ack_*_errors.log");
+			ack_race_free(&r);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(delayed_offer_duplicate_answer_during_ack_wait)
+		{
+			ack_race_t r = { 0 };
+
+			delayed_offer_ack_race(switch_core_get_variable("local_ip_v4"), ACK_RACE_DUPLICATE_ANSWER, &r);
+			fst_xcheck(r.sipp_started && r.parked, "SIPp call did not reach park");
+			fst_xcheck(ack_race_joined(&r, 2), "second uuid_answer and record did not reach the endpoint while the ACK was pending");
+			fst_xcheck(api_call_ok(&r.answer) && r.answer.elapsed_ms < 3000, "uuid_answer did not complete when the ACK arrived");
+			fst_xcheck(api_call_ok(&r.extra) && r.extra.elapsed_ms < 3000, "second uuid_answer did not complete when the ACK arrived");
+			fst_xcheck(api_call_ok(&r.record), "uuid_record failed");
+			fst_xcheck(r.up && r.media, "call not up with media after the ACK");
+			fst_xcheck(r.sipp_ok, "SIPp delayed-offer scenario failed; inspect uac_delayed_offer_slow_ack_*_errors.log");
+			ack_race_free(&r);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(early_offer_answer_and_media_during_prack_wait)
+		{
+			ack_race_t r = { 0 };
+
+			early_offer_prack_race(switch_core_get_variable("local_ip_v4"), "3434343434", SWITCH_FALSE, &r);
+			fst_xcheck(r.sipp_started && r.parked, "SIPp call did not reach park");
+			fst_xcheck(ack_race_joined(&r, 2), "answer and record did not reach the endpoint while the PRACK was pending");
+			fst_xcheck(api_call_ok(&r.extra), "uuid_record that sent the early offer failed");
+			fst_xcheck(api_call_ok(&r.answer) && r.answer.elapsed_ms < 3000, "uuid_answer did not complete when the PRACK arrived");
+			fst_xcheck(api_call_ok(&r.record) && r.record.elapsed_ms < 3000, "uuid_record did not complete when the PRACK arrived");
+			fst_xcheck(r.up && r.media, "call not up with media after the PRACK");
+			fst_xcheck(r.sipp_ok, "SIPp early-offer scenario failed; inspect uac_early_offer_slow_prack_*_errors.log");
+			ack_race_free(&r);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(ring_ready_early_offer_answer_during_prack_wait)
+		{
+			ack_race_t r = { 0 };
+
+			early_offer_prack_race(switch_core_get_variable("local_ip_v4"), "3434343435", SWITCH_TRUE, &r);
+			fst_xcheck(r.sipp_started && r.parked, "SIPp call did not reach park");
+			fst_xcheck(ack_race_joined(&r, 2), "answer and record did not reach the endpoint while the PRACK was pending");
+			fst_xcheck(api_call_ok(&r.answer) && r.answer.elapsed_ms < 3000, "uuid_answer did not complete when the PRACK arrived");
+			fst_xcheck(api_call_ok(&r.record) && r.record.elapsed_ms < 3000, "uuid_record did not complete when the PRACK arrived");
+			fst_xcheck(r.up && r.media, "call not up with media after the PRACK");
+			fst_xcheck(r.sipp_ok, "SIPp early-offer scenario failed; inspect uac_early_offer_slow_prack_*_errors.log");
+			ack_race_free(&r);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(ring_hook_pre_answer_during_prack_wait)
+		{
+			ack_race_t r = { 0 };
+
+			/* uuid_ring_ready sends the promoted 183; its execute_on_ring pre_answer waits for the PRACK. */
+			early_offer_hook_race(switch_core_get_variable("local_ip_v4"), "3434343436", "uuid_ring_ready", SWITCH_TRUE, &r);
+			fst_xcheck(r.sipp_started && r.parked, "SIPp call did not reach park");
+			fst_xcheck(r.joins >= 1, "the ring hook's pre_answer did not wait for the PRACK");
+			fst_xcheck(api_call_ok(&r.extra) && r.extra.elapsed_ms < 3000, "uuid_ring_ready did not complete when the PRACK arrived");
+			fst_xcheck(api_call_ok(&r.answer) && r.answer.elapsed_ms < 3000, "uuid_answer failed");
+			fst_xcheck(r.up && r.media, "call not up with media");
+			fst_xcheck(r.sipp_ok, "SIPp early-offer scenario failed; inspect uac_early_offer_slow_prack_*_errors.log");
+			ack_race_free(&r);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(pre_answer_hook_answers_on_prack)
+		{
+			ack_race_t r = { 0 };
+
+			/* uuid_record sends the 183; the PRACK's execute_on_pre_answer answers the call. Nothing else answers it. */
+			early_offer_hook_race(switch_core_get_variable("local_ip_v4"), "3434343437", "uuid_record", SWITCH_FALSE, &r);
+			fst_xcheck(r.sipp_started && r.parked, "SIPp call did not reach park");
+			fst_xcheck(api_call_ok(&r.extra) && r.extra.elapsed_ms < 3000, "uuid_record did not complete when the PRACK arrived");
+			fst_xcheck(r.up && r.media && r.answered_at, "the pre-answer hook did not answer the call after the PRACK");
+			fst_xcheck(r.sipp_ok, "SIPp early-offer scenario failed; inspect uac_early_offer_slow_prack_*_errors.log");
+			ack_race_free(&r);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(pre_answer_hook_runs_once_with_answer_waiting_on_prack)
+		{
+			ack_race_t r = { 0 };
+
+			/* uuid_record sends the 183, uuid_answer waits for the PRACK, the PRACK fires an execute_on_pre_answer
+			   hook: the answer must not overtake it, and it must run exactly once. */
+			early_offer_prack_race(switch_core_get_variable("local_ip_v4"), "3434343438", SWITCH_FALSE, &r);
+			fst_xcheck(r.sipp_started && r.parked, "SIPp call did not reach park");
+			fst_xcheck(ack_race_joined(&r, 2), "answer and record did not reach the endpoint while the PRACK was pending");
+			fst_xcheck(r.hook_runs == 1, "the pre-answer hook did not run exactly once");
+			fst_xcheck(api_call_ok(&r.answer) && r.answer.elapsed_ms < 3000, "uuid_answer did not complete when the PRACK arrived");
+			fst_xcheck(r.up && r.media, "call not up with media after the PRACK");
+			fst_xcheck(r.sipp_ok, "SIPp early-offer scenario failed; inspect uac_early_offer_slow_prack_*_errors.log");
+			ack_race_free(&r);
+		}
+		FST_TEST_END()
+
+		/* The target sends 183 with SDP and answers 2 s later: B gets one 200 OK, after the answer. */
+		FST_TEST_BEGIN(blind_transfer_early_media_then_answer)
+		{
+			bt_result_t r = { 0 };
+
+			blind_transfer_run(switch_core_get_variable("local_ip_v4"), "sipp-scenarios/uas_blind_transfer_target_early_answer.xml", "6000",
+							   "SIP/2.0 200 OK", BT_MOVE_NONE, &r);
+			fst_xcheck(r.started, "Unable to start the SIPp peers");
+			fst_xcheck(r.results == 1, "the REFER sender did not get exactly one result");
+			fst_xcheck(strstr(r.status, "SIP/2.0 200 OK") != NULL, "the result is not 200 OK");
+			fst_xcheck(r.target_answered_at && r.result_at >= r.target_answered_at, "200 OK was sent before the target answered");
+			fst_xcheck(r.b_ok, "the REFER sender did not get one NOTIFY with SIP/2.0 200 OK before the BYE");
+			fst_xcheck(r.a_ok && r.b_ok && r.c_ok, "a SIPp peer failed; inspect the *_blind_transfer_*_errors.log files");
+		}
+		FST_TEST_END()
+
+		/* The target sends 183 with SDP, then 486: B gets one result, the 486. */
+		FST_TEST_BEGIN(blind_transfer_early_media_then_busy)
+		{
+			bt_result_t r = { 0 };
+
+			blind_transfer_run(switch_core_get_variable("local_ip_v4"), "sipp-scenarios/uas_blind_transfer_target_early_busy.xml", "6000",
+							   "SIP/2.0 486 Busy Here", BT_MOVE_NONE, &r);
+			fst_xcheck(r.started, "Unable to start the SIPp peers");
+			fst_xcheck(r.results == 1, "the REFER sender did not get exactly one result");
+			fst_xcheck(strstr(r.status, "SIP/2.0 486 Busy Here") != NULL, "the result is not 486 Busy Here");
+			fst_xcheck(r.b_ok, "the REFER sender did not get one NOTIFY with SIP/2.0 486 Busy Here before the BYE");
+			fst_xcheck(r.a_ok && r.b_ok && r.c_ok, "a SIPp peer failed; inspect the *_blind_transfer_*_errors.log files");
+		}
+		FST_TEST_END()
+
+		/* A hangs up while the target is in early media: B gets one failure and is hung up. */
+		FST_TEST_BEGIN(blind_transfer_caller_hangup_during_early_media)
+		{
+			bt_result_t r = { 0 };
+
+			blind_transfer_run(switch_core_get_variable("local_ip_v4"), "sipp-scenarios/uas_blind_transfer_target_early_cancel.xml", "4000",
+							   "SIP/2.0 403 Forbidden", BT_MOVE_NONE, &r);
+			fst_xcheck(r.started, "Unable to start the SIPp peers");
+			fst_xcheck(r.results == 1, "the REFER sender did not get exactly one result");
+			fst_xcheck(strstr(r.status, "SIP/2.0 403 Forbidden") != NULL, "the result is not the failure 403 Forbidden");
+			fst_xcheck(r.referrer_blind_transfer_hangup, "the REFER sender was not hung up with BLIND_TRANSFER");
+			fst_xcheck(r.b_ok, "the REFER sender did not get one NOTIFY with SIP/2.0 403 Forbidden before the BYE");
+			fst_xcheck(r.a_ok && r.b_ok && r.c_ok, "a SIPp peer failed; inspect the *_blind_transfer_*_errors.log files");
+		}
+		FST_TEST_END()
+
+		/* A hangs up while the target rings: B gets one failure and is hung up. */
+		FST_TEST_BEGIN(blind_transfer_caller_hangup_while_ringing)
+		{
+			bt_result_t r = { 0 };
+
+			blind_transfer_run(switch_core_get_variable("local_ip_v4"), "sipp-scenarios/uas_blind_transfer_target_ring_cancel.xml", "4000",
+							   "SIP/2.0 403 Forbidden", BT_MOVE_NONE, &r);
+			fst_xcheck(r.started, "Unable to start the SIPp peers");
+			fst_xcheck(r.settled, "channels still up 5 s after the SIPp peers ended");
+			fst_xcheck(r.results == 1, "the REFER sender did not get exactly one result");
+			fst_xcheck(strstr(r.status, "SIP/2.0 403 Forbidden") != NULL, "the result is not the failure 403 Forbidden");
+			fst_xcheck(r.referrer_blind_transfer_hangup, "the REFER sender was not hung up with BLIND_TRANSFER");
+			fst_xcheck(r.b_ok, "the REFER sender did not get one NOTIFY with SIP/2.0 403 Forbidden before the BYE");
+			fst_xcheck(r.a_ok && r.b_ok && r.c_ok, "a SIPp peer failed; inspect the *_blind_transfer_*_errors.log files");
+		}
+		FST_TEST_END()
+
+		/* B is moved out of the REFER's park before A hangs up: A's result is stale and B gets
+		   nothing; B ends when its new dialplan (sleep) does. */
+		FST_TEST_BEGIN(blind_transfer_referrer_moved_before_result)
+		{
+			bt_result_t r = { 0 };
+
+			blind_transfer_run(switch_core_get_variable("local_ip_v4"), "sipp-scenarios/uas_blind_transfer_target_ring_cancel.xml", "4000",
+							   "none", BT_MOVE_TRANSFER, &r);
+			fst_xcheck(r.started, "Unable to start the SIPp peers");
+			fst_xcheck(r.moved, "the REFER sender was not moved out of its park");
+			fst_xcheck(r.settled, "channels still up 5 s after the SIPp peers ended");
+			fst_xcheck(r.results == 0, "a result was sent to the REFER sender after it left the park");
+			fst_xcheck(!r.referrer_blind_transfer_hangup, "the moved REFER sender was hung up with BLIND_TRANSFER");
+			fst_xcheck(r.a_ok && r.b_ok && r.c_ok, "a SIPp peer failed (B fails on any NOTIFY); inspect the *_blind_transfer_*_errors.log files");
+		}
+		FST_TEST_END()
+
+		/* B is moved out of the REFER's park and parked again with uuid_park before A hangs up:
+		   CS_PARK alone does not tell the two parks apart, so B must still get nothing. */
+		FST_TEST_BEGIN(blind_transfer_referrer_reparked_before_result)
+		{
+			bt_result_t r = { 0 };
+
+			blind_transfer_run(switch_core_get_variable("local_ip_v4"), "sipp-scenarios/uas_blind_transfer_target_ring_cancel.xml", "4000",
+							   "none", BT_MOVE_TRANSFER_REPARK, &r);
+			fst_xcheck(r.started, "Unable to start the SIPp peers");
+			fst_xcheck(r.moved, "the REFER sender was not moved out of its park and parked again");
+			fst_xcheck(r.settled, "channels still up 5 s after the SIPp peers ended");
+			fst_xcheck(r.results == 0, "a result was sent to the re-parked REFER sender");
+			fst_xcheck(!r.referrer_blind_transfer_hangup, "the re-parked REFER sender was hung up with BLIND_TRANSFER");
+			fst_xcheck(r.a_ok && r.b_ok && r.c_ok, "a SIPp peer failed (B fails on any NOTIFY); inspect the *_blind_transfer_*_errors.log files");
 		}
 		FST_TEST_END()
 

@@ -887,6 +887,7 @@ typedef enum {
 	SWITCH_RTP_FLAG_ICE_FAILED,
 	SWITCH_RTP_FLAG_IGNORE_RTP_DURING_DTMF,
 	SWITCH_RTP_FLAG_BUNDLE_ACCEPT_ANY_PT,
+	SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP,
 	SWITCH_RTP_FLAG_INVALID
 } switch_rtp_flag_t;
 
@@ -1714,6 +1715,9 @@ typedef enum {
 	CF_REMOTE_RECOVERED,
 	CF_OBSERVE_INITIATOR,
 	CF_BUNDLE_MEDIA,
+	/* set while the endpoint negotiates an SDP offer from the far end that is not a re-INVITE (an early-dialog UPDATE):
+	 * the core cannot tell it from an early media answer, which comes as SDP_OFFER too */
+	CF_REMOTE_SDP_OFFER,
 	/* WARNING: DO NOT ADD ANY FLAGS BELOW THIS LINE */
 	/* IF YOU ADD NEW ONES CHECK IF THEY SHOULD PERSIST OR ZERO THEM IN switch_core_session.c switch_core_session_request_xml() */
 	CF_FLAG_MAX
@@ -1831,6 +1835,9 @@ SWITCH_CODEC_FLAG_SILENCE =			(1 <<  4) - Silence
 SWITCH_CODEC_FLAG_FREE_POOL =		(1 <<  5) - Free codec's pool on destruction
 SWITCH_CODEC_FLAG_AAL2 =			(1 <<  6) - USE AAL2 Bitpacking
 SWITCH_CODEC_FLAG_PASSTHROUGH =		(1 <<  7) - Passthrough only
+SWITCH_CODEC_FLAG_NATIVE_DTX =		(1 << 17) - Codec carries its own silence descriptors (e.g. AMR SID); the receiver generates comfort noise from them
+SWITCH_CODEC_FLAG_PEEK_RECEIVED =	(1 << 19) - Codec sees every received payload (SCC_CODEC_SPECIFIC "received"), also those the core does not decode
+SWITCH_CODEC_FLAG_PEEK_SENT =		(1 << 20) - Codec gets the RTP timestamp each of its payloads was sent with (SCC_CODEC_SPECIFIC "sent", "sent_kept" when it is the frame's own plus an offset), "unsent" for one not sent
 </pre>
 */
 typedef enum {
@@ -1844,9 +1851,13 @@ typedef enum {
 	SWITCH_CODEC_FLAG_PASSTHROUGH = (1 << 7),
 	SWITCH_CODEC_FLAG_READY = (1 << 8),
 	SWITCH_CODEC_FLAG_RESET_PENDING = (1 << 9),
+	SWITCH_CODEC_FLAG_CONCEAL_OVERRUN_LOGGED = (1 << 10),
 	SWITCH_CODEC_FLAG_HAS_ADJ_BITRATE = (1 << 14),
 	SWITCH_CODEC_FLAG_HAS_PLC = (1 << 15),
-	SWITCH_CODEC_FLAG_VIDEO_PATCHING = (1 << 16)
+	SWITCH_CODEC_FLAG_VIDEO_PATCHING = (1 << 16),
+	SWITCH_CODEC_FLAG_NATIVE_DTX = (1 << 17),
+	SWITCH_CODEC_FLAG_PEEK_RECEIVED = (1 << 19),
+	SWITCH_CODEC_FLAG_PEEK_SENT = (1 << 20)
 } switch_codec_flag_enum_t;
 typedef uint32_t switch_codec_flag_t;
 
@@ -2058,7 +2069,8 @@ typedef enum {
 	SWITCH_IO_FLAG_SINGLE_READ = (1 << 1),
 	SWITCH_IO_FLAG_FORCE = (1 << 2),
 	SWITCH_IO_FLAG_QUEUED = (1 << 3),
-	SWITCH_IO_FLAG_BUNDLE_DRAIN = (1 << 4)
+	SWITCH_IO_FLAG_BUNDLE_DRAIN = (1 << 4),
+	SWITCH_IO_FLAG_BOUNDED_READ = (1 << 5)
 } switch_io_flag_enum_t;
 typedef uint32_t switch_io_flag_t;
 
@@ -2888,7 +2900,11 @@ typedef enum {
 	SCFC_FLUSH_AUDIO,
 	SCFC_PAUSE_READ,
 	SCFC_PAUSE_WRITE,
-	SCFC_RESUME_WRITE
+	SCFC_RESUME_WRITE,
+	/* Abort any I/O in flight on this handle and fail subsequent I/O rather than
+	 * blocking, so a caller waiting on the writer can stop waiting.  Formats that do
+	 * not implement it simply ignore it. */
+	SCFC_ABORT_IO
 } switch_file_command_t;
 
 

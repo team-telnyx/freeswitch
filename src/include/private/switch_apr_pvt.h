@@ -60,6 +60,9 @@ unsigned int switch_apr_queue_size(switch_apr_queue_t *queue);
 fspr_status_t switch_apr_queue_pop(switch_apr_queue_t *queue, void **data);
 fspr_status_t switch_apr_queue_pop_timeout(switch_apr_queue_t *queue, void **data, fspr_interval_time_t timeout);
 fspr_status_t switch_apr_queue_trypop(switch_apr_queue_t *queue, void **data);
+typedef int (*switch_apr_queue_match_t)(void *item, void *match_data);
+fspr_status_t switch_apr_queue_extract(switch_apr_queue_t *queue, switch_apr_queue_match_t match, void *match_data,
+                                       void **removed, unsigned int capacity, unsigned int *nremoved);
 fspr_status_t switch_apr_queue_interrupt_all(switch_apr_queue_t *queue);
 fspr_status_t switch_apr_queue_term(switch_apr_queue_t *queue);
 

@@ -4,8 +4,30 @@ noinst_PROGRAMS = switch_event switch_hash switch_ivr_originate switch_utils swi
 			   switch_ivr_play_say switch_core_codec switch_rtp switch_xml
 noinst_PROGRAMS += switch_core_video switch_core_db switch_vad switch_packetizer switch_core_session test_sofia switch_ivr_async switch_core_asr switch_log switch_stun switch_trickle_ice switch_bundle
 
-noinst_PROGRAMS += switch_hold switch_sip switch_mod_telnyx switch_mod_gstt switch_3pcc test_inuse_race switch_jb_deadlock switch_cjson switch_sockaddr test_rtp_set_flag_null_crash test_write_frame_foreign_codec test_video_bridge_engine_race switch_apr_cleanup test_dtmf_sent_event
+noinst_PROGRAMS += switch_hold switch_sip switch_mod_telnyx switch_mod_gstt switch_3pcc test_inuse_race switch_jb_deadlock switch_cjson switch_sockaddr test_rtp_set_flag_null_crash test_write_frame_foreign_codec test_g729_zero_length_plc test_video_bridge_engine_race switch_apr_cleanup test_dtmf_sent_event test_record_transfer_helper_uaf test_record_helper_destroy_uaf
 
+# Regression: a zero write-error grace must never give up.
+noinst_PROGRAMS += test_record_write_error_grace
+# Regression: switch_core_session_read_frame() must not unlock the codec mutex by
+# re-dereferencing session->read_codec, which a concurrent switch_core_codec_destroy()
+# may have zeroed.
+noinst_PROGRAMS += test_read_frame_codec_teardown
+
+# Regression: a bounded read must not wait for a full frame of tiny payloads.
+noinst_PROGRAMS += test_read_frame_accumulation
+
+# Regression: a transfer landing in the state-machine handoff window must
+# still be routed. See switch_channel_inc_transfer_generation().
+noinst_PROGRAMS += test_transfer_handoff_window
+
+# Regression: a ceiling discard must keep the stream position.
+noinst_PROGRAMS += test_record_rate_boundary
+
+# Far-end DTX across a bridge: no generated fill between forwarded silence descriptors.
+noinst_PROGRAMS += switch_ivr_bridge_dtx
+# Regression: an inferred VBR ptime is only adopted when the codec can load it.
+noinst_PROGRAMS += switch_vbr_ptime
+noinst_PROGRAMS += switch_vbr_ptime_rtp
 # switch_mod_lumenvox is intentionally NOT built/run in CI yet: LumenVox servers
 # are not reachable from CI, so the ASR tests cannot run there. Re-enable by
 # appending switch_mod_lumenvox to the line above. See TELCORE-249.

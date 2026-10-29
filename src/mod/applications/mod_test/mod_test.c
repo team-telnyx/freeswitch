@@ -70,6 +70,9 @@ typedef struct {
 	char *channel_uuid;
 	switch_vad_t *vad;
 	int partial;
+	int get_results_delay_ms;
+	int in_get_results;
+	int closed;
 } test_asr_t;
 
 
@@ -160,6 +163,8 @@ static switch_status_t test_asr_close(switch_asr_handle_t *ah, switch_asr_flag_t
 
 	switch_log_printf(SWITCH_CHANNEL_UUID_LOG(context->channel_uuid), SWITCH_LOG_NOTICE, "ASR closing ...\n");
 
+	context->closed = 1;
+
 	if (context->vad) {
 		switch_vad_destroy(&context->vad);
 	}
@@ -229,9 +234,32 @@ static switch_status_t test_asr_resume(switch_asr_handle_t *ah)
 	return SWITCH_STATUS_SUCCESS;
 }
 
+/* The core must not run asr_close while a speech thread is still inside the
+ * module. Report it rather than assert: the callback is not the test's thread,
+ * and the handle is pool allocated here so the read itself stays in bounds. */
+static void test_asr_report_use_after_close(test_asr_t *context, const char *fn)
+{
+	if (context->closed) {
+		switch_log_printf(SWITCH_CHANNEL_UUID_LOG(context->channel_uuid), SWITCH_LOG_ERROR,
+						  "%s is running after asr_close destroyed the handle state\n", fn);
+		switch_core_set_variable("mod_test_asr_use_after_close", "true");
+	}
+}
+
 static switch_status_t test_asr_check_results(switch_asr_handle_t *ah, switch_asr_flag_t *flags)
 {
 	test_asr_t *context = (test_asr_t *) ah->private_info;
+
+	test_asr_report_use_after_close(context, "asr_check_results");
+
+	/* Reporting a result here makes the media bug callback take the core speech
+	 * thread's mutex, which that thread holds for as long as it is inside
+	 * asr_get_results below. The read loop would then block with bug_rwlock
+	 * held, starving switch_core_media_bug_remove() of its write lock for the
+	 * whole delay -- which is exactly the close a test wants to run in it. */
+	if (context->in_get_results) {
+		return SWITCH_STATUS_BREAK;
+	}
 
 	if (switch_test_flag(context, ASRFLAG_RETURNED_RESULT) || switch_test_flag(ah, SWITCH_ASR_FLAG_CLOSED)) {
 		return SWITCH_STATUS_BREAK;
@@ -264,6 +292,20 @@ static switch_status_t test_asr_get_results(switch_asr_handle_t *ah, char **resu
 {
 	test_asr_t *context = (test_asr_t *) ah->private_info;
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
+
+	/* Only the core speech thread calls this, never the media bug callback, so
+	 * the delay parks that one thread inside the module and nothing else. The
+	 * variable lets a test confirm the thread really is parked in here before it
+	 * closes the handle, rather than assuming it from timing alone. */
+	if (context->get_results_delay_ms > 0) {
+		context->in_get_results = 1;
+		switch_core_set_variable("mod_test_asr_in_get_results", "true");
+		switch_yield(context->get_results_delay_ms * 1000);
+		switch_core_set_variable("mod_test_asr_in_get_results", "false");
+		context->in_get_results = 0;
+	}
+
+	test_asr_report_use_after_close(context, "asr_get_results");
 
 	if (switch_test_flag(context, ASRFLAG_RETURNED_RESULT) || switch_test_flag(ah, SWITCH_ASR_FLAG_CLOSED)) {
 		return SWITCH_STATUS_FALSE;
@@ -371,6 +413,9 @@ static void test_asr_text_param(switch_asr_handle_t *ah, char *param, const char
 		} else if (!strcasecmp("partial", param) && switch_true(val)) {
 			context->partial = 3;
 			switch_log_printf(SWITCH_CHANNEL_UUID_LOG(context->channel_uuid), SWITCH_LOG_DEBUG, "partial = %d\n", context->partial);
+		} else if (!strcasecmp("get-results-delay-ms", param) && switch_is_number(val)) {
+			context->get_results_delay_ms = nval;
+			switch_log_printf(SWITCH_CHANNEL_UUID_LOG(context->channel_uuid), SWITCH_LOG_DEBUG, "get-results-delay-ms = %d\n", context->get_results_delay_ms);
 		}
 	}
 }
@@ -453,10 +498,133 @@ static void test_speech_float_param_tts(switch_speech_handle_t *sh, char *param,
 {
 }
 
+/* A write-only file sink that can be told to block inside file_write, so a test can hold the
+   recording thread still while the session thread keeps queueing audio.  Writes raw L16 at
+   whatever rate the handle was opened with, so the sample count on disk is the file's own. */
+
+#define TEST_FILE_STALL_MAX_MS 10000
+
+static volatile int test_file_stall = 0;
+
+struct test_file_context {
+	switch_file_t *fd;
+};
+
+static switch_status_t test_file_open(switch_file_handle_t *handle, const char *path)
+{
+	struct test_file_context *context;
+
+	if (!switch_test_flag(handle, SWITCH_FILE_FLAG_WRITE)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "%s is a write-only sink\n", path);
+		return SWITCH_STATUS_GENERR;
+	}
+
+	if (!(context = switch_core_alloc(handle->memory_pool, sizeof(*context)))) {
+		return SWITCH_STATUS_MEMERR;
+	}
+
+	if (switch_file_open(&context->fd, path, SWITCH_FOPEN_WRITE | SWITCH_FOPEN_CREATE | SWITCH_FOPEN_TRUNCATE,
+						 SWITCH_FPROT_UREAD | SWITCH_FPROT_UWRITE, handle->memory_pool) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Error opening %s\n", path);
+		return SWITCH_STATUS_GENERR;
+	}
+
+	/* no pre-buffering: every write has to reach the sink, or a test cannot hold one */
+	handle->pre_buffer_datalen = 0;
+
+	handle->samples = 0;
+	handle->format = 0;
+	handle->sections = 0;
+	handle->seekable = 0;
+	handle->speed = 0;
+	handle->pos = 0;
+	handle->private_info = context;
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static switch_status_t test_file_close(switch_file_handle_t *handle)
+{
+	struct test_file_context *context = handle->private_info;
+
+	if (context->fd) {
+		switch_file_close(context->fd);
+		context->fd = NULL;
+	}
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static switch_status_t test_file_write(switch_file_handle_t *handle, void *data, size_t *len)
+{
+	struct test_file_context *context = handle->private_info;
+	size_t bytes = *len * 2 * handle->channels;
+	int waited_ms = 0;
+
+	/* bounded so a test that never releases the stall fails instead of hanging the suite */
+	while (test_file_stall && waited_ms < TEST_FILE_STALL_MAX_MS) {
+		switch_yield(20000);
+		waited_ms += 20;
+	}
+
+	if (waited_ms) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Test file sink held a write for %d ms\n", waited_ms);
+	}
+
+	if (switch_file_write(context->fd, data, &bytes) != SWITCH_STATUS_SUCCESS) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	handle->pos += bytes;
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static switch_status_t test_file_read(switch_file_handle_t *handle, void *data, size_t *len)
+{
+	return SWITCH_STATUS_FALSE;
+}
+
+static switch_status_t test_file_seek(switch_file_handle_t *handle, unsigned int *cur_sample, int64_t samples, int whence)
+{
+	return SWITCH_STATUS_FALSE;
+}
+
+static switch_status_t test_file_set_string(switch_file_handle_t *handle, switch_audio_col_t col, const char *string)
+{
+	return SWITCH_STATUS_FALSE;
+}
+
+static switch_status_t test_file_get_string(switch_file_handle_t *handle, switch_audio_col_t col, const char **string)
+{
+	return SWITCH_STATUS_FALSE;
+}
+
+#define TEST_FILE_STALL_SYNTAX "on|off"
+SWITCH_STANDARD_API(test_file_stall_function)
+{
+	if (!zstr(cmd) && !strcasecmp(cmd, "on")) {
+		test_file_stall = 1;
+	} else if (!zstr(cmd) && !strcasecmp(cmd, "off")) {
+		test_file_stall = 0;
+	} else {
+		stream->write_function(stream, "-USAGE: %s\n", TEST_FILE_STALL_SYNTAX);
+		return SWITCH_STATUS_SUCCESS;
+	}
+
+	stream->write_function(stream, "+OK\n");
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static char *test_file_supported_formats[] = { "teststall", NULL };
+
 SWITCH_MODULE_LOAD_FUNCTION(mod_test_load)
 {
 	switch_asr_interface_t *asr_interface;
 	switch_speech_interface_t *speech_interface = NULL;
+	switch_file_interface_t *file_interface;
+	switch_api_interface_t *api_interface;
 
 	*module_interface = switch_loadable_module_create_module_interface(pool, modname);
 
@@ -484,6 +652,19 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_test_load)
 	speech_interface->speech_text_param_tts = test_speech_text_param_tts;
 	speech_interface->speech_numeric_param_tts = test_speech_numeric_param_tts;
 	speech_interface->speech_float_param_tts = test_speech_float_param_tts;
+
+	file_interface = switch_loadable_module_create_interface(*module_interface, SWITCH_FILE_INTERFACE);
+	file_interface->interface_name = modname;
+	file_interface->extens = test_file_supported_formats;
+	file_interface->file_open = test_file_open;
+	file_interface->file_close = test_file_close;
+	file_interface->file_read = test_file_read;
+	file_interface->file_write = test_file_write;
+	file_interface->file_seek = test_file_seek;
+	file_interface->file_set_string = test_file_set_string;
+	file_interface->file_get_string = test_file_get_string;
+
+	SWITCH_ADD_API(api_interface, "test_file_stall", "Block writes to the test file sink", test_file_stall_function, TEST_FILE_STALL_SYNTAX);
 
 	return SWITCH_STATUS_SUCCESS;
 }

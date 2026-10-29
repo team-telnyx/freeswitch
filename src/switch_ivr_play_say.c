@@ -1027,9 +1027,11 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_record_file_event(switch_core_session
 
 	}
 
-	if (read_impl.actual_samples_per_second && fh->native_rate >= 1000) {
-		switch_channel_set_variable_printf(channel, "record_seconds", "%d", fh->samples_out / fh->native_rate);
-		switch_channel_set_variable_printf(channel, "record_ms", "%d", fh->samples_out / (fh->native_rate / 1000));
+	if (fh->samplerate >= 1000) {
+		/* Scale before dividing: record_sample_rate accepts 11025/22050/44100, and samplerate/1000
+		   would truncate those to 11/22/44 and report a few tenths of a percent long. */
+		switch_channel_set_variable_printf(channel, "record_seconds", "%u", (uint32_t) (fh->samples_out / fh->samplerate));
+		switch_channel_set_variable_printf(channel, "record_ms", "%u", (uint32_t) ((uint64_t) fh->samples_out * 1000 / fh->samplerate));
 
 	}
 

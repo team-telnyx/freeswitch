@@ -243,6 +243,8 @@ typedef enum {
 	PFLAG_3PCC_PROXY,
 	PFLAG_3PCC_EARLY_OFFER,
 	PFLAG_3PCC_EARLY_OFFER_DIALPLAN,
+	PFLAG_RING_READY_EARLY_MEDIA,
+	PFLAG_RELIABLE_180_NOSDP,
 	PFLAG_RTP_SECURE_MEDIA_3PCC_OFFER_BOTH,
 	PFLAG_3PCC_REINVITE_BRIDGED_ON_ACK,
 	PFLAG_CALLID_AS_UUID,
@@ -355,6 +357,7 @@ typedef enum {
 	TFLAG_EARLY_MEDIA,
 	TFLAG_3PCC,
 	TFLAG_3PCC_EARLY_OFFER,
+	TFLAG_EARLY_OFFER_SENT,
 	TFLAG_READY,
 	TFLAG_REFER,
 	TFLAG_NOHUP,
@@ -372,6 +375,8 @@ typedef enum {
 	TFLAG_PROXY_MEDIA,
 	TFLAG_HOLD_LOCK,
 	TFLAG_3PCC_HAS_ACK,
+	TFLAG_3PCC_ANSWER_PENDING,
+	TFLAG_EARLY_OFFER_COMPLETING,
 	TFLAG_UPDATING_DISPLAY,
 	TFLAG_ENABLE_SOA,
 	TFLAG_RECOVERED,
@@ -956,6 +961,7 @@ struct private_object {
 
 	switch_mutex_t *prack_mutex;
 	switch_thread_cond_t *prack_cond;
+	switch_thread_id_t early_offer_completer;
 };
 
 
@@ -1095,6 +1101,7 @@ char *sofia_glue_session_id_header(switch_core_session_t *session, sofia_profile
  */
 void sofia_media_set_r_sdp_codec_string(switch_core_session_t *session, const char *codec_string, sdp_session_t *sdp);
 switch_status_t sofia_media_tech_media(private_object_t *tech_pvt, const char *r_sdp, switch_sdp_type_t type);
+switch_status_t sofia_media_tech_media_ex(private_object_t *tech_pvt, const char *r_sdp, switch_sdp_type_t type, switch_bool_t mark_pre_answered);
 char *sofia_reg_find_reg_url(sofia_profile_t *profile, const char *user, const char *host, char *val, switch_size_t len);
 void event_handler(switch_event_t *event);
 void sofia_presence_event_handler(switch_event_t *event);

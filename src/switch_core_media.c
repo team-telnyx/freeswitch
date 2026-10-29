@@ -36,6 +36,7 @@
 #include <switch_nat.h>
 #include "private/switch_core_pvt.h"
 #include "private/switch_rtp_pvt.h"
+#include "private/switch_core_media_pvt.h"
 #include <switch_curl.h>
 #include <errno.h>
 #include <sofia-sip/sdp.h>
@@ -178,6 +179,9 @@ struct switch_rtp_engine_s {
 	uint32_t check_frames;
 	uint32_t mismatch_count;
 	uint32_t last_codec_ms;
+	switch_atomic_t codec_generation;
+	uint32_t vbr_ptime_generation;
+	switch_vbr_ptime_state_t vbr_ptime;
 	uint8_t codec_reinvites;
 	uint32_t max_missed_packets;
 	uint32_t max_missed_hold_packets;
@@ -619,6 +623,65 @@ static inline switch_media_flow_t sdp_media_flow(unsigned in)
 	}
 
 	return SWITCH_MEDIA_FLOW_SENDRECV;
+}
+
+static inline uint32_t vbr_ptime_observe(switch_core_session_t *session, switch_vbr_ptime_state_t *state,
+										 uint32_t ts, uint16_t seq, uint32_t samples_per_second, uint32_t cur_ms)
+{
+	int32_t delta;
+	uint16_t seq_gap;
+	uint32_t codec_ms = 0;
+
+	/* a zero timestamp means the frame has none; sequence number 0 is an ordinary value once per wrap */
+	if (!ts || samples_per_second < 1000) {
+		memset(state, 0, sizeof(*state));
+		return 0;
+	}
+
+	if (!state->last_ts) {
+		memset(state, 0, sizeof(*state));
+		state->last_ts = ts;
+		state->last_seq = seq;
+		return 0;
+	}
+
+	delta = (int32_t) (ts - state->last_ts);
+	seq_gap = (uint16_t) (seq - state->last_seq);
+
+	state->last_ts = ts;
+	state->last_seq = seq;
+
+	if (delta > 0 && seq_gap > 0 && seq_gap < 0x8000) {
+		codec_ms = (uint32_t) delta / (samples_per_second / 1000);
+
+		if (seq_gap > 1) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "[VBR]: Correcting calculated ptime value from [%d] to [%d] to compensate for [%d] lost packet(s)\n", codec_ms, codec_ms / seq_gap, seq_gap - 1);
+			codec_ms /= seq_gap;
+		}
+	}
+
+	if (codec_ms && codec_ms != cur_ms && codec_ms == state->last_codec_ms) {
+		state->mismatch_count++;
+	} else {
+		state->mismatch_count = 0;
+	}
+
+	state->last_codec_ms = codec_ms;
+
+	if (state->mismatch_count > MAX_MISMATCH_FRAMES) {
+		if (codec_ms > 120) {
+			/*will show too many times with packet loss*/
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG3,
+							  "[VBR]: Remote party is trying to send timestamps that suggest an increment of [%d] ms per packet, which is too high. Ignoring.\n",
+							  (int) codec_ms);
+			state->mismatch_count = 0;
+			return 0;
+		}
+
+		return codec_ms;
+	}
+
+	return 0;
 }
 
 static int get_channels(const char *name, int dft)
@@ -4639,6 +4702,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 	int do_cng = 0;
 	int fire_readable = 0;
 	switch_bool_t bundle_direct_read_active = SWITCH_FALSE;
+	switch_bool_t bundle_audio_queue_gap = SWITCH_FALSE;
 	switch_rtp_engine_t *bundle_direct_veng = NULL;
 
 	switch_assert(session);
@@ -4792,6 +4856,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 			} else {
 				/* A queue timeout is an ordinary audio gap. Return one CNG frame
 				 * instead of looping forever inside this read call. */
+				bundle_audio_queue_gap = SWITCH_TRUE;
 				switch_set_flag((&engine->read_frame), SFF_CNG);
 				engine->read_frame.datalen = engine->read_impl.encoded_bytes_per_packet;
 				if (engine->read_frame.data && engine->read_frame.datalen <= engine->read_frame.buflen) {
@@ -5034,6 +5099,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 			engine->check_frames = 0;
 			engine->last_ts = 0;
 			engine->last_seq = 0;
+			engine->vbr_ptime.last_ts = 0;
 
 			do_cng = 1;
 		}
@@ -5231,63 +5297,30 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 						engine->last_seq = engine->read_frame.seq;
 
 					} else if (smh->media_flags[SCMF_AUTOFIX_TIMING] && is_vbr && switch_rtp_get_jitter_buffer(engine->rtp_session)
-							   && type == SWITCH_MEDIA_TYPE_AUDIO
-							   && engine->read_frame.timestamp && engine->read_frame.seq && engine->read_impl.samples_per_second) {
-						uint32_t codec_ms = (int) (engine->read_frame.timestamp -
-								   engine->last_ts) / (engine->read_impl.samples_per_second / 1000);
+							   && type == SWITCH_MEDIA_TYPE_AUDIO && !switch_test_flag((&engine->read_frame), SFF_PLC)
+							   && engine->read_frame.timestamp && engine->read_impl.samples_per_second) {
+						uint32_t codec_ms;
+						uint32_t generation = switch_atomic_read(&engine->codec_generation);
 
-						if (engine->last_seq && (int) (engine->read_frame.seq - engine->last_seq) > 1) {
-								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "[VBR]: Correcting calculated ptime value from [%d] to [%d] to compensate for [%d] lost packet(s)\n", codec_ms, codec_ms / (int) (engine->read_frame.seq - engine->last_seq), (int) (engine->read_frame.seq - engine->last_seq - 1));
-								codec_ms = codec_ms / (int) (engine->read_frame.seq - engine->last_seq);
+						if (engine->vbr_ptime_generation != generation) {
+							engine->vbr_ptime_generation = generation;
+							engine->vbr_ptime.last_ts = 0;
 						}
 
-						if (codec_ms && codec_ms != engine->cur_payload_map->codec_ms) {
-							if (engine->last_codec_ms && engine->last_codec_ms == codec_ms) {
-								engine->mismatch_count++;
-							}
-						} else {
-							engine->mismatch_count = 0;
+						codec_ms = vbr_ptime_observe(session, &engine->vbr_ptime, engine->read_frame.timestamp, engine->read_frame.seq,
+													 engine->read_impl.samples_per_second, engine->cur_payload_map->codec_ms);
+
+						if (codec_ms && !switch_core_media_pvt_vbr_ptime_adopt(session, session->codec_read_mutex, &engine->read_codec,
+																		   engine->cur_payload_map, codec_ms, &engine->reset_codec,
+																		   &engine->codec_generation, engine->vbr_ptime_generation)) {
+							engine->vbr_ptime.mismatch_count = 0;
 						}
-
-						engine->last_codec_ms = codec_ms;
-
-						if (engine->mismatch_count > MAX_MISMATCH_FRAMES) {
-
-							if (codec_ms > 120) {
-								/*will show too many times with packet loss*/
-								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG3,
-												  "[VBR]: Remote party is trying to send timestamps that suggest an increment of [%d] ms per packet, which is too high. Ignoring.\n",
-												  (int) codec_ms);
-								engine->last_ts = engine->read_frame.timestamp;
-								engine->last_seq = engine->read_frame.seq;
-								goto skip;
-							}
-
-							if (codec_ms != engine->cur_payload_map->codec_ms) {
-								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-												  "[VBR]: Packet size change detected. Remote PTIME changed from [%d] to [%d]\n",
-												  (int) engine->cur_payload_map->codec_ms,
-												  (int) codec_ms
-												  );
-			 					engine->cur_payload_map->codec_ms = codec_ms;
-								engine->reset_codec = 2;
-								if (switch_core_codec_ready(&engine->read_codec)) {
-									switch_set_flag(&engine->read_codec, SWITCH_CODEC_FLAG_RESET_PENDING);
-								}
-
-								if (switch_channel_test_flag(session->channel, CF_CONFERENCE)) {
-									switch_channel_set_flag(session->channel, CF_CONFERENCE_RESET_MEDIA);
-								}
-							}
-						}
-
-						engine->last_ts = engine->read_frame.timestamp;
-						engine->last_seq = engine->read_frame.seq;
 
 					} else {
 						engine->mismatch_count = 0;
 						engine->last_ts = 0;
 						engine->last_seq = 0;
+						engine->vbr_ptime.last_ts = 0;
 					}
 				}
 
@@ -5427,6 +5460,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_read_frame(switch_core_session
 		bundle_audio_direct_read_exit(smh, bundle_direct_veng);
 		bundle_direct_read_active = SWITCH_FALSE;
 		bundle_direct_veng = NULL;
+	}
+
+	/* A local BUNDLE queue gap is not a received CNG/discontinuity. */
+	if (type == SWITCH_MEDIA_TYPE_AUDIO && !bundle_audio_queue_gap && switch_test_flag((&engine->read_frame), SFF_CNG)) {
+		engine->vbr_ptime.last_ts = 0;
 	}
 
 	if (smh->read_mutex[type]) {
@@ -6022,6 +6060,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_set_codec(switch_core_session_
 
 	a_engine->read_impl = *a_engine->read_codec.implementation;
 	a_engine->write_impl = *a_engine->write_codec.implementation;
+	switch_atomic_inc(&a_engine->codec_generation);
 
 	switch_core_session_set_read_impl(session, a_engine->read_codec.implementation);
 	switch_core_session_set_write_impl(session, a_engine->write_codec.implementation);
@@ -6056,6 +6095,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_set_codec(switch_core_session_
 	if (force != 2) {
 		switch_core_session_set_real_read_codec(session, &a_engine->read_codec);
 		switch_core_session_set_write_codec(session, &a_engine->write_codec);
+	} else {
+		/* the read codec was re-created in place: media bugs still decode with a copy of the old one */
+		switch_core_session_refresh_bug_codec(session);
 	}
 
 	a_engine->cur_payload_map->fmtp_out = switch_core_session_strdup(session, a_engine->write_codec.fmtp_out);
@@ -7813,6 +7855,52 @@ static int same_codec_impl(const switch_codec_implementation_t *imp, const switc
 		imp->samples_per_second == ref->samples_per_second;
 }
 
+/*
+ * Some codecs latch fmtp-driven state such as AMR payload framing when they are
+ * initialised, so ask the running codec whether an fmtp would change it. A codec
+ * that does not answer is treated as unaffected.
+ */
+static int same_codec_framing(switch_core_session_t *session, switch_codec_t *codec, const char *fmtp)
+{
+	switch_codec_control_type_t reply_type = SCCT_NONE;
+	void *reply = NULL;
+	int same = 1;
+
+	switch_core_session_lock_codec_read(session);
+
+	if (switch_core_codec_ready(codec) && codec->implementation->codec_control &&
+		switch_core_codec_control(codec, SCC_CODEC_SPECIFIC, SCCT_STRING, (void *) "fmtp_changes_framing",
+								  SCCT_STRING, (void *) fmtp, &reply_type, &reply) == SWITCH_STATUS_SUCCESS &&
+		reply_type == SCCT_STRING && reply) {
+		same = !switch_true((const char *) reply);
+	}
+
+	switch_core_session_unlock_codec_read(session);
+
+	return same;
+}
+
+/*
+ * A re-offer carrying a different fmtp than the one we stored fails
+ * fmtp_check_match() and allocates a fresh payload map, and only
+ * switch_core_media_set_codec() ever fills in fmtp_out. Keeping the
+ * codec means it is not called, so the answer would advertise the
+ * codec with no a=fmtp at all. Carry the fmtp of the codec we are
+ * keeping over to the new payload map.
+ */
+static void keep_codec_fmtp(switch_core_session_t *session, switch_rtp_engine_t *a_engine, const switch_codec_implementation_t *selected_imp)
+{
+	if (a_engine->cur_payload_map && selected_imp && switch_core_codec_ready(&a_engine->write_codec) &&
+		!zstr(a_engine->write_codec.fmtp_out) &&
+		same_codec_impl(a_engine->write_codec.implementation, selected_imp) &&
+		zstr(a_engine->cur_payload_map->fmtp_out)) {
+		a_engine->cur_payload_map->fmtp_out = switch_core_session_strdup(session, a_engine->write_codec.fmtp_out);
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+						  "Keeping fmtp [%s] for %s on the new payload map\n",
+						  a_engine->cur_payload_map->fmtp_out, a_engine->read_impl.iananame);
+	}
+}
+
 static void greedy_sort(switch_media_handle_t *smh, struct matches *matches, int m_idx, const switch_codec_implementation_t **codec_array, int total_codecs)
 {
 	int j = 0, f = 0, g;
@@ -8305,6 +8393,14 @@ SWITCH_DECLARE(int16_t) switch_core_media_validate_common_audio_sdp(switch_core_
 						}
 					}
 
+					/* AMR / AMR-WB on a dynamic payload type below 96: negotiation matches it where the codec has fmtp
+					 * matching (else negotiation still refuses it) */
+					if (!match && map->rm_pt < 96 && !zstr(map->rm_encoding) && !strcasecmp(rm_encoding, imp->iananame) &&
+						(!strcasecmp(imp->iananame, "AMR") || !strcasecmp(imp->iananame, "AMR-WB")) &&
+						(remote_codec_rate == codec_rate || fmtp_remote_codec_rate == imp->actual_samples_per_second)) {
+						match = 1;
+					}
+
 					if (match && bit_rate && map_bit_rate &&
 							map_bit_rate != bit_rate && strcasecmp(map->rm_encoding, "ilbc") &&
 							strcasecmp(map->rm_encoding, "isac")) {
@@ -8324,6 +8420,14 @@ SWITCH_DECLARE(int16_t) switch_core_media_validate_common_audio_sdp(switch_core_
 								remote_codec_rate != codec_rate) {
 							/* ptime does not match */
 							match = 0;
+
+							/* as in negotiation: no more near matches than the array holds */
+							if (nm_idx >= MAX_MATCHES) {
+								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+												  "Audio Codec Compare [%s:%d:%u:%u:%d:%u:%d] was not saved as a near-match. Too many. Ignoring.\n",
+												  imp->iananame, imp->ianacode, codec_rate, imp->actual_samples_per_second, imp->microseconds_per_packet / 1000, bit_rate, imp->number_of_channels);
+								continue;
+							}
 
 							near_matches[nm_idx].codec_idx = i;
 							near_matches[nm_idx].rate = remote_codec_rate;
@@ -8377,6 +8481,13 @@ SWITCH_DECLARE(int16_t) switch_core_media_validate_common_audio_sdp(switch_core_
 
 					prefs[0] = tmp;
 					num = switch_loadable_module_get_codecs_sorted(search, fmtp, 1, prefs, 1);
+					/* a codec with fmtp matching (AMR, AMR-WB ...): the lookup by name ignores the interval and
+					 * returns the head of its implementations; keep the near match, which the fmtp matched, if
+					 * the substitute's fmtp does not match (e.g. the other payload framing) */
+					if (num && near_match->matches_fmtp && strcasecmp(near_match->iananame, "opus") &&
+						(!search[0]->matches_fmtp || search[0]->matches_fmtp(near_matches[j].map->rm_fmtp, search[0]->fmtp) != SWITCH_STATUS_SUCCESS)) {
+						num = 0;
+					}
 
 					if (num) {
 						timp = search[0];
@@ -9688,6 +9799,47 @@ static void switch_core_media_validate_answer_mid(switch_core_session_t *session
 	sdp_parser_free(offer_parser);
 }
 
+/*
+ * The octet-align our last SDP states for a payload type of an AMR / AMR-WB rtpmap of ours (encoding) in its
+ * m=audio section: "octet-align=0" / "octet-align=1", the default when its a=fmtp line has none or there is no
+ * a=fmtp line; NULL if our rtpmap for that payload type is another codec or missing. What we offered on it,
+ * for an answer that leaves it out.
+ */
+static const char *amr_offered_octet_align(switch_media_handle_t *smh, int pt, const char *encoding)
+{
+	const char *sdp = smh->mparams->local_sdp_str, *audio, *end, *line, *eol, *oa;
+	char key[32];
+	size_t klen, elen = strlen(encoding);
+
+	if (zstr(sdp) || !(audio = strstr(sdp, "m=audio "))) {
+		return NULL;
+	}
+	if (!(end = strstr(audio, "\nm="))) {
+		end = audio + strlen(audio);
+	}
+
+	/* our rtpmap for the payload type is this codec */
+	klen = switch_snprintf(key, sizeof(key), "a=rtpmap:%d ", pt);
+	for (line = audio; (line = strstr(line, key)) && line < end && line[-1] != '\n'; line += klen);
+	if (!line || line >= end || strncasecmp(line + klen, encoding, elen) || line[klen + elen] != '/') {
+		return NULL;
+	}
+
+	klen = switch_snprintf(key, sizeof(key), "a=fmtp:%d ", pt);
+	for (line = audio; (line = strstr(line, key)) && line < end && line[-1] != '\n'; line += klen);
+	if (!line || line >= end) {
+		return "octet-align=0";
+	}
+	eol = line + strcspn(line, "\r\n");
+	/* an fmtp of ours without octet-align (e.g. rtp_force_audio_fmtp) offered the RFC 4867 default */
+	if (!(oa = switch_stristr("octet-align", line)) || oa > eol) {
+		return "octet-align=0";
+	}
+	for (oa += strlen("octet-align"); *oa == ' ' || *oa == '='; oa++);
+	return *oa == '1' ? "octet-align=1" : "octet-align=0";
+}
+
+//?
 SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *session, const char *r_sdp, uint8_t *proceed, switch_sdp_type_t sdp_type)
 {
 	uint8_t match = 0, vmatch = 0, almost_vmatch = 0, tmatch = 0, fmatch = 0;
@@ -10512,6 +10664,29 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 				fmtp_remote_codec_rate = 0;
 				memset(&codec_fmtp, 0, sizeof(codec_fmtp));
 
+				/*
+				 * AMR / AMR-WB answer to our offer that leaves out octet-align: it is the one we offered on that
+				 * payload type, as our last SDP states it (RFC 4867 8.3.1 wants it returned unmodified; many
+				 * stacks drop the default). The codec default for an fmtp without octet-align (bandwidth
+				 * efficient, or octet aligned with the codec's force-oa) is for offers. Early media answers to
+				 * our INVITE come here as SDP_OFFER: before the outbound leg is answered they are answers too,
+				 * unless the endpoint marks a real offer (CF_REMOTE_SDP_OFFER: an early-dialog UPDATE from the
+				 * far end, which keeps the default and is answered with the framing it offered).
+				 */
+				if ((sdp_type == SDP_ANSWER ||
+					 (switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_OUTBOUND && !switch_channel_test_flag(session->channel, CF_ANSWERED) &&
+					  !switch_channel_test_flag(session->channel, CF_REMOTE_SDP_OFFER))) &&
+					(!strcasecmp(map->rm_encoding, "AMR") || !strcasecmp(map->rm_encoding, "AMR-WB")) &&
+					(zstr(map->rm_fmtp) || !switch_stristr("octet-align", map->rm_fmtp))) {
+					const char *offered = amr_offered_octet_align(smh, map->rm_pt, map->rm_encoding);
+
+					if (offered) {
+						map->rm_fmtp = switch_core_session_sprintf(session, "%s%s%s", zstr(map->rm_fmtp) ? "" : map->rm_fmtp, zstr(map->rm_fmtp) ? "" : "; ", offered);
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s answer on payload type %d without octet-align: as offered, fmtp [%s]\n",
+										  map->rm_encoding, map->rm_pt, map->rm_fmtp);
+					}
+				}
+
 				if (zstr(map->rm_fmtp)) {
 					if (!strcasecmp(map->rm_encoding, "ilbc")) {
 						codec_ms = 30;
@@ -10755,6 +10930,13 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 
 					prefs[0] = tmp;
 					num = switch_loadable_module_get_codecs_sorted(search, fmtp, 1, prefs, 1);
+					/* a codec with fmtp matching (AMR, AMR-WB ...): the lookup by name ignores the interval and
+					 * returns the head of its implementations; keep the near match, which the fmtp matched, if
+					 * the substitute's fmtp does not match (e.g. the other payload framing) */
+					if (num && near_match->matches_fmtp && strcasecmp(near_match->iananame, "opus") &&
+						(!search[0]->matches_fmtp || search[0]->matches_fmtp(near_matches[j].map->rm_fmtp, search[0]->fmtp) != SWITCH_STATUS_SUCCESS)) {
+						num = 0;
+					}
 
 					if (num) {
 						timp = search[0];
@@ -10824,10 +11006,15 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 					 * Prioritize previously negotiated codec
 					 */
 					if (a_engine->read_impl.iananame && switch_core_codec_ready(&a_engine->read_codec) && strcasecmp(pmap->iananame, a_engine->read_impl.iananame) == 0 &&
-						(!strict_codec_match || (!partner_driven && !found_prev && same_codec_impl(matches[j].imp, &a_engine->read_impl)))) {
+						(!strict_codec_match || (!partner_driven && found_prev < 2 && same_codec_impl(matches[j].imp, &a_engine->read_impl) &&
+												 (!found_prev || same_codec_framing(session, &a_engine->read_codec, matches[j].map->rm_fmtp))))) {
 						if (strict_codec_match) {
-							/* Latch, so a later match on the same name cannot overwrite the exact one. */
-							found_prev = 1;
+							/*
+							 * Latch, so a later match on the same name cannot overwrite the exact one.
+							 * A match whose framing differs from the running codec is only held until
+							 * one that agrees with it turns up.
+							 */
+							found_prev = same_codec_framing(session, &a_engine->read_codec, matches[j].map->rm_fmtp) ? 2 : 1;
 						}
 						if (a_engine->cur_payload_map) {
 							a_engine->cur_payload_map->current = 0;
@@ -10840,6 +11027,9 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 						}
 
 						if (last_pt == a_engine->cur_payload_map->pt) {
+							if (strict_codec_match) {
+								changed_pt = 0;
+							}
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Sticking with previously negotiated codec %s\n", a_engine->read_impl.iananame);
 						} else {
 							changed_pt = 1;
@@ -10945,46 +11135,25 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 						int codec_ready = switch_core_codec_ready(&a_engine->read_codec);
 						int same_codec_name = codec_ready && selected_imp->iananame && a_engine->read_impl.iananame &&
 							!strcasecmp(selected_imp->iananame, a_engine->read_impl.iananame);
+						int same_framing = !same_codec_name || same_codec_framing(session, &a_engine->read_codec, a_engine->cur_payload_map->rm_fmtp);
 
-						if (codec_ready && same_codec_impl(selected_imp, &a_engine->read_impl)) {
+						if (codec_ready && same_codec_impl(selected_imp, &a_engine->read_impl) && same_framing) {
 							a_engine->reset_codec = 0;
 							switch_clear_flag(&a_engine->read_codec, SWITCH_CODEC_FLAG_RESET_PENDING);
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Not resetting codec. We stick to %s\n", a_engine->read_impl.iananame);
 
-							/*
-							 * A re-offer carrying a different fmtp than the one we stored fails
-							 * fmtp_check_match() and allocates a fresh payload map, and only
-							 * switch_core_media_set_codec() ever fills in fmtp_out. Keeping the
-							 * codec means it is not called, so the answer would advertise the
-							 * codec with no a=fmtp at all. Carry the fmtp of the codec we are
-							 * keeping over to the new payload map.
-							 */
-							if (a_engine->cur_payload_map && switch_core_codec_ready(&a_engine->write_codec) &&
-								!zstr(a_engine->write_codec.fmtp_out) &&
-								same_codec_impl(a_engine->write_codec.implementation, selected_imp)) {
-								const char *kept = NULL;
-
-								if (zstr(a_engine->cur_payload_map->fmtp_out)) {
-									a_engine->cur_payload_map->fmtp_out = switch_core_session_strdup(session, a_engine->write_codec.fmtp_out);
-									kept = a_engine->cur_payload_map->fmtp_out;
-								}
-
-								if (kept) {
-									switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-													  "Keeping fmtp [%s] for %s on the new payload map\n",
-													  kept, a_engine->read_impl.iananame);
-								}
-							}
+							keep_codec_fmtp(session, a_engine, selected_imp);
 						} else if (same_codec_name) {
 							/*
-							 * The codec already in use, at a different implementation, ptime
-							 * or rate. Any of the three rebuilds the payload map, since all
-							 * three are part of its key, so reset here rather than leaving it
-							 * to the deferred reset in the read loop: the answer SDP is
-							 * generated before that runs, and it takes a=fmtp from the payload
-							 * map that switch_core_media_set_codec() fills in.
+							 * The codec already in use, at a different implementation, ptime,
+							 * rate or payload framing. Any of these rebuilds the payload map or
+							 * the codec state, so reset here rather than leaving it to the
+							 * deferred reset in the read loop: the answer SDP is generated
+							 * before that runs, and it takes a=fmtp from the payload map that
+							 * switch_core_media_set_codec() fills in.
 							 */
-							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Force reset codec for %s\n", a_engine->read_impl.iananame);
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Force reset codec for %s%s\n", a_engine->read_impl.iananame,
+											  same_framing ? "" : " (payload framing changed)");
 							if (switch_core_media_set_codec(session, 2, smh->mparams->codec_flags) != SWITCH_STATUS_SUCCESS) {
 								match = 0;
 							} else {
@@ -11002,6 +11171,26 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 							 */
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Deferring codec reset for %s\n", a_engine->read_impl.iananame);
 						}
+					} else if (selected_imp && a_engine->cur_payload_map && switch_core_codec_ready(&a_engine->read_codec) &&
+							   !strcasecmp(selected_imp->iananame, a_engine->read_impl.iananame) &&
+							   !same_codec_framing(session, &a_engine->read_codec, a_engine->cur_payload_map->rm_fmtp)) {
+						/*
+						 * The running codec latched a payload framing (AMR octet-align, say) that
+						 * the selected payload no longer has. Keeping it would leave us sending
+						 * and expecting the old framing, so reset now: the answer is generated
+						 * before the deferred reset in the read loop runs, and it takes a=fmtp
+						 * from the payload map that switch_core_media_set_codec() fills in.
+						 */
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Force reset codec for %s (payload framing changed)\n",
+										  a_engine->read_impl.iananame);
+						if (switch_core_media_set_codec(session, 2, smh->mparams->codec_flags) != SWITCH_STATUS_SUCCESS) {
+							match = 0;
+						} else {
+							a_engine->reset_codec = 0;
+							if (switch_core_codec_ready(&a_engine->read_codec)) {
+								switch_clear_flag(&a_engine->read_codec, SWITCH_CODEC_FLAG_RESET_PENDING);
+							}
+						}
 					} else {
 						for(z = 0; z < m_idx && smh->num_negotiated_codecs < SWITCH_MAX_CODECS; z++) { 
 							if (!(!switch_core_codec_ready(&a_engine->read_codec) ||
@@ -11014,6 +11203,7 @@ SWITCH_DECLARE(uint8_t) switch_core_media_negotiate_sdp(switch_core_session_t *s
 									switch_clear_flag(&a_engine->read_codec, SWITCH_CODEC_FLAG_RESET_PENDING);
 								}
 								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Not resetting codec. We stick to %s\n", a_engine->read_impl.iananame);
+								keep_codec_fmtp(session, a_engine, selected_imp);
 								break;
 							} 
 						}
@@ -12371,6 +12561,9 @@ static switch_status_t perform_write(switch_core_session_t *session, switch_fram
 	switch_io_event_hook_write_frame_t *ptr;
 	switch_status_t status = SWITCH_STATUS_FALSE;
 	switch_media_handle_t *smh;
+	switch_rtp_t *rtp_session = NULL;
+	uint32_t sent = 0, ts = 0;
+	switch_bool_t kept = SWITCH_FALSE;
 
 	switch_assert(session != NULL);
 
@@ -12388,11 +12581,13 @@ static switch_status_t perform_write(switch_core_session_t *session, switch_fram
 		}
 	}
 
-	if (session->bugs && !(frame->flags & SFF_NOT_AUDIO)) {
+	if (!(frame->flags & SFF_NOT_AUDIO)) {
 		switch_media_bug_t *bp;
 		switch_bool_t ok = SWITCH_TRUE;
 		int prune = 0;
 
+		/* The list head is only read under bug_rwlock; the old bare peek
+		 * raced link/unlink on the transfer path (TELCORE-339). */
 		switch_thread_rwlock_rdlock(session->bug_rwlock);
 
 		for (bp = session->bugs; bp; bp = bp->next) {
@@ -12433,6 +12628,14 @@ static switch_status_t perform_write(switch_core_session_t *session, switch_fram
 	}
 
 
+	/* e.g. an AMR encoder keeping its mode changes on the frame-blocks the receiver counts: the RTP timestamp each
+	 * of its frames was sent with, or that one was not sent */
+	if (smh && frame->codec && frame->codec == session->write_codec && switch_core_codec_ready(frame->codec) &&
+		switch_test_flag(frame->codec, SWITCH_CODEC_FLAG_PEEK_SENT) &&
+		(rtp_session = smh->engines[SWITCH_MEDIA_TYPE_AUDIO].rtp_session)) {
+		sent = switch_rtp_get_sent_frames(rtp_session, NULL, NULL);
+	}
+
 	if (session->endpoint_interface->io_routines->write_frame) {
 		if ((status = session->endpoint_interface->io_routines->write_frame(session, frame, flags, stream_id)) == SWITCH_STATUS_SUCCESS) {
 			for (ptr = session->event_hooks.write_frame; ptr; ptr = ptr->next) {
@@ -12440,6 +12643,14 @@ static switch_status_t perform_write(switch_core_session_t *session, switch_fram
 					break;
 				}
 			}
+		}
+	}
+
+	if (rtp_session && switch_core_codec_ready(frame->codec)) {
+		if (switch_rtp_get_sent_frames(rtp_session, &ts, &kept) != sent) {
+			switch_core_codec_control(frame->codec, SCC_CODEC_SPECIFIC, SCCT_STRING, (void *) (kept ? "sent_kept" : "sent"), SCCT_INT, &ts, NULL, NULL);
+		} else {
+			switch_core_codec_control(frame->codec, SCC_CODEC_SPECIFIC, SCCT_STRING, (void *) "unsent", SCCT_NONE, NULL, NULL, NULL);
 		}
 	}
 
@@ -13437,6 +13648,54 @@ SWITCH_DECLARE(void) switch_core_media_reset_autofix(switch_core_session_t *sess
 	engine->check_frames = 0;
 	engine->last_ts = 0;
 	engine->last_seq = 0;
+	engine->vbr_ptime.last_ts = 0;
+}
+
+SWITCH_DECLARE(uint32_t) switch_core_media_pvt_vbr_ptime_observe(switch_core_session_t *session, switch_vbr_ptime_state_t *state,
+															     uint32_t ts, uint16_t seq, uint32_t samples_per_second, uint32_t cur_ms)
+{
+	if (!state) {
+		return 0;
+	}
+
+	return vbr_ptime_observe(session, state, ts, seq, samples_per_second, cur_ms);
+}
+
+SWITCH_DECLARE(switch_bool_t) switch_core_media_pvt_vbr_ptime_adopt(switch_core_session_t *session, switch_mutex_t *codec_mutex, switch_codec_t *codec,
+																    payload_map_t *pmap, uint32_t codec_ms, uint8_t *reset_codec,
+																    volatile switch_atomic_t *codec_generation, uint32_t observed_generation)
+{
+	switch_bool_t adopted = SWITCH_FALSE;
+
+	if (!codec_mutex || !codec || !pmap || !reset_codec || !codec_ms || codec_ms == pmap->codec_ms) {
+		return SWITCH_FALSE;
+	}
+
+	if (switch_mutex_trylock(codec_mutex) != SWITCH_STATUS_SUCCESS) {
+		return SWITCH_FALSE;
+	}
+
+	if ((!codec_generation || switch_atomic_read(codec_generation) == observed_generation) && switch_core_codec_ready(codec) &&
+		switch_core_codec_ptime_supported(codec, pmap->iananame, pmap->modname, pmap->rm_fmtp,
+										  (uint32_t) pmap->rm_rate, (int) codec_ms, pmap->channels, pmap->bitrate)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+						  "[VBR]: Packet size change detected. Remote PTIME changed from [%d] to [%d]\n",
+						  (int) pmap->codec_ms,
+						  (int) codec_ms
+						  );
+		pmap->codec_ms = codec_ms;
+		*reset_codec = 2;
+		switch_set_flag(codec, SWITCH_CODEC_FLAG_RESET_PENDING);
+
+		if (session && switch_channel_test_flag(session->channel, CF_CONFERENCE)) {
+			switch_channel_set_flag(session->channel, CF_CONFERENCE_RESET_MEDIA);
+		}
+		adopted = SWITCH_TRUE;
+	}
+
+	switch_mutex_unlock(codec_mutex);
+
+	return adopted;
 }
 
 
@@ -14446,6 +14705,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 	val = switch_channel_get_variable(session->channel, "rtp_rewrite_timestamps");
 	if ((!val && !switch_media_handle_test_media_flag(smh, SCMF_REWRITE_TIMESTAMPS)) || (val && switch_false(val))) {
 		flags[SWITCH_RTP_FLAG_RAW_WRITE]++;
+	}
+
+	val = switch_channel_get_variable(session->channel, "rtp_rebase_timestamps_on_jump");
+	if ((!val && switch_media_handle_test_media_flag(smh, SCMF_REBASE_TIMESTAMPS_ON_JUMP)) || (val && switch_true(val))) {
+		flags[SWITCH_RTP_FLAG_REBASE_TS_ON_JUMP]++;
 	}
 	
 	// Deprecated channel variable. please use rtp_use_ms_per_packet
@@ -15552,6 +15816,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 				switch_mutex_lock(smh->bundle_drain_mutex);
 				bundle_drain_thread_start(session);
 				switch_mutex_unlock(smh->bundle_drain_mutex);
+
 			} else {
 				if (v_engine->bundled_with_audio) {
 					/* Stop drain thread before disabling BUNDLE */
@@ -16448,6 +16713,16 @@ static void add_fb(char *buf, uint32_t buflen, int pt, int fir, int nack, int pl
 
 }
 
+/* Held by any of the three hold mechanisms: switch_core_media_toggle_hold()
+ * sets CF_PROTO_HOLD, switch_ivr_hold() sets CF_HOLD, and mod_sofia's
+ * INDICATE_HOLD handler sets only CF_LEG_HOLDING. */
+static int partner_is_held(switch_channel_t *channel)
+{
+	return switch_channel_test_flag(channel, CF_PROTO_HOLD) ||
+		switch_channel_test_flag(channel, CF_HOLD) ||
+		switch_channel_test_flag(channel, CF_LEG_HOLDING);
+}
+
 //?
 #define SDPBUFLEN 65536
 SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *session, switch_sdp_type_t sdp_type, const char *ip, switch_port_t port, const char *sr, int force)
@@ -16480,6 +16755,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 	//int red = 0;
 	payload_map_t *pmap;
 	int is_outbound = switch_channel_direction(session->channel) == SWITCH_CALL_DIRECTION_OUTBOUND;
+	int proxy_3pcc_offer;
 	const char *vbw;
 	int bw = 256, i = 0;
 	int audio_mid_emitted = 0;
@@ -16578,6 +16854,23 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 		switch_core_session_check_outgoing_crypto(session, sdp_type);
 	}
 
+	/*
+	 * An inbound 3PCC proxy call answering a late-offer INVITE generates its own
+	 * offer here without CF_3PCC. When rtp_secure_media_3pcc_proxy_offer is set,
+	 * prepare SDES crypto for that offer as for the other 3PCC offers. Media we
+	 * don't terminate (proxy/bypass) and WebRTC/DTLS offers are left as they are.
+	 */
+	proxy_3pcc_offer = !is_outbound &&
+		sdp_type == SDP_OFFER &&
+		switch_channel_test_flag(session->channel, CF_3PCC_PROXY) &&
+		!switch_channel_test_flag(session->channel, CF_PROXY_MODE) &&
+		!switch_channel_test_flag(session->channel, CF_PROXY_MEDIA) &&
+		!switch_channel_test_flag(session->channel, CF_AVPF) &&
+		!switch_channel_test_flag(session->channel, CF_DTLS) &&
+		!switch_true(switch_channel_get_variable(session->channel, "media_webrtc")) &&
+		!switch_true(switch_channel_get_variable(session->channel, "rtp_use_dtls")) &&
+		switch_channel_var_true(session->channel, "rtp_secure_media_3pcc_proxy_offer");
+
 	if (is_outbound || switch_channel_test_flag(session->channel, CF_RECOVERING) ||
 		switch_channel_test_flag(session->channel, CF_3PCC)) {
 		if (!switch_channel_test_flag(session->channel, CF_AVPF) &&
@@ -16605,6 +16898,10 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 				generate_local_fingerprint(smh, SWITCH_MEDIA_TYPE_AUDIO);
 			}
 		}
+	}
+
+	if (is_outbound || switch_channel_test_flag(session->channel, CF_RECOVERING) ||
+		switch_channel_test_flag(session->channel, CF_3PCC) || proxy_3pcc_offer) {
 		switch_core_session_parse_crypto_prefs(session);
 
 		/*
@@ -16617,7 +16914,7 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 		 */
 		if (!is_outbound &&
 		    sdp_type == SDP_OFFER &&
-		    switch_channel_test_flag(session->channel, CF_3PCC) &&
+		    (switch_channel_test_flag(session->channel, CF_3PCC) || proxy_3pcc_offer) &&
 		    !switch_channel_test_flag(session->channel, CF_RECOVERING) &&
 		    smh->crypto_mode == CRYPTO_MODE_OPTIONAL &&
 		    !switch_channel_var_true(session->channel, "rtp_secure_media_3pcc_offer_both")) {
@@ -16875,13 +17172,21 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 			if (other_smh) {
 				other_engine = &other_smh->engines[SWITCH_MEDIA_TYPE_AUDIO];
 				/* Only update partner's smode if partner's endpoint is not on hold
-				 * When we transition to sendrecv/recvonly (can receive), only update if partner can send */
+				 * When we transition to sendrecv/recvonly (can receive), only update if partner can send.
+				 * Do not propagate INACTIVE to a non-held partner so it can receive hold audio. */
 				if (new_smode == SWITCH_MEDIA_FLOW_SENDRECV || new_smode == SWITCH_MEDIA_FLOW_RECVONLY) {
 					if (other_engine->rmode != SWITCH_MEDIA_FLOW_INACTIVE) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG, 
 						"Updating partner media mode to %d\n", opp_smode);
 						other_engine->smode = opp_smode;
 					}
+				} else if (new_smode == SWITCH_MEDIA_FLOW_INACTIVE &&
+						   !switch_channel_var_true(session->channel, "rtp_inactive_hold_propagate_legacy") &&
+						   other_engine->rmode != SWITCH_MEDIA_FLOW_INACTIVE &&
+						   !partner_is_held(switch_core_session_get_channel(other_session))) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
+									  "Skipping partner media mode update for inactive hold; partner keeps smode %d\n",
+									  other_engine->smode);
 				} else {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG, 
 						"Updating partner media mode to %d\n", opp_smode);
@@ -19471,6 +19776,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_receive_message(switch_core_se
 	case SWITCH_MESSAGE_INDICATE_HARD_MUTE:
 		if (a_engine->rtp_session) {
 			a_engine->last_seq = 0;
+			switch_atomic_inc(&a_engine->codec_generation);
 			
 			if (session->bugs && msg->numeric_arg) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
@@ -22674,9 +22980,16 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 		need_codec = TRUE;
 	}
 
-	if (session->bugs && !need_codec && !switch_test_flag(session, SSF_MEDIA_BUG_TAP_ONLY)) {
-		do_bugs = TRUE;
-		need_codec = TRUE;
+	if (!need_codec) {
+		/* Gate under bug_rwlock: the bare-pointer peek raced bug link/unlink
+		 * (switch_core_media_bug_add/transfer_callback) and the tap-only flag
+		 * update; TSan flagged both pairs (TELCORE-339). */
+		switch_thread_rwlock_rdlock(session->bug_rwlock);
+		if (session->bugs && !session->bug_tap_only) {
+			do_bugs = TRUE;
+			need_codec = TRUE;
+		}
+		switch_thread_rwlock_unlock(session->bug_rwlock);
 	}
 
 	if (frame->codec->implementation->actual_samples_per_second != session->write_impl.actual_samples_per_second) {
@@ -22727,6 +23040,13 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 
 	if (frame->codec) {
 		session->raw_write_frame.datalen = session->raw_write_frame.buflen;
+		/* room for the channel expansion below, which is done in place: a codec may decode more than one
+		 * packet's worth of audio (e.g. several AMR frames in one payload) */
+		if (session->write_impl.number_of_channels > frame->codec->implementation->number_of_channels) {
+			uint32_t in_ch = frame->codec->implementation->number_of_channels, out_ch = session->write_impl.number_of_channels;
+
+			session->raw_write_frame.datalen = session->raw_write_frame.buflen / 2 / out_ch * 2 * in_ch;
+		}
 		frame->codec->cur_frame = frame;
 		session->write_codec->cur_frame = frame;
 		status = switch_core_codec_decode(frame->codec,
@@ -22893,10 +23213,12 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_frame(switch_core_sess
 
 
 
-	if (session->bugs) {
+	{
 		switch_media_bug_t *bp;
 		int prune = 0;
 
+		/* No bare peek at session->bugs: the head is only read under
+		 * bug_rwlock (raced link/unlink on the transfer path, TELCORE-339). */
 		switch_thread_rwlock_rdlock(session->bug_rwlock);
 		for (bp = session->bugs; bp; bp = bp->next) {
 			switch_bool_t ok = SWITCH_TRUE;

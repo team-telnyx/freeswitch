@@ -1,0 +1,195 @@
+{
+  "schema": 1,
+  "profile": {
+    "detection_mode": 1,
+    "detectors_lagged_n": 1,
+    "detectors_n": 48,
+    "max_frequency": 2000,
+    "min_frequency": 550,
+    "min_tone_duration_ms": 100,
+    "require_continuous_streak": 1,
+    "sample_n_continuous_streak": 10,
+    "sample_n_to_skip": 0,
+    "spectral_confirmation": 1,
+    "spectral_min_purity": 0.8,
+    "spectral_reject_fax_cng": 1,
+    "spectral_window_ms": 100
+  },
+  "legacy_profile": {
+    "detection_mode": 1,
+    "detectors_lagged_n": 1,
+    "detectors_n": 48,
+    "require_continuous_streak": 1,
+    "sample_n_continuous_streak": 10,
+    "sample_n_to_skip": 0
+  },
+  "cases": [
+    {
+      "id": "ticket-positive-voicemail-beep",
+      "capture_filename": "avmd-positive-voicemail-beep-50b43261.pcap",
+      "capture_sha256": "3df572d56517cae302521546bacfc948c13fd9f81e16be6f2bc3c54b306593c8",
+      "clock_rate": 8000,
+      "stream": {
+        "destination": "10.96.165.167",
+        "destination_port": 4900,
+        "payload_type": 0,
+        "source": "50.114.146.69",
+        "source_port": 24108,
+        "ssrc": 1212734821
+      },
+      "expected": {
+        "detect": true,
+        "frequency_hz_min": 650,
+        "frequency_hz_max": 681,
+        "detection_time_ms_min": 12000,
+        "detection_time_ms_max": 14500
+      }
+    },
+    {
+      "id": "ticket-negative-transfer-ringback",
+      "capture_filename": "avmd-negative-transfer-ringback-b49b5b5e.pcap",
+      "capture_sha256": "0d989fe1d9562d8170bbc5873b502753b420d569877da664dda2ce1c70af0ba1",
+      "clock_rate": 8000,
+      "stream": {
+        "destination": "10.231.147.131",
+        "destination_port": 32328,
+        "payload_type": 0,
+        "source": "10.3.216.255",
+        "source_port": 37009,
+        "ssrc": 664421380
+      },
+      "expected": {
+        "detect": false
+      }
+    },
+    {
+      "id": "repository-speech-negative",
+      "label": "labelled-speech",
+      "source": {
+        "type": "repository_wav",
+        "path": "../mod_test/test/sounds/ivr-please_state_your_name_and_reason_for_calling.wav",
+        "sha256": "c87e075bf20114ce945a532a88a5c75c24e47f6b032e6be5d911c002970490da"
+      },
+      "expected": {
+        "detect": false
+      }
+    },
+    {
+      "id": "cc0-music-negative",
+      "label": "labelled-music",
+      "source": {
+        "type": "repository_wav",
+        "path": "test/fixtures/real-music-cc0.wav",
+        "sha256": "f2f9ee005ca66990b44b3c3c10f1d78e4a40f201469b098043710eba68518c95"
+      },
+      "expected": {
+        "detect": false
+      }
+    },
+    {
+      "id": "synthetic-sparse-pulses-then-tone",
+      "label": "duration-gap-regression",
+      "settings": {
+        "min_tone_duration_ms": 300
+      },
+      "source": {
+        "type": "synthetic",
+        "generator": "sparse_then_tone",
+        "clock_rate": 8000,
+        "duration_ms": 500
+      },
+      "expected": {
+        "detect": false
+      }
+    },
+    {
+      "id": "hardened-single-tone-latency",
+      "label": "latency-control",
+      "source": {
+        "type": "synthetic",
+        "generator": "single_tone",
+        "clock_rate": 8000,
+        "duration_ms": 1200
+      },
+      "expected": {
+        "detect": true,
+        "frequency_hz_min": 650,
+        "frequency_hz_max": 670,
+        "detection_time_ms_min": 0,
+        "detection_time_ms_max": 1500
+      }
+    },
+    {
+      "id": "hardened-wrong-frequency-half-frames",
+      "label": "continuous-candidate-frequency-regression",
+      "settings": {
+        "min_tone_duration_ms": 300
+      },
+      "source": {
+        "type": "synthetic",
+        "generator": "candidate_with_wrong_frequency_gaps",
+        "clock_rate": 8000,
+        "duration_ms": 1200
+      },
+      "expected": {
+        "detect": false
+      }
+    },
+    {
+      "id": "hardened-300ms-duration-control",
+      "label": "continuous-candidate-frequency-control",
+      "settings": {
+        "min_tone_duration_ms": 300
+      },
+      "source": {
+        "type": "synthetic",
+        "generator": "single_tone",
+        "clock_rate": 8000,
+        "duration_ms": 1200
+      },
+      "expected": {
+        "detect": true,
+        "frequency_hz_min": 650,
+        "frequency_hz_max": 670,
+        "detection_time_ms_min": 0,
+        "detection_time_ms_max": 1500
+      }
+    },
+    {
+      "id": "legacy-default-single-tone",
+      "label": "legacy-defaults",
+      "profile": "legacy",
+      "source": {
+        "type": "synthetic",
+        "generator": "single_tone",
+        "clock_rate": 8000,
+        "duration_ms": 1200
+      },
+      "expected": {
+        "detect": true,
+        "frequency_hz_min": 650,
+        "frequency_hz_max": 670,
+        "detection_time_ms_min": 0,
+        "detection_time_ms_max": 1500
+      }
+    },
+    {
+      "id": "legacy-default-dual-tone",
+      "label": "legacy-defaults",
+      "profile": "legacy",
+      "source": {
+        "type": "synthetic",
+        "generator": "legacy_dual_tone",
+        "clock_rate": 8000,
+        "duration_ms": 1200
+      },
+      "expected": {
+        "detect": true,
+        "frequency_hz_min": 450,
+        "frequency_hz_max": 470,
+        "detection_time_ms_min": 0,
+        "detection_time_ms_max": 1500
+      }
+    }
+  ]
+}

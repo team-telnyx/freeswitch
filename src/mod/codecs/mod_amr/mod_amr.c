@@ -152,7 +152,7 @@ static struct {
 
 const int switch_amr_frame_sizes[] = {12,13,15,17,19,20,26,31,5,0,0,0,0,0,0,1};
 
-#define SWITCH_AMR_OUT_MAX_SIZE 32
+#define SWITCH_AMR_OUT_MAX_SIZE 33
 #define SWITCH_AMR_MODES 9 /* plus SID */
 
 static switch_bool_t switch_amr_unpack_oa(unsigned char *buf, uint8_t *tmp, int encoded_data_len)
@@ -243,10 +243,51 @@ static switch_bool_t switch_amr_info(switch_codec_t *codec, unsigned char *encod
 
 #endif
 
+#ifndef AMR_PASSTHROUGH
+static int amr_fmtp_octet_align(const char *fmtp)
+{
+	char *fmtp_dup, *argv[10];
+	int argc, x, octet_align = 0;
+
+	if (fmtp && (fmtp_dup = strdup(fmtp))) {
+		argc = switch_separate_string(fmtp_dup, ';', argv, (sizeof(argv) / sizeof(argv[0])));
+
+		for (x = 0; x < argc; x++) {
+			char *data = argv[x];
+			char *arg;
+
+			while (*data && *data == ' ') {
+				data++;
+			}
+
+			if ((arg = strchr(data, '='))) {
+				*arg++ = '\0';
+				if (!strcasecmp(data, "octet-align") && atoi(arg)) {
+					octet_align = 1;
+				}
+			}
+		}
+
+		free(fmtp_dup);
+	}
+
+	if (globals.force_oa) {
+		octet_align = 1;
+	}
+
+	if (globals.force_be) {
+		octet_align = 0;
+	}
+
+	return octet_align;
+}
+#endif
+
 static switch_status_t switch_amr_init(switch_codec_t *codec, switch_codec_flag_t flags, const switch_codec_settings_t *codec_settings)
 {
 #ifdef AMR_PASSTHROUGH
 	codec->flags |= SWITCH_CODEC_FLAG_PASSTHROUGH;
+	codec->flags |= SWITCH_CODEC_FLAG_NATIVE_DTX;
 	if (codec->fmtp_in) {
 		codec->fmtp_out = switch_core_strdup(codec->memory_pool, codec->fmtp_in);
 	}
@@ -257,9 +298,9 @@ static switch_status_t switch_amr_init(switch_codec_t *codec, switch_codec_flag_
 	switch_codec_fmtp_t codec_fmtp;
 	amr_codec_settings_t amr_codec_settings = { 0 };
 	int encoding, decoding;
-	int x, i, argc, fmtptmp_pos;
+	int x, i, argc, fmtptmp_pos = 0;
 	char *argv[10];
-	char fmtptmp[128];
+	char fmtptmp[128] = "";
 	switch_core_session_t *session = codec->session;
 	char *fmtp_dup = NULL;
 
@@ -306,11 +347,7 @@ static switch_status_t switch_amr_init(switch_codec_t *codec, switch_codec_flag_
 
 				if ((arg = strchr(data, '='))) {
 					*arg++ = '\0';
-					if (!strcasecmp(data, "octet-align")) {
-						if (atoi(arg)) {
-							switch_set_flag(context, AMR_OPT_OCTET_ALIGN);
-						}
-					} else if (!strcasecmp(data, "mode-change-neighbor")) {
+					if (!strcasecmp(data, "mode-change-neighbor")) {
 						if (atoi(arg)) {
 							switch_set_flag(context, AMR_OPT_MODE_CHANGE_NEIGHBOR);
 						}
@@ -352,12 +389,8 @@ static switch_status_t switch_amr_init(switch_codec_t *codec, switch_codec_flag_
 			free(fmtp_dup);
 		}
 
-		if (globals.force_oa) {
+		if (amr_fmtp_octet_align(codec->fmtp_in)) {
 			switch_set_flag(context, AMR_OPT_OCTET_ALIGN);
-		}
-
-		if (globals.force_be) {
-			switch_clear_flag(context, AMR_OPT_OCTET_ALIGN);
 		}
 
 		if (context->enc_modes && !globals.mode_set_overwrite) {
@@ -392,7 +425,9 @@ static switch_status_t switch_amr_init(switch_codec_t *codec, switch_codec_flag_
 					}
 				}
 
-				fmtptmp_pos = switch_snprintf(fmtptmp, sizeof(fmtptmp), "mode-set=%s", modes);
+				if (j) {
+					fmtptmp_pos = switch_snprintf(fmtptmp, sizeof(fmtptmp), "mode-set=%s", modes);
+				}
 			}
 		}
 
@@ -403,11 +438,12 @@ static switch_status_t switch_amr_init(switch_codec_t *codec, switch_codec_flag_
 
 
 		if (!globals.volte) {
-			switch_snprintf(fmtptmp + fmtptmp_pos, sizeof(fmtptmp) - fmtptmp_pos, ";octet-align=%d", switch_test_flag(context, AMR_OPT_OCTET_ALIGN) ? 1 : 0);
+			fmtptmp_pos += switch_snprintf(fmtptmp + fmtptmp_pos, sizeof(fmtptmp) - fmtptmp_pos, "%soctet-align=%d", fmtptmp_pos ? ";" : "",
+										   switch_test_flag(context, AMR_OPT_OCTET_ALIGN) ? 1 : 0);
 		} else {
 			/* some UEs reject the call with 488 if mode-change-capability is not 2 */
-			switch_snprintf(fmtptmp + fmtptmp_pos, sizeof(fmtptmp) - fmtptmp_pos, ";octet-align=%d;max-red=0;mode-change-capability=2",
-							switch_test_flag(context, AMR_OPT_OCTET_ALIGN) ? 1 : 0);
+			fmtptmp_pos += switch_snprintf(fmtptmp + fmtptmp_pos, sizeof(fmtptmp) - fmtptmp_pos, "%soctet-align=%d;max-red=0;mode-change-capability=2",
+										   fmtptmp_pos ? ";" : "", switch_test_flag(context, AMR_OPT_OCTET_ALIGN) ? 1 : 0);
 		}
 
 		if (!zstr(globals.fmtp_extra)) {
@@ -443,6 +479,7 @@ static switch_status_t switch_amr_init(switch_codec_t *codec, switch_codec_flag_
 
 		switch_mutex_init(&context->mutex, SWITCH_MUTEX_UNNESTED, codec->memory_pool);
 
+		codec->flags |= SWITCH_CODEC_FLAG_NATIVE_DTX;
 		codec->private_info = context;
 
 		return SWITCH_STATUS_SUCCESS;
@@ -555,12 +592,20 @@ static switch_status_t switch_amr_decode(switch_codec_t *codec,
 	if (switch_test_flag(context, AMR_OPT_OCTET_ALIGN)) {
 		/* Octed Aligned */
 		if (!switch_amr_unpack_oa(buf, tmp, encoded_data_len)) {
-			goto decode_error;
+			memcpy(buf, encoded_data, encoded_data_len);
+			if (!switch_amr_unpack_be(buf, tmp, encoded_data_len)) {
+				goto decode_error;
+			}
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AMR decoder (OA): decoded a bandwidth efficient packet\n");
 		}
 	} else {
 		/* Bandwidth Efficient */
 		if (!switch_amr_unpack_be(buf, tmp, encoded_data_len)) {
-			goto decode_error;
+			memcpy(buf, encoded_data, encoded_data_len);
+			if (!switch_amr_unpack_oa(buf, tmp, encoded_data_len)) {
+				goto decode_error;
+			}
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AMR decoder (BE): decoded an octet aligned packet\n");
 		}
 	}
 
@@ -598,6 +643,18 @@ static switch_status_t switch_amr_control(switch_codec_t *codec,
 		{
 			int32_t level = *((uint32_t *) cmd_data);
 			context->debug = level;
+		}
+		break;
+	case SCC_CODEC_SPECIFIC:
+		{
+			const char *command = (const char *) cmd_data;
+
+			if (!zstr(command) && !strcasecmp(command, "fmtp_changes_framing") && rtype && ret_data) {
+				int octet_align = switch_test_flag(context, AMR_OPT_OCTET_ALIGN) ? 1 : 0;
+
+				*rtype = SCCT_STRING;
+				*ret_data = (void *) (amr_fmtp_octet_align((const char *) cmd_arg) == octet_align ? "false" : "true");
+			}
 		}
 		break;
 	case SCC_AUDIO_ADJUST_BITRATE:
