@@ -91,6 +91,19 @@ SWITCH_DECLARE(void) switch_channel_inc_transfer_generation(switch_channel_t *ch
 SWITCH_DECLARE(uint32_t) switch_channel_get_transfer_generation(switch_channel_t *channel);
 
 /*!
+  \brief Open or close a broadcast generation on a channel
+  \param channel channel to update
+*/
+SWITCH_DECLARE(void) switch_channel_inc_broadcast_generation(switch_channel_t *channel);
+
+/*!
+  \brief Read a channel's broadcast generation; compare with != only, it wraps
+  \param channel channel to read
+  \return the current generation
+*/
+SWITCH_DECLARE(uint32_t) switch_channel_get_broadcast_generation(switch_channel_t *channel);
+
+/*!
   \brief Test whether another thread set the channel's state after its latest transfer
   \param channel channel to test
   \return SWITCH_TRUE when a later command, not the session thread, chose the current state

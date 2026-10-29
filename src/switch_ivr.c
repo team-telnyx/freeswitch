@@ -591,6 +591,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 
 		if (app_name) {
 			int x;
+			int raised_broadcast = 0;
 			const char *b_uuid = NULL;
 			switch_core_session_t *b_session = NULL;
 
@@ -601,6 +602,11 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 
 			if (!switch_channel_test_flag(channel, CF_BROADCAST)) {
 				switch_channel_set_flag(channel, CF_BROADCAST);
+				/* The outermost broadcast frame opens the generation here and
+				 * closes it below. Zero stays reserved for "no broadcast has
+				 * run", so a marker that is not a number never matches. */
+				raised_broadcast = 1;
+				switch_channel_inc_broadcast_generation(channel);
 				if (inner) {
 					inner--;
 				}
@@ -654,6 +660,38 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 					switch_channel_clear_flag(channel, CF_BREAK);
 				}
 
+				/* The bridge thread runs this loop and cannot see its peer from
+				 * inside it. A peer hangup landing before CF_BROADCAST is raised
+				 * above arms nothing, so check the peer here instead. locate(),
+				 * not get_partner(): get_partner() cannot tell "no partner" from
+				 * "partner is down", and a transfer clears the partner uuid while
+				 * CF_BRIDGED is still set. Raise the stop rather than breaking
+				 * out, so the app still runs and still fires PLAYBACK_STOP.
+				 * Must follow the CF_BREAK reset above, which would otherwise
+				 * wipe the break this raises. */
+				if (switch_channel_test_flag(channel, CF_BRIDGED)) {
+					char peer_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1] = "";
+
+					if (switch_channel_get_partner_uuid_copy(channel, peer_uuid, sizeof(peer_uuid))) {
+						switch_core_session_t *peer_session = switch_core_session_locate(peer_uuid);
+
+						if (peer_session) {
+							switch_core_session_rwunlock(peer_session);
+						} else {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+											  "%s Stopping broadcast: bridge peer %s is gone, broadcast generation %u\n",
+											  switch_channel_get_name(channel), peer_uuid,
+											  switch_channel_get_broadcast_generation(channel));
+							/* The peer is gone, so its answered state cannot be read. Report the
+							 * cause rather than withhold one a leg that hangs up needs. */
+							switch_channel_set_variable_printf(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, "%u:0",
+															   switch_channel_get_broadcast_generation(channel));
+							switch_channel_set_flag(channel, CF_STOP_BROADCAST);
+							switch_channel_set_flag(channel, CF_BREAK);
+						}
+					}
+				}
+
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s Command Execute [depth=%d] %s(%s)\n",
 								  switch_channel_get_name(channel), switch_core_session_stack_count(session, 0), app_name, switch_str_nil(app_arg));
 				b4 = switch_micro_time_now();
@@ -669,7 +707,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 				switch_channel_set_variable_printf(channel, "total_loops", "%d", loops);
 
 				if (switch_core_session_execute_application_event(session, app_name, app_arg) != SWITCH_STATUS_SUCCESS) {
-					if (!inner || switch_channel_test_flag(channel, CF_STOP_BROADCAST)) switch_channel_clear_flag(channel, CF_BROADCAST);
+					if (raised_broadcast || switch_channel_test_flag(channel, CF_STOP_BROADCAST)) switch_channel_clear_flag(channel, CF_BROADCAST);
 					break;
 				}
 
@@ -692,13 +730,38 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 				}
 			}
 
-			if (!inner) {
+			/* Only the frame that raised the flag may drop it. inner does not
+			 * track nesting on a bridged channel: it counts a broadcast that
+			 * starts while the channel is unbridged or holds the b leg, so it is
+			 * zero in a nested frame there and that frame would clear a flag the
+			 * outer playback still needs. Every writer tests this flag, so
+			 * dropping it early loses a peer hangup arriving while the outer
+			 * playback is still running. raised_broadcast implies !inner, so
+			 * this is the same test everywhere else. */
+			if (raised_broadcast) {
 				switch_channel_clear_flag(channel, CF_BROADCAST);
 			}
 
 			if (switch_channel_test_flag(channel, CF_STOP_BROADCAST)) {
 				switch_channel_clear_flag(channel, CF_BROADCAST);
 				switch_channel_set_flag(channel, CF_BREAK);
+			}
+
+			/* Close this broadcast generation. The peer-hangup marker carries the
+			 * generation it was written for, so one left behind by a setter that
+			 * raced this cleanup no longer matches and is ignored, including by a
+			 * dialplan playback, which never reaches switch_ivr_parse_event().
+			 * Only the frame that raised CF_BROADCAST closes it, so a nested
+			 * priority broadcast and the playback it nests in share one
+			 * generation and both still report the same peer hangup. Do not test
+			 * inner here: on a bridged channel it is zero in the nested frame
+			 * too, because it only counts a broadcast that starts while the
+			 * channel is unbridged or holds the b leg.
+			 * Must stay below the CF_BROADCAST clears above: a setter writes the
+			 * marker only while it still sees CF_BROADCAST, so closing the
+			 * generation after the flag is down invalidates any such write. */
+			if (raised_broadcast) {
+				switch_channel_inc_broadcast_generation(channel);
 			}
 
 			switch_channel_audio_sync(channel);
