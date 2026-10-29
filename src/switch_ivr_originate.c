@@ -2860,6 +2860,9 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 			peer_channel = NULL;
 			start = 0;
 			read_frame = NULL;
+			/* A previous leg may have left ringback_data on its own peer's outbound_ringback, which belongs
+			   to a session that is gone by now; start every leg from the caller's ringback. */
+			ringback_data = caller_ringback_data;
 			oglobals.ringback_ok = 1;
 			var = NULL;
 			to = 0;
