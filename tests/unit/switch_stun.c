@@ -1805,9 +1805,13 @@ FST_TEARDOWN_END()
 			fst_xcheck(switch_find_local_ip(bootstrap_host, sizeof(bootstrap_host), NULL, AF_INET) == SWITCH_STATUS_SUCCESS, "switch_find_local_ip()");
 			fst_xcheck(strncmp(bootstrap_host, "127.", 4), "non-loopback bootstrap host");
 			flags[SWITCH_RTP_FLAG_RTCP_MUX] = 1;
-			rtp_session = switch_rtp_new(bootstrap_host, rx_port, tx_host, tx_port, TEST_PT, 8000, 20 * 1000, flags, "soft", &err, pool);
+			/* switch_rtp_new() seeds from_addr with the remote address, and the STUN below is fed straight to
+			   switch_rtp_pvt_handle_ice() without a receive. Create with bootstrap_host:rx_port as the remote so
+			   that is the packet source, then move the remote away so learning the candidate has to update it. */
+			rtp_session = switch_rtp_new(bootstrap_host, rx_port, bootstrap_host, rx_port, TEST_PT, 8000, 20 * 1000, flags, "soft", &err, pool);
 			fst_xcheck(rtp_session != NULL, "switch_rtp_new()");
 			fst_check(switch_rtp_ready(rtp_session));
+			fst_requires(switch_rtp_set_remote_address(rtp_session, tx_host, tx_port, 0, SWITCH_TRUE, &err) == SWITCH_STATUS_SUCCESS);
 			switch_core_media_set_rtp_session(session, SWITCH_MEDIA_TYPE_AUDIO, rtp_session);
 
 			ice.ice_params = &ice_params;
@@ -2096,6 +2100,7 @@ FST_TEARDOWN_END()
 			switch_threadattr_t *attr;
 			switch_status_t thread_status;
 			switch_rtcp_frame_t report;
+			switch_sockaddr_t *sender_addr = NULL;
 			switch_time_t deadline;
 			const char *err = NULL;
 			int observed = 0, completed = 0, started = 0;
@@ -2115,6 +2120,9 @@ FST_TEARDOWN_END()
 			if (!fst_check(ctx.rtp != NULL)) goto reset_reader_cleanup;
 			if (!fst_check(switch_rtp_activate_rtcp(ctx.rtp, 100, 26302, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS)) goto reset_reader_cleanup;
 			if (!fst_check(switch_socket_create(&ctx.sender, AF_INET, SOCK_DGRAM, 0, pool) == SWITCH_STATUS_SUCCESS)) goto reset_reader_cleanup;
+			/* Send from the session's remote address; RTCP from any other source is dropped as injected. */
+			if (!fst_check(switch_sockaddr_info_get(&sender_addr, rx_host, SWITCH_UNSPEC, 26302, 0, pool) == SWITCH_STATUS_SUCCESS)) goto reset_reader_cleanup;
+			if (!fst_check(switch_socket_bind(ctx.sender, sender_addr) == SWITCH_STATUS_SUCCESS)) goto reset_reader_cleanup;
 			if (!fst_check(switch_sockaddr_info_get(&ctx.target, rx_host, SWITCH_UNSPEC, 26300, 0, pool) == SWITCH_STATUS_SUCCESS)) goto reset_reader_cleanup;
 			if (!fst_check(switch_threadattr_create(&attr, pool) == SWITCH_STATUS_SUCCESS)) goto reset_reader_cleanup;
 			switch_atomic_set(&ctx.running, 1);
