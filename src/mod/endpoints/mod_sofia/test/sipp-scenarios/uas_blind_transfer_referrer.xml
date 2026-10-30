@@ -83,7 +83,7 @@
     </action>
   </recv>
 
-  <send>
+  <send next="wrong_frag" test="frag_wrong">
     <![CDATA[
 
       SIP/2.0 200 OK
@@ -96,7 +96,6 @@
 
     ]]>
   </send>
-  <nop next="wrong_frag" test="frag_wrong"/>
 
   <!-- After the result: a BYE from FreeSWITCH, or B's own BYE 4 s later. A second
        NOTIFY is an unexpected message and fails the call. -->

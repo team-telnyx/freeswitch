@@ -19,4 +19,6 @@ rc=0
 ./sipp-based-tests blind_transfer_referrer_reparked_before_result || rc=1
 ./sipp-based-tests blind_transfer_rerouted_then_second_target_answers || rc=1
 ./sipp-based-tests blind_transfer_rerouted_then_second_target_busy || rc=1
+./sipp-based-tests blind_transfer_queued_transfer_to_park || rc=1
+./sipp-based-tests blind_transfer_queued_app_resumes_bridge || rc=1
 exit $rc

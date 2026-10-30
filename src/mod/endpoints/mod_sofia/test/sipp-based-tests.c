@@ -592,7 +592,36 @@ static struct {
 	switch_time_t target_answered_at;
 	switch_time_t second_target_answered_at;
 	int referrer_blind_transfer_hangup;
-} bt_watch = { PTHREAD_MUTEX_INITIALIZER, 0, "", 0, 0, 0, 0 };
+	char resume_peer[SWITCH_UUID_FORMATTED_LENGTH + 1];
+	int resume_unbridge;
+	int resume_bridge;
+	int resume_transfer;
+	int resume_set;
+} bt_watch = { PTHREAD_MUTEX_INITIALIZER, 0, "", 0, 0, 0, 0, "", 0, 0, 0, 0 };
+
+/* Observe the real private-event resume, before the confirmation gate. The hook
+   and its static counters remain valid until the SIPp sessions finish. */
+static switch_status_t bt_resume_hook(switch_core_session_t *session, switch_core_session_message_t *msg)
+{
+	switch_channel_t *channel = switch_core_session_get_channel(session);
+
+	if (msg->numeric_arg != 42 || strcmp(switch_str_nil(msg->_func), "audio_bridge_thread")) {
+		return SWITCH_STATUS_SUCCESS;
+	}
+	pthread_mutex_lock(&bt_watch.mutex);
+	if (!strcmp(switch_str_nil(msg->string_arg), bt_watch.resume_peer)) {
+		if (msg->message_id == SWITCH_MESSAGE_INDICATE_UNBRIDGE) {
+			++bt_watch.resume_unbridge;
+		} else if (msg->message_id == SWITCH_MESSAGE_INDICATE_BRIDGE && bt_watch.resume_unbridge) {
+			++bt_watch.resume_bridge;
+			bt_watch.resume_transfer = switch_channel_test_flag(channel, CF_TRANSFER) &&
+				!switch_channel_get_variable(channel, "blind_transfer_deferred_peer");
+			bt_watch.resume_set = switch_true(switch_channel_get_variable(channel, "bt_resume_done"));
+		}
+	}
+	pthread_mutex_unlock(&bt_watch.mutex);
+	return SWITCH_STATUS_SUCCESS;
+}
 
 static switch_status_t bt_watch_logger(const switch_log_node_t *node, switch_log_level_t level)
 {
@@ -634,16 +663,22 @@ typedef struct {
 	int referrer_blind_transfer_hangup;
 	int settled;
 	int moved;
+	int resume_unbridge;
+	int resume_bridge;
+	int resume_transfer;
+	int resume_set;
 } bt_result_t;
 
 /* What blind_transfer_run() does to the REFER sender once its REFER has parked it, or, for
-   BT_MOVE_REROUTE_*, to the transferred leg A once it is bridged to C on early media. */
+   BT_MOVE_REROUTE_* / BT_MOVE_QUEUED_*, to A once it is bridged to C on early media. */
 typedef enum {
 	BT_MOVE_NONE,
 	BT_MOVE_TRANSFER,			/* uuid_transfer out of the park */
 	BT_MOVE_TRANSFER_REPARK,	/* uuid_transfer out of the park, then uuid_park */
 	BT_MOVE_REROUTE_ANSWER,		/* C parks after the bridge; A to a second target D (SIPp on 5065) that answers */
-	BT_MOVE_REROUTE_BUSY		/* the same, D rejects with 486 */
+	BT_MOVE_REROUTE_BUSY,		/* the same, D rejects with 486 */
+	BT_MOVE_QUEUED_PARK,		/* a running bridge consumes a queued transfer to park */
+	BT_MOVE_QUEUED_SET		/* a normal queued app resumes the same bridge */
 } bt_move_t;
 
 static int start_bt_sipp(const char *ip, const char *scenario, const char *port, const char *target, const char *hold_ms,
@@ -793,12 +828,13 @@ static switch_bool_t bt_move_referrer(bt_move_t move)
 
 /* Finds the transfer target C that holds the deferred confirmation (blind_transfer_deferred_uuid,
    set on the early-media bridge to the transferred leg A's uuid), sets park_after_bridge on C so
-   it survives A leaving the bridge, and moves A with uuid_transfer to 7878780006, which bridges D. */
-static switch_bool_t bt_reroute_transferred_leg(void)
+   it survives A leaving the bridge, and moves A to D or queues an application on its running bridge. */
+static switch_bool_t bt_move_transferred_leg(bt_move_t move)
 {
 	char a_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1] = "";
 	char *arg;
 	int loop_count = 250;
+	int queued = move == BT_MOVE_QUEUED_PARK || move == BT_MOVE_QUEUED_SET;
 	switch_bool_t ok;
 
 	while (!*a_uuid && loop_count--) {
@@ -810,9 +846,29 @@ static switch_bool_t bt_reroute_transferred_leg(void)
 
 				if (c_session) {
 					switch_channel_t *c_channel = switch_core_session_get_channel(c_session);
+					const char *uuid = switch_channel_get_variable(c_channel, "blind_transfer_deferred_uuid");
+					switch_core_session_t *a_session = NULL;
 
-					switch_channel_set_variable(c_channel, "park_after_bridge", "true");
-					switch_copy_string(a_uuid, switch_str_nil(switch_channel_get_variable(c_channel, "blind_transfer_deferred_uuid")), sizeof(a_uuid));
+					if (move != BT_MOVE_QUEUED_SET) {
+						switch_channel_set_variable(c_channel, "park_after_bridge", "true");
+					}
+					if (!queued) {
+						switch_copy_string(a_uuid, switch_str_nil(uuid), sizeof(a_uuid));
+					} else if (!zstr(uuid) && (a_session = switch_core_session_locate(uuid))) {
+						switch_channel_t *a_channel = switch_core_session_get_channel(a_session);
+
+						/* Queue only after startup: the audio loop, not parse_all_events, must consume it. */
+						if (switch_channel_test_flag(a_channel, CF_BRIDGED) && switch_channel_test_flag(c_channel, CF_BRIDGED) &&
+							!switch_channel_test_flag(c_channel, CF_ANSWERED)) {
+							pthread_mutex_lock(&bt_watch.mutex);
+							switch_copy_string(bt_watch.resume_peer, switch_core_session_get_uuid(c_session), sizeof(bt_watch.resume_peer));
+							pthread_mutex_unlock(&bt_watch.mutex);
+							if (switch_core_event_hook_add_receive_message(a_session, bt_resume_hook) == SWITCH_STATUS_SUCCESS) {
+								switch_copy_string(a_uuid, uuid, sizeof(a_uuid));
+							}
+						}
+						switch_core_session_rwunlock(a_session);
+					}
 					switch_core_session_rwunlock(c_session);
 				}
 			}
@@ -827,6 +883,10 @@ static switch_bool_t bt_reroute_transferred_leg(void)
 		return SWITCH_FALSE;
 	}
 
+	if (queued) {
+		return switch_ivr_broadcast(a_uuid, move == BT_MOVE_QUEUED_PARK ? "transfer::7878780007 XML default" :
+									"set::bt_resume_done=true", SMF_ECHO_ALEG) == SWITCH_STATUS_SUCCESS;
+	}
 	arg = switch_mprintf("%s 7878780006 XML default", a_uuid);
 	ok = bt_api_ok("uuid_transfer", arg);
 	switch_safe_free(arg);
@@ -852,6 +912,11 @@ static void blind_transfer_run(const char *ip, const char *target_scenario, cons
 	bt_watch.target_answered_at = 0;
 	bt_watch.second_target_answered_at = 0;
 	bt_watch.referrer_blind_transfer_hangup = 0;
+	bt_watch.resume_peer[0] = '\0';
+	bt_watch.resume_unbridge = 0;
+	bt_watch.resume_bridge = 0;
+	bt_watch.resume_transfer = 0;
+	bt_watch.resume_set = 0;
 	pthread_mutex_unlock(&bt_watch.mutex);
 	switch_log_bind_logger(bt_watch_logger, SWITCH_LOG_DEBUG, SWITCH_FALSE);
 
@@ -865,8 +930,8 @@ static void blind_transfer_run(const char *ip, const char *target_scenario, cons
 		goto end;
 	}
 	r->started = 1;
-	if (d_scenario) {
-		r->moved = bt_reroute_transferred_leg();
+	if (d_scenario || move == BT_MOVE_QUEUED_PARK || move == BT_MOVE_QUEUED_SET) {
+		r->moved = bt_move_transferred_leg(move);
 	} else if (move != BT_MOVE_NONE) {
 		r->moved = bt_move_referrer(move);
 	}
@@ -890,6 +955,10 @@ static void blind_transfer_run(const char *ip, const char *target_scenario, cons
 	r->target_answered_at = bt_watch.target_answered_at;
 	r->second_target_answered_at = bt_watch.second_target_answered_at;
 	r->referrer_blind_transfer_hangup = bt_watch.referrer_blind_transfer_hangup;
+	r->resume_unbridge = bt_watch.resume_unbridge;
+	r->resume_bridge = bt_watch.resume_bridge;
+	r->resume_transfer = bt_watch.resume_transfer;
+	r->resume_set = bt_watch.resume_set;
 	pthread_mutex_unlock(&bt_watch.mutex);
 	stop_t38_sipp(&a);
 	stop_t38_sipp(&b);
@@ -1380,6 +1449,40 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 			fst_xcheck(r.results == 1, "the REFER sender did not get exactly one result");
 			fst_xcheck(strstr(r.status, "SIP/2.0 486 Busy Here") != NULL, "the result is not 486 Busy Here");
 			fst_xcheck(r.a_ok && r.b_ok && r.c_ok && r.d_ok, "a SIPp peer failed; inspect the *_blind_transfer_*_errors.log files");
+		}
+		FST_TEST_END()
+
+		/* The audio loop consumes the transfer, then resumes its obsolete bridge to C.
+		   C answers after A parks: only A's later hangup may send the final failure. */
+		FST_TEST_BEGIN(blind_transfer_queued_transfer_to_park)
+		{
+			bt_result_t r = { 0 };
+
+			blind_transfer_run(switch_core_get_variable("local_ip_v4"), "sipp-scenarios/uas_blind_transfer_target_left_answer.xml", "6000",
+							   "SIP/2.0 403 Forbidden", BT_MOVE_QUEUED_PARK, &r);
+			fst_xcheck(r.started && r.moved, "the transfer was not queued on the running early-media bridge");
+			fst_xcheck(r.resume_unbridge == 1 && r.resume_bridge == 1 && r.resume_transfer,
+					   "the audio bridge did not resume with its old peer after consuming the transfer");
+			fst_xcheck(r.target_answered_at && r.result_at > r.target_answered_at, "C did not answer before the final result");
+			fst_xcheck(r.results == 1 && strstr(r.status, "SIP/2.0 403 Forbidden"), "the final result is not A's hangup failure");
+			fst_xcheck(r.referrer_blind_transfer_hangup && r.settled, "the REFER sender or parked calls did not finish");
+			fst_xcheck(r.a_ok && r.b_ok && r.c_ok, "a SIPp peer failed; inspect the *_blind_transfer_*_errors.log files");
+		}
+		FST_TEST_END()
+
+		/* An ordinary queued application still resumes the same pending bridge. */
+		FST_TEST_BEGIN(blind_transfer_queued_app_resumes_bridge)
+		{
+			bt_result_t r = { 0 };
+
+			blind_transfer_run(switch_core_get_variable("local_ip_v4"), "sipp-scenarios/uas_blind_transfer_target_early_answer.xml", "6000",
+							   "SIP/2.0 200 OK", BT_MOVE_QUEUED_SET, &r);
+			fst_xcheck(r.started && r.moved, "the application was not queued on the running early-media bridge");
+			fst_xcheck(r.resume_unbridge == 1 && r.resume_bridge == 1 && r.resume_set && !r.resume_transfer,
+					   "the audio bridge did not resume after consuming the ordinary application");
+			fst_xcheck(r.results == 1 && strstr(r.status, "SIP/2.0 200 OK"), "the resumed bridge did not confirm once");
+			fst_xcheck(r.target_answered_at && r.result_at >= r.target_answered_at, "success preceded C's answer");
+			fst_xcheck(r.a_ok && r.b_ok && r.c_ok && r.settled, "a SIPp peer failed or left a channel up");
 		}
 		FST_TEST_END()
 
