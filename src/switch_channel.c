@@ -4312,11 +4312,19 @@ SWITCH_DECLARE(switch_status_t) switch_channel_perform_mark_answered(switch_chan
 
 	/* A bridge to this leg started on early media and deferred a blind transfer confirmation
 	   (INDICATE_BRIDGE set the variable): report success now. A leg that is not bridged yet gets
-	   its success from the bridge start. */
+	   its success from the bridge start. Only while the transferred leg still waits for this
+	   leg: once it is transferred or bridged to another peer, this answer is not its result. */
 	if ((uuid = switch_channel_get_variable_dup(channel, "blind_transfer_deferred_uuid", SWITCH_TRUE, -1))) {
 		switch_channel_set_variable(channel, "blind_transfer_deferred_uuid", NULL);
 		if ((other_session = switch_core_session_locate(uuid))) {
-			switch_ivr_blind_transfer_ack(other_session, SWITCH_TRUE);
+			const char *peer = switch_channel_get_variable(switch_core_session_get_channel(other_session), "blind_transfer_deferred_peer");
+
+			if (!strcmp(switch_str_nil(peer), switch_channel_get_uuid(channel))) {
+				switch_ivr_blind_transfer_ack(other_session, SWITCH_TRUE);
+			} else {
+				switch_log_printf(SWITCH_CHANNEL_CHANNEL_LOG(channel), SWITCH_LOG_DEBUG,
+								  "Not confirming the blind transfer of %s: it no longer waits for this leg\n", uuid);
+			}
 			switch_core_session_rwunlock(other_session);
 		}
 	}

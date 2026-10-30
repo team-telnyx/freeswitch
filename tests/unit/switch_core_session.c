@@ -890,16 +890,168 @@ FST_CORE_BEGIN("./conf")
 
 			/* the target answers with no bridge_to left (bridge handed off) */
 			fst_check(switch_channel_get_variable(t_channel, SWITCH_BRIDGE_VARIABLE) == NULL);
+			/* T.38 redirects the bridge, then sends BRIDGE with the same peer. */
+			switch_channel_set_flag(fst_channel, CF_REDIRECT);
+			fst_check(switch_core_session_receive_message(fst_session, &msg) == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_atomic_read(&blind_transfer_response_count) == 0);
 			switch_channel_mark_answered(t_channel);
 
 			fst_check(switch_atomic_read(&blind_transfer_response_count) == 1);
 			fst_check(blind_transfer_response_numeric_arg == 1);
 			fst_check(!switch_channel_test_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER));
 			fst_check(switch_channel_get_variable(t_channel, "blind_transfer_deferred_uuid") == NULL);
+			switch_channel_clear_flag(fst_channel, CF_REDIRECT);
 
 			stop_peer(r_session);
 			stop_peer(o_session);
 			stop_peer(t_session);
+		}
+		FST_SESSION_END()
+
+		/*
+		 * blind_transfer_answer_after_rebridge: the transferred leg is bridged
+		 * on early media to a first target, then to a second one (re-routed).
+		 * The late answer of the first target must send nothing; the answer
+		 * of the second target sends the one success.
+		 */
+		FST_SESSION_BEGIN(blind_transfer_answer_after_rebridge)
+		{
+			switch_core_session_t *r_session = NULL; /* parked REFER sender */
+			switch_core_session_t *c_session = NULL; /* first target, left in early media */
+			switch_core_session_t *d_session = NULL; /* second target */
+			switch_channel_t *c_channel;
+			switch_channel_t *d_channel;
+			switch_core_session_message_t msg = { 0 };
+
+			fst_requires((r_session = start_peer()));
+			fst_requires((c_session = start_peer()));
+			fst_requires((d_session = start_peer()));
+			c_channel = switch_core_session_get_channel(c_session);
+			d_channel = switch_core_session_get_channel(d_session);
+			/* mark_answered early-returns on an already answered channel */
+			switch_channel_clear_flag(c_channel, CF_ANSWERED);
+			switch_channel_clear_flag(d_channel, CF_ANSWERED);
+
+			switch_channel_set_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER);
+			switch_channel_set_variable(fst_channel, "blind_transfer_uuid", switch_core_session_get_uuid(r_session));
+
+			msg.message_id = SWITCH_MESSAGE_INDICATE_BRIDGE;
+			msg.from = __FILE__;
+			msg.string_arg = switch_core_session_strdup(fst_session, switch_core_session_get_uuid(c_session));
+			fst_requires(switch_core_session_receive_message(fst_session, &msg) == SWITCH_STATUS_SUCCESS);
+			msg.string_arg = switch_core_session_strdup(fst_session, switch_core_session_get_uuid(d_session));
+			fst_requires(switch_core_session_receive_message(fst_session, &msg) == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_atomic_read(&blind_transfer_response_count) == 0);
+
+			/* the first target answers late: not the result of the transfer */
+			switch_channel_mark_answered(c_channel);
+			fst_check(switch_atomic_read(&blind_transfer_response_count) == 0);
+			fst_check(switch_channel_test_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER));
+			fst_check(switch_channel_get_variable(c_channel, "blind_transfer_deferred_uuid") == NULL);
+
+			switch_channel_mark_answered(d_channel);
+			fst_check(switch_atomic_read(&blind_transfer_response_count) == 1);
+			fst_check(blind_transfer_response_numeric_arg == 1);
+			fst_check(!switch_channel_test_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER));
+
+			stop_peer(r_session);
+			stop_peer(c_session);
+			stop_peer(d_session);
+		}
+		FST_SESSION_END()
+
+		/*
+		 * blind_transfer_answer_after_transfer_without_bridge: the transferred
+		 * leg is bridged on early media to a first target, then transferred to
+		 * a dialplan without a bridge (park). The late answer of the first
+		 * target must send nothing; the result comes from the end of that
+		 * dialplan or the hangup of the transferred leg.
+		 */
+		FST_SESSION_BEGIN(blind_transfer_answer_after_transfer_without_bridge)
+		{
+			switch_core_session_t *r_session = NULL; /* parked REFER sender */
+			switch_core_session_t *c_session = NULL; /* first target, left in early media */
+			switch_channel_t *c_channel;
+			switch_core_session_message_t msg = { 0 };
+
+			fst_requires((r_session = start_peer()));
+			fst_requires((c_session = start_peer()));
+			c_channel = switch_core_session_get_channel(c_session);
+			/* mark_answered early-returns on an already answered channel */
+			switch_channel_clear_flag(c_channel, CF_ANSWERED);
+
+			switch_channel_set_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER);
+			switch_channel_set_variable(fst_channel, "blind_transfer_uuid", switch_core_session_get_uuid(r_session));
+
+			msg.message_id = SWITCH_MESSAGE_INDICATE_BRIDGE;
+			msg.from = __FILE__;
+			msg.string_arg = switch_core_session_strdup(fst_session, switch_core_session_get_uuid(c_session));
+			fst_requires(switch_core_session_receive_message(fst_session, &msg) == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_atomic_read(&blind_transfer_response_count) == 0);
+
+			fst_requires(switch_ivr_session_transfer(fst_session, "park", "inline", NULL) == SWITCH_STATUS_SUCCESS);
+
+			/* the first target answers late: not the result of the transfer */
+			switch_channel_mark_answered(c_channel);
+			fst_check(switch_atomic_read(&blind_transfer_response_count) == 0);
+			fst_check(switch_channel_test_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER));
+			fst_check(switch_channel_get_variable(c_channel, "blind_transfer_deferred_uuid") == NULL);
+
+			/* cleanup */
+			switch_channel_clear_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER);
+			stop_peer(r_session);
+			stop_peer(c_session);
+		}
+		FST_SESSION_END()
+
+		/* The queued transfer's bridge resume is obsolete even if its old peer has
+		   already answered. This models the gate; SIPp covers the actual queue consumer. */
+		FST_SESSION_BEGIN(blind_transfer_stale_bridge_during_transfer)
+		{
+			switch_core_session_t *r_session = NULL;
+			switch_core_session_t *c_session = NULL;
+			switch_channel_t *c_channel;
+			switch_core_session_message_t msg = { 0 };
+
+			r_session = start_peer();
+			c_session = start_peer();
+			fst_check(r_session && c_session);
+			if (!r_session || !c_session) {
+				if (r_session) stop_peer(r_session);
+				if (c_session) stop_peer(c_session);
+				break;
+			}
+			c_channel = switch_core_session_get_channel(c_session);
+			switch_channel_clear_flag(c_channel, CF_ANSWERED);
+			switch_channel_set_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER);
+			switch_channel_set_variable(fst_channel, "blind_transfer_uuid", switch_core_session_get_uuid(r_session));
+			msg.message_id = SWITCH_MESSAGE_INDICATE_BRIDGE;
+			msg.from = __FILE__;
+			msg.string_arg = switch_core_session_get_uuid(c_session);
+			fst_check(switch_core_session_receive_message(fst_session, &msg) == SWITCH_STATUS_SUCCESS);
+
+			/* State left by session_transfer before the old bridge resumes. */
+			switch_channel_set_variable(fst_channel, "blind_transfer_deferred_peer", NULL);
+			switch_channel_set_flag(fst_channel, CF_TRANSFER);
+			fst_check(switch_core_session_receive_message(fst_session, &msg) == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_channel_get_variable(fst_channel, "blind_transfer_deferred_peer") == NULL);
+			switch_channel_mark_answered(c_channel);
+			fst_check(switch_atomic_read(&blind_transfer_response_count) == 0);
+			fst_check(switch_channel_test_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER));
+
+			/* The already-answered branch must also ignore a stale BRIDGE. */
+			fst_check(switch_core_session_receive_message(fst_session, &msg) == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_atomic_read(&blind_transfer_response_count) == 0);
+			fst_check(switch_channel_test_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER));
+
+			/* A valid bridge after routing still confirms an answered peer. */
+			switch_channel_clear_flag(fst_channel, CF_TRANSFER);
+			fst_check(switch_core_session_receive_message(fst_session, &msg) == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_atomic_read(&blind_transfer_response_count) == 1);
+			fst_check(blind_transfer_response_numeric_arg == 1);
+			fst_check(!switch_channel_test_flag(fst_channel, CF_CONFIRM_BLIND_TRANSFER));
+			stop_peer(r_session);
+			stop_peer(c_session);
 		}
 		FST_SESSION_END()
 
