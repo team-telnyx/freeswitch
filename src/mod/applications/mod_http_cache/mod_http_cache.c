@@ -1310,10 +1310,10 @@ static switch_status_t http_get(url_cache_t *cache, http_profile_t *profile, cac
 #endif
 		int i;
 
-		switch_curl_easy_setopt(curl_handle, CURLOPT_FOLLOWLOCATION, 1);
-		switch_curl_easy_setopt(curl_handle, CURLOPT_MAXREDIRS, 10);
-		switch_curl_easy_setopt(curl_handle, CURLOPT_FAILONERROR, 1);
-		switch_curl_easy_setopt(curl_handle, CURLOPT_NOSIGNAL, 1);
+		switch_curl_easy_setopt(curl_handle, CURLOPT_FOLLOWLOCATION, (long)1);
+		switch_curl_easy_setopt(curl_handle, CURLOPT_MAXREDIRS, (long)10);
+		switch_curl_easy_setopt(curl_handle, CURLOPT_FAILONERROR, (long)1);
+		switch_curl_easy_setopt(curl_handle, CURLOPT_NOSIGNAL, (long)1);
 		if (headers) {
 			switch_curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, headers);
 		}
