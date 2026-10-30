@@ -674,6 +674,12 @@
       </condition>
     </extension>
 
+    <extension name="blind_transfer_confirm_park">
+      <condition field="destination_number" expression="^7878780007$">
+        <action application="park"/>
+      </condition>
+    </extension>
+
     <!-- A re-routed (uuid_transfer) away from the first target C: bridges a second target D (SIPp on 5065). -->
     <extension name="blind_transfer_confirm_reroute">
       <condition field="destination_number" expression="^7878780006$">

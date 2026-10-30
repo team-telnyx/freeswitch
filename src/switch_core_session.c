@@ -969,7 +969,8 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_perform_receive_message(swit
 
 
 		if (message->message_id == SWITCH_MESSAGE_INDICATE_BRIDGE &&
-			switch_channel_test_flag(session->channel, CF_CONFIRM_BLIND_TRANSFER)) {
+			switch_channel_test_flag(session->channel, CF_CONFIRM_BLIND_TRANSFER) &&
+			!switch_channel_test_flag(session->channel, CF_TRANSFER)) {
 			/* string_arg carries the bridge peer uuid (absent only for conference/
 			   eavesdrop, which keep the legacy success). A peer that can't be
 			   located is already at CS_HANGUP and never answered: defer. */
