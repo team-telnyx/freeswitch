@@ -105,9 +105,66 @@ FST_TEST_BEGIN(frame_buffer_dup_without_data_rebuilds_base_header)
 	fst_check(clone->packetlen == SWITCH_RTP_HEADER_LEN);
 	fst_check(clone->datalen == 0);
 	fst_check(clone->data == (uint8_t *) clone->packet + SWITCH_RTP_HEADER_LEN);
+	fst_check(clone->buflen == SWITCH_RTP_MAX_BUF_LEN - SWITCH_RTP_HEADER_LEN);
 	fst_check(cloned_packet->header.cc == 0);
 	fst_check(cloned_packet->header.x == 0);
 	fst_check(cloned_packet->header.p == 0);
+
+	switch_frame_buffer_free(fb, &clone);
+	switch_frame_buffer_destroy(&fb);
+}
+FST_TEST_END()
+
+FST_TEST_BEGIN(frame_buffer_dup_preserves_rtp_extension_metadata)
+{
+	switch_frame_buffer_t *fb = NULL;
+	switch_frame_t orig = { 0 };
+	switch_frame_t *clone = NULL;
+	switch_rtp_packet_t packet = { 0 };
+	uint8_t *payload = (uint8_t *)&packet + SWITCH_RTP_HEADER_LEN;
+
+	orig.packet = &packet;
+	orig.data = payload;
+	orig.datalen = 1;
+	orig.packetlen = SWITCH_RTP_HEADER_LEN + 1;
+	orig.buflen = SWITCH_RTP_MAX_BUF_LEN - SWITCH_RTP_HEADER_LEN;
+	orig.rtp_extensions.mid = 4;
+
+	fst_requires(switch_frame_buffer_create(&fb, 1) == SWITCH_STATUS_SUCCESS);
+	fst_requires(switch_frame_buffer_dup(fb, &orig, &clone) == SWITCH_STATUS_SUCCESS);
+	fst_requires(clone != NULL);
+	fst_check(clone->rtp_extensions.mid == orig.rtp_extensions.mid);
+
+	switch_frame_buffer_free(fb, &clone);
+	switch_frame_buffer_destroy(&fb);
+}
+FST_TEST_END()
+
+FST_TEST_BEGIN(frame_buffer_dup_reports_capacity_after_rtp_header)
+{
+	switch_frame_buffer_t *fb = NULL;
+	switch_frame_t orig = { 0 };
+	switch_frame_t *clone = NULL;
+	switch_rtp_packet_t packet = { 0 };
+	switch_size_t data_offset = SWITCH_RTP_HEADER_LEN + 8;
+	uint8_t *payload = (uint8_t *)&packet + data_offset;
+	uint32_t payload_len = 32;
+
+	memset(payload, 0xa5, payload_len);
+	orig.packet = &packet;
+	orig.data = payload;
+	orig.datalen = payload_len;
+	orig.packetlen = (uint32_t)data_offset + payload_len;
+	orig.buflen = SWITCH_RTP_MAX_BUF_LEN - (uint32_t)data_offset;
+
+	fst_requires(switch_frame_buffer_create(&fb, 1) == SWITCH_STATUS_SUCCESS);
+	fst_requires(switch_frame_buffer_dup(fb, &orig, &clone) == SWITCH_STATUS_SUCCESS);
+	fst_requires(clone != NULL);
+	fst_check(clone->packetlen == data_offset + payload_len);
+	fst_check(clone->datalen == payload_len);
+	fst_check(clone->data == (uint8_t *)clone->packet + data_offset);
+	fst_check(clone->buflen == SWITCH_RTP_MAX_BUF_LEN - data_offset);
+	fst_check(!memcmp(clone->data, payload, payload_len));
 
 	switch_frame_buffer_free(fb, &clone);
 	switch_frame_buffer_destroy(&fb);
@@ -391,6 +448,62 @@ FST_TEST_BEGIN(test_switch_http_parse_header)
 			switch_http_free_request(&request);
 		}
 	}
+}
+FST_TEST_END()
+
+FST_TEST_BEGIN(redact_file_target)
+{
+    char buf[512];
+    const char *out;
+
+    /* mod_av appends "pubUser=... pubPasswd=..." to the RTMP target, and record_session
+     * carries its own {} parameters, so neither may reach a log verbatim. */
+    out = switch_redact_file_target("{auth_username=alice,auth_password=hunter2}"
+                                    "rtmp://recorder.example.com/live/streamkey", buf, sizeof(buf));
+    fst_check_string_equals(out, "rtmp://recorder.example.com/...");
+    fst_check(strstr(out, "hunter2") == NULL);
+    fst_check(strstr(out, "streamkey") == NULL);
+
+    out = switch_redact_file_target("rtmp://recorder.example.com/live/streamkey "
+                                    "pubUser=alice pubPasswd=hunter2 flashver=FMLE/3.0", buf, sizeof(buf));
+    fst_check_string_equals(out, "rtmp://recorder.example.com/...");
+    fst_check(strstr(out, "hunter2") == NULL);
+
+    /* Several parameter groups, and the [] form the record path also accepts. */
+    out = switch_redact_file_target("{a=1}{auth_password=hunter2} [b=2]rtmp://host.example.com/app", buf, sizeof(buf));
+    fst_check_string_equals(out, "rtmp://host.example.com/...");
+
+    /* Userinfo in the authority goes too. */
+    out = switch_redact_file_target("rtmps://bob:s3cret@recorder.example.com:1935/live/key", buf, sizeof(buf));
+    fst_check_string_equals(out, "rtmps://recorder.example.com:1935/...");
+    fst_check(strstr(out, "s3cret") == NULL);
+
+    /* So does a query string. */
+    out = switch_redact_file_target("rtmp://recorder.example.com?token=abc123", buf, sizeof(buf));
+    fst_check_string_equals(out, "rtmp://recorder.example.com/...");
+
+    /* A host-only target keeps its shape rather than gaining a phantom path. */
+    out = switch_redact_file_target("rtmp://recorder.example.com", buf, sizeof(buf));
+    fst_check_string_equals(out, "rtmp://recorder.example.com");
+
+    /* A local path holds no secret, and the log is more useful naming it. */
+    out = switch_redact_file_target("/var/lib/freeswitch/recordings/call.wav", buf, sizeof(buf));
+    fst_check_string_equals(out, "/var/lib/freeswitch/recordings/call.wav");
+
+    out = switch_redact_file_target("{av_record_audio_only=true}/tmp/call.mp4", buf, sizeof(buf));
+    fst_check_string_equals(out, "/tmp/call.mp4");
+
+    /* Nothing usable to render. */
+    out = switch_redact_file_target(NULL, buf, sizeof(buf));
+    fst_check_string_equals(out, "(unknown)");
+    out = switch_redact_file_target("", buf, sizeof(buf));
+    fst_check_string_equals(out, "(unknown)");
+    out = switch_redact_file_target("{auth_password=hunter2} ", buf, sizeof(buf));
+    fst_check_string_equals(out, "(unknown)");
+
+    /* An unterminated parameter group would leave the secret in the remainder. */
+    out = switch_redact_file_target("{auth_password=hunter2 rtmp://host.example.com/app", buf, sizeof(buf));
+    fst_check_string_equals(out, "(unknown)");
 }
 FST_TEST_END()
 

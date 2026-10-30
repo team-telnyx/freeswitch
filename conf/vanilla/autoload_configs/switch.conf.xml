@@ -37,6 +37,15 @@
 	as different hostnames.
     -->
     <!-- <param name="switchname" value="freeswitch"/> -->
+
+    <!--
+	Override the hostname reported by gethostname().
+	Intended for containerised deployments that cannot set the kernel UTS
+	hostname. Unlike switchname, this replaces the value used for the
+	FreeSWITCH-Hostname event header and the "hostname" core variable.
+	When set, the periodic host/IP check will not revert it.
+    -->
+    <!-- <param name="hostname" value="freeswitch"/> -->
     <!-- <param name="cpu-idle-smoothing-depth" value="30"/> -->
 
 

@@ -524,7 +524,7 @@ SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_binded_address(switch_s
 		inet_pton(AF_INET, ipstr, &ip->address);
 	}
 
-	packet->header.length += htons(sizeof(switch_stun_packet_attribute_t)) + attribute->length;
+	packet->header.length = htons(ntohs(packet->header.length) + sizeof(switch_stun_packet_attribute_t) + ntohs(attribute->length));
 	return 1;
 }
 
@@ -553,7 +553,7 @@ SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_xor_binded_address(swit
 		ip->address = htonl(ntohl(ip->address) ^ STUN_MAGIC_COOKIE);
 	}
 
-	packet->header.length += htons(sizeof(switch_stun_packet_attribute_t)) + attribute->length;
+	packet->header.length = htons(ntohs(packet->header.length) + sizeof(switch_stun_packet_attribute_t) + ntohs(attribute->length));
 	return 1;
 }
 
@@ -567,7 +567,7 @@ SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_priority(switch_stun_pa
 	attribute->length = htons(4);
 	memcpy(attribute->value, &priority, 4);
 
-	packet->header.length += htons(sizeof(switch_stun_packet_attribute_t)) + attribute->length;
+	packet->header.length = htons(ntohs(packet->header.length) + sizeof(switch_stun_packet_attribute_t) + ntohs(attribute->length));
 	return 1;
 }
 
@@ -581,7 +581,7 @@ SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_integrity(switch_stun_p
 	attribute->length = htons(20);
 
 	xlen = ntohs(packet->header.length) + sizeof(switch_stun_packet_header_t);
-	packet->header.length += htons(sizeof(switch_stun_packet_attribute_t)) + attribute->length;
+	packet->header.length = htons(ntohs(packet->header.length) + sizeof(switch_stun_packet_attribute_t) + ntohs(attribute->length));
 
 	HMAC(EVP_sha1(), (unsigned char *)pass, (int)strlen(pass), (void *)packet, xlen, (void *)attribute->value, NULL);
 
@@ -600,7 +600,7 @@ SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_fingerprint(switch_stun
 
 	xlen = ntohs(packet->header.length) + sizeof(switch_stun_packet_header_t);
 
-	packet->header.length += htons(sizeof(switch_stun_packet_attribute_t)) + attribute->length;
+	packet->header.length = htons(ntohs(packet->header.length) + sizeof(switch_stun_packet_attribute_t) + ntohs(attribute->length));
 
 	crc = htonl(switch_crc32_8bytes(packet, xlen) ^ 0x5354554e);
 
@@ -723,7 +723,7 @@ SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_use_candidate(switch_st
 	attribute = (switch_stun_packet_attribute_t *) ((uint8_t *) & packet->first_attribute + ntohs(packet->header.length));
 	attribute->type = htons(SWITCH_STUN_ATTR_USE_CAND);
 	attribute->length = htons(0);
-	packet->header.length += htons(sizeof(switch_stun_packet_attribute_t)) + attribute->length;
+	packet->header.length = htons(ntohs(packet->header.length) + sizeof(switch_stun_packet_attribute_t) + ntohs(attribute->length));
 	return 1;
 }
 
@@ -747,7 +747,7 @@ SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_controlling_value(switc
 	attribute->type = htons(SWITCH_STUN_ATTR_CONTROLLING);
 	attribute->length = htons(8);
 	memcpy(attribute->value, tie_breaker, 8);
-	packet->header.length += htons(sizeof(switch_stun_packet_attribute_t)) + attribute->length;
+	packet->header.length = htons(ntohs(packet->header.length) + sizeof(switch_stun_packet_attribute_t) + ntohs(attribute->length));
 	return 1;
 }
 
@@ -771,7 +771,7 @@ SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_controlled_value(switch
 	attribute->type = htons(SWITCH_STUN_ATTR_CONTROLLED);
 	attribute->length = htons(8);
 	memcpy(attribute->value, tie_breaker, 8);
-	packet->header.length += htons(sizeof(switch_stun_packet_attribute_t)) + attribute->length;
+	packet->header.length = htons(ntohs(packet->header.length) + sizeof(switch_stun_packet_attribute_t) + ntohs(attribute->length));
 	return 1;
 }
 
@@ -795,7 +795,7 @@ SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_username(switch_stun_pa
 		switch_stun_random_string(attribute->value, ulen, NULL);
 	}
 
-	packet->header.length += htons((u_short)(sizeof(switch_stun_packet_attribute_t) + padding)) + attribute->length;
+	packet->header.length = htons(ntohs(packet->header.length) + sizeof(switch_stun_packet_attribute_t) + padding + ntohs(attribute->length));
 
 	return 1;
 }
@@ -819,7 +819,7 @@ SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_software(switch_stun_pa
 		switch_stun_random_string(attribute->value, ulen, NULL);
 	}
 
-	packet->header.length += htons((u_short)(sizeof(switch_stun_packet_attribute_t) + padding)) + attribute->length;
+	packet->header.length = htons(ntohs(packet->header.length) + sizeof(switch_stun_packet_attribute_t) + padding + ntohs(attribute->length));
 
 	return 1;
 }
@@ -843,7 +843,7 @@ SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_password(switch_stun_pa
 		switch_stun_random_string(attribute->value, ulen, NULL);
 	}
 
-	packet->header.length += htons((u_short)(sizeof(switch_stun_packet_attribute_t) + padding)) + attribute->length;
+	packet->header.length = htons(ntohs(packet->header.length) + sizeof(switch_stun_packet_attribute_t) + padding + ntohs(attribute->length));
 
 	return 1;
 }
@@ -946,6 +946,56 @@ SWITCH_DECLARE(switch_status_t) switch_stun_packet_verify_integrity(const uint8_
 	}
 
 	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(switch_stun_packet_t *) switch_stun_packet_build_ice_request(uint8_t *buf, switch_size_t capacity,
+	char *id, const char *username, const char *software, uint32_t priority,
+	const char *password, const char *tie_breaker, switch_bool_t controlling, switch_bool_t use_candidate)
+{
+	switch_stun_packet_t *packet;
+	switch_size_t username_len, software_len = 0, needed;
+
+	if (!buf || !username || (software && (!password || !tie_breaker))) {
+		return NULL;
+	}
+
+	username_len = strlen(username);
+	if (software) {
+		software_len = strlen(software);
+	}
+	if (username_len > 512 || software_len > 127) {
+		return NULL;
+	}
+
+	needed = sizeof(switch_stun_packet_header_t) + 4 + ((username_len + 3) & ~(switch_size_t)3);
+	if (software) {
+		/* PRIORITY, SOFTWARE, role, optional nomination, integrity, fingerprint. */
+		needed += 8 + 4 + ((software_len + 3) & ~(switch_size_t)3) + 12 +
+			(use_candidate ? 4 : 0) + 24 + 8;
+	}
+	if (needed > capacity) {
+		return NULL;
+	}
+
+	memset(buf, 0, needed);
+	packet = switch_stun_packet_build_header(SWITCH_STUN_BINDING_REQUEST, id, buf);
+	switch_stun_packet_attribute_add_username(packet, (char *)username, (uint16_t)username_len);
+	if (software) {
+		switch_stun_packet_attribute_add_priority(packet, priority);
+		switch_stun_packet_attribute_add_software(packet, (char *)software, (uint16_t)software_len);
+		if (controlling) {
+			switch_stun_packet_attribute_add_controlling_value(packet, tie_breaker);
+		} else {
+			switch_stun_packet_attribute_add_controlled_value(packet, tie_breaker);
+		}
+		if (use_candidate) {
+			switch_stun_packet_attribute_add_use_candidate(packet);
+		}
+		switch_stun_packet_attribute_add_integrity(packet, password);
+		switch_stun_packet_attribute_add_fingerprint(packet);
+	}
+
+	return packet;
 }
 
 SWITCH_DECLARE(char *) switch_stun_host_lookup(const char *host, switch_memory_pool_t *pool)

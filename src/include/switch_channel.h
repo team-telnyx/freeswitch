@@ -76,6 +76,34 @@ typedef struct switch_channel_timetable switch_channel_timetable_t;
 */
 SWITCH_DECLARE(switch_channel_state_t) switch_channel_get_state(switch_channel_t *channel);
 SWITCH_DECLARE(switch_channel_state_t) switch_channel_get_running_state(switch_channel_t *channel);
+
+/*!
+  \brief Mark a newly installed caller profile as not yet routed
+  \param channel channel to mark
+*/
+SWITCH_DECLARE(void) switch_channel_inc_transfer_generation(switch_channel_t *channel);
+
+/*!
+  \brief Read a channel's transfer generation; compare with != only, it wraps
+  \param channel channel to read
+  \return the current generation
+*/
+SWITCH_DECLARE(uint32_t) switch_channel_get_transfer_generation(switch_channel_t *channel);
+
+/*!
+  \brief Test whether another thread set the channel's state after its latest transfer
+  \param channel channel to test
+  \return SWITCH_TRUE when a later command, not the session thread, chose the current state
+*/
+SWITCH_DECLARE(switch_bool_t) switch_channel_transfer_superseded(switch_channel_t *channel);
+
+/*!
+  \brief Test for an extension queued by switch_channel_transfer_to_extension() and not yet
+         consumed by switch_channel_get_queued_extension(); does not consume it
+  \param channel channel to test
+  \return SWITCH_TRUE when one is pending
+*/
+SWITCH_DECLARE(switch_bool_t) switch_channel_has_queued_extension(switch_channel_t *channel);
 SWITCH_DECLARE(int) switch_channel_check_signal(switch_channel_t *channel, switch_bool_t in_thread_only);
 
 /*!
@@ -410,6 +438,18 @@ SWITCH_DECLARE(switch_caller_extension_t *) switch_channel_get_caller_extension(
   \return TRUE if flags were present
 */
 SWITCH_DECLARE(uint32_t) switch_channel_test_flag(switch_channel_t *channel, switch_channel_flag_t flag);
+
+/*!
+  \brief Test and clear given flag on a given channel in one atomic step
+  \param channel channel to test and clear the flag on
+  \param flag to test and clear
+  \return SWITCH_TRUE if the flag was set, SWITCH_FALSE if it was not
+  \note This is a raw clear that deliberately skips the per-flag side effects
+        of switch_channel_clear_flag (see there). It is intended only for
+        side-effect-free flags such as CF_CONFIRM_BLIND_TRANSFER, used as an
+        exactly-once gate.
+*/
+SWITCH_DECLARE(switch_bool_t) switch_channel_test_and_clear_flag(switch_channel_t *channel, switch_channel_flag_t flag);
 
 /*!
   \brief Set given flag(s) on a given channel

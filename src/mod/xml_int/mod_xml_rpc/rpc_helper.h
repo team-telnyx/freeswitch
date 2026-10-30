@@ -7,6 +7,7 @@ SWITCH_BEGIN_EXTERN_C
 
 switch_bool_t is_resource_available(const char* comman, const char* api_str);
 switch_bool_t is_api_response_error(const char* response);
+switch_bool_t should_stop_batch(const char* response, switch_bool_t continue_on_fail, switch_bool_t run_all);
 void set_min_idle_cpu_watermark(const char* idle_cpu);
 void set_throttled_api_calls(const char* api);
 SWITCH_END_EXTERN_C

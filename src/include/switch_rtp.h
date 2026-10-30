@@ -60,6 +60,7 @@ typedef struct {
 	char body[SWITCH_RTP_MAX_BUF_LEN+4+sizeof(char *)];
 	switch_rtp_hdr_ext_t *ext;
 	char *ebody;
+	uint8_t mid_ext_id;
 } switch_rtp_packet_t;
 
 typedef enum {
@@ -89,16 +90,20 @@ typedef struct switch_rtp_crypto_key switch_rtp_crypto_key_t;
 
 typedef struct switch_rtp_write_state switch_rtp_write_state_t;
 
+#define SWITCH_RTP_MID_MAX_LEN 16
+
 typedef enum {
 	IPR_RTP,
 	IPR_RTCP
 } ice_proto_t;
 
 typedef struct ext_mid_s {
-	uint8_t ext_id;      /* negotiated extmap ID for MID (1-14 for 1-byte header) */
-	char local_mid[17];  /* MID string to write (max 16 bytes for 1-byte hdr format) */
-	char remote_mid[17]; /* MID string read from the current packet (max 16 bytes for 1-byte hdr format) */
-	uint8_t enabled;
+	uint8_t send_ext_id; /* negotiated outbound extmap ID (1-14 for 1-byte header) */
+	uint8_t recv_ext_id; /* negotiated inbound extmap ID (1-14 for 1-byte header) */
+	char local_mid[SWITCH_RTP_MID_MAX_LEN + 1];  /* MID string to write (max 16 bytes for 1-byte hdr format) */
+	char remote_mid[SWITCH_RTP_MID_MAX_LEN + 1]; /* MID string read from the current packet (max 16 bytes for 1-byte hdr format) */
+	uint8_t send_enabled;
+	uint8_t recv_enabled;
 } ext_mid_t;
 
 typedef struct icand_s {
@@ -788,6 +793,15 @@ SWITCH_DECLARE(uint32_t) switch_rtp_get_ssrc(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(uint32_t) switch_rtp_get_remote_ssrc(switch_rtp_t *rtp_session);
 
 /*!
+  \brief Count of the frames switch_rtp_write_frame sent, and the RTP timestamp of the last one
+  \param rtp_session the RTP session
+  \param ts the timestamp of the last frame sent (optional)
+  \param kept whether that timestamp is the frame's own (plus an offset) rather than generated (optional)
+  \return the count
+*/
+SWITCH_DECLARE(uint32_t) switch_rtp_get_sent_frames(switch_rtp_t *rtp_session, uint32_t *ts, switch_bool_t *kept);
+
+/*!
   \brief Associate an arbitrary data pointer with and RTP session
   \param rtp_session the RTP session to assign the pointer to
   \param private_data the private data to assign
@@ -843,11 +857,16 @@ SWITCH_DECLARE(switch_time_t) switch_rtp_session_set_dtls_checks_started(switch_
 SWITCH_DECLARE(switch_sockaddr_t*) switch_rtp_session_get_remote_addr(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(switch_sockaddr_t*) switch_rtp_session_get_rtcp_remote_addr(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(char *) switch_rtp_session_get_type(switch_rtp_t *rtp_session);
-/* Enables MID receive parsing for ext_id and clears any configured local MID, so outbound MID insertion is disabled until switch_rtp_enable_mid() is called. */
+/* Replaces MID state with receive-only parsing for ext_id. */
 SWITCH_DECLARE(switch_status_t) switch_rtp_enable_mid_receive(switch_rtp_t *rtp_session, uint8_t ext_id);
 SWITCH_DECLARE(switch_status_t) switch_rtp_enable_mid(switch_rtp_t *rtp_session, uint8_t ext_id, const char *mid);
-/* Returns the session-owned MID parsed from the current returned RTP packet, or NULL when that packet did not carry MID. The returned pointer is overwritten by the next RTP read and must not be retained across reads or threads. */
+SWITCH_DECLARE(switch_status_t) switch_rtp_configure_mid(switch_rtp_t *rtp_session, uint8_t send_ext_id, const char *mid, uint8_t recv_ext_id);
+/* Clears negotiated MID send/receive state. */
+SWITCH_DECLARE(switch_status_t) switch_rtp_disable_mid(switch_rtp_t *rtp_session);
+/* Returns session-owned storage that is valid only until the next RTP read or MID reconfiguration. */
 SWITCH_DECLARE(const char *) switch_rtp_get_received_mid(switch_rtp_t *rtp_session);
+/* Copies the current received MID while holding the RTP MID-state lock. */
+SWITCH_DECLARE(switch_status_t) switch_rtp_copy_received_mid(switch_rtp_t *rtp_session, char *mid, switch_size_t mid_len);
 
 #ifdef SWITCH_RTP_TEST_HOOKS
 SWITCH_DECLARE(switch_status_t) switch_rtp_test_rewrite_mid_extension(
@@ -857,6 +876,18 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_test_rewrite_mid_extension(
 	const char *mid,
 	switch_bool_t drop_peer_extensions,
 	switch_size_t trusted_payload_offset);
+SWITCH_DECLARE(switch_status_t) switch_rtp_test_strip_header_extensions(
+	switch_rtp_packet_t *packet,
+	switch_size_t *bytes,
+	switch_size_t trusted_payload_offset);
+SWITCH_DECLARE(switch_status_t) switch_rtp_test_add_audio_level_and_rewrite_mid(
+	switch_rtp_t *rtp_session,
+	switch_rtp_packet_t *packet,
+	switch_size_t *bytes,
+	uint8_t ext_id,
+	const char *mid,
+	switch_size_t trusted_payload_offset);
+SWITCH_DECLARE(switch_status_t) switch_rtp_test_set_received_mid(switch_rtp_t *rtp_session, const char *mid);
 #endif
 
 /* Trickle ICE extensions */
@@ -899,6 +930,7 @@ SWITCH_DECLARE(uint32_t) switch_rtp_get_ms_per_packet(switch_rtp_t *rtp_session)
 SWITCH_DECLARE(uint32_t) switch_rtp_get_us_per_packet(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(switch_bool_t) switch_rtp_using_timer(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(void) switch_rtp_prepare_trickle_ice(switch_rtp_t *rtp_session, ice_proto_t proto, ice_t *ice_params);
+SWITCH_DECLARE(void) switch_rtp_invalidate_remote_ice_candidates(switch_rtp_t *rtp_session, ice_t *ice_params);
 SWITCH_DECLARE(uint32_t) switch_rtp_get_new_ssrc(switch_rtp_t *rtp_session);
 /*!
   \}
@@ -923,6 +955,6 @@ SWITCH_END_EXTERN_C
  * @param rtp         The RTP session to read candidates from
  * @param session     The core session (for pool allocations via switch_core_session_strdup)
  * @param ice_in      Pointer to the engine's ice_in structure to write into
- * @return            Number of new candidates merged
+ * @return            Number of newly available candidates copied or directly published
  */
 SWITCH_DECLARE(int) switch_rtp_merge_remote_ice_candidates_into_engine(switch_rtp_t *rtp, switch_core_session_t *session, ice_t *ice_in);

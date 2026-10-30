@@ -185,6 +185,7 @@ static switch_frame_t *find_free_frame(switch_frame_buffer_t *fb, switch_frame_t
 	np->frame->flags = orig->flags;
 	np->frame->codec = orig->codec;
 	np->frame->pmap = orig->pmap;
+	np->frame->rtp_extensions = orig->rtp_extensions;
 	np->frame->img = NULL;
 	np->frame->extra_data = np;
 	np->inuse = 1;
@@ -241,7 +242,7 @@ static switch_frame_t *find_free_frame(switch_frame_buffer_t *fb, switch_frame_t
 		np->frame->packetlen = data_offset + datalen;
 		np->frame->data = packet + data_offset;
 		np->frame->datalen = datalen;
-		np->frame->buflen = SWITCH_RTP_MAX_BUF_LEN;
+		np->frame->buflen = SWITCH_RTP_MAX_BUF_LEN - data_offset;
 	} else {
 		np->frame->packet = NULL;
 		np->frame->packetlen = 0;
@@ -3598,6 +3599,59 @@ SWITCH_DECLARE(char *) switch_url_encode_opt(const char *url, char *buf, size_t 
 SWITCH_DECLARE(char *) switch_url_encode(const char *url, char *buf, size_t len)
 {
 	return switch_url_encode_opt(url, buf, len, SWITCH_FALSE);
+}
+
+SWITCH_DECLARE(const char *) switch_redact_file_target(const char *target, char *buf, switch_size_t buflen)
+{
+	const char *scheme_end, *host, *end, *e;
+
+	if (!buf || !buflen) {
+		return "(unknown)";
+	}
+
+	if (zstr(target)) {
+		return "(unknown)";
+	}
+
+	/* Leading {} and [] groups are caller-supplied parameters -- auth_username and
+	 * auth_password among them -- so they never belong in a log line. */
+	while (*target == '{' || *target == '[') {
+		if (!(e = switch_find_end_paren(target, *target, *target == '{' ? '}' : ']'))) {
+			return "(unknown)";
+		}
+
+		target = e + 1;
+
+		while (*target == ' ') {
+			target++;
+		}
+	}
+
+	if (zstr(target)) {
+		return "(unknown)";
+	}
+
+	if (!(scheme_end = strstr(target, SWITCH_URL_SEPARATOR))) {
+		/* A local path holds no secret, and the log is more useful naming it. */
+		switch_snprintf(buf, buflen, "%s", target);
+		return buf;
+	}
+
+	host = scheme_end + 3;
+
+	/* Stop at the path, the query, the fragment, or a space -- the last of which is
+	 * where mod_av's RTMP credentials begin.  Userinfo before an @ goes too. */
+	for (end = host; *end && *end != '/' && *end != '?' && *end != '#' && *end != ' '; end++) {
+		if (*end == '@') {
+			host = end + 1;
+		}
+	}
+
+	switch_snprintf(buf, buflen, "%.*s" SWITCH_URL_SEPARATOR "%.*s%s",
+					(int) (scheme_end - target), target, (int) (end - host), host,
+					*end ? "/..." : "");
+
+	return buf;
 }
 
 SWITCH_DECLARE(char *) switch_url_decode(char *s)

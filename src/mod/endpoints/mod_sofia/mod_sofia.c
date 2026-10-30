@@ -250,6 +250,30 @@ static switch_status_t sofia_pre_validate_remote_sdp(switch_core_session_t *sess
 	return SWITCH_STATUS_SUCCESS;
 }
 
+/* A REFER sender parked for a confirmed blind transfer has left that park (moved by
+   uuid_transfer or uuid_bridge): forget the transfer, so that a later result does not
+   act on the leg even if it is parked again. */
+static void sofia_forget_blind_transfer(switch_core_session_t *session)
+{
+	switch_channel_t *channel = switch_core_session_get_channel(session);
+	switch_channel_state_t state = switch_channel_get_state(channel);
+
+	/* The state loop parses queued signal data before it calls the handler of the state
+	   it just took, so a park can land before this handler runs (the REFER itself, or a
+	   uuid_park right after a uuid_transfer). The midstate check then skips the standard
+	   handler of that state and the leg stays in the park, so keep the transfer. A leg
+	   that is already hanging up gets no result either way. */
+	if (state == CS_PARK || state >= CS_HANGUP) {
+		return;
+	}
+
+	if (switch_channel_get_variable(channel, "sip_blind_transfer_event")) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+						  "%s left the blind transfer park, a later transfer result is ignored\n", switch_channel_get_name(channel));
+		switch_channel_set_variable(channel, "sip_blind_transfer_event", NULL);
+	}
+}
+
 static switch_status_t sofia_on_routing(switch_core_session_t *session)
 {
 	private_object_t *tech_pvt = (private_object_t *) switch_core_session_get_private(session);
@@ -268,6 +292,8 @@ static switch_status_t sofia_on_routing(switch_core_session_t *session)
 		sofia_clear_flag_locked(tech_pvt, TFLAG_SIP_HOLD);
 		switch_channel_clear_flag(channel, CF_LEG_HOLDING);
 	}
+
+	sofia_forget_blind_transfer(session);
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s SOFIA ROUTING\n",
 					  switch_channel_get_name(switch_core_session_get_channel(session)));
@@ -306,6 +332,8 @@ static switch_status_t sofia_on_hibernate(switch_core_session_t *session)
 		switch_channel_clear_flag(channel, CF_LEG_HOLDING);
 	}
 
+	sofia_forget_blind_transfer(session);
+
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s SOFIA HIBERNATE\n",
 					  switch_channel_get_name(switch_core_session_get_channel(session)));
 
@@ -325,6 +353,8 @@ static switch_status_t sofia_on_execute(switch_core_session_t *session)
 		sofia_clear_flag_locked(tech_pvt, TFLAG_SIP_HOLD);
 		switch_channel_clear_flag(channel, CF_LEG_HOLDING);
 	}
+
+	sofia_forget_blind_transfer(session);
 
 	sofia_pre_extract_media_security_preference(session, &params);
 	if (sofia_pre_validate_remote_sdp(session, tech_pvt->profile, params) != SWITCH_STATUS_SUCCESS) {
@@ -897,12 +927,14 @@ switch_status_t sofia_on_hangup(switch_core_session_t *session)
 
 static switch_status_t sofia_on_exchange_media(switch_core_session_t *session)
 {
+	sofia_forget_blind_transfer(session);
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "SOFIA EXCHANGE_MEDIA\n");
 	return SWITCH_STATUS_SUCCESS;
 }
 
 static switch_status_t sofia_on_soft_execute(switch_core_session_t *session)
 {
+	sofia_forget_blind_transfer(session);
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "SOFIA SOFT_EXECUTE\n");
 	return SWITCH_STATUS_SUCCESS;
 }
@@ -919,6 +951,78 @@ static switch_status_t sofia_acknowledge_call(switch_core_session_t *session)
 	}
 
 	return SWITCH_STATUS_FALSE;
+}
+
+/* Wait, with sofia_mutex released, until another thread clears the flag, the channel goes down or
+   timer T1x64 expires. Called and returns with sofia_mutex held. */
+static switch_bool_t sofia_wait_flag_cleared(private_object_t *tech_pvt, int flag)
+{
+	uint32_t t1x64 = tech_pvt->profile->timer_t1x64 ? tech_pvt->profile->timer_t1x64 : 32000;
+	switch_time_t deadline = switch_micro_time_now() + (switch_time_t)t1x64 * 1000;
+
+	switch_mutex_unlock(tech_pvt->sofia_mutex);
+	while (switch_channel_ready(tech_pvt->channel) && sofia_test_flag(tech_pvt, flag) && switch_micro_time_now() < deadline) {
+		switch_cond_next();
+	}
+	switch_mutex_lock(tech_pvt->sofia_mutex);
+
+	return sofia_test_flag(tech_pvt, flag) ? SWITCH_FALSE : SWITCH_TRUE;
+}
+
+/* 3pcc proxy mode, no-SDP INVITE: our offer is out in the 200 OK of an answer waiting for its ACK. Media
+   comes up when the ACK completes that answer; a second offer or provisional response would never reach the
+   far end and would stall the call. Wait for the answer instead, and succeed only if it completed. */
+static switch_status_t sofia_3pcc_proxy_join_pending_answer(private_object_t *tech_pvt)
+{
+	switch_channel_t *channel = tech_pvt->channel;
+
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(tech_pvt->session), SWITCH_LOG_DEBUG,
+					  "%s waiting for the pending answer\n", switch_channel_get_name(channel));
+
+	if (sofia_wait_flag_cleared(tech_pvt, TFLAG_3PCC_ANSWER_PENDING) &&
+		switch_channel_ready(channel) && switch_channel_test_flag(channel, CF_ANSWERED)) {
+		return SWITCH_STATUS_SUCCESS;
+	}
+
+	return SWITCH_STATUS_FALSE;
+}
+
+/* An SDP offer sent in a reliable provisional whose PRACK answer has not arrived yet. */
+static switch_bool_t sofia_early_offer_pending(private_object_t *tech_pvt)
+{
+	return (sofia_test_flag(tech_pvt, TFLAG_EARLY_OFFER_SENT) && sofia_test_flag(tech_pvt, TFLAG_3PCC_EARLY_OFFER)) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
+/* Wait for the PRACK answer to a pending early offer instead of starting another offer/answer exchange.
+   Media is up when it succeeds; on timeout the call is torn down. */
+static switch_status_t sofia_join_early_offer(private_object_t *tech_pvt)
+{
+	switch_channel_t *channel = tech_pvt->channel;
+	switch_bool_t completer;
+
+	switch_mutex_lock(tech_pvt->flag_mutex);
+	completer = sofia_test_flag(tech_pvt, TFLAG_EARLY_OFFER_COMPLETING) &&
+		switch_thread_equal(tech_pvt->early_offer_completer, switch_thread_self());
+	switch_mutex_unlock(tech_pvt->flag_mutex);
+
+	if (completer) {
+		/* A pre-answer hook of the PRACK completing this offer: media is already up. */
+		return (switch_channel_ready(channel) && sofia_test_flag(tech_pvt, TFLAG_SDP)) ? SWITCH_STATUS_SUCCESS : SWITCH_STATUS_FALSE;
+	}
+
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(tech_pvt->session), SWITCH_LOG_DEBUG,
+					  "%s early-offer: waiting for the PRACK answer\n", switch_channel_get_name(channel));
+
+	if (!sofia_wait_flag_cleared(tech_pvt, TFLAG_3PCC_EARLY_OFFER)) {
+		if (switch_channel_ready(channel)) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(tech_pvt->session), SWITCH_LOG_ERROR,
+							  "%s early-offer: timeout waiting for PRACK answer\n", switch_channel_get_name(channel));
+			switch_channel_hangup(channel, SWITCH_CAUSE_NO_USER_RESPONSE);
+		}
+		return SWITCH_STATUS_FALSE;
+	}
+
+	return (switch_channel_ready(channel) && sofia_test_flag(tech_pvt, TFLAG_SDP)) ? SWITCH_STATUS_SUCCESS : SWITCH_STATUS_FALSE;
 }
 
 static switch_status_t sofia_answer_channel(switch_core_session_t *session)
@@ -997,6 +1101,16 @@ static switch_status_t sofia_answer_channel(switch_core_session_t *session)
 		sofia_set_flag_locked(tech_pvt, TFLAG_SDP);
 		switch_channel_mark_answered(channel);     // ... and remember to actually answer the call!
 		status = SWITCH_STATUS_SUCCESS;
+		goto done;
+	}
+
+	if (sofia_test_flag(tech_pvt, TFLAG_3PCC_ANSWER_PENDING)) {
+		status = sofia_3pcc_proxy_join_pending_answer(tech_pvt);
+		goto done;
+	}
+
+	if (switch_channel_direction(channel) == SWITCH_CALL_DIRECTION_INBOUND && sofia_early_offer_pending(tech_pvt) &&
+		(status = sofia_join_early_offer(tech_pvt)) != SWITCH_STATUS_SUCCESS) {
 		goto done;
 	}
 
@@ -1100,6 +1214,7 @@ static switch_status_t sofia_answer_channel(switch_core_session_t *session)
 
 			if (is_3pcc_proxy) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "3PCC-PROXY, Sent a 200 OK, waiting for ACK\n");
+				sofia_set_flag(tech_pvt, TFLAG_3PCC_ANSWER_PENDING);
 				/* Unlock the session signal to allow the ack to make it in */
 				// Maybe we should timeout?
 				switch_mutex_unlock(tech_pvt->sofia_mutex);
@@ -1110,6 +1225,7 @@ static switch_status_t sofia_answer_channel(switch_core_session_t *session)
 
 				/*  Regain lock on sofia */
 				switch_mutex_lock(tech_pvt->sofia_mutex);
+				sofia_clear_flag(tech_pvt, TFLAG_3PCC_ANSWER_PENDING);
 
 				if (is_proxy) {
 					sofia_clear_flag(tech_pvt, TFLAG_3PCC_HAS_ACK);
@@ -1662,6 +1778,26 @@ static switch_status_t sofia_send_dtmf(switch_core_session_t *session, const swi
 	return SWITCH_STATUS_SUCCESS;
 }
 
+/* Build our own SDP offer to put in a reliable provisional response. RTP is not activated here:
+   the answer arrives in the PRACK and nua_i_prack brings media up. */
+static switch_status_t sofia_early_offer_gen_sdp(private_object_t *tech_pvt)
+{
+	switch_core_session_t *session = tech_pvt->session;
+	switch_status_t status;
+
+	sofia_clear_flag_locked(tech_pvt, TFLAG_LATE_NEGOTIATION);
+	switch_core_media_prepare_codecs(session, SWITCH_TRUE);
+
+	if ((status = switch_core_media_choose_port(tech_pvt->session, SWITCH_MEDIA_TYPE_AUDIO, 0)) != SWITCH_STATUS_SUCCESS) {
+		switch_channel_hangup(tech_pvt->channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
+		return status;
+	}
+
+	switch_core_media_gen_local_sdp(session, SDP_OFFER, NULL, 0, NULL, 0);
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
 static switch_status_t sofia_receive_message(switch_core_session_t *session, switch_core_session_message_t *msg)
 {
 	switch_channel_t *channel = switch_core_session_get_channel(session);
@@ -1854,19 +1990,36 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 			event = switch_channel_get_variable(channel, "sip_blind_transfer_event");
 			uuid = switch_channel_get_variable(channel, "blind_transfer_uuid");
 
-			if (event && uuid) {
+			/* Only a leg still parked for this result: if it left CS_PARK
+			   (moved by uuid_transfer or uuid_bridge), the result is stale.
+			   Leaving the park also unsets sip_blind_transfer_event (see
+			   sofia_forget_blind_transfer()), so a leg that ran another state
+			   and was parked again is skipped. */
+			if (event && uuid && switch_channel_get_state(channel) == CS_PARK) {
+				/* Default failure sipfrag: also the one sent when the transferred
+				   leg is already down, because the locate below then fails. */
 				char payload_str[255] = "SIP/2.0 403 Forbidden\r\n";
 				const char *session_id_header = sofia_glue_session_id_header(session, tech_pvt->profile);
+				switch_bool_t peer_alive = SWITCH_FALSE;
+
+				/* Taken before the leg is transferred or hung up below, so a later
+				   result finds nothing to answer. event and uuid are copies (session
+				   pool), so they stay valid. */
+				switch_channel_set_variable(channel, "sip_blind_transfer_event", NULL);
+				switch_channel_set_variable(channel, "blind_transfer_uuid", NULL);
+
 				if (msg->numeric_arg) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 							"%s Completing blind transfer with success\n", switch_channel_get_name(channel));
 					switch_set_string(payload_str, "SIP/2.0 200 OK\r\n");
-				} else if (uuid) {
+				} else {
 					switch_core_session_t *other_session = switch_core_session_locate(uuid);
 					if (other_session) {
 						switch_channel_t *other_channel = switch_core_session_get_channel(other_session);
 						const char *invite_failure_status = switch_channel_get_variable(other_channel, "sip_invite_failure_status");
-						const char *invite_failure_str = switch_channel_get_variable(other_channel, "sip_invite_failure_status");
+						const char *invite_failure_str = switch_channel_get_variable(other_channel, "sip_invite_failure_phrase");
+						/* The locate refuses channels that are already down. */
+						peer_alive = SWITCH_TRUE;
 						if (!zstr(invite_failure_status) && !zstr(invite_failure_str)) {
 							snprintf(payload_str, sizeof(payload_str), "SIP/2.0 %s %s\r\n", invite_failure_status, invite_failure_str);
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
@@ -1887,8 +2040,17 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 
 
 				if (!msg->numeric_arg) {
-					xdest = switch_core_session_sprintf(session, "intercept:%s", uuid);
-					switch_ivr_session_transfer(session, xdest, "inline", NULL);
+					/* Re-bridge onto the transferred leg only while it is up. Otherwise
+					   the NOTIFY above has carried the failure: end this parked leg. */
+					if (peer_alive) {
+						xdest = switch_core_session_sprintf(session, "intercept:%s", uuid);
+						switch_ivr_session_transfer(session, xdest, "inline", NULL);
+					} else {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+								"%s blind transfer failed and transferee %s is down, hanging up\n",
+								switch_channel_get_name(channel), uuid);
+						switch_channel_hangup(channel, SWITCH_CAUSE_BLIND_TRANSFER);
+					}
 				}
 			}
 
@@ -1897,6 +2059,9 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 	case SWITCH_MESSAGE_INDICATE_CLEAR_PROGRESS:
 		if (!switch_channel_test_flag(channel, CF_ANSWERED)) {
 			sofia_clear_flag(tech_pvt, TFLAG_EARLY_MEDIA);
+			if (!sofia_test_flag(tech_pvt, TFLAG_3PCC_EARLY_OFFER)) {
+				sofia_clear_flag(tech_pvt, TFLAG_EARLY_OFFER_SENT);
+			}
 		}
 		goto end;
 	case SWITCH_MESSAGE_INDICATE_ANSWER:
@@ -2917,7 +3082,8 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 			}
 
 			if (!switch_channel_test_flag(channel, CF_RING_READY) && !sofia_test_flag(tech_pvt, TFLAG_BYE) &&
-				!switch_channel_test_flag(channel, CF_EARLY_MEDIA) && !switch_channel_test_flag(channel, CF_ANSWERED)) {
+				!switch_channel_test_flag(channel, CF_EARLY_MEDIA) && !switch_channel_test_flag(channel, CF_ANSWERED) &&
+				!sofia_test_flag(tech_pvt, TFLAG_3PCC_ANSWER_PENDING)) {
 				char *extra_header = sofia_glue_get_extra_headers(channel, SOFIA_SIP_PROGRESS_HEADER_PREFIX);
 				const char *call_info = switch_channel_get_variable(channel, "presence_call_info_full");
 				char *cid = generate_pai_str(tech_pvt);
@@ -2950,6 +3116,87 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 				case SWITCH_RING_READY_RINGING:
 				default:
 
+					/* Whether this 180 may go out reliably. Applied here rather than at
+					   invite time so the routing dialplan can still decide it; the tag
+					   reaches the stack ahead of the response below, both being queued on
+					   the same nua handle. */
+					{
+						const char *reliable_180 = switch_channel_get_variable(channel, "reliable_180_without_sdp");
+
+						if (reliable_180 || sofia_test_pflag(tech_pvt->profile, PFLAG_RELIABLE_180_NOSDP)) {
+							nua_set_hparams(tech_pvt->nh,
+											NUTAG_RELIABLE_180_NOSDP(reliable_180 ? switch_true(reliable_180) : 1), TAG_END());
+						}
+					}
+
+					/* A no-SDP INVITE deferred by the early-offer flow has no offer to put in a
+					   reliable 180, and the far end is entitled to one in the first reliable
+					   provisional, so send a 183 carrying it instead. The answer arrives in the
+					   PRACK; nothing is waited on here. Skipped when this leg originated a bridge,
+					   because the outbound leg's codecs are not inherited until later.
+
+					   The 183 requires 100rel, so the peer must have advertised it. The profile
+					   default is only applied to such peers, but the per-call variable can be set
+					   from the dialplan or a pre-routing source that never consulted the peer, so
+					   revalidate here against what the INVITE actually carried. */
+					if (switch_channel_var_true(channel, "ring_ready_early_media") &&
+						switch_channel_var_true(channel, "sip_remote_supports_100rel") &&
+						switch_channel_test_flag(channel, CF_3PCC) &&
+						sofia_test_flag(tech_pvt, TFLAG_LATE_NEGOTIATION) &&
+						!sofia_test_flag(tech_pvt, TFLAG_EARLY_OFFER_SENT) &&
+						!switch_channel_test_flag(channel, CF_PROXY_MODE) &&
+						!switch_channel_test_flag(channel, CF_PROXY_MEDIA) &&
+						!switch_channel_test_flag(channel, CF_ORIGINATOR)) {
+
+						if (sofia_early_offer_gen_sdp(tech_pvt) != SWITCH_STATUS_SUCCESS) {
+							switch_safe_free(extra_header);
+							status = SWITCH_STATUS_FALSE;
+							goto end_lock;
+						}
+
+						sofia_set_flag_locked(tech_pvt, TFLAG_3PCC_EARLY_OFFER);
+						sofia_set_flag_locked(tech_pvt, TFLAG_EARLY_OFFER_SENT);
+						tech_pvt->mparams.early_sdp = switch_core_session_strdup(tech_pvt->session, tech_pvt->mparams.local_sdp_str);
+
+						if (sofia_use_soa(tech_pvt)) {
+							nua_respond(tech_pvt->nh, SIP_183_SESSION_PROGRESS,
+										NUTAG_AUTOANSWER(0),
+										SIPTAG_CONTACT_STR(tech_pvt->reply_contact),
+										SOATAG_REUSE_REJECTED(1),
+										SOATAG_RTP_SELECT(1),
+										SOATAG_SDP_PRINT_FLAGS(SOA_SDP_PRINT_FLAG_ALWAYS),
+										SOATAG_SDP_MEDIA_STRICT_FMT(sofia_test_pflag(tech_pvt->profile, PFLAG_SDP_MEDIA_STRICT_FMT)),
+										SOATAG_ADDRESS(tech_pvt->mparams.adv_sdp_audio_ip),
+										SOATAG_USER_SDP_STR(tech_pvt->mparams.local_sdp_str),
+										SOATAG_AUDIO_AUX("cn telephone-event"),
+										SIPTAG_REQUIRE_STR("100rel"),
+										SIPTAG_HEADER_STR("P-Early-Media: sendrecv"),
+										TAG_IF(cid, SIPTAG_HEADER_STR(cid)),
+										TAG_IF(call_info, SIPTAG_CALL_INFO_STR(call_info)),
+										TAG_IF(!zstr(extra_header), SIPTAG_HEADER_STR(extra_header)),
+										TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)),
+										TAG_END());
+						} else {
+							nua_respond(tech_pvt->nh, SIP_183_SESSION_PROGRESS,
+										NUTAG_AUTOANSWER(0),
+										NUTAG_MEDIA_ENABLE(0),
+										SIPTAG_CONTACT_STR(tech_pvt->reply_contact),
+										SIPTAG_CONTENT_TYPE_STR("application/sdp"),
+										SIPTAG_PAYLOAD_STR(tech_pvt->mparams.local_sdp_str),
+										SIPTAG_REQUIRE_STR("100rel"),
+										SIPTAG_HEADER_STR("P-Early-Media: sendrecv"),
+										TAG_IF(cid, SIPTAG_HEADER_STR(cid)),
+										TAG_IF(call_info, SIPTAG_CALL_INFO_STR(call_info)),
+										TAG_IF(!zstr(extra_header), SIPTAG_HEADER_STR(extra_header)),
+										TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)),
+										TAG_END());
+						}
+
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+										  "%s ring_ready promoted to early media with an SDP offer\n", switch_channel_get_name(channel));
+						break;
+					}
+
 					nua_respond(tech_pvt->nh, SIP_180_RINGING,
 								SIPTAG_CONTACT_STR(tech_pvt->reply_contact),
 								TAG_IF(cid, SIPTAG_HEADER_STR(cid)),
@@ -2965,7 +3212,11 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 
 
 				switch_safe_free(extra_header);
+				/* The ring hooks may pre-answer, which can wait for the PRACK to the offer just sent;
+				   its handler needs sofia_mutex. */
+				switch_mutex_unlock(tech_pvt->sofia_mutex);
 				switch_channel_mark_ring_ready(channel);
+				switch_mutex_lock(tech_pvt->sofia_mutex);
 			}
 		}
 		break;
@@ -2997,6 +3248,16 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 			is_proxy = (switch_channel_test_flag(channel, CF_PROXY_MODE) || switch_channel_test_flag(channel, CF_PROXY_MEDIA));
 			is_3pcc_proxy = (sofia_test_pflag(tech_pvt->profile, PFLAG_3PCC_PROXY) && sofia_test_flag(tech_pvt, TFLAG_3PCC));
 
+			if (sofia_test_flag(tech_pvt, TFLAG_3PCC_ANSWER_PENDING)) {
+				status = sofia_3pcc_proxy_join_pending_answer(tech_pvt);
+				goto end_lock;
+			}
+
+			if (sofia_early_offer_pending(tech_pvt)) {
+				status = sofia_join_early_offer(tech_pvt);
+				goto end_lock;
+			}
+
 			/* dialplan-mode early-offer: the no-SDP INVITE was deferred (CF_3PCC is set only by
 			   the no-SDP early-offer defer, which distinguishes this from a normal SDP INVITE
 			   that also carries TFLAG_LATE_NEGOTIATION under inbound-late-negotiation) and the
@@ -3027,7 +3288,8 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 				}
 			}
 
-			if (!sofia_test_flag(tech_pvt, TFLAG_ANS) && !sofia_test_flag(tech_pvt, TFLAG_EARLY_MEDIA)) {
+			if (!sofia_test_flag(tech_pvt, TFLAG_ANS) && !sofia_test_flag(tech_pvt, TFLAG_EARLY_MEDIA)
+				&& !sofia_test_flag(tech_pvt, TFLAG_EARLY_OFFER_SENT)) {
 
 				sofia_set_flag_locked(tech_pvt, TFLAG_EARLY_MEDIA);
 				switch_log_printf(SWITCH_CHANNEL_ID_SESSION, msg->_file, msg->_func, msg->_line,
@@ -3049,16 +3311,13 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 						}
 					}
 				} else if (sofia_test_flag(tech_pvt, TFLAG_3PCC_EARLY_OFFER)) {
-					/* Early-offer: build our own SDP offer for the 183. RTP is NOT activated
-					   here -- the PRACK answer (consumed in nua_i_prack) does that, after which
-					   the synchronous wait further below unblocks the dialplan. */
-					sofia_clear_flag_locked(tech_pvt, TFLAG_LATE_NEGOTIATION);
-					switch_core_media_prepare_codecs(tech_pvt->session, SWITCH_TRUE);
-					if ((status = switch_core_media_choose_port(tech_pvt->session, SWITCH_MEDIA_TYPE_AUDIO, 0)) != SWITCH_STATUS_SUCCESS) {
-						switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
+					/* Early-offer: the offer goes in the 183 and the answer comes back in the
+					   PRACK, after which the synchronous wait further below unblocks the
+					   dialplan. */
+					if ((status = sofia_early_offer_gen_sdp(tech_pvt)) != SWITCH_STATUS_SUCCESS) {
 						goto end_lock;
 					}
-					switch_core_media_gen_local_sdp(session, SDP_OFFER, NULL, 0, NULL, 0);
+					sofia_set_flag_locked(tech_pvt, TFLAG_EARLY_OFFER_SENT);
 				} else {
 					if (sofia_test_flag(tech_pvt, TFLAG_LATE_NEGOTIATION) ||
 						switch_core_media_codec_chosen(tech_pvt->session, SWITCH_MEDIA_TYPE_AUDIO) != SWITCH_STATUS_SUCCESS) {
