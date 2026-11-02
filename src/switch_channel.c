@@ -3624,6 +3624,9 @@ SWITCH_DECLARE(switch_bool_t) switch_channel_has_queued_extension(switch_channel
 
 SWITCH_DECLARE(void) switch_channel_transfer_to_extension(switch_channel_t *channel, switch_caller_extension_t *caller_extension)
 {
+	/* The new extension no longer waits for the peer left behind. */
+	switch_channel_set_variable(channel, "blind_transfer_deferred_peer", NULL);
+
 	switch_mutex_lock(channel->profile_mutex);
 	channel->queued_extension = caller_extension;
 	switch_mutex_unlock(channel->profile_mutex);

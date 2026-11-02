@@ -597,7 +597,8 @@ static struct {
 	int resume_bridge;
 	int resume_transfer;
 	int resume_set;
-} bt_watch = { PTHREAD_MUTEX_INITIALIZER, 0, "", 0, 0, 0, 0, "", 0, 0, 0, 0 };
+	int resume_xferext;
+} bt_watch = { PTHREAD_MUTEX_INITIALIZER, 0, "", 0, 0, 0, 0, "", 0, 0, 0, 0, 0 };
 
 /* Observe the real private-event resume, before the confirmation gate. The hook
    and its static counters remain valid until the SIPp sessions finish. */
@@ -617,6 +618,7 @@ static switch_status_t bt_resume_hook(switch_core_session_t *session, switch_cor
 			bt_watch.resume_transfer = switch_channel_test_flag(channel, CF_TRANSFER) &&
 				!switch_channel_get_variable(channel, "blind_transfer_deferred_peer");
 			bt_watch.resume_set = switch_true(switch_channel_get_variable(channel, "bt_resume_done"));
+			bt_watch.resume_xferext = switch_channel_test_flag(channel, CF_TRANSFER) && switch_channel_has_queued_extension(channel);
 		}
 	}
 	pthread_mutex_unlock(&bt_watch.mutex);
@@ -667,6 +669,7 @@ typedef struct {
 	int resume_bridge;
 	int resume_transfer;
 	int resume_set;
+	int resume_xferext;
 } bt_result_t;
 
 /* What blind_transfer_run() does to the REFER sender once its REFER has parked it, or, for
@@ -678,7 +681,8 @@ typedef enum {
 	BT_MOVE_REROUTE_ANSWER,		/* C parks after the bridge; A to a second target D (SIPp on 5065) that answers */
 	BT_MOVE_REROUTE_BUSY,		/* the same, D rejects with 486 */
 	BT_MOVE_QUEUED_PARK,		/* a running bridge consumes a queued transfer to park */
-	BT_MOVE_QUEUED_SET		/* a normal queued app resumes the same bridge */
+	BT_MOVE_QUEUED_SET,		/* a normal queued app resumes the same bridge */
+	BT_MOVE_XFEREXT_PARK		/* the audio loop consumes an xferext event containing park */
 } bt_move_t;
 
 static int start_bt_sipp(const char *ip, const char *scenario, const char *port, const char *target, const char *hold_ms,
@@ -826,15 +830,48 @@ static switch_bool_t bt_move_referrer(bt_move_t move)
 	return ok;
 }
 
+/* Qualify the handoff without depending on the awaited-peer deletion under test. */
+static switch_bool_t bt_wait_xferext_parked(const char *a_uuid, const char *c_uuid)
+{
+	int loop_count = 100;
+
+	while (loop_count--) {
+		switch_core_session_t *session = switch_core_session_locate(a_uuid);
+		switch_bool_t a_parked = SWITCH_FALSE, c_parked = SWITCH_FALSE;
+
+		if (session) {
+			switch_channel_t *channel = switch_core_session_get_channel(session);
+			switch_caller_extension_t *extension = switch_channel_get_caller_extension(channel);
+
+			a_parked = switch_channel_test_flag(channel, CF_PARK) && switch_channel_get_state(channel) == CS_EXECUTE &&
+				extension && !strcmp(switch_str_nil(extension->extension_name), "xferext");
+			switch_core_session_rwunlock(session);
+		}
+		if ((session = switch_core_session_locate(c_uuid))) {
+			switch_channel_t *channel = switch_core_session_get_channel(session);
+
+			c_parked = switch_channel_test_flag(channel, CF_PARK) && !switch_channel_test_flag(channel, CF_ANSWERED) &&
+				!switch_channel_test_flag(channel, CF_BRIDGED);
+			switch_core_session_rwunlock(session);
+		}
+		if (a_parked && c_parked) {
+			return SWITCH_TRUE;
+		}
+		switch_sleep(20 * 1000);
+	}
+	return SWITCH_FALSE;
+}
+
 /* Finds the transfer target C that holds the deferred confirmation (blind_transfer_deferred_uuid,
    set on the early-media bridge to the transferred leg A's uuid), sets park_after_bridge on C so
    it survives A leaving the bridge, and moves A to D or queues an application on its running bridge. */
 static switch_bool_t bt_move_transferred_leg(bt_move_t move)
 {
 	char a_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1] = "";
+	char c_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1] = "";
 	char *arg;
 	int loop_count = 250;
-	int queued = move == BT_MOVE_QUEUED_PARK || move == BT_MOVE_QUEUED_SET;
+	int queued = move == BT_MOVE_QUEUED_PARK || move == BT_MOVE_QUEUED_SET || move == BT_MOVE_XFEREXT_PARK;
 	switch_bool_t ok;
 
 	while (!*a_uuid && loop_count--) {
@@ -865,6 +902,7 @@ static switch_bool_t bt_move_transferred_leg(bt_move_t move)
 							pthread_mutex_unlock(&bt_watch.mutex);
 							if (switch_core_event_hook_add_receive_message(a_session, bt_resume_hook) == SWITCH_STATUS_SUCCESS) {
 								switch_copy_string(a_uuid, uuid, sizeof(a_uuid));
+								switch_copy_string(c_uuid, switch_core_session_get_uuid(c_session), sizeof(c_uuid));
 							}
 						}
 						switch_core_session_rwunlock(a_session);
@@ -883,6 +921,23 @@ static switch_bool_t bt_move_transferred_leg(bt_move_t move)
 		return SWITCH_FALSE;
 	}
 
+	if (move == BT_MOVE_XFEREXT_PARK) {
+		switch_core_session_t *session = switch_core_session_locate(a_uuid);
+		switch_event_t *event = NULL;
+
+		ok = SWITCH_FALSE;
+		if (session) {
+			/* The same event and non-priority queue used by event-socket sendmsg. */
+			if (switch_event_create(&event, SWITCH_EVENT_COMMAND) == SWITCH_STATUS_SUCCESS &&
+				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "call-command", "xferext") == SWITCH_STATUS_SUCCESS &&
+				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "application", "park") == SWITCH_STATUS_SUCCESS) {
+				ok = switch_core_session_queue_private_event(session, &event, SWITCH_FALSE) == SWITCH_STATUS_SUCCESS;
+			}
+			switch_event_destroy(&event);
+			switch_core_session_rwunlock(session);
+		}
+		return ok && bt_wait_xferext_parked(a_uuid, c_uuid);
+	}
 	if (queued) {
 		return switch_ivr_broadcast(a_uuid, move == BT_MOVE_QUEUED_PARK ? "transfer::7878780007 XML default" :
 									"set::bt_resume_done=true", SMF_ECHO_ALEG) == SWITCH_STATUS_SUCCESS;
@@ -917,6 +972,7 @@ static void blind_transfer_run(const char *ip, const char *target_scenario, cons
 	bt_watch.resume_bridge = 0;
 	bt_watch.resume_transfer = 0;
 	bt_watch.resume_set = 0;
+	bt_watch.resume_xferext = 0;
 	pthread_mutex_unlock(&bt_watch.mutex);
 	switch_log_bind_logger(bt_watch_logger, SWITCH_LOG_DEBUG, SWITCH_FALSE);
 
@@ -930,7 +986,7 @@ static void blind_transfer_run(const char *ip, const char *target_scenario, cons
 		goto end;
 	}
 	r->started = 1;
-	if (d_scenario || move == BT_MOVE_QUEUED_PARK || move == BT_MOVE_QUEUED_SET) {
+	if (d_scenario || move == BT_MOVE_QUEUED_PARK || move == BT_MOVE_QUEUED_SET || move == BT_MOVE_XFEREXT_PARK) {
 		r->moved = bt_move_transferred_leg(move);
 	} else if (move != BT_MOVE_NONE) {
 		r->moved = bt_move_referrer(move);
@@ -959,6 +1015,7 @@ static void blind_transfer_run(const char *ip, const char *target_scenario, cons
 	r->resume_bridge = bt_watch.resume_bridge;
 	r->resume_transfer = bt_watch.resume_transfer;
 	r->resume_set = bt_watch.resume_set;
+	r->resume_xferext = bt_watch.resume_xferext;
 	pthread_mutex_unlock(&bt_watch.mutex);
 	stop_t38_sipp(&a);
 	stop_t38_sipp(&b);
@@ -1465,6 +1522,25 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 					   "the audio bridge did not resume with its old peer after consuming the transfer");
 			fst_xcheck(r.target_answered_at && r.result_at > r.target_answered_at, "C did not answer before the final result");
 			fst_xcheck(r.results == 1 && strstr(r.status, "SIP/2.0 403 Forbidden"), "the final result is not A's hangup failure");
+			fst_xcheck(r.referrer_blind_transfer_hangup && r.settled, "the REFER sender or parked calls did not finish");
+			fst_xcheck(r.a_ok && r.b_ok && r.c_ok, "a SIPp peer failed; inspect the *_blind_transfer_*_errors.log files");
+		}
+		FST_TEST_END()
+
+		/* xferext leaves C alive but abandons its result. Only A's later failure may confirm. */
+		FST_TEST_BEGIN(blind_transfer_xferext_to_park)
+		{
+			bt_result_t r = { 0 };
+
+			blind_transfer_run(switch_core_get_variable("local_ip_v4"), "sipp-scenarios/uas_blind_transfer_target_left_answer.xml", "6000",
+							   "SIP/2.0 403 Forbidden", BT_MOVE_XFEREXT_PARK, &r);
+			fst_xcheck(r.started && r.moved, "xferext did not park A while C survived unanswered");
+			fst_xcheck(r.resume_unbridge == 1 && r.resume_bridge == 1 && r.resume_xferext,
+					   "the audio bridge did not consume xferext and resume with its queued extension");
+			fst_xcheck(r.target_answered_at, "C did not answer after the xferext handoff");
+			fst_xcheck(r.results == 1 && strstr(r.status, "SIP/2.0 403 Forbidden"), "the final result is not A's hangup failure after xferext");
+			fst_xcheck(r.result_at > r.target_answered_at, "a result was sent at C's late answer");
+			fst_xcheck(r.resume_transfer, "xferext did not invalidate the awaited peer");
 			fst_xcheck(r.referrer_blind_transfer_hangup && r.settled, "the REFER sender or parked calls did not finish");
 			fst_xcheck(r.a_ok && r.b_ok && r.c_ok, "a SIPp peer failed; inspect the *_blind_transfer_*_errors.log files");
 		}
