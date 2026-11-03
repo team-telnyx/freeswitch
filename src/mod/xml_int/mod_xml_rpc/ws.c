@@ -410,6 +410,23 @@ static void ws_put_be64(uint8_t *p, uint64_t v)
 	p[7] = (uint8_t)(v);
 }
 
+/* Read into wsh->buffer until it holds want bytes, never past them, so the
+   next frame stays buffered in the connection. */
+static int ws_read_header(wsh_t *wsh, issize_t want)
+{
+	while (!wsh->down && wsh->datalen < want) {
+		issize_t r = ws_raw_read(wsh, wsh->buffer + wsh->datalen, want - wsh->datalen);
+
+		if (r < 1) {
+			return 0;
+		}
+
+		wsh->datalen += r;
+	}
+
+	return wsh->datalen >= want;
+}
+
 issize_t ws_read_frame(wsh_t *wsh, ws_opcode_t *oc, uint8_t **data)
 {
 
@@ -429,18 +446,12 @@ issize_t ws_read_frame(wsh_t *wsh, ws_opcode_t *oc, uint8_t **data)
 		return ws_close(wsh, WS_PROTO_ERR);
 	}
 
-	if ((wsh->datalen = ws_raw_read(wsh, wsh->buffer, 14)) < need) {
-		while (!wsh->down && wsh->datalen < need) {
-			issize_t r = ws_raw_read(wsh, wsh->buffer + wsh->datalen, 14 - wsh->datalen);
+	wsh->datalen = 0;
 
-			if (r < 1) {
-				/* invalid read - protocol err .. */
-				*oc = WSOC_CLOSE;
-				return ws_close(wsh, WS_PROTO_ERR);
-			}
-
-			wsh->datalen += r;
-		}
+	if (!ws_read_header(wsh, need)) {
+		/* invalid read - protocol err .. */
+		*oc = WSOC_CLOSE;
+		return ws_close(wsh, WS_PROTO_ERR);
 	}
 
 	*oc = *wsh->buffer & 0xf;
@@ -449,6 +460,7 @@ issize_t ws_read_frame(wsh_t *wsh, ws_opcode_t *oc, uint8_t **data)
 	case WSOC_CLOSE:
 		{
 			wsh->plen = wsh->buffer[1] & 0x7f;
+			wsh->buffer[2] = '\0';	/* the close payload is not read */
 			*data = (uint8_t *) &wsh->buffer[2];
 			return ws_close(wsh, 1000);
 		}
@@ -461,6 +473,14 @@ issize_t ws_read_frame(wsh_t *wsh, ws_opcode_t *oc, uint8_t **data)
 		{
 			//int fin = (wsh->buffer[0] >> 7) & 1;
 			int mask = (wsh->buffer[1] >> 7) & 1;
+			int len7 = wsh->buffer[1] & 0x7f;
+			issize_t hlen = 2 + (mask ? 4 : 0) + (len7 == 127 ? 8 : len7 == 126 ? 2 : 0);
+
+			if (!ws_read_header(wsh, hlen)) {
+				/* invalid read - protocol err .. */
+				*oc = WSOC_CLOSE;
+				return ws_close(wsh, WS_PROTO_ERR);
+			}
 
 			if (mask) {
 				need += 4;
