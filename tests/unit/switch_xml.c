@@ -232,6 +232,71 @@ FST_MINCORE_BEGIN("./conf")
 		}
 		FST_TEST_END()
 
+		FST_TEST_BEGIN(test_exponential_entity_expansion_forward_refs)
+		{
+			/* Over the expansion count, each entity referencing one declared after it */
+			const char *nested_entities =
+				"<?xml version=\"1.0\"?>\n"
+				"<!DOCTYPE lolz [\n"
+				"<!ENTITY lol5 \"&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;\">\n"
+				"<!ENTITY lol4 \"&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;\">\n"
+				"<!ENTITY lol3 \"&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;\">\n"
+				"<!ENTITY lol2 \"&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;\">\n"
+				"<!ENTITY lol1 \"&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;\">\n"
+				"<!ENTITY lol \"lol\">\n"
+				"]>\n"
+				"<lolz>&lol5;</lolz>";
+
+			switch_xml_t xml = switch_xml_parse_str_dynamic((char *)nested_entities, SWITCH_TRUE);
+
+			fst_check(!xml || !zstr(switch_xml_error(xml)));
+			if (xml) switch_xml_free(xml);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(test_exponential_parameter_entity_expansion)
+		{
+			/* Parameter entities are expanded when declared: 48 bytes doubled 20 times */
+			const char *nested_entities =
+				"<?xml version=\"1.0\"?>\n"
+				"<!DOCTYPE lolz [\n"
+				"<!ENTITY % p0 \"lollollollollollollollollollollollollollollollol\">\n"
+				"<!ENTITY % p1 \"%p0;%p0;\"><!ENTITY % p2 \"%p1;%p1;\"><!ENTITY % p3 \"%p2;%p2;\">\n"
+				"<!ENTITY % p4 \"%p3;%p3;\"><!ENTITY % p5 \"%p4;%p4;\"><!ENTITY % p6 \"%p5;%p5;\">\n"
+				"<!ENTITY % p7 \"%p6;%p6;\"><!ENTITY % p8 \"%p7;%p7;\"><!ENTITY % p9 \"%p8;%p8;\">\n"
+				"<!ENTITY % p10 \"%p9;%p9;\"><!ENTITY % p11 \"%p10;%p10;\"><!ENTITY % p12 \"%p11;%p11;\">\n"
+				"<!ENTITY % p13 \"%p12;%p12;\"><!ENTITY % p14 \"%p13;%p13;\"><!ENTITY % p15 \"%p14;%p14;\">\n"
+				"<!ENTITY % p16 \"%p15;%p15;\"><!ENTITY % p17 \"%p16;%p16;\"><!ENTITY % p18 \"%p17;%p17;\">\n"
+				"<!ENTITY % p19 \"%p18;%p18;\"><!ENTITY % p20 \"%p19;%p19;\">\n"
+				"]>\n"
+				"<lolz/>";
+
+			switch_xml_t xml = switch_xml_parse_str_dynamic((char *)nested_entities, SWITCH_TRUE);
+
+			fst_check(!xml || !zstr(switch_xml_error(xml)));
+			if (xml) switch_xml_free(xml);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(test_entity_forward_ref)
+		{
+			/* A small forward reference is still expanded */
+			const char *safe_entities =
+				"<?xml version=\"1.0\"?>\n"
+				"<!DOCTYPE test [\n"
+				"<!ENTITY product \"&company; Media Server\">\n"
+				"<!ENTITY company \"FreeSWITCH\">\n"
+				"]>\n"
+				"<test>&product;</test>";
+
+			switch_xml_t xml = switch_xml_parse_str_dynamic((char *)safe_entities, SWITCH_TRUE);
+
+			fst_requires(xml);
+			fst_check_string_equals(xml->txt, "FreeSWITCH Media Server");
+			switch_xml_free(xml);
+		}
+		FST_TEST_END()
+
 		FST_TEST_BEGIN(test_entity_expansion_limit)
 		{
 			/* Test that reasonable entity usage still works */

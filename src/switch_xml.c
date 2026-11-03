@@ -106,6 +106,7 @@ void globfree(glob_t *);
 /* Limits for entity expansion to prevent excessive resource consumption */
 #define SWITCH_XML_MAX_ENTITY_EXPANSION_DEPTH 20              /* Maximum recursion depth for entity expansion */
 #define SWITCH_XML_MAX_ENTITY_EXPANSION_COUNT 10000           /* Maximum number of entity expansions */
+#define SWITCH_XML_MAX_ENTITY_VALUE_LENGTH (64 * 1024)        /* Maximum entity value after parameter entity expansion */
 
 static void preprocess_exec_set(char *keyval)
 {
@@ -912,7 +913,12 @@ static short switch_xml_internal_dtd(switch_xml_root_t root, char *s, switch_siz
 				*(s++) = '\0';	/* null terminate value */
 			ent[i + 1] = switch_xml_decode(v, pe, '%');	/* set value */
 			ent[i + 2] = NULL;	/* null terminate entity list */
-			if (!switch_xml_ent_ok(n, ent[i + 1], ent)) {	/* circular reference */
+			if (strlen(ent[i + 1]) > SWITCH_XML_MAX_ENTITY_VALUE_LENGTH) {
+				if (ent[i + 1] != v)
+					free(ent[i + 1]);
+				switch_xml_err(root, v, "entity value too long &%s", n);
+				break;
+			} else if (!switch_xml_ent_ok(n, ent[i + 1], ent)) {	/* circular reference */
 				if (ent[i + 1] != v)
 					free(ent[i + 1]);
 				switch_xml_err(root, v, "circular entity declaration &%s", n);
@@ -997,6 +1003,13 @@ static short switch_xml_internal_dtd(switch_xml_root_t root, char *s, switch_siz
 			s = strchr(s, '>');	/* skip other declarations */
 		else if (*(s++) == '%' && !root->standalone)
 			break;
+	}
+
+	/* An entity may reference ones declared after it, so check each again with all of them known */
+	for (i = 0; !*root->err && root->ent[i]; i += 2) {
+		if (!switch_xml_ent_ok(root->ent[i], root->ent[i + 1], root->ent)) {
+			switch_xml_err(root, s, "entity expansion limit exceeded &%s", root->ent[i]);
+		}
 	}
 
 	free(pe);
