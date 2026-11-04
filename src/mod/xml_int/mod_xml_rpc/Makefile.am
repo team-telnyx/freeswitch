@@ -88,5 +88,14 @@ test_test_rpc_helper_SOURCES = test/test_rpc_helper.cpp
 test_test_rpc_helper_CXXFLAGS = $(AM_CXXFLAGS) -std=c++17
 test_test_rpc_helper_LDADD =
 
-TESTS = test/test_rpc_helper
+# Standalone unit test for ws_read_frame(). Includes ws.c directly with
+# stubs for the abyss connection calls.
+noinst_PROGRAMS += test/test_ws_frame
+test_test_ws_frame_SOURCES = test/test_ws_frame.c
+test_test_ws_frame_CFLAGS = -I$(switch_srcdir)/libs/xmlrpc-c -I$(switch_srcdir)/libs/xmlrpc-c/include
+test_test_ws_frame_CFLAGS += -I$(switch_srcdir)/libs/xmlrpc-c/lib/abyss/src -I$(switch_srcdir)/libs/xmlrpc-c/lib/util/include
+test_test_ws_frame_CFLAGS += -I$(switch_builddir)/libs/xmlrpc-c/include $(openssl_CFLAGS) -I. -w
+test_test_ws_frame_LDADD = $(openssl_LIBS)
+
+TESTS = test/test_rpc_helper test/test_ws_frame
 
