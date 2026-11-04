@@ -387,6 +387,54 @@ FST_MINCORE_BEGIN("./conf")
 		}
 		FST_TEST_END()
 
+		FST_TEST_BEGIN(test_stray_reference_chars_add_no_allowance)
+		{
+			/* 18000 replacements exceed the cap; 10000 '%' in content are not references */
+			int i, n = 10000;
+			char *doc = malloc(9000 * 4 + n + 128), *p = doc;
+			switch_xml_t xml;
+
+			p += sprintf(p, "<!DOCTYPE t [\n<!ENTITY y \"a\">\n<!ENTITY x \"");
+			for (i = 0; i < 9000; i++) {
+				p += sprintf(p, "&y;");
+			}
+			p += sprintf(p, "\">\n]>\n<t>&x;&x;");
+			memset(p, '%', n);
+			p += n;
+			sprintf(p, "</t>");
+
+			xml = switch_xml_parse_str_dynamic(doc, SWITCH_TRUE);
+			fst_requires(xml);
+			fst_check(strstr(switch_xml_error(xml), "entity expansion limit exceeded") != NULL);
+			switch_xml_free(xml);
+			free(doc);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(test_normalized_attribute_charges_allocation)
+		{
+			/* Each value normalizes to "", but its 60 KB buffer still counts */
+			int i, n = 60000;
+			char *doc = malloc(n + 40 * 16 + 128), *p = doc;
+			switch_xml_t xml;
+
+			p += sprintf(p, "<!DOCTYPE r [\n<!ATTLIST t a NMTOKENS #IMPLIED>\n<!ENTITY sp \"");
+			memset(p, ' ', n);
+			p += n;
+			p += sprintf(p, "\">\n]>\n<r>");
+			for (i = 0; i < 40; i++) {
+				p += sprintf(p, "<t a=\"&sp;\"/>");
+			}
+			sprintf(p, "</r>");
+
+			xml = switch_xml_parse_str_dynamic(doc, SWITCH_TRUE);
+			fst_requires(xml);
+			fst_check(strstr(switch_xml_error(xml), "entity expansion limit exceeded") != NULL);
+			switch_xml_free(xml);
+			free(doc);
+		}
+		FST_TEST_END()
+
 		FST_TEST_BEGIN(test_many_references_in_input)
 		{
 			/* References written in the document do not use up the expansion budget */

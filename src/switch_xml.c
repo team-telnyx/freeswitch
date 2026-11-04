@@ -614,7 +614,7 @@ static char *switch_xml_decode(switch_xml_root_t root, char *s, char **ent, char
 {
 	char *e, *r = s, *m = s;
 	unsigned long b, c, d, l;
-	unsigned long len, max_len, refs = 0, input_refs, extra;
+	unsigned long len, max_len, refs = 0, input_refs, extra, alloc = 0;
 
 	for (; *s; s++) {			/* normalize line endings */
 		while (*s == '\r') {
@@ -624,8 +624,11 @@ static char *switch_xml_decode(switch_xml_root_t root, char *s, char **ent, char
 		}
 		if (!*s)
 			break;
-		if (*s == '&' || *s == '%')
-			refs++;			/* references already in s */
+		if ((*s == '&' && (t == '&' || t == ' ' || t == '*')) || (*s == '%' && t == '%')) {
+			for (b = 0; ent[b] && strncmp(s + 1, ent[b], strlen(ent[b])); b += 2);
+			if (ent[b])
+				refs++;		/* references already in s */
+		}
 	}
 
 	len = (unsigned long) (s - r);
@@ -694,6 +697,8 @@ static char *switch_xml_decode(switch_xml_root_t root, char *s, char **ent, char
 						} else {
 							r = (char *) switch_must_realloc(r, l);
 						}
+						if (l > alloc)
+							alloc = l;
 					}
 					e = strchr((s = r + d), ';');	/* fix up pointers */
 				}
@@ -719,12 +724,12 @@ static char *switch_xml_decode(switch_xml_root_t root, char *s, char **ent, char
 			*s = '\0';			/* trim any trailing space */
 	}
 
-	/* charge the document for the replacements beyond s's own references, and the growth */
+	/* charge the document for the replacements beyond s's own references, and the memory allocated */
 	if ((c = input_refs + extra - refs) > input_refs) {
 		root->expand_count -= c - input_refs;
 	}
-	if ((l = (unsigned long) strlen(r)) > len) {
-		root->expand_bytes -= (l - len < root->expand_bytes) ? l - len : root->expand_bytes;
+	if (alloc > len) {
+		root->expand_bytes -= (alloc - len < root->expand_bytes) ? alloc - len : root->expand_bytes;
 	}
 	return r;
 
