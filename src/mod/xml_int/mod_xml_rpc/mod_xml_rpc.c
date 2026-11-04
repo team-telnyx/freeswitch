@@ -646,6 +646,11 @@ abyss_bool websocket_hook(TSession *r)
 		node_count--;
 	}
 
+	/* The stop event may have fired before the bind above. */
+	switch_mutex_lock(globals.mutex);
+	if (globals.shutting_down) wsh->down = 1;
+	switch_mutex_unlock(globals.mutex);
+
 	while (!wsh->down) {
 		int bytes = ws_read_frame(wsh, &opcode, &data);
 
