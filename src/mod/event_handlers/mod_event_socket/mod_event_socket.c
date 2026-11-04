@@ -124,7 +124,7 @@ static struct {
 
 #define MAX_ACL 100
 
-static struct {
+static struct event_socket_prefs {
 	switch_mutex_t *mutex;
 	char *ip;
 	uint16_t port;
@@ -3063,16 +3063,8 @@ static int config(void)
 {
 	char *cf = "event_socket.conf";
 	switch_xml_t cfg, xml, settings, param;
-
-	/* serialize against reload_passwords(): the RELOADXML event raised by load/reload
-	   can dispatch while config() runs; without the lock the same prefs strings could
-	   be freed twice or the memset could leak what the callback allocated */
-	switch_mutex_lock(globals.listener_mutex);
-
-	switch_safe_free(prefs.ip);
-	switch_safe_free(prefs.password);
-	switch_safe_free(prefs.secondary_password);
-	memset(&prefs, 0, sizeof(prefs));
+	struct event_socket_prefs new_prefs = { 0 };
+	int new_debug = globals.debug;
 
 	if (!(xml = switch_xml_open_cfg(cf, &cfg, NULL))) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Open of %s failed\n", cf);
@@ -3083,57 +3075,71 @@ static int config(void)
 				char *val = (char *) switch_xml_attr_soft(param, "value");
 
 				if (!strcmp(var, "listen-ip")) {
-					set_pref_ip(val);
+					switch_safe_free(new_prefs.ip);
+					new_prefs.ip = strdup(val);
 				} else if (!strcmp(var, "debug")) {
-					globals.debug = atoi(val);
+					new_debug = atoi(val);
 				} else if (!strcmp(var, "nat-map")) {
 					if (switch_true(val) && switch_nat_get_type()) {
-						prefs.nat_map = 1;
+						new_prefs.nat_map = 1;
 					}
 				} else if (!strcmp(var, "listen-port")) {
-					prefs.port = (uint16_t) atoi(val);
+					new_prefs.port = (uint16_t) atoi(val);
 				} else if (!strcmp(var, "password")) {
-					set_pref_pass(val);
+					switch_safe_free(new_prefs.password);
+					new_prefs.password = strdup(val);
 				} else if (!strcmp(var, "secondary-password")) {
-					if (!zstr(val)) { set_pref_secondary_pass(val); }
+					if (!zstr(val)) {
+						switch_safe_free(new_prefs.secondary_password);
+						new_prefs.secondary_password = strdup(val);
+					}
 				} else if (!strcasecmp(var, "apply-inbound-acl") && ! zstr(val)) {
-					if (prefs.acl_count < MAX_ACL) {
-						prefs.acl[prefs.acl_count++] = strdup(val);
+					if (new_prefs.acl_count < MAX_ACL) {
+						new_prefs.acl[new_prefs.acl_count++] = strdup(val);
 					} else {
 						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Max acl records of %d reached\n", MAX_ACL);
 					}
 				} else if (!strcasecmp(var, "stop-on-bind-error")) {
-					prefs.stop_on_bind_error = switch_true(val) ? 1 : 0;
+					new_prefs.stop_on_bind_error = switch_true(val) ? 1 : 0;
 				}
 			}
 		}
 		switch_xml_free(xml);
 	}
 
-	if (zstr(prefs.ip)) {
-		set_pref_ip("127.0.0.1");
+	if (zstr(new_prefs.ip)) {
+		switch_safe_free(new_prefs.ip);
+		new_prefs.ip = strdup("127.0.0.1");
 	}
 
-	if (zstr(prefs.password)) {
-		set_pref_pass("ClueCon");
+	if (zstr(new_prefs.password)) {
+		switch_safe_free(new_prefs.password);
+		new_prefs.password = strdup("ClueCon");
 	}
 
-	if (!prefs.nat_map) {
-		prefs.nat_map = 0;
+	if (!new_prefs.nat_map) {
+		new_prefs.nat_map = 0;
 	}
 
-	if (!prefs.acl_count) {
-		prefs.acl[prefs.acl_count++] = strdup("loopback.auto");
+	if (!new_prefs.acl_count) {
+		new_prefs.acl[new_prefs.acl_count++] = strdup("loopback.auto");
 	}
 
-	if (prefs.nat_map) {
-		prefs.nat_map = 0;
+	if (new_prefs.nat_map) {
+		new_prefs.nat_map = 0;
 	}
 
-	if (!prefs.port) {
-		prefs.port = 8021;
+	if (!new_prefs.port) {
+		new_prefs.port = 8021;
 	}
 
+	/* serialize against reload_passwords(): only the ownership swap needs the lock */
+	switch_mutex_lock(globals.listener_mutex);
+	switch_safe_free(prefs.ip);
+	switch_safe_free(prefs.password);
+	switch_safe_free(prefs.secondary_password);
+	prefs = new_prefs;
+	globals.debug = new_debug;
 	switch_mutex_unlock(globals.listener_mutex);
 
 	return 0;
