@@ -2584,6 +2584,23 @@ SWITCH_DECLARE(uint32_t) switch_channel_get_broadcast_generation(switch_channel_
 	return switch_atomic_read(&channel->broadcast_generation);
 }
 
+SWITCH_DECLARE(void) switch_channel_set_broadcast_peer_hangup_fallback(switch_channel_t *channel)
+{
+	const char *marker;
+	uint32_t generation;
+
+	switch_assert(channel != NULL);
+	/* The hangup writers use this same mutex. Keep their answered state even
+	 * when a writer arrives between the fallback's read and write. */
+	switch_mutex_lock(channel->profile_mutex);
+	generation = switch_channel_get_broadcast_generation(channel);
+	marker = switch_channel_get_variable_dup(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, SWITCH_FALSE, -1);
+	if (!marker || (uint32_t) strtoul(marker, NULL, 10) != generation) {
+		switch_channel_set_variable_printf(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, "%u:0", generation);
+	}
+	switch_mutex_unlock(channel->profile_mutex);
+}
+
 /*
  * Who moved the channel after the latest transfer: its own session thread, or a command
  * from another thread. The state alone cannot say - CS_CONSUME_MEDIA is both what the

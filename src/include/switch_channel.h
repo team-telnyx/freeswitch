@@ -103,6 +103,9 @@ SWITCH_DECLARE(void) switch_channel_inc_broadcast_generation(switch_channel_t *c
 */
 SWITCH_DECLARE(uint32_t) switch_channel_get_broadcast_generation(switch_channel_t *channel);
 
+/* Set a peer-gone fallback without replacing this broadcast's hangup marker. */
+SWITCH_DECLARE(void) switch_channel_set_broadcast_peer_hangup_fallback(switch_channel_t *channel);
+
 /*!
   \brief Test whether another thread set the channel's state after its latest transfer
   \param channel channel to test
