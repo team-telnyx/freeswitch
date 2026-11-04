@@ -106,7 +106,7 @@ void globfree(glob_t *);
 /* Limits for entity expansion to prevent excessive resource consumption */
 #define SWITCH_XML_MAX_ENTITY_EXPANSION_DEPTH 20              /* Maximum recursion depth for entity expansion */
 #define SWITCH_XML_MAX_ENTITY_EXPANSION_COUNT 10000           /* Maximum number of entity expansions */
-#define SWITCH_XML_MAX_ENTITY_VALUE_LENGTH (64 * 1024)        /* Maximum entity value after parameter entity expansion */
+#define SWITCH_XML_MAX_ENTITY_EXPANSION_SIZE (64 * 1024)      /* Maximum bytes entity expansion may add to one decoded string */
 
 static void preprocess_exec_set(char *keyval)
 {
@@ -602,11 +602,15 @@ static switch_xml_t switch_xml_err(switch_xml_root_t root, char *s, const char *
    to '&' for general entity decoding, '%' for parameter entity decoding, 'c'
    for cdata sections, ' ' for attribute normalization, or '*' for non-cdata
    attribute normalization. Returns s, or if the decoded string is longer than
-   s, returns a malloced string that must be freed. */
+   s, returns a malloced string that must be freed. Returns NULL if expansion
+   would add more than SWITCH_XML_MAX_ENTITY_EXPANSION_SIZE bytes or make more
+   than SWITCH_XML_MAX_ENTITY_EXPANSION_COUNT replacements beyond the
+   references in s. */
 static char *switch_xml_decode(char *s, char **ent, char t)
 {
 	char *e, *r = s, *m = s;
 	unsigned long b, c, d, l;
+	unsigned long max_len, refs = 0;
 
 	for (; *s; s++) {			/* normalize line endings */
 		while (*s == '\r') {
@@ -614,7 +618,14 @@ static char *switch_xml_decode(char *s, char **ent, char t)
 			if (*s == '\n')
 				memmove(s, (s + 1), strlen(s));
 		}
+		if (!*s)
+			break;
+		if (*s == '&' || *s == '%')
+			refs++;			/* references already in s */
 	}
+
+	max_len = (unsigned long) (s - r) + SWITCH_XML_MAX_ENTITY_EXPANSION_SIZE;
+	refs += SWITCH_XML_MAX_ENTITY_EXPANSION_COUNT;
 
 	for (s = r;;) {
 		while (*s && *s != '&' && (*s != '%' || t != '%') && !isspace((unsigned char) (*s)))
@@ -659,10 +670,16 @@ static char *switch_xml_decode(char *s, char **ent, char t)
 			for (b = 0; ent[b] && strncmp(s + 1, ent[b], strlen(ent[b])); b += 2);	/* find entity in entity list */
 
 			if (ent[b++]) {		/* found a match */
+				if (!refs--) {
+					goto too_big;
+				}
 				c = (unsigned long) strlen(ent[b]);
 				e = strchr(s, ';');
 				if (c && c - 1 > (unsigned long)(e - s)) {
 					l = (d = (unsigned long) (s - r)) + c + (unsigned long) strlen(e);	/* new length */
+					if (l > max_len) {
+						goto too_big;
+					}
 					if (l) {
 						if (r == m) {
 							char *tmp = (char *) switch_must_malloc(l);
@@ -695,6 +712,11 @@ static char *switch_xml_decode(char *s, char **ent, char t)
 			*s = '\0';			/* trim any trailing space */
 	}
 	return r;
+
+ too_big:
+	if (r != m)
+		free(r);
+	return NULL;
 }
 
 /* called when parser finds start of new tag */
@@ -735,7 +757,11 @@ static void switch_xml_char_content(switch_xml_root_t root, char *s, switch_size
 		return;					/* sanity check */
 
 	s[len] = '\0';				/* null terminate text (calling functions anticipate this) */
-	len = strlen(s = switch_xml_decode(s, root->ent, t)) + 1;
+	if (!(s = switch_xml_decode(s, root->ent, t))) {
+		switch_xml_err(root, m, "entity expansion limit exceeded");
+		return;
+	}
+	len = strlen(s) + 1;
 
 	if (!*(xml->txt))
 		xml->txt = s;			/* initial character content */
@@ -913,10 +939,8 @@ static short switch_xml_internal_dtd(switch_xml_root_t root, char *s, switch_siz
 				*(s++) = '\0';	/* null terminate value */
 			ent[i + 1] = switch_xml_decode(v, pe, '%');	/* set value */
 			ent[i + 2] = NULL;	/* null terminate entity list */
-			if (strlen(ent[i + 1]) > SWITCH_XML_MAX_ENTITY_VALUE_LENGTH) {
-				if (ent[i + 1] != v)
-					free(ent[i + 1]);
-				switch_xml_err(root, v, "entity value too long &%s", n);
+			if (!ent[i + 1]) {
+				switch_xml_err(root, v, "entity expansion limit exceeded &%s", n);
 				break;
 			} else if (!switch_xml_ent_ok(n, ent[i + 1], ent)) {	/* circular reference */
 				if (ent[i + 1] != v)
@@ -991,7 +1015,13 @@ static short switch_xml_internal_dtd(switch_xml_root_t root, char *s, switch_siz
 				root->attr[i] = sstmp;
 				root->attr[i][j + 3] = NULL;	/* null terminate list */
 				root->attr[i][j + 2] = c;	/* is it cdata? */
-				root->attr[i][j + 1] = (v) ? switch_xml_decode(v, root->ent, *c) : NULL;
+				root->attr[i][j + 1] = NULL;
+				root->attr[i][j] = NULL;
+				if (v && !(v = switch_xml_decode(v, root->ent, *c))) {
+					switch_xml_err(root, t, "entity expansion limit exceeded in <!ATTLIST");
+					break;
+				}
+				root->attr[i][j + 1] = v;
 				root->attr[i][j] = n;	/* attribute name  */
 			}
 		} else if (!strncmp(s, "<!--", 4))
@@ -1104,7 +1134,7 @@ SWITCH_DECLARE(switch_xml_t) switch_xml_parse_str_dynamic(char *s, switch_bool_t
 SWITCH_DECLARE(switch_xml_t) switch_xml_parse_str(char *s, switch_size_t len)
 {
 	switch_xml_root_t root = (switch_xml_root_t) switch_xml_new(NULL);
-	char q, e, *d, **attr, **a = NULL;	/* initialize a to avoid compile warning */
+	char q, e, *d, *dv, **attr, **a = NULL;	/* initialize a to avoid compile warning */
 	int l, i, j;
 
 	root->m = s;
@@ -1162,7 +1192,11 @@ SWITCH_DECLARE(switch_xml_t) switch_xml_parse_str(char *s, switch_size_t len)
 						}
 
 						for (j = 1; a && a[j] && strcmp(a[j], attr[l]); j += 3);
-						attr[l + 1] = switch_xml_decode(attr[l + 1], root->ent, (a && a[j]) ? *a[j + 2] : ' ');
+						if (!(dv = switch_xml_decode(attr[l + 1], root->ent, (a && a[j]) ? *a[j + 2] : ' '))) {
+							switch_xml_free_attr(attr);
+							return switch_xml_err(root, d, "entity expansion limit exceeded");
+						}
+						attr[l + 1] = dv;
 						if (attr[l + 1] < d || attr[l + 1] > s)
 							attr[l + 3][l / 2] = SWITCH_XML_TXTM;	/* value malloced */
 					}
@@ -1237,9 +1271,11 @@ SWITCH_DECLARE(switch_xml_t) switch_xml_parse_str(char *s, switch_size_t len)
 		if (*s && *s != '<') {	/* tag character content */
 			while (*s && *s != '<')
 				s++;
-			if (*s)
+			if (*s) {
 				switch_xml_char_content(root, d, s - d, '&');
-			else
+				if (*root->err)
+					return &root->xml;
+			} else
 				break;
 		} else if (!*s)
 			break;

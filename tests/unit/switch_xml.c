@@ -34,6 +34,41 @@
 
 #include <test/switch_test.h>
 
+/* lol3 passes the declaration checks (1110 references) but expands to 1 MB */
+static char *lol_doc(const char *dtd_extra, const char *body)
+{
+	const char *ref[] = { "&lol;", "&lol1;", "&lol2;" };
+	char *doc = malloc(64 * 1024), *p = doc;
+	int i, j;
+
+	p += sprintf(p, "<!DOCTYPE lolz [\n<!ENTITY lol \"");
+	memset(p, 'a', 1000);
+	p += 1000;
+	p += sprintf(p, "\">\n");
+	for (i = 0; i < 3; i++) {
+		p += sprintf(p, "<!ENTITY lol%d \"", i + 1);
+		for (j = 0; j < 10; j++) {
+			p += sprintf(p, "%s", ref[i]);
+		}
+		p += sprintf(p, "\">\n");
+	}
+	sprintf(p, "%s]>\n%s", dtd_extra, body);
+
+	return doc;
+}
+
+/* Parse doc, check it fails in the decoder with the expansion limit, free it */
+static int lol_doc_hits_limit(char *doc)
+{
+	switch_xml_t xml = switch_xml_parse_str_dynamic(doc, SWITCH_TRUE);
+	int hit = xml && strstr(switch_xml_error(xml), "entity expansion limit exceeded") != NULL;
+
+	if (xml) switch_xml_free(xml);
+	free(doc);
+
+	return hit;
+}
+
 FST_MINCORE_BEGIN("./conf")
 {
 	FST_SUITE_BEGIN(switch_xml)
@@ -273,8 +308,63 @@ FST_MINCORE_BEGIN("./conf")
 
 			switch_xml_t xml = switch_xml_parse_str_dynamic((char *)nested_entities, SWITCH_TRUE);
 
-			fst_check(!xml || !zstr(switch_xml_error(xml)));
-			if (xml) switch_xml_free(xml);
+			/* Stopped while decoding the declaration, not after it */
+			fst_requires(xml);
+			fst_check(strstr(switch_xml_error(xml), "entity expansion limit exceeded &p") != NULL);
+			switch_xml_free(xml);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(test_entity_expansion_size_in_content)
+		{
+			fst_check(lol_doc_hits_limit(lol_doc("", "<lolz>&lol3;</lolz>")));
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(test_entity_expansion_size_in_attribute)
+		{
+			fst_check(lol_doc_hits_limit(lol_doc("", "<lolz a=\"&lol3;\"/>")));
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(test_entity_expansion_size_in_attlist_default)
+		{
+			fst_check(lol_doc_hits_limit(lol_doc("<!ATTLIST lolz a CDATA \"&lol3;\">\n", "<lolz/>")));
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(test_entity_expansion_within_limit)
+		{
+			char *doc = lol_doc("", "<lolz>&lol1;</lolz>");
+			switch_xml_t xml = switch_xml_parse_str_dynamic(doc, SWITCH_TRUE);
+
+			fst_requires(xml);
+			fst_check(zstr(switch_xml_error(xml)));
+			fst_check(strlen(xml->txt) == 10000);
+			switch_xml_free(xml);
+			free(doc);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(test_many_references_in_input)
+		{
+			/* References written in the document do not use up the expansion budget */
+			int i, n = 20000;
+			char *doc = malloc(n * 5 + 16), *p = doc;
+			switch_xml_t xml;
+
+			p += sprintf(p, "<t>");
+			for (i = 0; i < n; i++) {
+				p += sprintf(p, "&amp;");
+			}
+			sprintf(p, "</t>");
+
+			xml = switch_xml_parse_str_dynamic(doc, SWITCH_TRUE);
+			fst_requires(xml);
+			fst_check(zstr(switch_xml_error(xml)));
+			fst_check(strlen(xml->txt) == (size_t)n);
+			switch_xml_free(xml);
+			free(doc);
 		}
 		FST_TEST_END()
 
