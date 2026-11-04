@@ -579,7 +579,6 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 		char *loop_h = switch_event_get_header(event, "loops");
 		char *hold_bleg = switch_event_get_header(event, "hold-bleg");
 		int loops = 1;
-		int inner = 0;
 
 		if (zstr(app_arg) && !zstr(content_type) && !strcasecmp(content_type, "text/plain")) {
 			app_arg = switch_event_get_body(event);
@@ -596,7 +595,6 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 			switch_core_session_t *b_session = NULL;
 
 			if (!switch_channel_test_flag(channel, CF_BRIDGED) || switch_channel_test_flag(channel, CF_HOLD_BLEG)) {
-				inner++;
 				hold_bleg = NULL;
 			}
 
@@ -607,9 +605,6 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 				 * run", so a marker that is not a number never matches. */
 				raised_broadcast = 1;
 				switch_channel_inc_broadcast_generation(channel);
-				if (inner) {
-					inner--;
-				}
 			}
 
 			if (hold_bleg && switch_true(hold_bleg)) {
@@ -682,10 +677,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 											  "%s Stopping broadcast: bridge peer %s is gone, broadcast generation %u\n",
 											  switch_channel_get_name(channel), peer_uuid,
 											  switch_channel_get_broadcast_generation(channel));
-							/* The peer is gone, so its answered state cannot be read. Report the
-							 * cause rather than withhold one a leg that hangs up needs. */
-							switch_channel_set_variable_printf(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, "%u:0",
-															   switch_channel_get_broadcast_generation(channel));
+							switch_channel_set_broadcast_peer_hangup_fallback(channel);
 							switch_channel_set_flag(channel, CF_STOP_BROADCAST);
 							switch_channel_set_flag(channel, CF_BREAK);
 						}
@@ -730,14 +722,9 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 				}
 			}
 
-			/* Only the frame that raised the flag may drop it. inner does not
-			 * track nesting on a bridged channel: it counts a broadcast that
-			 * starts while the channel is unbridged or holds the b leg, so it is
-			 * zero in a nested frame there and that frame would clear a flag the
-			 * outer playback still needs. Every writer tests this flag, so
-			 * dropping it early loses a peer hangup arriving while the outer
-			 * playback is still running. raised_broadcast implies !inner, so
-			 * this is the same test everywhere else. */
+			/* Only the frame that raised the flag may drop it. A nested frame
+			 * must leave the flag set while the outer playback still runs, so
+			 * peer hangup writers can still stop that playback. */
 			if (raised_broadcast) {
 				switch_channel_clear_flag(channel, CF_BROADCAST);
 			}
@@ -753,10 +740,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 			 * dialplan playback, which never reaches switch_ivr_parse_event().
 			 * Only the frame that raised CF_BROADCAST closes it, so a nested
 			 * priority broadcast and the playback it nests in share one
-			 * generation and both still report the same peer hangup. Do not test
-			 * inner here: on a bridged channel it is zero in the nested frame
-			 * too, because it only counts a broadcast that starts while the
-			 * channel is unbridged or holds the b leg.
+			 * generation and both still report the same peer hangup.
 			 * Must stay below the CF_BROADCAST clears above: a setter writes the
 			 * marker only while it still sees CF_BROADCAST, so closing the
 			 * generation after the flag is down invalidates any such write. */

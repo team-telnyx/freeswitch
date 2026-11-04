@@ -397,14 +397,10 @@ static int run_nested_priority_case(void)
  * The nested priority broadcast finishes first, and the peer hangs up only
  * afterwards, while the playback it nested in is still running.
  *
- * switch_ivr_parse_event() clears CF_BROADCAST when "inner" is zero, and inner
- * is zero in a nested frame on a bridged channel, because it only counts a
- * broadcast that starts while the channel is unbridged or holds the b leg. So
- * the nested frame can take the flag down while the outer playback is still
- * playing. The hangup-state stop and the bridge-exit marker both test that
- * flag, so a peer hangup arriving in that state would arm nothing and the outer
- * playback would run to the end of its file: the zombie call this change exists
- * to stop.
+ * Before this change, a nested frame on a bridged channel could clear
+ * CF_BROADCAST while the outer playback still ran. The hangup-state stop and
+ * bridge-exit marker both tested that flag, so a later peer hangup armed nothing
+ * and the outer playback ran to the end of its file.
  *
  * Reports through flag_down_after_nested whether the flag really was down once
  * the nested playback had ended, so the case states what it measured instead of
@@ -611,6 +607,82 @@ static int run_stale_setter_case(int customer_stop, char *cause_out, switch_size
 	return ok;
 }
 
+struct peer_gone_watch {
+	const char *uuid;
+	switch_queue_t *events;
+};
+
+static void on_peer_gone_stop(switch_event_t *event)
+{
+	struct peer_gone_watch *watch = event->bind_user_data;
+	const char *uuid = switch_event_get_header(event, "Unique-ID");
+	switch_event_t *copy = NULL;
+
+	if (uuid && !strcmp(uuid, watch->uuid) && switch_event_dup(&copy, event) == SWITCH_STATUS_SUCCESS) {
+		if (switch_queue_trypush(watch->events, copy) != SWITCH_STATUS_SUCCESS) {
+			switch_event_destroy(&copy);
+		}
+	}
+}
+
+/* Drive the real peer-missing check from the state left by an answered writer
+ * between broadcast iterations. Seeding that boundary avoids a timing race;
+ * playback and its reported cause still come from the real entry point. */
+static switch_event_t *run_peer_gone_marker_case(switch_core_session_t *session, const char *kind)
+{
+	switch_channel_t *channel = switch_core_session_get_channel(session);
+	struct peer_gone_watch watch = { 0 };
+	switch_event_t *command = NULL, *stopped = NULL, *extra = NULL;
+	uint32_t generation;
+
+	watch.uuid = switch_core_session_get_uuid(session);
+	if (switch_queue_create(&watch.events, 4, switch_core_session_get_pool(session)) != SWITCH_STATUS_SUCCESS) {
+		return NULL;
+	}
+	if (switch_event_create(&command, SWITCH_EVENT_COMMAND) != SWITCH_STATUS_SUCCESS) {
+		return NULL;
+	}
+	if (switch_event_bind("peer_gone_marker", SWITCH_EVENT_PLAYBACK_STOP, SWITCH_EVENT_SUBCLASS_ANY,
+						  on_peer_gone_stop, &watch) != SWITCH_STATUS_SUCCESS) {
+		switch_event_destroy(&command);
+		return NULL;
+	}
+
+	switch_channel_set_flag(channel, CF_BROADCAST);
+	switch_channel_inc_broadcast_generation(channel);
+	generation = switch_channel_get_broadcast_generation(channel);
+	switch_channel_set_flag(channel, CF_BRIDGED);
+	switch_channel_set_variable(channel, SWITCH_SIGNAL_BOND_VARIABLE, "00000000-0000-0000-0000-000000000000");
+	switch_channel_set_variable(channel, SWITCH_PARK_AFTER_BRIDGE_VARIABLE, "true");
+	switch_channel_set_variable(channel, "last_bridge_hangup_cause", "USER_BUSY");
+	if (strcmp(kind, "missing")) {
+		switch_channel_set_variable_printf(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, "%u:%d",
+										   !strcmp(kind, "stale") ? generation - 1 : generation,
+										   strcmp(kind, "unanswered") ? 1 : 0);
+	}
+	switch_event_add_header_string(command, SWITCH_STACK_BOTTOM, "call-command", "execute");
+	switch_event_add_header_string(command, SWITCH_STACK_BOTTOM, "execute-app-name", "playback");
+	switch_event_add_header_string(command, SWITCH_STACK_BOTTOM, "execute-app-arg", "silence_stream://200");
+	switch_ivr_parse_event(session, command);
+	/* Bound a missing event, without making elapsed time a success condition. */
+	switch_queue_pop_timeout(watch.events, (void **) &stopped, 5000000);
+	switch_event_unbind_callback(on_peer_gone_stop);
+	while (switch_queue_trypop(watch.events, (void **) &extra) == SWITCH_STATUS_SUCCESS) {
+		switch_event_destroy(&extra);
+	}
+	switch_event_destroy(&command);
+	switch_channel_clear_flag(channel, CF_BRIDGED);
+	switch_channel_clear_flag(channel, CF_BROADCAST);
+	switch_channel_clear_flag(channel, CF_STOP_BROADCAST);
+	switch_channel_clear_flag(channel, CF_BREAK);
+	switch_channel_inc_broadcast_generation(channel);
+	switch_channel_set_variable(channel, SWITCH_SIGNAL_BOND_VARIABLE, NULL);
+	switch_channel_set_variable(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, NULL);
+	switch_channel_set_variable(channel, SWITCH_PARK_AFTER_BRIDGE_VARIABLE, NULL);
+	switch_channel_set_variable(channel, "last_bridge_hangup_cause", NULL);
+	return stopped;
+}
+
 FST_CORE_BEGIN("./conf_playsay")
 {
 	FST_SUITE_BEGIN(switch_ivr_play_say)
@@ -628,6 +700,25 @@ FST_CORE_BEGIN("./conf_playsay")
 		{
 		}
 		FST_TEARDOWN_END()
+
+		FST_SESSION_BEGIN(peer_gone_preserves_current_answered_marker)
+		{
+			const char *kinds[] = { "answered", "unanswered", "stale", "missing" };
+			switch_event_t *stopped;
+			int i;
+
+			for (i = 0; i < 4; ++i) {
+				stopped = run_peer_gone_marker_case(fst_session, kinds[i]);
+				fst_check(stopped != NULL);
+				if (stopped) {
+					fst_check_string_equals(switch_event_get_header(stopped, "Playback-Status"), "break");
+					fst_check_string_equals(switch_event_get_header(stopped, "Hangup-Cause"), i ? "USER_BUSY" : NULL);
+					switch_event_destroy(&stopped);
+				}
+				fst_check(switch_channel_ready(fst_channel));
+			}
+		}
+		FST_SESSION_END()
 
 		FST_SESSION_BEGIN(play_and_collect_input_failure)
 		{
