@@ -165,6 +165,7 @@ struct switch_channel {
 	switch_channel_state_t state;
 	switch_channel_state_t running_state;
 	switch_atomic_t transfer_generation;
+	switch_atomic_t broadcast_generation;
 	/* Under state_mutex: the transfer generation current when another thread last set a
 	   state other than CS_ROUTING. See note_state_from_another_thread(). */
 	uint32_t superseding_generation;
@@ -2567,6 +2568,37 @@ SWITCH_DECLARE(uint32_t) switch_channel_get_transfer_generation(switch_channel_t
 	switch_assert(channel != NULL);
 
 	return switch_atomic_read(&channel->transfer_generation);
+}
+
+SWITCH_DECLARE(void) switch_channel_inc_broadcast_generation(switch_channel_t *channel)
+{
+	switch_assert(channel != NULL);
+
+	switch_atomic_inc(&channel->broadcast_generation);
+}
+
+SWITCH_DECLARE(uint32_t) switch_channel_get_broadcast_generation(switch_channel_t *channel)
+{
+	switch_assert(channel != NULL);
+
+	return switch_atomic_read(&channel->broadcast_generation);
+}
+
+SWITCH_DECLARE(void) switch_channel_set_broadcast_peer_hangup_fallback(switch_channel_t *channel)
+{
+	const char *marker;
+	uint32_t generation;
+
+	switch_assert(channel != NULL);
+	/* The hangup writers use this same mutex. Keep their answered state even
+	 * when a writer arrives between the fallback's read and write. */
+	switch_mutex_lock(channel->profile_mutex);
+	generation = switch_channel_get_broadcast_generation(channel);
+	marker = switch_channel_get_variable_dup(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, SWITCH_FALSE, -1);
+	if (!marker || (uint32_t) strtoul(marker, NULL, 10) != generation) {
+		switch_channel_set_variable_printf(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, "%u:0", generation);
+	}
+	switch_mutex_unlock(channel->profile_mutex);
 }
 
 /*
