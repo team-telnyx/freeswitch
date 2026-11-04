@@ -20,16 +20,36 @@ static struct {
 	int next;
 } chunks;
 
+/* Chunk markers: an idle read timeout, and the client closing the connection */
+static const uint8_t TIMEOUT[1], EOF_MARK[1];
+
 static uint8_t written[4096];
 static size_t written_len;
 
 void ConnRead(TConn *const connectionP, uint32_t const timeout, bool *const eofP,
 			  bool *const timedOutP, const char **const errorP)
 {
-	(void)timeout; (void)eofP; (void)timedOutP;
+	(void)timeout;
+
+	if (eofP) *eofP = false;
+	if (timedOutP) *timedOutP = false;
 
 	if (chunks.next >= chunks.count) {
 		*errorP = strdup("no more data");
+		return;
+	}
+
+	if (chunks.data[chunks.next] == TIMEOUT || chunks.data[chunks.next] == EOF_MARK) {
+		bool is_eof = chunks.data[chunks.next] == EOF_MARK;
+		bool *flagP = is_eof ? eofP : timedOutP;
+
+		chunks.next++;
+		if (flagP) {
+			*flagP = true;
+			*errorP = NULL;
+		} else {
+			*errorP = strdup(is_eof ? "eof" : "timeout");
+		}
 		return;
 	}
 
@@ -205,6 +225,53 @@ static void test_truncated_header(void)
 	printf("PASS test_truncated_header\n");
 }
 
+static void test_idle_timeout_then_frame(void)
+{
+	uint8_t buf[64];
+	size_t n;
+
+	reset();
+	n = client_frame(buf, WSOC_TEXT, "late", 4);
+	add_chunk(TIMEOUT, 0);
+	add_chunk(TIMEOUT, 0);
+	add_chunk(buf, n);
+
+	expect_frame(WSOC_TEXT, "late");
+	assert(!wsh.down);
+	printf("PASS test_idle_timeout_then_frame\n");
+}
+
+static void test_eof_at_frame_boundary(void)
+{
+	ws_opcode_t oc;
+	uint8_t *data;
+
+	reset();
+	add_chunk(EOF_MARK, 0);
+
+	assert(ws_read_frame(&wsh, &oc, &data) == -WS_PROTO_ERR);
+	assert(oc == WSOC_CLOSE && wsh.down);
+	printf("PASS test_eof_at_frame_boundary\n");
+}
+
+static void test_timeout_inside_header(void)
+{
+	uint8_t buf[64];
+	ws_opcode_t oc;
+	uint8_t *data;
+	size_t n;
+
+	reset();
+	n = client_frame(buf, WSOC_TEXT, "hello", 5);
+	add_chunk(buf, 3);
+	add_chunk(TIMEOUT, 0);
+	add_chunk(buf + 3, n - 3);
+
+	assert(ws_read_frame(&wsh, &oc, &data) == -WS_PROTO_ERR);
+	assert(oc == WSOC_CLOSE && wsh.down);
+	printf("PASS test_timeout_inside_header\n");
+}
+
 int main(void)
 {
 	test_back_to_back_short_frames();
@@ -212,5 +279,8 @@ int main(void)
 	test_extended_length_then_short_frame();
 	test_frame_one_byte_per_read();
 	test_truncated_header();
+	test_idle_timeout_then_frame();
+	test_eof_at_frame_boundary();
+	test_timeout_inside_header();
 	return 0;
 }

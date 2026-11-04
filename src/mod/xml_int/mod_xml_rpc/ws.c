@@ -263,10 +263,14 @@ int ws_handshake_kvp(wsh_t *wsh, char *key, char *version, char *proto)
 
 }
 
-issize_t ws_raw_read(wsh_t *wsh, void *data, size_t bytes)
+/* As ws_raw_read(), but a read that times out with no data returns 0 with
+   *timed_out set instead of failing. */
+static issize_t ws_raw_read_timed(wsh_t *wsh, void *data, size_t bytes, int *timed_out)
 {
 	issize_t r;
 	TConn *conn = wsh->tsession->connP;
+
+	*timed_out = 0;
 
 	if (!wsh->handshake) {
 		r = wsh->tsession->connP->buffersize;
@@ -276,6 +280,7 @@ issize_t ws_raw_read(wsh_t *wsh, void *data, size_t bytes)
 		return r;
 	} else {
 		const char *readError = NULL;
+		bool eof = false, timedOut = false;
 
 		// printf("    pos=%d size=%d need=%d\n", conn->bufferpos, conn->buffersize, bytes);
 
@@ -285,11 +290,20 @@ issize_t ws_raw_read(wsh_t *wsh, void *data, size_t bytes)
 			printf("286 Read Error %d!\n", r);
 			return 0;
 		} else if (r == 0) {
-			ConnRead(conn, 2, NULL, NULL, &readError);
+			ConnRead(conn, 2, &eof, &timedOut, &readError);
 
 			if (readError) {
 				// printf("292 Read Error %s\n", readError);
 				free((void *)readError);
+				return 0;
+			}
+
+			if (eof) {
+				return 0;
+			}
+
+			if (timedOut) {
+				*timed_out = 1;
 				return 0;
 			}
 
@@ -310,6 +324,13 @@ issize_t ws_raw_read(wsh_t *wsh, void *data, size_t bytes)
 
 	}
 
+}
+
+issize_t ws_raw_read(wsh_t *wsh, void *data, size_t bytes)
+{
+	int timed_out;
+
+	return ws_raw_read_timed(wsh, data, bytes, &timed_out);
 }
 
 issize_t ws_raw_write(wsh_t *wsh, void *data, size_t bytes)
@@ -411,13 +432,18 @@ static void ws_put_be64(uint8_t *p, uint64_t v)
 }
 
 /* Read into wsh->buffer until it holds want bytes, never past them, so the
-   next frame stays buffered in the connection. */
+   next frame stays buffered in the connection. An idle timeout before the
+   first byte of a frame keeps waiting; one inside a frame fails. */
 static int ws_read_header(wsh_t *wsh, issize_t want)
 {
 	while (!wsh->down && wsh->datalen < want) {
-		issize_t r = ws_raw_read(wsh, wsh->buffer + wsh->datalen, want - wsh->datalen);
+		int timed_out;
+		issize_t r = ws_raw_read_timed(wsh, wsh->buffer + wsh->datalen, want - wsh->datalen, &timed_out);
 
 		if (r < 1) {
+			if (timed_out && wsh->datalen == 0) {
+				continue;
+			}
 			return 0;
 		}
 
