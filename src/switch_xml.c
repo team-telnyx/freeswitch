@@ -107,6 +107,8 @@ void globfree(glob_t *);
 #define SWITCH_XML_MAX_ENTITY_EXPANSION_DEPTH 20              /* Maximum recursion depth for entity expansion */
 #define SWITCH_XML_MAX_ENTITY_EXPANSION_COUNT 10000           /* Maximum number of entity expansions */
 #define SWITCH_XML_MAX_ENTITY_EXPANSION_SIZE (64 * 1024)      /* Maximum bytes entity expansion may add to one decoded string */
+#define SWITCH_XML_MAX_DOCUMENT_EXPANSION_SIZE (1024 * 1024)  /* ... and to one document */
+#define SWITCH_XML_MAX_DOCUMENT_EXPANSION_COUNT 100000        /* Maximum replacements in one document beyond its references */
 
 static void preprocess_exec_set(char *keyval)
 {
@@ -219,6 +221,8 @@ struct switch_xml_root {		/* additional data for the root tag */
 	char ***pi;					/* processing instructions */
 	short standalone;			/* non-zero if <?xml standalone="yes"?> */
 	char err[SWITCH_XML_ERRL];	/* error string */
+	unsigned long expand_bytes;	/* entity expansion budget left for this document */
+	unsigned long expand_count;
 };
 
 char *SWITCH_XML_NIL[] = { NULL };	/* empty, null terminated array of strings */
@@ -605,12 +609,12 @@ static switch_xml_t switch_xml_err(switch_xml_root_t root, char *s, const char *
    s, returns a malloced string that must be freed. Returns NULL if expansion
    would add more than SWITCH_XML_MAX_ENTITY_EXPANSION_SIZE bytes or make more
    than SWITCH_XML_MAX_ENTITY_EXPANSION_COUNT replacements beyond the
-   references in s. */
-static char *switch_xml_decode(char *s, char **ent, char t)
+   references in s, or exceed what is left of root's document budget. */
+static char *switch_xml_decode(switch_xml_root_t root, char *s, char **ent, char t)
 {
 	char *e, *r = s, *m = s;
 	unsigned long b, c, d, l;
-	unsigned long max_len, refs = 0;
+	unsigned long len, max_len, refs = 0, input_refs, extra;
 
 	for (; *s; s++) {			/* normalize line endings */
 		while (*s == '\r') {
@@ -624,8 +628,11 @@ static char *switch_xml_decode(char *s, char **ent, char t)
 			refs++;			/* references already in s */
 	}
 
-	max_len = (unsigned long) (s - r) + SWITCH_XML_MAX_ENTITY_EXPANSION_SIZE;
-	refs += SWITCH_XML_MAX_ENTITY_EXPANSION_COUNT;
+	len = (unsigned long) (s - r);
+	max_len = len + (root->expand_bytes < SWITCH_XML_MAX_ENTITY_EXPANSION_SIZE ? root->expand_bytes : SWITCH_XML_MAX_ENTITY_EXPANSION_SIZE);
+	extra = root->expand_count < SWITCH_XML_MAX_ENTITY_EXPANSION_COUNT ? root->expand_count : SWITCH_XML_MAX_ENTITY_EXPANSION_COUNT;
+	input_refs = refs;
+	refs += extra;			/* replacements left for this string */
 
 	for (s = r;;) {
 		while (*s && *s != '&' && (*s != '%' || t != '%') && !isspace((unsigned char) (*s)))
@@ -711,6 +718,14 @@ static char *switch_xml_decode(char *s, char **ent, char t)
 		if (--s >= r && *s == ' ')
 			*s = '\0';			/* trim any trailing space */
 	}
+
+	/* charge the document for the replacements beyond s's own references, and the growth */
+	if ((c = input_refs + extra - refs) > input_refs) {
+		root->expand_count -= c - input_refs;
+	}
+	if ((l = (unsigned long) strlen(r)) > len) {
+		root->expand_bytes -= (l - len < root->expand_bytes) ? l - len : root->expand_bytes;
+	}
 	return r;
 
  too_big:
@@ -757,7 +772,7 @@ static void switch_xml_char_content(switch_xml_root_t root, char *s, switch_size
 		return;					/* sanity check */
 
 	s[len] = '\0';				/* null terminate text (calling functions anticipate this) */
-	if (!(s = switch_xml_decode(s, root->ent, t))) {
+	if (!(s = switch_xml_decode(root, s, root->ent, t))) {
 		switch_xml_err(root, m, "entity expansion limit exceeded");
 		return;
 	}
@@ -937,7 +952,7 @@ static short switch_xml_internal_dtd(switch_xml_root_t root, char *s, switch_siz
 			*(++s) = '\0';		/* null terminate name */
 			if ((s = strchr(v, q)))
 				*(s++) = '\0';	/* null terminate value */
-			ent[i + 1] = switch_xml_decode(v, pe, '%');	/* set value */
+			ent[i + 1] = switch_xml_decode(root, v, pe, '%');	/* set value */
 			ent[i + 2] = NULL;	/* null terminate entity list */
 			if (!ent[i + 1]) {
 				switch_xml_err(root, v, "entity expansion limit exceeded &%s", n);
@@ -1017,7 +1032,7 @@ static short switch_xml_internal_dtd(switch_xml_root_t root, char *s, switch_siz
 				root->attr[i][j + 2] = c;	/* is it cdata? */
 				root->attr[i][j + 1] = NULL;
 				root->attr[i][j] = NULL;
-				if (v && !(v = switch_xml_decode(v, root->ent, *c))) {
+				if (v && !(v = switch_xml_decode(root, v, root->ent, *c))) {
 					switch_xml_err(root, t, "entity expansion limit exceeded in <!ATTLIST");
 					break;
 				}
@@ -1138,6 +1153,8 @@ SWITCH_DECLARE(switch_xml_t) switch_xml_parse_str(char *s, switch_size_t len)
 	int l, i, j;
 
 	root->m = s;
+	root->expand_bytes = SWITCH_XML_MAX_DOCUMENT_EXPANSION_SIZE;
+	root->expand_count = SWITCH_XML_MAX_DOCUMENT_EXPANSION_COUNT;
 	if (!len)
 		return switch_xml_err(root, s, "root tag missing");
 	root->u = switch_xml_str2utf8(&s, &len);	/* convert utf-16 to utf-8 */
@@ -1192,7 +1209,7 @@ SWITCH_DECLARE(switch_xml_t) switch_xml_parse_str(char *s, switch_size_t len)
 						}
 
 						for (j = 1; a && a[j] && strcmp(a[j], attr[l]); j += 3);
-						if (!(dv = switch_xml_decode(attr[l + 1], root->ent, (a && a[j]) ? *a[j + 2] : ' '))) {
+						if (!(dv = switch_xml_decode(root, attr[l + 1], root->ent, (a && a[j]) ? *a[j + 2] : ' '))) {
 							switch_xml_free_attr(attr);
 							return switch_xml_err(root, d, "entity expansion limit exceeded");
 						}

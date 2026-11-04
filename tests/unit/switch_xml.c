@@ -346,6 +346,47 @@ FST_MINCORE_BEGIN("./conf")
 		}
 		FST_TEST_END()
 
+		FST_TEST_BEGIN(test_entity_reference_from_char_reference)
+		{
+			/* &a; yields "&", so &b; expands to "&b;" again on every rescan */
+			const char *doc =
+				"<!DOCTYPE t [\n<!ENTITY a \"&#38;\">\n<!ENTITY b \"&a;b;\">\n]>\n<t>&b;</t>";
+			switch_xml_t xml = switch_xml_parse_str_dynamic((char *)doc, SWITCH_TRUE);
+
+			fst_requires(xml);
+			fst_check(strstr(switch_xml_error(xml), "entity expansion limit exceeded") != NULL);
+			switch_xml_free(xml);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(test_parameter_entity_cycle)
+		{
+			/* ent_ok() does not follow parameter entities */
+			const char *doc =
+				"<!DOCTYPE t [\n<!ENTITY % p \"%q;\">\n<!ENTITY % q \"%p;\">\n<!ENTITY r \"%q;\">\n]>\n<t/>";
+			switch_xml_t xml = switch_xml_parse_str_dynamic((char *)doc, SWITCH_TRUE);
+
+			fst_requires(xml);
+			fst_check(strstr(switch_xml_error(xml), "entity expansion limit exceeded") != NULL);
+			switch_xml_free(xml);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(test_entity_expansion_document_budget)
+		{
+			/* Each element stays under the per-string cap; together they exceed the document's */
+			char body[8192], *p = body;
+			int i;
+
+			p += sprintf(p, "<lolz>");
+			for (i = 0; i < 200; i++) {
+				p += sprintf(p, "<a>&lol1;</a>");
+			}
+			sprintf(p, "</lolz>");
+			fst_check(lol_doc_hits_limit(lol_doc("", body)));
+		}
+		FST_TEST_END()
+
 		FST_TEST_BEGIN(test_many_references_in_input)
 		{
 			/* References written in the document do not use up the expansion budget */
