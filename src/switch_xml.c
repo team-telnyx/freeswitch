@@ -1062,6 +1062,9 @@ static short switch_xml_internal_dtd(switch_xml_root_t root, char *s, switch_siz
 		}
 	}
 
+	for (i = 0; pe[i]; i += 2)	/* free malloced parameter entity values */
+		if ((v = pe[i + 1]) < root->s || v > root->e)
+			free(v);
 	free(pe);
 	return !*root->err;
 }
