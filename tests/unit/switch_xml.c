@@ -435,6 +435,50 @@ FST_MINCORE_BEGIN("./conf")
 		}
 		FST_TEST_END()
 
+		FST_TEST_BEGIN(test_decode_output)
+		{
+			/* Pins what the decoder produces: line endings, character and entity
+			   references (growing and shrinking), and attribute normalization */
+			const char *doc =
+				"<!DOCTYPE t [\n<!ENTITY big \"0123456789\">\n<!ENTITY e \"\">\n"
+				"<!ATTLIST t n NMTOKENS #IMPLIED>\n]>\n"
+				"<t c=\"a&#9;b\r\nc\" n=\"  x&#32; &big;\ty  \">x\r\ny\rz &#x263A;&lt;&big;&e;&amp;&#38;amp;&unknown;</t>";
+			switch_xml_t xml = switch_xml_parse_str_dynamic((char *)doc, SWITCH_TRUE);
+
+			fst_requires(xml);
+			fst_check(zstr(switch_xml_error(xml)));
+			fst_check_string_equals(xml->txt, "x\ny\nz \xE2\x98\xBA<0123456789&&amp;&unknown;");
+			fst_check_string_equals(switch_xml_attr(xml, "c"), "a\tb c");	/* character references are not normalized */
+			fst_check_string_equals(switch_xml_attr(xml, "n"), "x 0123456789 y");
+			switch_xml_free(xml);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(test_decode_is_linear)
+		{
+			/* One memmove of the rest per reference made this take minutes */
+			int i, n = 1000000;
+			char *doc = malloc(n * 5 + 16), *p = doc;
+			switch_time_t start;
+			switch_xml_t xml;
+
+			p += sprintf(p, "<t>");
+			for (i = 0; i < n; i++) {
+				p += sprintf(p, "&amp;");
+			}
+			sprintf(p, "</t>");
+
+			start = switch_time_now();
+			xml = switch_xml_parse_str_dynamic(doc, SWITCH_TRUE);
+			fst_requires(xml);
+			fst_check(zstr(switch_xml_error(xml)));
+			fst_check(strlen(xml->txt) == (size_t)n);
+			fst_check(switch_time_now() - start < 2000000);
+			switch_xml_free(xml);
+			free(doc);
+		}
+		FST_TEST_END()
+
 		FST_TEST_BEGIN(test_many_references_in_input)
 		{
 			/* References written in the document do not use up the expansion budget */

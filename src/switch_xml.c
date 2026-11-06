@@ -605,41 +605,48 @@ static switch_xml_t switch_xml_err(switch_xml_root_t root, char *s, const char *
    ent is a null terminated array of alternating entity names and values. set t
    to '&' for general entity decoding, '%' for parameter entity decoding, 'c'
    for cdata sections, ' ' for attribute normalization, or '*' for non-cdata
-   attribute normalization. Returns s, or if the decoded string is longer than
-   s, returns a malloced string that must be freed. Returns NULL if expansion
-   would add more than SWITCH_XML_MAX_ENTITY_EXPANSION_SIZE bytes or make more
-   than SWITCH_XML_MAX_ENTITY_EXPANSION_COUNT replacements beyond the
-   references in s, or exceed what is left of root's document budget. */
+   attribute normalization. Returns s, or a malloced string that must be freed.
+   Returns NULL if expansion would add more than
+   SWITCH_XML_MAX_ENTITY_EXPANSION_SIZE bytes or make more than
+   SWITCH_XML_MAX_ENTITY_EXPANSION_COUNT replacements beyond the references in
+   s, or exceed what is left of root's document budget.
+
+   Decoded text is written at w, behind the unread rest of the string at s.
+   A replacement is copied in front of the rest so that it is scanned again,
+   into the gap between w and s when it fits, so the work stays linear. */
 static char *switch_xml_decode(switch_xml_root_t root, char *s, char **ent, char t)
 {
-	char *e, *r = s, *m = s;
+	char *e, *r = s, *m = s, *w, *end;
 	unsigned long b, c, d, l;
-	unsigned long len, max_len, refs = 0, input_refs, extra, alloc = 0;
+	unsigned long len, max_len, refs = 0, input_refs, extra, peak = 0;
 
-	for (; *s; s++) {			/* normalize line endings */
-		while (*s == '\r') {
-			*(s++) = '\n';
-			if (*s == '\n')
-				memmove(s, (s + 1), strlen(s));
-		}
-		if (!*s)
-			break;
+	for (w = r; *s; s++) {		/* normalize line endings */
+		if (*s == '\r') {
+			*(w++) = '\n';
+			if (s[1] == '\n')
+				s++;
+		} else
+			*(w++) = *s;
+	}
+	*w = '\0';
+	len = (unsigned long) (w - r);
+
+	for (s = r; *s; s++) {
 		if ((*s == '&' && (t == '&' || t == ' ' || t == '*')) || (*s == '%' && t == '%')) {
 			for (b = 0; ent[b] && strncmp(s + 1, ent[b], strlen(ent[b])); b += 2);
 			if (ent[b])
-				refs++;		/* references already in s */
+				refs++;			/* references already in s */
 		}
 	}
 
-	len = (unsigned long) (s - r);
 	max_len = len + (root->expand_bytes < SWITCH_XML_MAX_ENTITY_EXPANSION_SIZE ? root->expand_bytes : SWITCH_XML_MAX_ENTITY_EXPANSION_SIZE);
 	extra = root->expand_count < SWITCH_XML_MAX_ENTITY_EXPANSION_COUNT ? root->expand_count : SWITCH_XML_MAX_ENTITY_EXPANSION_COUNT;
 	input_refs = refs;
-	refs += extra;			/* replacements left for this string */
+	refs += extra;				/* replacements left for this string */
 
-	for (s = r;;) {
+	for (w = s = r, end = r + len;;) {
 		while (*s && *s != '&' && (*s != '%' || t != '%') && !isspace((unsigned char) (*s)))
-			s++;
+			*(w++) = *(s++);
 
 		if (!*s)
 			break;
@@ -651,85 +658,105 @@ static char *switch_xml_decode(switch_xml_root_t root, char *s, char **ent, char
 				base = 16;
 			}
 			if (!isxdigit((int)*code)) { /* "&# 1;" and "&#-1;" are invalid */
-				s++;
+				*(w++) = *(s++);
 				continue;
 			}
 			c = strtoul(code, &e, base);
-			if (!c || *e != ';') {
-				s++;
+			if (!c || *e != ';' || c > 0x7FFFFFFF) {	/* not a character ref, or out of UTF-8 range */
+				*(w++) = *(s++);
 				continue;
 			}
-			/* not a character ref */
 			if (c < 0x80)
-				*(s++) = (char) c;	/* US-ASCII subset */
-			else if (c > 0x7FFFFFFF) { /* out of UTF-8 range */
-				s++;
-				continue;
-			} else {				/* multi-byte UTF-8 sequence */
+				*(w++) = (char) c;	/* US-ASCII subset */
+			else {				/* multi-byte UTF-8 sequence, never longer than the reference */
 				for (b = 0, d = c; d; d /= 2)
 					b++;		/* number of bits in c */
 				b = (b - 2) / 5;	/* number of bytes in payload */
 				assert(b < 7);		/* because c <= 0x7FFFFFFF */
-				*(s++) = (char) ((0xFF << (7 - b)) | (c >> (6 * b)));	/* head */
+				*(w++) = (char) ((0xFF << (7 - b)) | (c >> (6 * b)));	/* head */
 				while (b)
-					*(s++) = (char) (0x80 | ((c >> (6 * --b)) & 0x3F));	/* payload */
+					*(w++) = (char) (0x80 | ((c >> (6 * --b)) & 0x3F));	/* payload */
 			}
-
-			memmove(s, strchr(s, ';') + 1, strlen(strchr(s, ';')));
+			s = e + 1;
 		} else if ((*s == '&' && (t == '&' || t == ' ' || t == '*')) || (*s == '%' && t == '%')) {	/* entity reference */
 			for (b = 0; ent[b] && strncmp(s + 1, ent[b], strlen(ent[b])); b += 2);	/* find entity in entity list */
 
-			if (ent[b++]) {		/* found a match */
-				if (!refs--) {
-					goto too_big;
-				}
-				c = (unsigned long) strlen(ent[b]);
-				e = strchr(s, ';');
-				if (c && c - 1 > (unsigned long)(e - s)) {
-					l = (d = (unsigned long) (s - r)) + c + (unsigned long) strlen(e);	/* new length */
-					if (l > max_len) {
-						goto too_big;
-					}
-					if (l) {
-						if (r == m) {
-							char *tmp = (char *) switch_must_malloc(l);
-							r = strcpy(tmp, r);
-						} else {
-							r = (char *) switch_must_realloc(r, l);
-						}
-						if (l > alloc)
-							alloc = l;
-					}
-					e = strchr((s = r + d), ';');	/* fix up pointers */
-				}
+			if (!ent[b]) {		/* not a known entity */
+				*(w++) = *(s++);
+				continue;
+			}
+			if (!refs--) {
+				goto too_big;
+			}
+			e = s + 1 + strlen(ent[b]);	/* just past the reference */
+			c = (unsigned long) strlen(ent[b + 1]);
+			l = (unsigned long) (w - r) + c + (unsigned long) (end - e);	/* new length */
+			if (l > max_len) {
+				goto too_big;
+			}
+			if (l + 1 > peak)
+				peak = l + 1;
+			if (c > (unsigned long) (e - w)) {	/* no room in the gap: grow, leaving a new one */
+				unsigned long cap = l + 1 + (l + 1) / 2, rest = (unsigned long) (end - e);
+				char *tmp;
 
-				memmove(s + c, e + 1, strlen(e));	/* shift rest of string */
-				strncpy(s, ent[b], c);	/* copy in replacement text */
-			} else
-				s++;			/* not a known entity */
-		} else if ((t == ' ' || t == '*') && isspace((int) (*s)))
-			*(s++) = ' ';
-		else
-			s++;				/* no decoding needed */
+				if (cap > max_len + 1)
+					cap = max_len + 1;
+				tmp = (char *) switch_must_malloc(cap);
+				d = (unsigned long) (w - r);
+				memcpy(tmp, r, d);
+				memcpy(tmp + cap - 1 - rest, e, rest + 1);
+				if (r != m)
+					free(r);
+				r = tmp;
+				w = r + d;
+				end = r + cap - 1;
+				e = end - rest;
+			}
+			s = e - c;
+			memmove(s, ent[b + 1], c);	/* the replacement is read next */
+		} else if ((t == ' ' || t == '*') && isspace((int) (*s))) {
+			*(w++) = ' ';
+			s++;
+		} else
+			*(w++) = *(s++);	/* no decoding needed */
 	}
+	*w = '\0';
 
 	if (t == '*') {				/* normalize spaces for non-cdata attributes */
-		for (s = r; *s; s++) {
-			if ((l = (unsigned long) strspn(s, " ")))
-				memmove(s, s + l, strlen(s + l) + 1);
-			while (*s && *s != ' ')
-				s++;
+		int space = 0;
+
+		for (w = s = r; *s; s++) {
+			if (*s == ' ') {
+				space = w > r;	/* drop leading spaces, collapse the rest */
+				continue;
+			}
+			if (space) {
+				*(w++) = ' ';
+				space = 0;
+			}
+			*(w++) = *s;
 		}
-		if (--s >= r && *s == ' ')
-			*s = '\0';			/* trim any trailing space */
+		*w = '\0';			/* trailing spaces are dropped */
 	}
 
-	/* charge the document for the replacements beyond s's own references, and the memory allocated */
+	if (r != m) {				/* return it in place when it fits, else trim to size */
+		l = (unsigned long) (w - r) + 1;
+		if (l <= len + 1) {
+			memcpy(m, r, l);
+			free(r);
+			r = m;
+		} else {
+			r = (char *) switch_must_realloc(r, l);
+		}
+	}
+
+	/* charge the document for the replacements beyond s's own references, and the largest length reached */
 	if ((c = input_refs + extra - refs) > input_refs) {
 		root->expand_count -= c - input_refs;
 	}
-	if (alloc > len) {
-		root->expand_bytes -= (alloc - len < root->expand_bytes) ? alloc - len : root->expand_bytes;
+	if (peak > len) {
+		root->expand_bytes -= (peak - len < root->expand_bytes) ? peak - len : root->expand_bytes;
 	}
 	return r;
 
