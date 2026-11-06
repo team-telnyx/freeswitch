@@ -47,6 +47,29 @@ static void prepare_handle(esl_handle_t *h, esl_socket_t s)
 		BUF_CHUNK, BUF_START, 0) == ESL_SUCCESS);
 }
 
+static void expect_body(const char *frame, const char *body, const char *desc)
+{
+	int sv[2];
+	esl_handle_t h;
+	size_t n = strlen(frame);
+	ssize_t w;
+
+	fprintf(stderr, "  case: %s\n", desc);
+
+	TEST_ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+
+	prepare_handle(&h, sv[0]);
+
+	w = write(sv[1], frame, n);
+	TEST_ASSERT(w == (ssize_t) n);
+	close(sv[1]);
+
+	TEST_ASSERT(esl_recv_event(&h, 0, NULL) == ESL_SUCCESS);
+	TEST_ASSERT(h.last_event && h.last_event->body && !strcmp(h.last_event->body, body));
+
+	esl_disconnect(&h);
+}
+
 static void expect_rejected(const char *frame, const char *desc)
 {
 	int sv[2];
@@ -88,6 +111,16 @@ int main(void)
 		"Content-Type: text/event-plain\n"
 		"Content-Length: 99999999999\n\n",
 		"Content-Length above ESL_MAX_CONTENT_LENGTH");
+
+	expect_rejected(
+		"Content-Type: text/event-plain\n"
+		"Content-Length: 1x\n\nX",
+		"Content-Length with trailing garbage");
+
+	expect_body(
+		"Content-Type: text/event-plain\r\n"
+		"Content-Length: 1\r\n\r\nX",
+		"X", "Content-Length from a CRLF peer");
 
 	fprintf(stderr, "OK\n");
 	return 0;
