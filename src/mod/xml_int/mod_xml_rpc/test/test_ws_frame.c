@@ -272,6 +272,44 @@ static void test_timeout_inside_header(void)
 	printf("PASS test_timeout_inside_header\n");
 }
 
+static void test_timeout_inside_payload(void)
+{
+	uint8_t buf[64];
+	size_t n;
+
+	reset();
+	n = client_frame(buf, WSOC_TEXT, "slow link", 9);
+	add_chunk(buf, 9);	/* header and 3 payload bytes */
+	add_chunk(TIMEOUT, 0);
+	add_chunk(TIMEOUT, 0);
+	add_chunk(buf + 9, n - 9);
+
+	expect_frame(WSOC_TEXT, "slow link");
+	assert(!wsh.down);
+	printf("PASS test_timeout_inside_payload\n");
+}
+
+static void test_payload_stall_closes(void)
+{
+	uint8_t buf[64];
+	ws_opcode_t oc;
+	uint8_t *data;
+	size_t n;
+	int i;
+
+	reset();
+	n = client_frame(buf, WSOC_TEXT, "stalled", 7);
+	add_chunk(buf, 8);
+	for (i = 0; i < WS_PAYLOAD_STALL_TIMEOUTS; i++) {
+		add_chunk(TIMEOUT, 0);
+	}
+	add_chunk(buf + 8, n - 8);
+
+	assert(ws_read_frame(&wsh, &oc, &data) == -WS_PROTO_ERR);
+	assert(oc == WSOC_CLOSE && wsh.down);
+	printf("PASS test_payload_stall_closes\n");
+}
+
 int main(void)
 {
 	test_back_to_back_short_frames();
@@ -282,5 +320,7 @@ int main(void)
 	test_idle_timeout_then_frame();
 	test_eof_at_frame_boundary();
 	test_timeout_inside_header();
+	test_timeout_inside_payload();
+	test_payload_stall_closes();
 	return 0;
 }
