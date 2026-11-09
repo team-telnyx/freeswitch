@@ -1344,6 +1344,85 @@ static switch_status_t drive_dtls_pair_ready(switch_rtp_t *client_rtp, switch_rt
 	return SWITCH_STATUS_TIMEOUT;
 }
 
+#define OTHER_DTLS_FINGERPRINT "00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF"
+
+/* Replace the SDP's single placeholder fingerprint line with lines */
+static switch_status_t set_sdp_fingerprints(char *sdp, switch_size_t sdp_len, const char *lines)
+{
+	const char *old = "a=fingerprint:sha-256 " TEST_DTLS_FINGERPRINT "\n";
+	char *at = strstr(sdp, old);
+	switch_size_t old_len = strlen(old), new_len = strlen(lines), tail;
+
+	if (!at || strlen(sdp) - old_len + new_len >= sdp_len) {
+		return SWITCH_STATUS_FALSE;
+	}
+	tail = strlen(at + old_len) + 1;
+	memmove(at + new_len, at + old_len, tail);
+	memcpy(at, lines, new_len);
+	return SWITCH_STATUS_SUCCESS;
+}
+
+/* Handshake a target (DTLS server) with a peer (DTLS client) whose remote SDP
+   carries peer_fingerprints; the client verifies the target's certificate. */
+static switch_status_t run_multi_fingerprint_case(switch_port_t port, const char *peer_fingerprints,
+	switch_bool_t *ready, dtls_state_t *client_state)
+{
+	switch_core_session_t *target_session = NULL;
+	switch_core_session_t *peer_session = NULL;
+	switch_rtp_t *target_rtp = NULL;
+	switch_rtp_t *peer_rtp = NULL;
+	void *target_sdp_session = NULL;
+	void *peer_sdp_session = NULL;
+	sdp_parser_t *target_parser = NULL;
+	sdp_parser_t *peer_parser = NULL;
+	switch_rtp_pvt_transport_snapshot_t client;
+	char target_sdp[2048];
+	char peer_sdp[2048];
+	switch_status_t status = SWITCH_STATUS_FALSE;
+
+	*ready = SWITCH_FALSE;
+	*client_state = DS_INVALID;
+	if (build_dtls_pair_sdp(target_sdp, sizeof(target_sdp), 1683119000 + port, port, "active",
+			"multiFingerprintTargetUfrag1", "multiFingerprintTargetPassword1234561") != SWITCH_STATUS_SUCCESS ||
+		build_dtls_pair_sdp(peer_sdp, sizeof(peer_sdp), 1683119100 + port, (switch_port_t)(port + 100),
+			"passive", "multiFingerprintPeerUfrag1", "multiFingerprintPeerPassword1234561") != SWITCH_STATUS_SUCCESS ||
+		use_runtime_dtls_fingerprint(target_sdp) != SWITCH_STATUS_SUCCESS ||
+		set_sdp_fingerprints(peer_sdp, sizeof(peer_sdp), peer_fingerprints) != SWITCH_STATUS_SUCCESS) {
+		goto done;
+	}
+	if (make_session_and_rtp_with_sdp_ex(&target_session, &target_rtp, &target_sdp_session,
+			&target_parser, target_sdp, "PCMU", SWITCH_TRUE, SWITCH_TRUE, "controlled") != SWITCH_STATUS_SUCCESS ||
+		!target_rtp ||
+		make_session_and_rtp_with_sdp_ex(&peer_session, &peer_rtp, &peer_sdp_session,
+			&peer_parser, peer_sdp, "PCMU", SWITCH_TRUE, SWITCH_TRUE, NULL) != SWITCH_STATUS_SUCCESS ||
+		!peer_rtp) {
+		goto done;
+	}
+	*ready = drive_dtls_pair_ready(peer_rtp, target_rtp) == SWITCH_STATUS_SUCCESS ? SWITCH_TRUE : SWITCH_FALSE;
+	if (switch_rtp_pvt_get_transport_snapshot(peer_rtp, IPR_RTP, &client) == SWITCH_STATUS_SUCCESS) {
+		*client_state = client.dtls_state;
+	}
+	status = SWITCH_STATUS_SUCCESS;
+
+done:
+	cleanup_session_media_and_sdp(peer_session, peer_sdp_session, peer_parser);
+	cleanup_session_media_and_sdp(target_session, target_sdp_session, target_parser);
+	return status;
+}
+
+/* "a=fingerprint:<type> <the certificate's fingerprint>\n" */
+static char *runtime_fingerprint_line(char *buf, switch_size_t len, const char *type)
+{
+	dtls_fingerprint_t fp = { 0 };
+
+	fp.type = (char *)type;
+	if (!switch_core_cert_gen_fingerprint(DTLS_SRTP_FNAME, &fp) || zstr(fp.str)) {
+		return NULL;
+	}
+	switch_snprintf(buf, len, "a=fingerprint:%s %s\n", type, fp.str);
+	return buf;
+}
+
 typedef struct ready_restart_response_first_result_s {
 	switch_rtp_pvt_transport_snapshot_t before;
 	switch_rtp_pvt_transport_snapshot_t activated;
@@ -3515,6 +3594,49 @@ FCT_BGN()
 			fst_check(remote_port == 18219);
 
 			review_regression_owner_cleanup();
+		}
+		FCT_TEST_END();
+
+		/* RFC 8122: the peer may offer several fingerprints; the certificate it
+		   uses must match one of them, not necessarily the last. */
+		FCT_TEST_BGN(dtls_client_accepts_a_matching_fingerprint_that_is_not_last)
+		{
+			char real[256], lines[512];
+			switch_bool_t ready;
+			dtls_state_t state;
+
+			fst_requires(runtime_fingerprint_line(real, sizeof(real), "sha-256"));
+			switch_snprintf(lines, sizeof(lines), "%sa=fingerprint:sha-256 " OTHER_DTLS_FINGERPRINT "\n", real);
+			fst_requires(run_multi_fingerprint_case(18960, lines, &ready, &state) == SWITCH_STATUS_SUCCESS);
+			fst_check(ready == SWITCH_TRUE);
+			fst_check(state == DS_READY);
+		}
+		FCT_TEST_END();
+
+		FCT_TEST_BGN(dtls_client_accepts_a_matching_fingerprint_of_another_algorithm)
+		{
+			char real[256], lines[512];
+			switch_bool_t ready;
+			dtls_state_t state;
+
+			fst_requires(runtime_fingerprint_line(real, sizeof(real), "sha-1"));
+			switch_snprintf(lines, sizeof(lines), "%sa=fingerprint:sha-256 " OTHER_DTLS_FINGERPRINT "\n", real);
+			fst_requires(run_multi_fingerprint_case(18962, lines, &ready, &state) == SWITCH_STATUS_SUCCESS);
+			fst_check(ready == SWITCH_TRUE);
+			fst_check(state == DS_READY);
+		}
+		FCT_TEST_END();
+
+		FCT_TEST_BGN(dtls_client_rejects_a_certificate_matching_no_fingerprint)
+		{
+			switch_bool_t ready;
+			dtls_state_t state;
+
+			fst_requires(run_multi_fingerprint_case(18964,
+				"a=fingerprint:sha-256 " TEST_DTLS_FINGERPRINT "\n"
+				"a=fingerprint:sha-256 " OTHER_DTLS_FINGERPRINT "\n", &ready, &state) == SWITCH_STATUS_SUCCESS);
+			fst_check(ready == SWITCH_FALSE);
+			fst_check(state == DS_FAIL);
 		}
 		FCT_TEST_END();
 
