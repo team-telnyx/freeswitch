@@ -80,6 +80,8 @@
 #define RTP_STUN_FREQ 1000000
 #define DEFAULT_ICE_NOMINATION_FALLBACK_MS 10000
 #define DEFAULT_ICE_MID_CALL_FAILOVER_MS 5000
+#define ICE_TEAMS_POLICY_MAX_CONFLICTS 4
+#define ICE_TEAMS_POLICY_CONFLICT_US ((switch_time_t)5000000)
 #define DEFAULT_ICE_CONTROLLING_FAILOVER_MS 5000
 #define ICE_CONTROLLING_FAILOVER_TRANSACTION_MS 5000
 #define ICE_CONTROLLING_FAILOVER_RTO_MS 1000
@@ -518,6 +520,18 @@ struct switch_rtp {
 	switch_rtp_ice_t ice;
 	switch_rtp_ice_t rtcp_ice;
 	char ice_tie_breaker[8];
+	/* Explicit Teams interop exception; lifetime budget is never rearmed by trickle/reset. */
+	uint8_t ice_teams_policy_cached;
+	uint8_t ice_teams_policy_enabled;
+	uint8_t ice_teams_policy_failed;
+	uint8_t ice_teams_policy_conflicts;
+	uint8_t ice_teams_policy_request_valid[ICE_TEAMS_POLICY_MAX_CONFLICTS];
+	uint8_t ice_teams_policy_request_component[ICE_TEAMS_POLICY_MAX_CONFLICTS];
+	char ice_teams_policy_request_id[ICE_TEAMS_POLICY_MAX_CONFLICTS][12];
+	const char *ice_teams_policy_request_user[ICE_TEAMS_POLICY_MAX_CONFLICTS];
+	const char *ice_teams_policy_request_pass[ICE_TEAMS_POLICY_MAX_CONFLICTS];
+	const char *ice_teams_policy_request_rpass[ICE_TEAMS_POLICY_MAX_CONFLICTS];
+	switch_time_t ice_teams_policy_deadline[2];
 	char *timer_name;
 	char *local_host_str;
 	char *remote_host_str;
@@ -1564,6 +1578,52 @@ SWITCH_DECLARE(void) switch_rtp_pvt_ice_role_conflict_rotate_tie_breaker(char ti
 	}
 }
 
+/* Caller owns ice_mutex. Failure is terminal, including across ICE reactivation. */
+static switch_bool_t ice_teams_policy_check(switch_rtp_t *rtp_session, switch_time_t now, switch_bool_t conflict)
+{
+	switch_channel_t *channel;
+	int i;
+
+	if (!rtp_session->ice_teams_policy_enabled) return SWITCH_TRUE;
+	if (rtp_session->ice_teams_policy_failed) return SWITCH_FALSE;
+	for (i = 0; i < 2; i++) {
+		if (rtp_session->ice_teams_policy_deadline[i] && now >= rtp_session->ice_teams_policy_deadline[i]) break;
+	}
+	if (i == 2 && (!conflict || rtp_session->ice_teams_policy_conflicts < ICE_TEAMS_POLICY_MAX_CONFLICTS)) {
+		if (conflict) rtp_session->ice_teams_policy_conflicts++;
+		return SWITCH_TRUE;
+	}
+	rtp_session->ice_teams_policy_failed = 1;
+	switch_rtp_pvt_ice_role_conflict_cancel(&rtp_session->ice);
+	switch_rtp_pvt_ice_role_conflict_cancel(&rtp_session->rtcp_ice);
+	channel = switch_core_session_get_channel(rtp_session->session);
+	switch_channel_set_variable(channel, "rtp_ice_controlling_policy_failure", "role_conflict_exhausted");
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING,
+		"Teams ICE controlling policy failed: unresolved role conflict (repairs:%u)\n",
+		rtp_session->ice_teams_policy_conflicts);
+	switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
+	return SWITCH_FALSE;
+}
+
+static switch_bool_t ice_teams_policy_conflict(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, switch_time_t now)
+{
+	int component = ice == &rtp_session->rtcp_ice ? 1 : 0;
+
+	if (!ice_teams_policy_check(rtp_session, now, SWITCH_TRUE)) return SWITCH_FALSE;
+	if (!rtp_session->ice_teams_policy_deadline[component]) {
+		rtp_session->ice_teams_policy_deadline[component] = now + ICE_TEAMS_POLICY_CONFLICT_US;
+	}
+	return SWITCH_TRUE;
+}
+
+/* Retire an episode only at an authenticated controlling nomination's commit boundary. */
+static void ice_teams_policy_resolved(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice)
+{
+	if (rtp_session->ice_teams_policy_enabled && !(ice->type & ICE_CONTROLLED)) {
+		rtp_session->ice_teams_policy_deadline[ice == &rtp_session->rtcp_ice ? 1 : 0] = 0;
+	}
+}
+
 SWITCH_DECLARE(uint32_t) switch_rtp_pvt_ice_local_prflx_priority(switch_bool_t is_rtcp, switch_bool_t rtcp_mux)
 {
 	return is_rtcp && !rtcp_mux ? ICE_LOCAL_PRFLX_PRIORITY - 1 : ICE_LOCAL_PRFLX_PRIORITY;
@@ -1839,7 +1899,8 @@ static switch_status_t ice_send_controlling_check(switch_rtp_t *rtp_session, swi
 	}
 
 	switch_mutex_lock(rtp_session->ice_mutex);
-	status = switch_socket_sendto(sock_output, candidate_addr, 0, (void *)packet, &bytes);
+	status = ice_teams_policy_check(rtp_session, switch_micro_time_now(), SWITCH_FALSE) ?
+		switch_socket_sendto(sock_output, candidate_addr, 0, (void *)packet, &bytes) : SWITCH_STATUS_FALSE;
 	switch_mutex_unlock(rtp_session->ice_mutex);
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session),
@@ -2142,6 +2203,10 @@ static switch_status_t ice_out(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 		 * the pre-existing next_run best-effort gate.  The mutex is nested because
 		 * the tick may send a probe through ice_send_controlling_check(). */
 		switch_mutex_lock(rtp_session->ice_mutex);
+		if (!ice_teams_policy_check(rtp_session, now, SWITCH_FALSE)) {
+			switch_mutex_unlock(rtp_session->ice_mutex);
+			return SWITCH_STATUS_FALSE;
+		}
 		ice_controlling_failover_tick(rtp_session, ice, now);
 		switch_mutex_unlock(rtp_session->ice_mutex);
 	}
@@ -2224,6 +2289,11 @@ static switch_status_t ice_out(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 	}
 
 	switch_mutex_lock(rtp_session->ice_mutex);
+	if (!ice_teams_policy_check(rtp_session, now, SWITCH_FALSE)) {
+		switch_mutex_unlock(rtp_session->ice_mutex);
+		READ_DEC(rtp_session);
+		return SWITCH_STATUS_FALSE;
+	}
 	sent_controlling = ice->type & ICE_CONTROLLED ? SWITCH_FALSE : SWITCH_TRUE;
 	memcpy(tie_breaker, rtp_session->ice_tie_breaker, sizeof(tie_breaker));
 
@@ -2319,7 +2389,9 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_get_controlling_nomination_id(swi
 
 	switch_mutex_lock(rtp_session->ice_mutex);
 	ice = proto == IPR_RTP ? &rtp_session->ice : &rtp_session->rtcp_ice;
-	if (ice->controlling_failover_state != SWITCH_RTP_ICE_CONTROLLING_FAILOVER_NOMINATING ||
+	if ((ice->controlling_failover_state != SWITCH_RTP_ICE_CONTROLLING_FAILOVER_NOMINATING &&
+		 ice->controlling_failover_state != SWITCH_RTP_ICE_CONTROLLING_STARTUP_NOMINATING &&
+		 ice->controlling_failover_state != SWITCH_RTP_ICE_CONTROLLING_RESTART_NOMINATING) ||
 		!ice->controlling_failover_nomination_id[0]) {
 		switch_mutex_unlock(rtp_session->ice_mutex);
 		return SWITCH_STATUS_FALSE;
@@ -2342,7 +2414,9 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_ice_timer_tick(switch_rtp_t *rtp_
 
 	switch_mutex_lock(rtp_session->ice_mutex);
 	ice = proto == IPR_RTP ? &rtp_session->ice : &rtp_session->rtcp_ice;
-	ice_controlling_failover_tick(rtp_session, ice, now);
+	if (ice_teams_policy_check(rtp_session, now, SWITCH_FALSE)) {
+		ice_controlling_failover_tick(rtp_session, ice, now);
+	}
 	switch_mutex_unlock(rtp_session->ice_mutex);
 
 	return SWITCH_STATUS_SUCCESS;
@@ -3284,6 +3358,7 @@ static void ice_controlling_failover_commit(switch_rtp_t *rtp_session, switch_rt
 		switch_channel_set_flag(channel, CF_VIDEO_REFRESH_REQ);
 		switch_core_media_gen_key_frame(rtp_session->session);
 	}
+	ice_teams_policy_resolved(rtp_session, ice);
 	ice_controlling_failover_reset(ice, SWITCH_TRUE);
 }
 
@@ -3376,6 +3451,7 @@ static void ice_controlling_bootstrap_commit(switch_rtp_t *rtp_session, switch_r
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE,
 		"ICE controlling %s: nomination succeeded, selected %s candidate %s:%u idx:%d\n",
 		restarting ? "restart" : "startup", rtp_type(rtp_session), candidate->con_addr, candidate->con_port, candidate_idx);
+	ice_teams_policy_resolved(rtp_session, ice);
 	ice_controlling_failover_reset(ice, SWITCH_TRUE);
 }
 
@@ -3447,6 +3523,7 @@ static switch_bool_t dtls_preserved_restart_commit(switch_rtp_t *rtp_session, sw
 		"ICE restart preserved in-progress DTLS association and migrated output to %s:%u\n",
 		candidate->con_addr, candidate->con_port);
 
+	ice_teams_policy_resolved(rtp_session, ice);
 	return SWITCH_TRUE;
 }
 
@@ -3546,6 +3623,7 @@ static switch_bool_t ice_controlling_failover_handle_response(switch_rtp_t *rtp_
 			candidate_idx < ice->ice_params->cand_idx[ice->proto]) {
 			ice->ice_params->cands[candidate_idx][ice->proto].responsive = 1;
 		}
+		if (response_sent_controlling) ice_teams_policy_resolved(rtp_session, ice);
 		ice_controlling_failover_reset(ice, SWITCH_TRUE);
 		return SWITCH_FALSE;
 	}
@@ -3611,6 +3689,57 @@ static switch_bool_t ice_controlling_failover_handle_response(switch_rtp_t *rtp_
 	}
 
 	return SWITCH_TRUE;
+}
+
+/* Replace only this component's transaction; a role-retaining repair must not
+ * cancel another component or turn a provisional nomination into an addr-less ice_out. */
+static void ice_teams_policy_retry(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
+	int candidate_idx, switch_time_t now)
+{
+	switch_rtp_ice_controlling_failover_state_t state = ice->controlling_failover_state;
+	switch_bool_t nominate;
+	switch_time_t candidate_us = ice->controlling_failover_state == SWITCH_RTP_ICE_CONTROLLING_FAILOVER_IDLE ?
+		now : ice->controlling_failover_candidate_us;
+	char *transaction;
+	int family = AF_UNSPEC;
+
+	if (state != SWITCH_RTP_ICE_CONTROLLING_FAILOVER_IDLE) {
+		candidate_idx = ice->controlling_failover_idx;
+	} else if (ice_restart_check_ready(rtp_session, ice, candidate_idx, now)) {
+		state = SWITCH_RTP_ICE_CONTROLLING_RESTART_NOMINATING;
+	} else if (ice_controlling_startup_ready(rtp_session, ice)) {
+		state = SWITCH_RTP_ICE_CONTROLLING_STARTUP_NOMINATING;
+	}
+	/* New bootstrap nominations retain the existing address/family admission. */
+	if (ice->controlling_failover_state == SWITCH_RTP_ICE_CONTROLLING_FAILOVER_IDLE &&
+		state != SWITCH_RTP_ICE_CONTROLLING_FAILOVER_IDLE &&
+		(!ice->ice_params || candidate_idx < 0 || candidate_idx >= ice->ice_params->cand_idx[ice->proto] ||
+		 !ice_remote_ip_is_acceptable(rtp_session, ice->ice_params->cands[candidate_idx][ice->proto].con_addr,
+			"udp", &family) || !rtp_session->local_addr ||
+		 family != switch_sockaddr_get_family(rtp_session->local_addr))) {
+		switch_rtp_pvt_ice_role_conflict_cancel(ice);
+		return;
+	}
+	switch_rtp_pvt_ice_role_conflict_cancel(ice);
+	if (state == SWITCH_RTP_ICE_CONTROLLING_FAILOVER_IDLE) {
+		ice_out(rtp_session, ice, SWITCH_TRUE);
+		return;
+	}
+	/* Reuse the existing state's eligibility and nomination/commit machinery. */
+	if (!ice->ice_params || candidate_idx < 0 || candidate_idx >= ice->ice_params->cand_idx[ice->proto]) return;
+	ice->controlling_failover_idx = candidate_idx;
+	ice->controlling_failover_candidate_us = candidate_us;
+	nominate = state != SWITCH_RTP_ICE_CONTROLLING_FAILOVER_PROBING;
+	transaction = nominate ? ice->controlling_failover_nomination_id : ice->controlling_failover_probe_id;
+	if (ice_send_controlling_check(rtp_session, ice, candidate_idx, nominate,
+		transaction, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
+		ice->controlling_failover_state = state;
+		ice->controlling_failover_started_us = now;
+		ice->controlling_failover_sent_us = now;
+		ice->controlling_failover_attempts = 1;
+	} else {
+		ice_controlling_failover_reset(ice, SWITCH_TRUE);
+	}
 }
 
 void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *data, switch_size_t len)
@@ -3886,6 +4015,13 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 			goto end;
 		}
 
+		if (rtp_session->ice_teams_policy_enabled) {
+			if (!ice_teams_policy_conflict(rtp_session, ice, packet_now)) goto end;
+			/* Keep the maximum tie and the candidate-bound nomination owner. */
+			ice_teams_policy_retry(rtp_session, ice, response_candidate_idx, packet_now);
+			goto end;
+		}
+
 		role_conflict_was_promoted = ice->promoted_to_controlling ? SWITCH_TRUE : SWITCH_FALSE;
 		switch_rtp_pvt_ice_role_conflict_cancel(&rtp_session->ice);
 		switch_rtp_pvt_ice_role_conflict_cancel(&rtp_session->rtcp_ice);
@@ -3922,6 +4058,63 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 		got_message_integrity && got_fingerprint && stun_auth_valid ? SWITCH_TRUE : SWITCH_FALSE;
 	authenticated_current_response = raw_packet_type == SWITCH_STUN_BINDING_RESPONSE &&
 		stun_response_auth_valid && got_message_integrity && got_fingerprint ? SWITCH_TRUE : SWITCH_FALSE;
+	if (rtp_session->ice_teams_policy_enabled) {
+		if (!ice_teams_policy_check(rtp_session, packet_now, SWITCH_FALSE)) goto end;
+		if (raw_packet_type == SWITCH_STUN_BINDING_REQUEST && got_ice_controlling) {
+			uint8_t response_buf[128] = { 0 };
+			switch_stun_packet_t *response;
+			switch_stun_packet_attribute_t *error;
+			switch_socket_t *output = is_rtcp ? rtp_session->rtcp_sock_output : rtp_session->sock_output;
+			switch_size_t response_bytes;
+			int request_idx, candidate_idx, candidate_family = AF_UNSPEC;
+			switch_bool_t duplicate = SWITCH_FALSE;
+
+			if (!authenticated_current_request || got_ice_controlling != 1 || got_ice_controlled ||
+				!peer_tie_breaker || !pri || !ntohl(*pri) || !output) goto end;
+			candidate_idx = ice_find_candidate_by_addr(ice, from_host, from_port);
+			/* An eligible observed tuple may resolve roles before peer-reflexive learning.
+			 * Answering a conflict does not authorize candidate selection or nomination. */
+			if (candidate_idx < 0 && (!response_local_addr ||
+				switch_sockaddr_get_family(from_addr) != switch_sockaddr_get_family(response_local_addr) ||
+				!ice_remote_ip_is_acceptable(rtp_session, from_host, "udp", &candidate_family))) goto end;
+			for (request_idx = 0; request_idx < ICE_TEAMS_POLICY_MAX_CONFLICTS; request_idx++) {
+				if (rtp_session->ice_teams_policy_request_valid[request_idx] &&
+					rtp_session->ice_teams_policy_request_component[request_idx] == (is_rtcp ? 1 : 0) &&
+					!memcmp(rtp_session->ice_teams_policy_request_id[request_idx], packet->header.id, 12) &&
+					!strcmp(rtp_session->ice_teams_policy_request_user[request_idx], ice->user_ice) &&
+					!strcmp(rtp_session->ice_teams_policy_request_pass[request_idx], ice->pass) &&
+					!strcmp(rtp_session->ice_teams_policy_request_rpass[request_idx], ice->rpass)) {
+					duplicate = SWITCH_TRUE;
+					break;
+				}
+			}
+			if (!duplicate) {
+				if (!ice_teams_policy_conflict(rtp_session, ice, packet_now)) goto end;
+				request_idx = rtp_session->ice_teams_policy_conflicts - 1;
+				rtp_session->ice_teams_policy_request_valid[request_idx] = 1;
+				rtp_session->ice_teams_policy_request_component[request_idx] = is_rtcp ? 1 : 0;
+				memcpy(rtp_session->ice_teams_policy_request_id[request_idx], packet->header.id, 12);
+				/* Activation credentials are immutable pool strings: bind replay history to that generation. */
+				rtp_session->ice_teams_policy_request_user[request_idx] = ice->user_ice;
+				rtp_session->ice_teams_policy_request_pass[request_idx] = ice->pass;
+				rtp_session->ice_teams_policy_request_rpass[request_idx] = ice->rpass;
+			}
+			response = switch_stun_packet_build_header(SWITCH_STUN_BINDING_ERROR_RESPONSE, packet->header.id, response_buf);
+			error = (switch_stun_packet_attribute_t *)(response_buf + sizeof(response->header));
+			error->type = htons(SWITCH_STUN_ATTR_ERROR_CODE);
+			error->length = htons(4);
+			error->value[2] = 4;
+			error->value[3] = 87;
+			response->header.length = htons(8);
+			switch_stun_packet_attribute_add_integrity(response, ice->pass);
+			switch_stun_packet_attribute_add_fingerprint(response);
+			response_bytes = switch_stun_packet_length(response);
+			switch_socket_sendto(output, from_addr, 0, (void *)response, &response_bytes);
+			/* An unlisted competitor must not cancel another candidate's pending check. */
+			if (!duplicate && candidate_idx >= 0) ice_teams_policy_retry(rtp_session, ice, candidate_idx, packet_now);
+			goto end;
+		}
+	}
 	authoritative_dtls_tuple = !is_rtcp && rtp_session->dtls &&
 		rtp_session->dtls->preserve_restart_migrated ? SWITCH_TRUE : SWITCH_FALSE;
 	if (authoritative_dtls_tuple &&
@@ -9897,7 +10090,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice(switch_rtp_t *rtp_sessio
 	if (!rtp_session || !dtls_lifetime_lock(rtp_session)) {
 		return SWITCH_STATUS_FALSE;
 	}
-	if (!rtp_session->ready || rtp_session->flags[SWITCH_RTP_FLAG_SHUTDOWN]) {
+	if (!rtp_session->ready || rtp_session->flags[SWITCH_RTP_FLAG_SHUTDOWN] || rtp_session->ice_teams_policy_failed) {
 		dtls_lifetime_unlock(rtp_session);
 		return SWITCH_STATUS_FALSE;
 	}
@@ -10084,6 +10277,17 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice(switch_rtp_t *rtp_sessio
 	ice->controlling_failover_ms = 0;
 	ice->controlling_failover_idx = -1;
 	ice->controlling_failover_candidate_us = 0;
+	if (!rtp_session->ice_teams_policy_cached) {
+		rtp_session->ice_teams_policy_cached = 1;
+		rtp_session->ice_teams_policy_enabled = (type & ICE_VANILLA) &&
+			!(type & (ICE_CONTROLLED | ICE_LITE | ICE_LITE_INBOUND)) &&
+			switch_channel_var_true(switch_core_session_get_channel(rtp_session->session), "rtp_ice_teams_controlling");
+		if (rtp_session->ice_teams_policy_enabled) {
+			/* Deliberate per-profile exception to randomized ICE ties: no peer can have a higher value. */
+			memset(rtp_session->ice_tie_breaker, 0xff, sizeof(rtp_session->ice_tie_breaker));
+		}
+	}
+	if (rtp_session->ice_teams_policy_enabled) type &= ~ICE_CONTROLLED;
 	if (!rtp_session->ice_tie_breaker[0]) {
 		switch_rtp_pvt_ice_role_conflict_rotate_tie_breaker(rtp_session->ice_tie_breaker);
 	}
