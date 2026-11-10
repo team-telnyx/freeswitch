@@ -34,6 +34,7 @@
 
 int protect_dest_uri(switch_caller_profile_t *cp);
 char *sofia_glue_sanitize_display_name(char *name);
+switch_bool_t sofia_refer_to_dialstring_safe(const char *user, const char *host);
 
 static int timeout_sec = 10;
 static switch_interval_time_t delay_start_ms = 5000;
@@ -159,6 +160,30 @@ FST_TEST_BEGIN(test_protect_url)
 	fst_check_string_equals(cp.destination_number, "external/%0D%0A%20%23%25%26%2B%3A%3B%3C%3D%3E%3F@[\\]^`{|}\"@freeswitch-testing:9080");
 
 	switch_core_destroy_memory_pool(&cp.pool);
+}
+FST_TEST_END()
+
+FST_TEST_BEGIN(test_refer_to_dialstring_safe)
+{
+	/* Ordinary targets are allowed. */
+	fst_check(sofia_refer_to_dialstring_safe("1000", "192.168.1.1") == SWITCH_TRUE);
+	fst_check(sofia_refer_to_dialstring_safe("alice", "sip.example.net") == SWITCH_TRUE);
+	fst_check(sofia_refer_to_dialstring_safe("", "") == SWITCH_TRUE);
+	fst_check(sofia_refer_to_dialstring_safe(NULL, NULL) == SWITCH_TRUE);
+
+	/* A separator in the user part would add originate legs. */
+	fst_check(sofia_refer_to_dialstring_safe("1000,2000", "host") == SWITCH_FALSE);
+	fst_check(sofia_refer_to_dialstring_safe("1000|2000", "host") == SWITCH_FALSE);
+	fst_check(sofia_refer_to_dialstring_safe("1000:_:2000", "host") == SWITCH_FALSE);
+
+	/* Channel-variable brackets in either part. */
+	fst_check(sofia_refer_to_dialstring_safe("a[origination_caller_id_number=1]", "host") == SWITCH_FALSE);
+	fst_check(sofia_refer_to_dialstring_safe("a{foo=bar}", "host") == SWITCH_FALSE);
+	fst_check(sofia_refer_to_dialstring_safe("a<b>", "host") == SWITCH_FALSE);
+
+	/* The host part is checked too. */
+	fst_check(sofia_refer_to_dialstring_safe("1000", "evil,sofia/profile/sip:x@y") == SWITCH_FALSE);
+	fst_check(sofia_refer_to_dialstring_safe("1000", "host:_:x") == SWITCH_FALSE);
 }
 FST_TEST_END()
 

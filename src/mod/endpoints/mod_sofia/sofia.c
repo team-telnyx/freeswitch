@@ -10121,6 +10121,30 @@ respond:
 	}
 }
 
+/* A Refer-To target reaches switch_ivr_originate() as a dial string. These
+   characters would let the remote party add extra legs or channel variables,
+   so a target carrying any of them is refused. */
+switch_bool_t sofia_refer_to_dialstring_safe(const char *user, const char *host)
+{
+	const char *p;
+
+	for (p = user; p && *p; p++) {
+		if (strchr(",|{}[]<>", *p)) {
+			return SWITCH_FALSE;
+		}
+	}
+	for (p = host; p && *p; p++) {
+		if (strchr(",|{}[]<>", *p)) {
+			return SWITCH_FALSE;
+		}
+	}
+	if ((user && strstr(user, SWITCH_ENT_ORIGINATE_DELIM)) ||
+		(host && strstr(host, SWITCH_ENT_ORIGINATE_DELIM))) {
+		return SWITCH_FALSE;
+	}
+	return SWITCH_TRUE;
+}
+
 void sofia_handle_sip_i_refer(nua_t *nua, sofia_profile_t *profile, nua_handle_t *nh, switch_core_session_t *session, sip_t const *sip,
 								sofia_dispatch_event_t *de, tagi_t tags[])
 {
@@ -10189,6 +10213,18 @@ void sofia_handle_sip_i_refer(nua_t *nua, sofia_profile_t *profile, nua_handle_t
 
 	if (refer_to) {
 		char *rep = NULL;
+
+		if (!sofia_refer_to_dialstring_safe(refer_to->r_url->url_user, refer_to->r_url->url_host)) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+							  "Refusing REFER: dial-string characters in the Refer-To target\n");
+			nua_notify(tech_pvt->nh, NUTAG_NEWSUB(1), SIPTAG_CONTENT_TYPE_STR("message/sipfrag;version=2.0"),
+					   NUTAG_SUBSTATE(nua_substate_terminated),
+					   SIPTAG_SUBSCRIPTION_STATE_STR("terminated;reason=noresource"),
+					   SIPTAG_PAYLOAD_STR("SIP/2.0 403 Forbidden\r\n"), SIPTAG_EVENT_STR(etmp),
+					   TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)),
+					   TAG_END());
+			goto done;
+		}
 
 		if (sofia_test_pflag(profile, PFLAG_FULL_ID)) {
 			exten = switch_core_session_sprintf(session, "%s@%s", (char *) refer_to->r_url->url_user, (char *) refer_to->r_url->url_host);
