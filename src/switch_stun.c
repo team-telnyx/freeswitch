@@ -239,17 +239,22 @@ SWITCH_DECLARE(switch_stun_packet_t *) switch_stun_packet_parse(uint8_t *buf, ui
 		case SWITCH_STUN_ATTR_REFLECTED_FROM:
 		case SWITCH_STUN_ATTR_ALTERNATE_SERVER:
 		case SWITCH_STUN_ATTR_DESTINATION_ADDRESS:
-		case SWITCH_STUN_ATTR_PRIORITY:
 			{
 				switch_stun_ip_t *ip;
 
 				/* Check the attribute's own length: the packet may have more after it */
-				if (attr->length < (attr->type == SWITCH_STUN_ATTR_PRIORITY ? sizeof(uint32_t) : sizeof(switch_stun_ip_t))) {
+				if (attr->length < sizeof(switch_stun_ip_t)) {
 					return NULL;
 				}
 
 				ip = (switch_stun_ip_t *) attr->value;
 				ip->port = ntohs(ip->port);
+			}
+			break;
+		case SWITCH_STUN_ATTR_PRIORITY:
+			/* Left in network order: readers use ntohl() */
+			if (attr->length != sizeof(uint32_t)) {
+				return NULL;
 			}
 			break;
 		case SWITCH_STUN_ATTR_SOURCE_ADDRESS2:
