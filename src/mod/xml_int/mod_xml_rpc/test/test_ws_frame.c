@@ -20,8 +20,10 @@ static struct {
 	int next;
 } chunks;
 
-/* Chunk markers: an idle read timeout, and the client closing the connection */
-static const uint8_t TIMEOUT[1], EOF_MARK[1];
+/* Chunk markers: an idle read timeout, the client closing the connection,
+   and a timeout during which the stop hook marks the socket down */
+static const uint8_t TIMEOUT[1], EOF_MARK[1], STOP[1];
+static wsh_t wsh;
 
 static uint8_t written[4096];
 static size_t written_len;
@@ -37,6 +39,11 @@ void ConnRead(TConn *const connectionP, uint32_t const timeout, bool *const eofP
 	if (chunks.next >= chunks.count) {
 		*errorP = strdup("no more data");
 		return;
+	}
+
+	if (chunks.data[chunks.next] == STOP) {
+		wsh.down = 1;
+		chunks.data[chunks.next] = TIMEOUT;
 	}
 
 	if (chunks.data[chunks.next] == TIMEOUT || chunks.data[chunks.next] == EOF_MARK) {
@@ -84,7 +91,6 @@ bool ConnWrite(TConn *const connectionP, const void *const buffer, uint32_t cons
 
 static TConn conn;
 static TSession session;
-static wsh_t wsh;
 
 static void reset(void)
 {
@@ -272,6 +278,105 @@ static void test_timeout_inside_header(void)
 	printf("PASS test_timeout_inside_header\n");
 }
 
+static void test_timeout_inside_payload(void)
+{
+	uint8_t buf[64];
+	size_t n;
+
+	reset();
+	n = client_frame(buf, WSOC_TEXT, "slow link", 9);
+	add_chunk(buf, 9);	/* header and 3 payload bytes */
+	add_chunk(TIMEOUT, 0);
+	add_chunk(TIMEOUT, 0);
+	add_chunk(buf + 9, n - 9);
+
+	expect_frame(WSOC_TEXT, "slow link");
+	assert(!wsh.down);
+	printf("PASS test_timeout_inside_payload\n");
+}
+
+static void test_payload_stall_closes(void)
+{
+	uint8_t buf[64];
+	ws_opcode_t oc;
+	uint8_t *data;
+	size_t n;
+	int i;
+
+	reset();
+	n = client_frame(buf, WSOC_TEXT, "stalled", 7);
+	add_chunk(buf, 8);
+	for (i = 0; i < WS_PAYLOAD_STALL_TIMEOUTS; i++) {
+		add_chunk(TIMEOUT, 0);
+	}
+	add_chunk(buf + 8, n - 8);
+
+	assert(ws_read_frame(&wsh, &oc, &data) == -WS_PROTO_ERR);
+	assert(oc == WSOC_CLOSE && wsh.down);
+	printf("PASS test_payload_stall_closes\n");
+}
+
+static void test_payload_last_tolerated_stall(void)
+{
+	uint8_t buf[64];
+	size_t n;
+	int i;
+
+	reset();
+	n = client_frame(buf, WSOC_TEXT, "nearly", 6);
+	add_chunk(buf, 8);
+	for (i = 0; i < WS_PAYLOAD_STALL_TIMEOUTS - 1; i++) {
+		add_chunk(TIMEOUT, 0);
+	}
+	add_chunk(buf + 8, n - 8);
+
+	expect_frame(WSOC_TEXT, "nearly");
+	assert(!wsh.down);
+	printf("PASS test_payload_last_tolerated_stall\n");
+}
+
+static void test_payload_progress_resets_stalls(void)
+{
+	uint8_t buf[64];
+	size_t n;
+	int i;
+
+	reset();
+	n = client_frame(buf, WSOC_TEXT, "progress", 8);
+	add_chunk(buf, 8);
+	for (i = 0; i < WS_PAYLOAD_STALL_TIMEOUTS - 1; i++) {
+		add_chunk(TIMEOUT, 0);
+	}
+	add_chunk(buf + 8, 1);
+	for (i = 0; i < WS_PAYLOAD_STALL_TIMEOUTS - 1; i++) {
+		add_chunk(TIMEOUT, 0);
+	}
+	add_chunk(buf + 9, n - 9);
+
+	expect_frame(WSOC_TEXT, "progress");
+	assert(!wsh.down);
+	printf("PASS test_payload_progress_resets_stalls\n");
+}
+
+static void test_payload_stop_while_stalled(void)
+{
+	uint8_t buf[64];
+	ws_opcode_t oc;
+	uint8_t *data;
+	size_t n;
+
+	reset();
+	n = client_frame(buf, WSOC_TEXT, "stopped", 7);
+	add_chunk(buf, 8);
+	add_chunk(STOP, 0);
+	add_chunk(buf + 8, n - 8);
+
+	assert(ws_read_frame(&wsh, &oc, &data) < 0);
+	assert(wsh.down);
+	assert(chunks.next == 2);	/* closed without waiting for the rest */
+	printf("PASS test_payload_stop_while_stalled\n");
+}
+
 int main(void)
 {
 	test_back_to_back_short_frames();
@@ -282,5 +387,10 @@ int main(void)
 	test_idle_timeout_then_frame();
 	test_eof_at_frame_boundary();
 	test_timeout_inside_header();
+	test_timeout_inside_payload();
+	test_payload_stall_closes();
+	test_payload_last_tolerated_stall();
+	test_payload_progress_resets_stalls();
+	test_payload_stop_while_stalled();
 	return 0;
 }
