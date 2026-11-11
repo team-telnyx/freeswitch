@@ -6310,7 +6310,12 @@ static void generate_local_fingerprint(switch_media_handle_t *smh, switch_media_
 		} else {
 			engine->local_dtls_fingerprint.type = "sha-256";
 		}
-		switch_core_cert_gen_fingerprint(DTLS_SRTP_FNAME, &engine->local_dtls_fingerprint);
+		if (!switch_core_cert_gen_fingerprint(DTLS_SRTP_FNAME, &engine->local_dtls_fingerprint) &&
+			strcasecmp(engine->local_dtls_fingerprint.type, "sha-256")) {
+			/* The peer's hash is unsupported; ours needn't match it (RFC 8122). */
+			engine->local_dtls_fingerprint.type = "sha-256";
+			switch_core_cert_gen_fingerprint(DTLS_SRTP_FNAME, &engine->local_dtls_fingerprint);
+		}
 	}
 }
 

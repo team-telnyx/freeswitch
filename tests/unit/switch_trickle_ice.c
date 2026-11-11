@@ -3640,6 +3640,87 @@ FCT_BGN()
 		}
 		FCT_TEST_END();
 
+		FCT_TEST_BGN(cert_fingerprint_supports_every_offered_hash)
+		{
+			static const struct { const char *type; unsigned int len; } hashes[] = {
+				{ "md5", 16 }, { "sha-1", 20 }, { "sha-224", 28 }, { "sha-256", 32 },
+				{ "sha-384", 48 }, { "sha-512", 64 }
+			};
+			size_t i;
+
+			for (i = 0; i < sizeof(hashes) / sizeof(hashes[0]); i++) {
+				dtls_fingerprint_t fp = { 0 };
+
+				fp.type = (char *)hashes[i].type;
+				fst_check(switch_core_cert_gen_fingerprint(DTLS_SRTP_FNAME, &fp) == 1);
+				fst_check(fp.len == hashes[i].len);
+				fst_check(strlen(fp.str) == hashes[i].len * 3 - 1);
+			}
+		}
+		FCT_TEST_END();
+
+		FCT_TEST_BGN(cert_fingerprint_fails_for_an_unknown_hash)
+		{
+			dtls_fingerprint_t fp = { 0 };
+
+			fp.type = "sha-3-256";
+			fst_check(switch_core_cert_gen_fingerprint(DTLS_SRTP_FNAME, &fp) == 0);
+			fst_check(fp.len == 0);
+			fst_check(zstr(fp.str));
+		}
+		FCT_TEST_END();
+
+		FCT_TEST_BGN(dtls_client_accepts_a_sha_384_fingerprint)
+		{
+			char real[256];
+			switch_bool_t ready;
+			dtls_state_t state;
+
+			fst_requires(runtime_fingerprint_line(real, sizeof(real), "sha-384"));
+			fst_requires(run_multi_fingerprint_case(18966, real, &ready, &state) == SWITCH_STATUS_SUCCESS);
+			fst_check(ready == SWITCH_TRUE);
+			fst_check(state == DS_READY);
+		}
+		FCT_TEST_END();
+
+		FCT_TEST_BGN(dtls_client_rejects_an_unknown_fingerprint_hash)
+		{
+			switch_bool_t ready;
+			dtls_state_t state;
+
+			fst_requires(run_multi_fingerprint_case(18968,
+				"a=fingerprint:sha-3-256 " TEST_DTLS_FINGERPRINT "\n", &ready, &state) == SWITCH_STATUS_SUCCESS);
+			fst_check(ready == SWITCH_FALSE);
+			fst_check(state == DS_FAIL);
+		}
+		FCT_TEST_END();
+
+		/* The answer can't use a hash we don't support; it falls back to sha-256. */
+		FCT_TEST_BGN(answer_to_an_unknown_fingerprint_hash_uses_sha_256)
+		{
+			switch_core_session_t *session = NULL;
+			switch_rtp_t *rtp = NULL;
+			void *sdp_session = NULL;
+			sdp_parser_t *parser = NULL;
+			char offer[2048];
+			char fp_value[256] = "";
+			const char *local_sdp;
+
+			fst_requires(build_dtls_pair_sdp(offer, sizeof(offer), 1683119300, 18970, "active",
+				"unknownHashUfrag1", "unknownHashPassword12345678901") == SWITCH_STATUS_SUCCESS);
+			fst_requires(set_sdp_fingerprints(offer, sizeof(offer),
+				"a=fingerprint:sha-3-256 " TEST_DTLS_FINGERPRINT "\n") == SWITCH_STATUS_SUCCESS);
+			fst_requires(make_session_and_rtp_with_sdp_ex(&session, &rtp, &sdp_session, &parser,
+				offer, "PCMU", SWITCH_TRUE, SWITCH_TRUE, NULL) == SWITCH_STATUS_SUCCESS);
+			switch_core_media_gen_local_sdp(session, SDP_ANSWER, NULL, 0, NULL, 0);
+			local_sdp = switch_channel_get_variable(switch_core_session_get_channel(session), "rtp_local_sdp_str");
+			copy_sdp_attribute(local_sdp, "fingerprint", fp_value, sizeof(fp_value));
+			fst_check(!strncmp(fp_value, "sha-256 ", 8));
+			fst_check(strlen(fp_value) == strlen("sha-256 " TEST_DTLS_FINGERPRINT));
+			cleanup_session_media_and_sdp(session, sdp_session, parser);
+		}
+		FCT_TEST_END();
+
 		FCT_TEST_BGN(ready_dtls_restart_response_first_commits_only_controlling_nomination)
 		{
 			ready_restart_response_first_result_t promoted;
