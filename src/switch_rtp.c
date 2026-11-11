@@ -7554,7 +7554,8 @@ static int dtls_cert_matches(X509 *cert, const char *type, const char *str)
 }
 
 /* 1 if the peer's certificate matches a fingerprint its SDP offered. The SDP
-   may offer several (RFC 8122); remote_fp holds only the last one. */
+   may offer several (RFC 8122); remote_fp holds only the last one and the
+   identity the first SWITCH_RTP_DTLS_IDENTITY_MAX_FINGERPRINTS. */
 static int dtls_peer_cert_offered(switch_dtls_t *dtls, X509 *cert)
 {
 	const switch_rtp_pvt_dtls_identity_t *identity = &dtls->association_identity;
