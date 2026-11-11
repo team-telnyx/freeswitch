@@ -10133,6 +10133,13 @@ switch_bool_t sofia_refer_to_dialstring_safe(const char *user, const char *host)
 			return SWITCH_FALSE;
 		}
 	}
+	/* sofia keeps the brackets of an IPv6 literal host */
+	if (host && *host == '[') {
+		size_t n = strspn(host + 1, "0123456789abcdefABCDEF:.");
+		if (n && host[n + 1] == ']' && !host[n + 2]) {
+			host = NULL;
+		}
+	}
 	for (p = host; p && *p; p++) {
 		if (strchr(",|{}[]<>", *p)) {
 			return SWITCH_FALSE;

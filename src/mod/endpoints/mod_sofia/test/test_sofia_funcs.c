@@ -184,6 +184,15 @@ FST_TEST_BEGIN(test_refer_to_dialstring_safe)
 	/* The host part is checked too. */
 	fst_check(sofia_refer_to_dialstring_safe("1000", "evil,sofia/profile/sip:x@y") == SWITCH_FALSE);
 	fst_check(sofia_refer_to_dialstring_safe("1000", "host:_:x") == SWITCH_FALSE);
+
+	/* A bracketed IPv6 host is fine; other brackets in the host are not. */
+	fst_check(sofia_refer_to_dialstring_safe("1000", "[2001:db8::1]") == SWITCH_TRUE);
+	fst_check(sofia_refer_to_dialstring_safe("1000", "[::ffff:192.0.2.1]") == SWITCH_TRUE);
+	fst_check(sofia_refer_to_dialstring_safe("1000", "[a=b]") == SWITCH_FALSE);
+	fst_check(sofia_refer_to_dialstring_safe("1000", "[::1]x") == SWITCH_FALSE);
+	fst_check(sofia_refer_to_dialstring_safe("1000", "x[::1]") == SWITCH_FALSE);
+	fst_check(sofia_refer_to_dialstring_safe("1000", "[]") == SWITCH_FALSE);
+	fst_check(sofia_refer_to_dialstring_safe("1000", "[::1") == SWITCH_FALSE);
 }
 FST_TEST_END()
 
