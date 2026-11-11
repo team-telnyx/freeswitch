@@ -30,6 +30,12 @@
  * DIS have no effect on the result. It prints the ranges of DIS start that
  * give each result.
  *
+ * The sweep runs for two types of calling terminal: one that sends a single
+ * CNG indicator, and one that sends a CNG indicator for each CNG burst (CNG,
+ * then no-signal 0.5 s later, again every 3.5 s, until it receives a DIS).
+ * The second type leaves CNG and no-signal indicators in the queue of the
+ * gateway, and they must not start CNG again in front of the reply.
+ *
  * Exit status: 0 when the DCS is relayed in time in all runs, 1 when it is
  * not, 2 when the harness itself has a problem. -v prints every log line of
  * the gateway.
@@ -65,6 +71,8 @@
 #define DIS_REPEAT_MS		11520		/* the answering terminal sends its DIS again 11.5 s later */
 #define SWEEP_CNG_TIMES		3		/* see sweep_cng_ms */
 #define REPLY_MS		530		/* the calling terminal answers a DIS 0.53 s after it receives it */
+#define CNG_ON_MS		500		/* a CNG burst, for the terminal that sends one indicator per burst */
+#define CNG_CYCLE_MS		3500		/* the start of one CNG burst to the start of the next */
 
 /* T.30 frame control fields, in the bit order libspandsp uses internally. */
 #define FCF_DIS			0x80
@@ -120,6 +128,7 @@ static const char *sweep_verdict[SWEEP_RUNS];
 /* Times of the CNG indicator after the start of T.38. */
 static const int sweep_cng_ms[SWEEP_CNG_TIMES] = { 150, 225, 750 };
 static int sweep_cng_at_ms;
+static bool cng_per_burst;	/* the calling terminal sends a CNG indicator for each CNG burst */
 
 static t38_gateway_state_t *gw;
 static t38_core_state_t *gw_core;	/* receive side of the gateway: packets from the calling terminal */
@@ -137,6 +146,7 @@ static int n_bursts;
 static int now_ms;
 static int verbose;
 static int reply_due_ms = -1;
+static int next_cng_ms = -1;	/* next CNG burst of a terminal that sends one indicator per burst */
 
 /* Results */
 static int dcs_in_ms = -1;		/* first DCS handed to the gateway */
@@ -305,13 +315,18 @@ static void add_attempt(int ms)
 
 /* Times are in ms from the start of the gateway, which is the start of the T.38 session.
    The DIS starts at dis_start_ms, and again 11.5 s later. The calling terminal sends CNG,
-   then answers the first DIS it receives (see mon_rx_data). */
+   then answers the first DIS it receives (see mon_rx_data). A terminal that sends one
+   CNG indicator for each burst gets its bursts from run_script. */
 static void build_script(int dis_start_ms)
 {
 	add_event(22, EV_INDICATOR, T38_IND_NO_SIGNAL);
 	burst_onset_ms[n_bursts++] = dis_start_ms;
 	burst_onset_ms[n_bursts++] = dis_start_ms + DIS_REPEAT_MS;
-	add_event(sweep_cng_at_ms, EV_INDICATOR, T38_IND_CNG);
+	if (cng_per_burst) {
+		next_cng_ms = sweep_cng_at_ms;
+	} else {
+		add_event(sweep_cng_at_ms, EV_INDICATOR, T38_IND_CNG);
+	}
 }
 
 /* ---- what the gateway sends to the calling terminal ---- */
@@ -396,6 +411,7 @@ static void reset_state(void)
 	dis_relayed_ms = -1;
 	mon_frame_len = 0;
 	reply_due_ms = -1;
+	next_cng_ms = -1;
 	verdict = verdict_error;
 }
 
@@ -464,6 +480,12 @@ static int run_script(int dis_start_ms)
 		}
 
 		/* T.38 leg */
+		/* the calling terminal stops CNG when it receives a DIS */
+		if (next_cng_ms >= 0 && now_ms >= next_cng_ms && dis_relayed_ms < 0) {
+			add_event(next_cng_ms, EV_INDICATOR, T38_IND_CNG);
+			add_event(next_cng_ms + CNG_ON_MS, EV_INDICATOR, T38_IND_NO_SIGNAL);
+			next_cng_ms += CNG_CYCLE_MS;
+		}
 		if (reply_due_ms >= 0 && now_ms >= reply_due_ms) {
 			add_attempt(reply_due_ms);
 			reply_due_ms = -1;
@@ -515,8 +537,8 @@ static int run_script(int dis_start_ms)
 	return rc;
 }
 
-/* Runs the call for each time of the CNG indicator and each start of the DIS, and
-   prints the ranges of DIS start that give each result. */
+/* Runs the call for each type of calling terminal, each time of the CNG indicator and
+   each start of the DIS, and prints the ranges of DIS start that give each result. */
 int main(int argc, char *argv[])
 {
 	int rc = 0;
@@ -530,9 +552,11 @@ int main(int argc, char *argv[])
 		return 2;
 	}
 	verbose = (argc == 2);
-	for (k = 0; k < SWEEP_CNG_TIMES; ++k) {
-		sweep_cng_at_ms = sweep_cng_ms[k];
-		printf("CNG indicator at %d ms, DIS start from %d to %d ms in %d ms steps (ms from the start of the gateway)\n",
+	for (k = 0; k < 2 * SWEEP_CNG_TIMES; ++k) {
+		cng_per_burst = (k >= SWEEP_CNG_TIMES);
+		sweep_cng_at_ms = sweep_cng_ms[k % SWEEP_CNG_TIMES];
+		printf("%s at %d ms, DIS start from %d to %d ms in %d ms steps (ms from the start of the gateway)\n",
+			cng_per_burst ? "One CNG indicator per burst, first" : "One CNG indicator",
 			sweep_cng_at_ms, SWEEP_FIRST_MS, SWEEP_LAST_MS, SWEEP_STEP_MS);
 		for (i = 0; i < SWEEP_RUNS; ++i) {
 			run_rc = run_script(SWEEP_FIRST_MS + i * SWEEP_STEP_MS);
