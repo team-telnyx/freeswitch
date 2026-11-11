@@ -531,6 +531,25 @@ FST_TEARDOWN_END()
 		fst_check(switch_stun_packet_parse(last_priority, sizeof(last_priority) - 1) != NULL);
 	}
 	FST_TEST_END()
+	FST_TEST_BEGIN(test_stun_priority_left_in_network_order)
+	{
+		/* handle_ice reads PRIORITY with ntohl(), so parsing must not
+		   swap any of its bytes */
+		uint8_t priority_only[] =
+			"\x00\x01\x00\x08\x21\x12\xa4\x42\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c"
+			"\x00\x24\x00\x04\x6e\x00\x1e\xff";
+		/* PRIORITY is exactly 32 bits */
+		uint8_t long_priority[] =
+			"\x00\x01\x00\x0c\x21\x12\xa4\x42\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c"
+			"\x00\x24\x00\x08\x6e\x00\x1e\xff\x00\x00\x00\x00";
+		uint32_t priority;
+
+		fst_requires(switch_stun_packet_parse(priority_only, sizeof(priority_only) - 1) != NULL);
+		memcpy(&priority, priority_only + 24, sizeof(priority));
+		fst_check(ntohl(priority) == 0x6e001eff);
+		fst_check(switch_stun_packet_parse(long_priority, sizeof(long_priority) - 1) == NULL);
+	}
+	FST_TEST_END()
 	FST_TEST_BEGIN(test_binding_indication)
 	{
 		switch_stun_packet_t *packet;
@@ -1313,6 +1332,60 @@ FST_TEARDOWN_END()
 			switch_core_destroy_memory_pool(&pool);
 		}
 		FST_SESSION_END()
+		FST_SESSION_BEGIN(test_priority_match_requires_message_integrity)
+		{
+			/* A request whose PRIORITY equals the chosen candidate's counts
+			   as a match only when it carries our MESSAGE-INTEGRITY */
+			switch_core_session_t *session = NULL;
+			switch_status_t status;
+			switch_call_cause_t cause;
+			switch_rtp_ice_t ice = { 0 };
+			switch_memory_pool_t *pool = NULL;
+			static switch_rtp_t *rtp_session = NULL;
+			static switch_rtp_flag_t flags[SWITCH_RTP_FLAG_INVALID] = { 0 };
+			const char *err = NULL;
+			ice_t ice_params = { 0 };
+			uint8_t request[256];
+			switch_size_t request_len;
+
+			switch_core_new_memory_pool(&pool);
+
+			status = switch_ivr_originate(NULL, &session, &cause, "null/+15553334444", 2, NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL);
+			fst_requires(session);
+			fst_check(status == SWITCH_STATUS_SUCCESS);
+
+			switch_core_memory_pool_set_data(pool, "__session", session);
+			rtp_session = switch_rtp_new(rx_host, rx_port, tx_host, tx_port, TEST_PT, 8000, 20 * 1000, flags, "soft", &err, pool);
+			fst_requires(rtp_session != NULL);
+			switch_core_media_set_rtp_session(session, SWITCH_MEDIA_TYPE_AUDIO, rtp_session);
+
+			ice.ice_params = &ice_params;
+			ice.user_ice = "remoteUfrag:localUfrag";
+			ice.ice_user = "localUfrag:remoteUfrag";
+			ice.pass = "test-local-ice-password";
+			ice.type = ICE_VANILLA;
+			ice.addr = switch_rtp_session_get_remote_addr(rtp_session);
+			ice.proto = IPR_RTP;
+			ice.ice_params->chosen[ice.proto] = 0;
+			ice.ice_params->cand_idx[ice.proto] = 1;
+			ice.ice_params->cands[0][ice.proto].con_addr = (char *) tx_host;
+			ice.ice_params->cands[0][ice.proto].con_port = tx_port;
+			ice.ice_params->cands[0][ice.proto].priority = 0x6e0001ff;
+
+			ice.missed_count = 3;
+			request_len = build_authenticated_request(request, sizeof(request), "other:user", "not-our-password", SWITCH_FALSE);
+			switch_rtp_pvt_handle_ice(rtp_session, &ice, request, request_len);
+			fst_check(ice.missed_count == 3);
+
+			request_len = build_authenticated_request(request, sizeof(request), "other:user", ice.pass, SWITCH_FALSE);
+			switch_rtp_pvt_handle_ice(rtp_session, &ice, request, request_len);
+			fst_check(ice.missed_count == 0);
+
+			switch_rtp_destroy(&rtp_session);
+			switch_core_session_rwunlock(session);
+			switch_core_destroy_memory_pool(&pool);
+		}
+		FST_SESSION_END()
 		FST_SESSION_BEGIN(test_provisional_ice_requires_explicit_bootstrap)
 		{
 			switch_core_session_t *session = NULL;
@@ -1488,6 +1561,8 @@ FST_TEARDOWN_END()
 				fst_check(ice.ice_params->cands[1][ice.proto].responsive);
 				fst_check(ice.ice_params->cands[1][ice.proto].ready);
 				fst_check(ice.ice_params->cands[1][ice.proto].use_candidate);
+				/* learned with the PRIORITY the request carried */
+				fst_check(ice.ice_params->cands[1][ice.proto].priority == 0x6e0001ff);
 			}
 
 			memset(&ice, 0, sizeof(ice));

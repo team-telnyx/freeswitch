@@ -3851,7 +3851,8 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 				pri = (uint32_t *) attr->value;
 				priority = ntohl(*pri);
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG8, "|------: %u\n", priority);
-				ok = priority == ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].priority;
+				/* PRIORITY is not secret: match on it only with our MESSAGE-INTEGRITY */
+				ok = stun_auth_valid && priority == ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].priority;
 			}
 			break;
 		}
@@ -4180,8 +4181,8 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 		}
 			
 
-		if (!provisional_ice && !ok && ice == &rtp_session->ice && rtp_session->rtcp_ice.ice_params && pri &&
-			*pri == rtp_session->rtcp_ice.ice_params->cands[rtp_session->rtcp_ice.ice_params->chosen[1]][1].priority) {
+		if (!provisional_ice && !ok && ice == &rtp_session->ice && rtp_session->rtcp_ice.ice_params && pri && stun_auth_valid &&
+			ntohl(*pri) == rtp_session->rtcp_ice.ice_params->cands[rtp_session->rtcp_ice.ice_params->chosen[1]][1].priority) {
 			ice = &rtp_session->rtcp_ice;
 			ok = 1;
 		}
@@ -4227,7 +4228,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 						continue;
 					}
 					for (i = 0; i < icep[j]->ice_params->cand_idx[icep[j]->proto]; i++) {
-						if (icep[j]->ice_params &&  icep[j]->ice_params->cands[i][icep[j]->proto].priority == *pri) {
+						if (stun_auth_valid && icep[j]->ice_params && icep[j]->ice_params->cands[i][icep[j]->proto].priority == ntohl(*pri)) {
 							if (j == IPR_RTP && rtp_session->dtls &&
 								(rtp_session->dtls->preserve_restart_pending ||
 								 rtp_session->dtls->preserve_restart_migrated)) {
