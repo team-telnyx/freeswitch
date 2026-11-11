@@ -506,6 +506,31 @@ FST_TEARDOWN_END()
 		fst_xcheck(out_port == 0, "output port left defined on reject");
 	}
 	FST_TEST_END()
+	FST_TEST_BEGIN(test_stun_attribute_bounds_use_attribute_length)
+	{
+		/* A zero-length MAPPED-ADDRESS must not byte-swap the next
+		   attribute's header. Here that swap would turn SOFTWARE's length
+		   0x0400 into a valid-looking 4 and the packet would parse. */
+		static uint8_t empty_address[] =
+			"\x00\x01\x00\x0c\x21\x12\xa4\x42\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c"
+			"\x00\x01\x00\x00"
+			"\x80\x22\x04\x00" "abcd";
+		/* A 4-byte PRIORITY may end the packet */
+		static uint8_t last_priority[] =
+			"\x00\x01\x00\x08\x21\x12\xa4\x42\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c"
+			"\x00\x24\x00\x04\x6e\x00\x1e\xff";
+		/* Same for a zero-length ERROR_CODE: its 32-bit swap would turn
+		   04 00 22 80 into SOFTWARE with length 4 */
+		static uint8_t empty_error_code[] =
+			"\x01\x11\x00\x0c\x21\x12\xa4\x42\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c"
+			"\x00\x09\x00\x00"
+			"\x04\x00\x22\x80" "abcd";
+
+		fst_check(switch_stun_packet_parse(empty_address, sizeof(empty_address) - 1) == NULL);
+		fst_check(switch_stun_packet_parse(empty_error_code, sizeof(empty_error_code) - 1) == NULL);
+		fst_check(switch_stun_packet_parse(last_priority, sizeof(last_priority) - 1) != NULL);
+	}
+	FST_TEST_END()
 	FST_TEST_BEGIN(test_binding_indication)
 	{
 		switch_stun_packet_t *packet;
