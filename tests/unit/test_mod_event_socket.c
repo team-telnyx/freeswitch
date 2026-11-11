@@ -245,6 +245,38 @@ FST_CORE_DB_BEGIN("./conf_event_socket")
 		}
 		FST_TEST_END()
 
+		/* 4294967297 wraps to 1 in an int, and "1x" is not a number. Each
+		 * is followed by one byte that would complete the auth if accepted. */
+		FST_TEST_BEGIN(content_length_not_narrowed)
+		{
+			const char *bad[][2] = {
+				{ "4294967297", "Content-Length: 4294967297 must not wrap to 1" },
+				{ "1x", "Content-Length: 1x must be rejected" },
+				{ "", "empty Content-Length must be rejected" },
+				{ "\t", "whitespace-only Content-Length must be rejected" },
+				{ NULL, NULL }
+			};
+			int i;
+
+			for (i = 0; bad[i][0]; i++) {
+				switch_socket_t *sock = esl_connect_and_greet(fst_pool);
+				char packet[128], reply[256] = { 0 };
+				switch_size_t len;
+
+				if (!sock) {
+					fst_fail("could not connect to event_socket listener");
+					break;
+				}
+
+				len = switch_snprintf(packet, sizeof(packet), "auth ClueCon\nContent-Length: %s\n\nX", bad[i][0]);
+				fst_requires(send_all(sock, packet, len) == SWITCH_STATUS_SUCCESS);
+				recv_frame(sock, reply, sizeof(reply));
+				fst_xcheck(strstr(reply, "+OK accepted") == NULL, bad[i][1]);
+				switch_socket_close(sock);
+			}
+		}
+		FST_TEST_END()
+
 		/* A packet with a valid non-zero Content-Length must be parsed
 		 * end-to-end: command, headers, and body fully consumed before
 		 * the server replies. */

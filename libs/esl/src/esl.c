@@ -1336,15 +1336,21 @@ ESL_DECLARE(esl_status_t) esl_recv_event(esl_handle_t *handle, int check_q, esl_
 	}
 
 	if ((cl = esl_event_get_header(revent, "content-length"))) {
-		char *body;
+		char *body, *cl_end;
 		esl_ssize_t sofar = 0;
+		long long n;
 
-		len = atol(cl);
+		errno = 0;
+		n = strtoll(cl, &cl_end, 10);
+		while (cl_end != cl && (*cl_end == ' ' || *cl_end == '\t' || *cl_end == '\r')) {	/* the value keeps a CRLF peer's \r */
+			cl_end++;
+		}
 
-		if (len < 0 || len > ESL_MAX_CONTENT_LENGTH) {
+		if (errno || cl_end == cl || *cl_end || n < 0 || n > ESL_MAX_CONTENT_LENGTH) {
 			esl_event_destroy(&revent);
 			goto fail;
 		}
+		len = (esl_ssize_t) n;
 
 		body = malloc(len + 1);
 		if (!body) {
