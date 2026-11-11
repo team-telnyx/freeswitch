@@ -1342,7 +1342,7 @@ ESL_DECLARE(esl_status_t) esl_recv_event(esl_handle_t *handle, int check_q, esl_
 
 		errno = 0;
 		n = strtoll(cl, &cl_end, 10);
-		while (*cl_end == ' ' || *cl_end == '\t' || *cl_end == '\r') {	/* the value keeps a CRLF peer's \r */
+		while (cl_end != cl && (*cl_end == ' ' || *cl_end == '\t' || *cl_end == '\r')) {	/* the value keeps a CRLF peer's \r */
 			cl_end++;
 		}
 

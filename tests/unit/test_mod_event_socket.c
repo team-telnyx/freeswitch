@@ -253,6 +253,7 @@ FST_CORE_DB_BEGIN("./conf_event_socket")
 				{ "4294967297", "Content-Length: 4294967297 must not wrap to 1" },
 				{ "1x", "Content-Length: 1x must be rejected" },
 				{ "", "empty Content-Length must be rejected" },
+				{ "\t", "whitespace-only Content-Length must be rejected" },
 				{ NULL, NULL }
 			};
 			int i;

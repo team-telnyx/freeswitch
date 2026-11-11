@@ -117,6 +117,11 @@ int main(void)
 		"Content-Length: 1x\n\nX",
 		"Content-Length with trailing garbage");
 
+	expect_rejected(
+		"Content-Type: text/event-plain\r\n"
+		"Content-Length: \r\n\r\nX",
+		"empty Content-Length from a CRLF peer");
+
 	expect_body(
 		"Content-Type: text/event-plain\r\n"
 		"Content-Length: 1\r\n\r\nX",

@@ -1443,7 +1443,7 @@ static switch_status_t read_packet(listener_t *listener, switch_event_t **event,
 									/* Range-check before narrowing: atoi() wraps 4294967297 to 1 */
 									errno = 0;
 									cl = strtoll(val, &cl_end, 10);
-									while (*cl_end == ' ' || *cl_end == '\t' || *cl_end == '\r') {
+									while (cl_end != val && (*cl_end == ' ' || *cl_end == '\t' || *cl_end == '\r')) {
 										cl_end++;
 									}
 									clen = (errno || cl_end == val || *cl_end || cl < 0 || cl > MAX_CONTENT_LENGTH) ? -1 : (int) cl;
