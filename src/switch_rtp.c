@@ -81,6 +81,8 @@
 #define DEFAULT_ICE_NOMINATION_FALLBACK_MS 10000
 #define DEFAULT_ICE_MID_CALL_FAILOVER_MS 5000
 #define ICE_CONTROLLING_LOCK_MAX_CONFLICTS 4
+#define ICE_CONTROLLING_LOCK_REPLAY_SLOTS 32
+#define ICE_CONTROLLING_LOCK_REPLAY_US ((switch_time_t)40000000)
 #define ICE_CONTROLLING_LOCK_CONFLICT_US ((switch_time_t)5000000)
 #define DEFAULT_ICE_CONTROLLING_FAILOVER_MS 5000
 #define ICE_CONTROLLING_FAILOVER_TRANSACTION_MS 5000
@@ -426,12 +428,12 @@ static switch_status_t parse_cand_line(const char *line, switch_rtp_ice_cand_t *
 /* Each component owns an unresolved episode and a bounded replay cache. */
 typedef struct {
 	uint8_t conflicts;
-	uint8_t request_next;
-	uint8_t request_valid[ICE_CONTROLLING_LOCK_MAX_CONFLICTS];
-	char request_id[ICE_CONTROLLING_LOCK_MAX_CONFLICTS][12];
-	const char *request_user[ICE_CONTROLLING_LOCK_MAX_CONFLICTS];
-	const char *request_pass[ICE_CONTROLLING_LOCK_MAX_CONFLICTS];
-	const char *request_rpass[ICE_CONTROLLING_LOCK_MAX_CONFLICTS];
+	switch_time_t request_expires[ICE_CONTROLLING_LOCK_REPLAY_SLOTS];
+	switch_time_t request_suppressed_until;
+	char request_id[ICE_CONTROLLING_LOCK_REPLAY_SLOTS][12];
+	const char *request_user[ICE_CONTROLLING_LOCK_REPLAY_SLOTS];
+	const char *request_pass[ICE_CONTROLLING_LOCK_REPLAY_SLOTS];
+	const char *request_rpass[ICE_CONTROLLING_LOCK_REPLAY_SLOTS];
 	switch_time_t deadline;
 } switch_ice_controlling_lock_component_t;
 
@@ -1622,6 +1624,46 @@ static switch_bool_t ice_controlling_lock_conflict(switch_rtp_t *rtp_session, sw
 	if (!rtp_session->controlling_lock.component[component].deadline) {
 		rtp_session->controlling_lock.component[component].deadline = now + ICE_CONTROLLING_LOCK_CONFLICT_US;
 	}
+	return SWITCH_TRUE;
+}
+
+/* Caller holds ice_mutex; only authenticated, admissible requests reach this helper.
+ * RFC 8489 section 6.3.1: retain transactions seen in the last 40 seconds.
+ * A live entry is never evicted. If storage fills, unmatched requests remain
+ * uncounted until 40 seconds without another unmatched request. Otherwise an
+ * unrecorded retransmission could become "new" as soon as a slot expires.
+ * This conservatively delays new incoming-only episodes under saturation;
+ * existing deadlines and received-487 accounting remain effective. */
+static switch_bool_t ice_controlling_lock_request_is_new(switch_rtp_t *rtp_session,
+	switch_rtp_ice_t *ice, const char *id, switch_time_t now)
+{
+	switch_ice_controlling_lock_component_t *component =
+		&rtp_session->controlling_lock.component[ice == &rtp_session->rtcp_ice ? 1 : 0];
+	int i, available = -1;
+
+	for (i = 0; i < ICE_CONTROLLING_LOCK_REPLAY_SLOTS; i++) {
+		if (component->request_expires[i] <= now) {
+			if (available < 0) available = i;
+			continue;
+		}
+		if (!memcmp(component->request_id[i], id, 12) &&
+			!strcmp(component->request_user[i], ice->user_ice) &&
+			!strcmp(component->request_pass[i], ice->pass) &&
+			!strcmp(component->request_rpass[i], ice->rpass)) {
+			component->request_expires[i] = now + ICE_CONTROLLING_LOCK_REPLAY_US;
+			return SWITCH_FALSE;
+		}
+	}
+	if (available < 0 || component->request_suppressed_until > now) {
+		component->request_suppressed_until = now + ICE_CONTROLLING_LOCK_REPLAY_US;
+		return SWITCH_FALSE;
+	}
+	component->request_expires[available] = now + ICE_CONTROLLING_LOCK_REPLAY_US;
+	memcpy(component->request_id[available], id, 12);
+	/* Activation credentials are immutable pool strings, including across restarts. */
+	component->request_user[available] = ice->user_ice;
+	component->request_pass[available] = ice->pass;
+	component->request_rpass[available] = ice->rpass;
 	return SWITCH_TRUE;
 }
 
@@ -3791,7 +3833,7 @@ static void ice_controlling_lock_retry(switch_rtp_t *rtp_session, switch_rtp_ice
 	}
 }
 
-void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *data, switch_size_t len)
+static void handle_ice_at(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *data, switch_size_t len, switch_time_t packet_now)
 {
 	switch_stun_packet_t *packet;
 	switch_stun_packet_attribute_t *attr;
@@ -3836,7 +3878,6 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 	switch_bool_t direct_username_match = SWITCH_FALSE;
 	switch_bool_t recovering = SWITCH_FALSE;
 	switch_rtp_recovery_nomination_proof_t nomination_proof = SWITCH_RTP_RECOVERY_NOMINATION_NONE;
-	switch_time_t packet_now = switch_micro_time_now();
 	int response_candidate_idx = -1;
 	int role_conflict_487 = 0;
 	switch_bool_t role_conflict_sent_controlling = SWITCH_FALSE;
@@ -4115,9 +4156,8 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 			switch_stun_packet_attribute_t *error;
 			switch_socket_t *output = is_rtcp ? rtp_session->rtcp_sock_output : rtp_session->sock_output;
 			switch_size_t response_bytes;
-			int request_idx, candidate_idx, candidate_family = AF_UNSPEC;
-			switch_ice_controlling_lock_component_t *component = &rtp_session->controlling_lock.component[is_rtcp ? 1 : 0];
-			switch_bool_t duplicate = SWITCH_FALSE;
+			int candidate_idx, candidate_family = AF_UNSPEC;
+			switch_bool_t new_request;
 
 			if (!authenticated_current_request || got_ice_controlling != 1 || got_ice_controlled ||
 				!peer_tie_breaker || !pri || !ntohl(*pri) || !output) goto end;
@@ -4127,27 +4167,8 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 			if (candidate_idx < 0 && (!response_local_addr ||
 				switch_sockaddr_get_family(from_addr) != switch_sockaddr_get_family(response_local_addr) ||
 				!ice_remote_ip_is_acceptable(rtp_session, from_host, "udp", &candidate_family))) goto end;
-			for (request_idx = 0; request_idx < ICE_CONTROLLING_LOCK_MAX_CONFLICTS; request_idx++) {
-				if (component->request_valid[request_idx] &&
-					!memcmp(component->request_id[request_idx], packet->header.id, 12) &&
-					!strcmp(component->request_user[request_idx], ice->user_ice) &&
-					!strcmp(component->request_pass[request_idx], ice->pass) &&
-					!strcmp(component->request_rpass[request_idx], ice->rpass)) {
-					duplicate = SWITCH_TRUE;
-					break;
-				}
-			}
-			if (!duplicate) {
-				if (!ice_controlling_lock_conflict(rtp_session, ice, packet_now)) goto end;
-				request_idx = component->request_next;
-				component->request_next = (request_idx + 1) % ICE_CONTROLLING_LOCK_MAX_CONFLICTS;
-				component->request_valid[request_idx] = 1;
-				memcpy(component->request_id[request_idx], packet->header.id, 12);
-				/* Activation credentials are immutable pool strings: bind replay history to that generation. */
-				component->request_user[request_idx] = ice->user_ice;
-				component->request_pass[request_idx] = ice->pass;
-				component->request_rpass[request_idx] = ice->rpass;
-			}
+			new_request = ice_controlling_lock_request_is_new(rtp_session, ice, packet->header.id, packet_now);
+			if (new_request && !ice_controlling_lock_conflict(rtp_session, ice, packet_now)) goto end;
 			response = switch_stun_packet_build_header(SWITCH_STUN_BINDING_ERROR_RESPONSE, packet->header.id, response_buf);
 			error = (switch_stun_packet_attribute_t *)(response_buf + sizeof(response->header));
 			error->type = htons(SWITCH_STUN_ATTR_ERROR_CODE);
@@ -4160,7 +4181,7 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 			response_bytes = switch_stun_packet_length(response);
 			switch_socket_sendto(output, from_addr, 0, (void *)response, &response_bytes);
 			/* Neither a known crossing check nor an unlisted competitor owns our pending check. */
-			if (!duplicate && candidate_idx >= 0 && !ice_controlling_lock_check_pending(rtp_session, ice)) {
+			if (new_request && candidate_idx >= 0 && !ice_controlling_lock_check_pending(rtp_session, ice)) {
 				ice_controlling_lock_retry(rtp_session, ice, candidate_idx, packet_now);
 			}
 			goto end;
@@ -5153,8 +5174,13 @@ void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 	READ_DEC(rtp_session);
 }
 
-SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_handle_ice_from(switch_rtp_t *rtp_session, ice_proto_t proto,
-	const char *host, switch_port_t port, void *data, switch_size_t len)
+void switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *data, switch_size_t len)
+{
+	handle_ice_at(rtp_session, ice, data, len, switch_micro_time_now());
+}
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_handle_ice_from_at(switch_rtp_t *rtp_session, ice_proto_t proto,
+	const char *host, switch_port_t port, void *data, switch_size_t len, switch_time_t now)
 {
 	switch_rtp_ice_t *ice;
 	switch_sockaddr_t *from_addr = NULL;
@@ -5162,7 +5188,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_handle_ice_from(switch_rtp_t *rtp
 	switch_sockaddr_t **active_addr;
 	switch_status_t status = SWITCH_STATUS_FALSE;
 
-	if (!rtp_session || (proto != IPR_RTP && proto != IPR_RTCP) || zstr(host) || !port || !data || !len) {
+	if (!rtp_session || (proto != IPR_RTP && proto != IPR_RTCP) || zstr(host) || !port || !data || !len || !now) {
 		return SWITCH_STATUS_FALSE;
 	}
 
@@ -5187,7 +5213,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_handle_ice_from(switch_rtp_t *rtp
 
 	saved_addr = *active_addr;
 	*active_addr = from_addr;
-	switch_rtp_pvt_handle_ice(rtp_session, ice, data, len);
+	handle_ice_at(rtp_session, ice, data, len, now);
 	*active_addr = saved_addr;
 	status = SWITCH_STATUS_SUCCESS;
 
@@ -5195,6 +5221,12 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_handle_ice_from(switch_rtp_t *rtp
 	WRITE_DEC(rtp_session);
 	READ_DEC(rtp_session);
 	return status;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_handle_ice_from(switch_rtp_t *rtp_session, ice_proto_t proto,
+	const char *host, switch_port_t port, void *data, switch_size_t len)
+{
+	return switch_rtp_pvt_handle_ice_from_at(rtp_session, proto, host, port, data, len, switch_micro_time_now());
 }
 
 #ifdef ENABLE_SRTP
