@@ -519,8 +519,15 @@ FST_TEARDOWN_END()
 		static uint8_t last_priority[] =
 			"\x00\x01\x00\x08\x21\x12\xa4\x42\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c"
 			"\x00\x24\x00\x04\x6e\x00\x1e\xff";
+		/* Same for a zero-length ERROR_CODE: its 32-bit swap would turn
+		   04 00 22 80 into SOFTWARE with length 4 */
+		static uint8_t empty_error_code[] =
+			"\x01\x11\x00\x0c\x21\x12\xa4\x42\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c"
+			"\x00\x09\x00\x00"
+			"\x04\x00\x22\x80" "abcd";
 
 		fst_check(switch_stun_packet_parse(empty_address, sizeof(empty_address) - 1) == NULL);
+		fst_check(switch_stun_packet_parse(empty_error_code, sizeof(empty_error_code) - 1) == NULL);
 		fst_check(switch_stun_packet_parse(last_priority, sizeof(last_priority) - 1) != NULL);
 	}
 	FST_TEST_END()
