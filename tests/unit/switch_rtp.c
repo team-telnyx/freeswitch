@@ -1095,7 +1095,7 @@ FST_TEARDOWN_END()
 		udptl[0] = 0x86;
 		for (i = 0; i < 2; ++i) {
 			if (i) switch_rtp_clear_flag(media_rtp, SWITCH_RTP_FLAG_PROXY_MEDIA);
-			fst_requires(send_udp_packet(media_fd, media_port, udptl, 6));
+			fst_requires(send_udp_packet(media_fd, media_port, udptl, sizeof(udptl)));
 			fst_requires(send_udp_packet(media_fd, media_port, packet_with_mid, sizeof(packet_with_mid)));
 			fst_requires(media_ready());
 			fst_requires(media_read(&frame, SWITCH_IO_FLAG_NOBLOCK) == SWITCH_STATUS_SUCCESS);
