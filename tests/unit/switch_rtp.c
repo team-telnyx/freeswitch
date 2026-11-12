@@ -1041,6 +1041,72 @@ FST_TEARDOWN_BEGIN()
 	media_cleanup();
 }
 FST_TEARDOWN_END()
+	FST_TEST_BEGIN(test_udptl_receive_opaque_packets)
+	{
+		switch_frame_t frame = { 0 };
+		char mid[SWITCH_RTP_MID_MAX_LEN + 1] = "";
+		uint8_t packet_with_mid[] = {
+			0x91, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0xa0, 0x11, 0x22, 0x33, 0x44,
+			0x55, 0x55, 0x66, 0x66,
+			0xbe, 0xde, 0x00, 0x01, (TEST_MID_EXT_ID << 4), '1', 0x00, 0x00, 0xff
+		};
+		uint8_t udptl[] = {
+			0x86, 0x00, 0x01, 0x00, 0x00, 0x00,
+			0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00,
+			0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00
+		};
+		uint8_t sequence_high[] = { 0x86, 0x88, 0x80, 0x90, 0x9f, 0xbf, 0x7f, 0xc0 };
+		size_t i, packet_len;
+
+		fst_requires(media_open(0));
+		switch_rtp_set_flag(media_rtp, SWITCH_RTP_FLAG_NOBLOCK);
+		fst_requires(switch_rtp_enable_mid_receive(media_rtp, TEST_MID_EXT_ID) == SWITCH_STATUS_SUCCESS);
+		fst_requires(send_udp_packet(media_fd, media_port, packet_with_mid, sizeof(packet_with_mid)));
+		fst_requires(media_ready());
+		fst_requires(media_read(&frame, SWITCH_IO_FLAG_NOBLOCK) == SWITCH_STATUS_SUCCESS);
+		fst_requires(frame.packet != NULL);
+		fst_check(frame.packetlen == sizeof(packet_with_mid));
+		fst_requires(switch_rtp_copy_received_mid(media_rtp, mid, sizeof(mid)) == SWITCH_STATUS_SUCCESS);
+		fst_check(!strcmp(mid, "1"));
+
+		/* Model the negotiated flags without a mode-switch wakeup clearing the prior MID. */
+		switch_rtp_set_flag(media_rtp, SWITCH_RTP_FLAG_UDPTL);
+		switch_rtp_set_flag(media_rtp, SWITCH_RTP_FLAG_PROXY_MEDIA);
+		for (i = 0; i < sizeof(sequence_high); ++i) {
+			/* These sequence bytes resemble RTP version, CSRC and extension fields. */
+			udptl[0] = sequence_high[i];
+			packet_len = i < 2 ? sizeof(udptl) : 6;
+			udptl[5] = i < 2 ? 10 : 0; /* Redundant copies of the no-signal indicator. */
+			fst_requires(send_udp_packet(media_fd, media_port, udptl, packet_len));
+			fst_requires(media_ready());
+			fst_requires(media_read(&frame, SWITCH_IO_FLAG_NOBLOCK) == SWITCH_STATUS_SUCCESS);
+			fst_check(switch_test_flag(&frame, SFF_UDPTL_PACKET));
+			fst_check(switch_test_flag(&frame, SFF_PROXY_PACKET));
+			fst_check(!switch_test_flag(&frame, SFF_CNG));
+			fst_requires(frame.packet != NULL);
+			fst_check(frame.packetlen == packet_len);
+			fst_check(frame.datalen == packet_len);
+			fst_check(!memcmp(frame.packet, udptl, packet_len));
+			fst_check(switch_rtp_copy_received_mid(media_rtp, mid, sizeof(mid)) == SWITCH_STATUS_FALSE);
+		}
+
+		/* Ordinary and proxy RTP must still reject a truncated CSRC list. */
+		switch_rtp_clear_flag(media_rtp, SWITCH_RTP_FLAG_UDPTL);
+		udptl[0] = 0x86;
+		for (i = 0; i < 2; ++i) {
+			if (i) switch_rtp_clear_flag(media_rtp, SWITCH_RTP_FLAG_PROXY_MEDIA);
+			fst_requires(send_udp_packet(media_fd, media_port, udptl, 6));
+			fst_requires(send_udp_packet(media_fd, media_port, packet_with_mid, sizeof(packet_with_mid)));
+			fst_requires(media_ready());
+			fst_requires(media_read(&frame, SWITCH_IO_FLAG_NOBLOCK) == SWITCH_STATUS_SUCCESS);
+			fst_check(!switch_test_flag(&frame, SFF_UDPTL_PACKET));
+			fst_requires(frame.packet != NULL);
+			fst_check(frame.packetlen == sizeof(packet_with_mid));
+			fst_check(!memcmp(frame.packet, packet_with_mid, sizeof(packet_with_mid)));
+		}
+	}
+	FST_TEST_END()
+
 	FST_TEST_BEGIN(test_received_mid_clears_per_packet)
 	{
 		switch_memory_pool_t *test_pool = NULL;
