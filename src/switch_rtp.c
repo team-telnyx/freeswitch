@@ -16468,7 +16468,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_handle_extensions(switch_rtp_t *rtp_s
 	 * it was never reliably stripped when cc > 0. This function only needs to *read* the
 	 * extension, so it locates it at body + CSRC locally below. */
 
-	if (!rtp_session->has_rtp) return SWITCH_STATUS_SUCCESS;
+	if (!rtp_session->has_rtp || rtp_session->flags[SWITCH_RTP_FLAG_UDPTL]) return SWITCH_STATUS_SUCCESS;
 
 	{
 		uint8_t *packet_start = (uint8_t *) &rtp_session->recv_msg.header;
@@ -16483,7 +16483,6 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_handle_extensions(switch_rtp_t *rtp_s
 
 
 	if (!rtp_session->flags[SWITCH_RTP_FLAG_PROXY_MEDIA] &&
-		!rtp_session->flags[SWITCH_RTP_FLAG_UDPTL] &&
 		rtp_session->recv_msg.header.x) {
 
 		switch_rtp_hdr_ext_t *recv_ext = NULL;
