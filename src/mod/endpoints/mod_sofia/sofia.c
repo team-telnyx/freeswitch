@@ -8162,6 +8162,24 @@ static void mark_transfer_record(switch_core_session_t *session, const char *br_
 }
 
 
+/* Only the original outgoing stack-ready event can confirm this session handoff. */
+static void sofia_recovery_handoff_ready(private_object_t *tech_pvt, nua_handle_t *nh,
+                                       int event_state, int status)
+{
+	const char *token;
+	switch_channel_t *channel;
+
+	if (!tech_pvt || nh != tech_pvt->nh || event_state != nua_callstate_ready || status != 200 ||
+		tech_pvt->sent_invites != 1 || !tech_pvt->sent_last_invite) return;
+	channel = tech_pvt->channel;
+	if (!switch_channel_up(channel) || !switch_channel_test_flag(channel, CF_RECOVERED)) return;
+	token = switch_channel_get_variable_strdup(channel, "sip_recovery_handoff");
+	if (zstr(token)) { free((void *)token); return; }
+	switch_channel_set_variable(channel, "sip_recovery_handoff_ready", token);
+	switch_channel_set_variable(channel, "sip_recovery_handoff", NULL);
+	free((void *)token);
+}
+
 static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 									 char const *phrase,
 									 nua_t *nua, sofia_profile_t *profile, nua_handle_t *nh, sofia_private_t *sofia_private, sip_t const *sip,
@@ -8171,6 +8189,7 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 	const char *l_sdp = NULL, *r_sdp = NULL;
 	int offer_recv = 0, answer_recv = 0, offer_sent = 0, answer_sent = 0;
 	int ss_state = nua_callstate_init;
+	int event_state = nua_callstate_init;
 	switch_channel_t *channel = NULL;
 	private_object_t *tech_pvt = NULL;
 	const char *replaces_str = NULL;
@@ -8192,6 +8211,7 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 			NUTAG_OFFER_SENT_REF(offer_sent),
 			NUTAG_ANSWER_SENT_REF(answer_sent),
 			SIPTAG_REPLACES_STR_REF(replaces_str), SOATAG_LOCAL_SDP_STR_REF(l_sdp), SOATAG_REMOTE_SDP_STR_REF(r_sdp), TAG_END());
+	event_state = ss_state;
 
 	if (session) {
 		channel = switch_core_session_get_channel(session);
@@ -9786,6 +9806,7 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 
   done:
 
+	sofia_recovery_handoff_ready(tech_pvt, nh, event_state, status);
 	switch_safe_free(patched_sdp);
 
 	if ((enum nua_callstate) ss_state == nua_callstate_ready && channel && session && tech_pvt) {
