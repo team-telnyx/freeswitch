@@ -4295,6 +4295,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 			if (oglobals.ethread) {
 				switch_status_t st;
 				switch_thread_join(&st, oglobals.ethread);
+				/* oglobals outlives this leg; a later leg that starts no early-media thread must not join this one again. */
+				oglobals.ethread = NULL;
 			}
 
 			if (early_state.buffer) {
