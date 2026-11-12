@@ -16483,7 +16483,6 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_handle_extensions(switch_rtp_t *rtp_s
 
 
 	if (!rtp_session->flags[SWITCH_RTP_FLAG_PROXY_MEDIA] &&
-		!rtp_session->flags[SWITCH_RTP_FLAG_UDPTL] &&
 		rtp_session->recv_msg.header.x) {
 
 		switch_rtp_hdr_ext_t *recv_ext = NULL;
