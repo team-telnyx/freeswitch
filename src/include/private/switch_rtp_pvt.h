@@ -180,6 +180,10 @@ typedef enum {
 } switch_rtp_pvt_dtls_restart_result_t;
 
 SWITCH_DECLARE(void) switch_rtp_pvt_handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *data, switch_size_t len);
+/* Deterministic packet-time entry for private lifecycle/expiry regressions. */
+SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_handle_ice_from_at(switch_rtp_t *rtp_session, ice_proto_t proto,
+	const char *host, switch_port_t port, void *data, switch_size_t len, switch_time_t now);
+
 SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_handle_ice_from(switch_rtp_t *rtp_session, ice_proto_t proto,
 	const char *host, switch_port_t port, void *data, switch_size_t len);
 SWITCH_DECLARE(switch_status_t) switch_rtp_pvt_get_ice_state(switch_rtp_t *rtp_session, ice_proto_t proto,
