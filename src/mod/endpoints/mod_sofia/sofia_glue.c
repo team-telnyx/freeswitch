@@ -125,6 +125,16 @@ void sofia_glue_set_name(private_object_t *tech_pvt, const char *channame)
 	switch_channel_set_name(tech_pvt->channel, name);
 }
 
+/* Copies the profile's SIP refresh telemetry settings to the call; an unset or invalid threshold (0) takes the default. */
+void sofia_glue_copy_refresh_diag_settings(private_object_t *tech_pvt, sofia_profile_t *profile)
+{
+	tech_pvt->refresh_diag_enabled = profile->refresh_work_telemetry;
+	tech_pvt->refresh_diag_slow_us =
+		(switch_time_t) (profile->refresh_work_slow_ms ? profile->refresh_work_slow_ms : SOFIA_REFRESH_WORK_SLOW_MS_DEFAULT) * 1000;
+	tech_pvt->refresh_diag_lock_us =
+		(switch_time_t) (profile->refresh_work_lock_ms ? profile->refresh_work_lock_ms : SOFIA_REFRESH_WORK_LOCK_MS_DEFAULT) * 1000;
+}
+
 void sofia_glue_attach_private(switch_core_session_t *session, sofia_profile_t *profile, private_object_t *tech_pvt, const char *channame)
 {
 
@@ -148,6 +158,8 @@ void sofia_glue_attach_private(switch_core_session_t *session, sofia_profile_t *
 	tech_pvt->x_freeswitch_support_local = FREESWITCH_SUPPORT;
 
 	tech_pvt->profile = profile;
+
+	sofia_glue_copy_refresh_diag_settings(tech_pvt, profile);
 
 	if (!zstr(profile->rtpip[profile->rtpip_next])) {
 		tech_pvt->mparams.rtpip4 = switch_core_session_strdup(session, profile->rtpip[profile->rtpip_next++]);
@@ -270,6 +282,11 @@ void sofia_glue_attach_private(switch_core_session_t *session, sofia_profile_t *
 
 	if (channame) {
 		sofia_glue_set_name(tech_pvt, channame);
+	}
+
+	if (tech_pvt->refresh_diag_enabled) {
+		switch_core_session_refresh_watch_enable(session, (switch_time_t) (profile->refresh_work_stall_ms ? profile->refresh_work_stall_ms :
+																		   SOFIA_REFRESH_WORK_STALL_MS_DEFAULT) * 1000);
 	}
 
 }

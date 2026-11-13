@@ -35,6 +35,7 @@
  */
 
 #include <switch.h>
+#include <switch_refresh_diag.h>
 #include "private/switch_core_pvt.h"
 
 #define SWITCH_SQL_QUEUE_LEN 100000
@@ -3420,11 +3421,22 @@ SWITCH_DECLARE(void) switch_core_recovery_track(switch_core_session_t *session)
 	switch_xml_t cdr = NULL;
 	char *xml_cdr_text = NULL;
 	switch_channel_t *channel = switch_core_session_get_channel(session);
-	
+	switch_refresh_diag_t *diag = switch_refresh_diag_current();
+	switch_time_t t0 = 0, t1 = 0, t2 = 0, t3 = 0, t4 = 0;
+
+	if (diag) {
+		diag->recovery_calls++;
+		diag->recovery_status = SWITCH_RDIAG_RECOVERY_NO_CALLBACK;
+	}
+
 	if (!recovery_track_callback) {
 		return;
 	}
-	
+
+	if (diag) {
+		diag->recovery_status = SWITCH_RDIAG_RECOVERY_INELIGIBLE;
+	}
+
 	if (!switch_channel_test_flag(channel, CF_ANSWERED) || switch_channel_get_state(channel) < CS_SOFT_EXECUTE) {
 		return;
 	}
@@ -3433,15 +3445,46 @@ SWITCH_DECLARE(void) switch_core_recovery_track(switch_core_session_t *session)
 		return;
 	}
 
+	if (diag) {
+		diag->recovery_status = SWITCH_RDIAG_RECOVERY_NO_XML;
+		t0 = switch_refresh_diag_now();
+	}
+
 	if (switch_ivr_generate_xml_cdr(session, &cdr) == SWITCH_STATUS_SUCCESS) {
+		if (diag) {
+			t1 = switch_refresh_diag_now();
+		}
 		xml_cdr_text = switch_xml_toxml_nolock(cdr, SWITCH_FALSE);
+		if (diag) {
+			t2 = switch_refresh_diag_now();
+		}
 		switch_xml_free(cdr);
+		if (diag) {
+			t3 = switch_refresh_diag_now();
+			diag->recovery_build_us += t1 - t0;
+			diag->recovery_serialize_us += t2 - t1;
+			diag->recovery_xml_free_us += t3 - t2;
+		}
+	} else if (diag) {
+		diag->recovery_build_us += switch_refresh_diag_now() - t0;
 	}
 
 	if (xml_cdr_text) {
+		if (diag) {
+			diag->recovery_bytes += strlen(xml_cdr_text);
+			t3 = switch_refresh_diag_now();
+		}
 		recovery_track_callback(session, xml_cdr_text);
+		if (diag) {
+			t4 = switch_refresh_diag_now();
+		}
 		switch_safe_free(xml_cdr_text);
 		switch_channel_set_flag(channel, CF_TRACKED);
+		if (diag) {
+			diag->recovery_status = SWITCH_RDIAG_RECOVERY_TRACKED;
+			diag->recovery_callback_us += t4 - t3;
+			diag->recovery_text_free_us += switch_refresh_diag_now() - t4;
+		}
 	}
 }
 
