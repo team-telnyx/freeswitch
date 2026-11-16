@@ -34,6 +34,7 @@ SWITCH_END_EXTERN_C
 #ifdef __cplusplus
 
 #include <atomic>
+#include <cstdint>
 #include <condition_variable>
 #include <map>
 #include <memory>
@@ -71,6 +72,12 @@ struct ModuleSlot {
 	std::atomic<bool>       draining{false};
 	std::mutex              mu;
 	std::condition_variable cv;
+	/* seq of the newest registration made against this slot, kept after that
+	   route is unregistered. Guarded by the registry mutex. Lets
+	   unregister_module_since() tell "nothing registered after the mark" (no
+	   handler of the undone LOAD can be running) from "registered and already
+	   unregistered" (one can, and must be drained). */
+	std::uint64_t           last_seq = 0;
 };
 
 /*

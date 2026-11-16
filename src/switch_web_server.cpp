@@ -363,7 +363,7 @@ public:
 				/* Same module re-registering the identical pattern (same raw,
 				   same method): update handler/mode in place. */
 				if (p.module == module && p.raw == path && p.method == method) {
-					p.mode = mode; p.handler = handler; p.user_data = user_data; p.seq = ++seq_;
+					p.mode = mode; p.handler = handler; p.user_data = user_data; p.seq = next_seq_locked(*slot);
 					return SWITCH_STATUS_SUCCESS;
 				}
 				/* Otherwise the match-sets intersect under overlapping methods:
@@ -373,7 +373,7 @@ public:
 			PatternEntry e;
 			e.module = module; e.method = method; e.mode = mode;
 			e.handler = handler; e.user_data = user_data; e.raw = path; e.slot = slot;
-			e.seq = ++seq_;
+			e.seq = next_seq_locked(*slot);
 			e.tokens = std::move(cand_tokens);
 			patterns_.push_back(std::move(e));
 			return SWITCH_STATUS_SUCCESS;
@@ -383,12 +383,12 @@ public:
 		for (auto &existing : bucket) {
 			if (!methods_overlap(existing.method, method)) continue;
 			if (existing.module == module && existing.method == method) {
-				existing.mode = mode; existing.handler = handler; existing.user_data = user_data; existing.seq = ++seq_;
+				existing.mode = mode; existing.handler = handler; existing.user_data = user_data; existing.seq = next_seq_locked(*slot);
 				return SWITCH_STATUS_SUCCESS;
 			}
 			return SWITCH_STATUS_FALSE;
 		}
-		bucket.push_back({module, method, mode, handler, user_data, path, slot, ++seq_});
+		bucket.push_back({module, method, mode, handler, user_data, path, slot, next_seq_locked(*slot)});
 		return SWITCH_STATUS_SUCCESS;
 	}
 
@@ -415,14 +415,14 @@ public:
 			if (!prefixes_overlap(existing.raw, prefix)) continue;
 			/* Same module re-registering the identical prefix: update in place. */
 			if (existing.module == module && existing.raw == prefix && existing.method == method) {
-				existing.mode = mode; existing.handler = handler; existing.user_data = user_data; existing.seq = ++seq_;
+				existing.mode = mode; existing.handler = handler; existing.user_data = user_data; existing.seq = next_seq_locked(*slot);
 				return SWITCH_STATUS_SUCCESS;
 			}
 			/* Overlapping prefixes (one segment-contains the other) under
 			   overlapping methods: reject so lookup order cannot decide. */
 			return SWITCH_STATUS_FALSE;
 		}
-		prefixes_.push_back({module, method, mode, handler, user_data, prefix, slot, ++seq_});
+		prefixes_.push_back({module, method, mode, handler, user_data, prefix, slot, next_seq_locked(*slot)});
 		return SWITCH_STATUS_SUCCESS;
 	}
 
@@ -499,11 +499,15 @@ public:
 	   that LOAD used may also belong to a live module, whose earlier routes
 	   are not the failed LOAD's to remove.
 
-	   Removes nothing and returns at once if no route is newer than `after`.
-	   If older routes remain, the slot stays theirs: it is not marked
+	   Returns at once only if nothing was registered against the module's
+	   slot after `after`: then no handler of the undone LOAD can be running.
+	   A LOAD that registered a route and unregistered it again itself
+	   (switch_web_server_unregister() does not drain) leaves nothing to
+	   remove, but its handler may still be in flight, so the slot is drained
+	   anyway. If older routes remain, the slot stays theirs: it is not marked
 	   draining or retired, and this only waits for the slot's in-flight
-	   count to reach zero — the removed handlers are among those it counts,
-	   along with the remaining routes' own. */
+	   count to reach zero — the undone LOAD's handlers are among those it
+	   counts, along with the remaining routes' own. */
 	/* Loops because two concurrent unregister_module() calls for the same
 	   module share one slot: whichever finishes first erases it, the module
 	   can then be re-registered, and the loser would otherwise return without
@@ -540,7 +544,10 @@ public:
 
 			if (after) {
 				if (!removed) {
-					return n;
+					auto sit = module_slots_.find(module);
+					if (sit == module_slots_.end() || sit->second->last_seq <= after) {
+						return n;
+					}
 				}
 				retire = !module_has_routes_locked(module);
 			}
@@ -755,6 +762,12 @@ private:
 	}
 
 	/* mu_ must be held in unique mode by the caller. */
+	/* The next registration seq, also recorded as the slot's newest. */
+	std::uint64_t next_seq_locked(ModuleSlot &slot) {
+		slot.last_seq = ++seq_;
+		return slot.last_seq;
+	}
+
 	std::shared_ptr<ModuleSlot> slot_for_locked(const std::string &module) {
 		auto it = module_slots_.find(module);
 		if (it != module_slots_.end()) return it->second;

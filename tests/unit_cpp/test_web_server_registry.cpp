@@ -799,6 +799,39 @@ static void test_unregister_since_mark_waits_for_inflight()
 	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/stay").outcome, (int)internal::LookupOutcome::Hit);
 }
 
+/* A LOAD that registered a route, unregistered it itself (no drain) and then
+ * failed leaves nothing newer than the mark to remove, but its handler may still
+ * be running. The rollback must wait for it before the loader unmaps the module,
+ * while a live module's own routes under the same name stay routed. */
+static void test_unregister_since_mark_drains_self_unregistered_route()
+{
+	std::cout << "[test] unregister_module_since drains a route the LOAD already unregistered\n";
+	wipe();
+	switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/live", SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL);
+	auto m = switch_web_server_registration_mark();
+	switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/rolled", SWITCH_WEB_DISPATCH_POOL, dummy_handler, NULL);
+
+	auto held = internal::lookup(SWITCH_WEB_METHOD_GET, "/rolled");
+	CHECK_EQ((int)held.outcome, (int)internal::LookupOutcome::Hit);
+	CHECK_EQ((int)switch_web_server_unregister("modA", SWITCH_WEB_METHOD_GET, "/rolled"), (int)SWITCH_STATUS_SUCCESS);
+
+	std::atomic<bool> returned{false};
+	std::thread sweeper([&] {
+		switch_web_server_unregister_module_since("modA", m);
+		returned.store(true);
+	});
+
+	std::this_thread::sleep_for(std::chrono::milliseconds(200));
+	CHECK(returned.load() == false);          /* the rolled-back handler is still running */
+
+	{ auto drop = std::move(held); }
+	sweeper.join();
+	CHECK(returned.load() == true);
+	CHECK_EQ((int)internal::lookup(SWITCH_WEB_METHOD_GET, "/live").outcome, (int)internal::LookupOutcome::Hit);
+	CHECK_EQ((int)switch_web_server_register("modA", SWITCH_WEB_METHOD_GET, "/again", SWITCH_WEB_DISPATCH_LITE, dummy_handler, NULL),
+	         (int)SWITCH_STATUS_SUCCESS);
+}
+
 /* All of the module's routes newer than the mark: same as a full sweep,
  * and the slot is retired so the name starts clean. */
 static void test_unregister_since_mark_retires_new_slot()
@@ -1298,6 +1331,7 @@ int main()
 	test_unregister_since_mark_keeps_older_routes();
 	test_unregister_since_mark_counts_updates();
 	test_unregister_since_mark_waits_for_inflight();
+	test_unregister_since_mark_drains_self_unregistered_route();
 	test_unregister_since_mark_retires_new_slot();
 	test_drain_under_concurrency();
 	test_overlapping_drains();
