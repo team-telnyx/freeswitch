@@ -278,6 +278,14 @@ SWITCH_DECLARE(uint32_t) switch_core_media_bug_count(switch_core_session_t *orig
           writes or replaces decoded audio (the core then decodes the session's frames)
 */
 SWITCH_DECLARE(switch_bool_t) switch_core_media_bug_tap_only(switch_core_session_t *orig_session);
+
+/*!
+  \brief Check whether the session's writes lose the silence descriptors of the frames they transcode
+  \param session the session to check
+  \return SWITCH_TRUE when the last frame transcoded between two codecs with SWITCH_CODEC_FLAG_CHECK_PASSTHROUGH
+          was re-encoded without its silence descriptors ("transcodes_dtx_to")
+*/
+SWITCH_DECLARE(switch_bool_t) switch_core_session_write_drops_native_dtx(switch_core_session_t *session);
 SWITCH_DECLARE(void) switch_media_bug_set_spy_fmt(switch_media_bug_t *bug, switch_vid_spy_fmt_t spy_fmt);
 SWITCH_DECLARE(switch_status_t) switch_core_media_bug_push_spy_frame(switch_media_bug_t *bug, switch_frame_t *frame, switch_rw_t rw);
 SWITCH_DECLARE(switch_status_t) switch_core_media_bug_patch_spy_frame(switch_media_bug_t *bug, switch_image_t *img, switch_rw_t rw);

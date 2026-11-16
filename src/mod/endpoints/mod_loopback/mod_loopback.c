@@ -1315,6 +1315,8 @@ struct null_private_object {
 	int rate;
 	/* null_codec, default L16 */
 	char *codec_name;
+	/* null_fmtp */
+	char *codec_fmtp;
 	uint8_t encoded_buf[SWITCH_RECOMMENDED_BUFFER_SIZE];
 	/* null_dtx_period: one frame, then period - 1 CNG frames */
 	uint32_t dtx_period;
@@ -1387,7 +1389,7 @@ static switch_status_t null_tech_init(null_private_t *tech_pvt, switch_core_sess
 	status = switch_core_codec_init(&tech_pvt->read_codec,
 					iananame,
 					NULL,
-					NULL,
+					tech_pvt->codec_fmtp,
 					tech_pvt->rate, interval, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, NULL, switch_core_session_get_pool(session));
 
 	if (status != SWITCH_STATUS_SUCCESS || !tech_pvt->read_codec.implementation || !switch_core_codec_ready(&tech_pvt->read_codec)) {
@@ -1397,7 +1399,7 @@ static switch_status_t null_tech_init(null_private_t *tech_pvt, switch_core_sess
 	status = switch_core_codec_init(&tech_pvt->write_codec,
 					iananame,
 					NULL,
-					NULL,
+					tech_pvt->codec_fmtp,
 					tech_pvt->rate, interval, 1, SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, NULL, switch_core_session_get_pool(session));
 
 
@@ -1627,11 +1629,11 @@ static switch_status_t null_tech_switch_rate(null_private_t *tech_pvt, switch_co
 
 	tech_pvt->rate = rate;
 
-	status = switch_core_codec_init(&tech_pvt->read_codec, iananame, NULL, NULL, tech_pvt->rate, interval, 1,
+	status = switch_core_codec_init(&tech_pvt->read_codec, iananame, NULL, tech_pvt->codec_fmtp, tech_pvt->rate, interval, 1,
 					SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, NULL, switch_core_session_get_pool(session));
 
 	if (status == SWITCH_STATUS_SUCCESS) {
-		status = switch_core_codec_init(&tech_pvt->write_codec, iananame, NULL, NULL, tech_pvt->rate, interval, 1,
+		status = switch_core_codec_init(&tech_pvt->write_codec, iananame, NULL, tech_pvt->codec_fmtp, tech_pvt->rate, interval, 1,
 						SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, NULL, switch_core_session_get_pool(session));
 
 		if (status != SWITCH_STATUS_SUCCESS) {
@@ -1904,6 +1906,9 @@ static switch_call_cause_t null_channel_outgoing_channel(switch_core_session_t *
 
 			if (codec) {
 				tech_pvt->codec_name = switch_core_session_strdup(*new_session, codec);
+			}
+			if ((codec = switch_event_get_header(var_event, "null_fmtp"))) {
+				tech_pvt->codec_fmtp = switch_core_session_strdup(*new_session, codec);
 			}
 			if (dtx_period && atoi(dtx_period) > 1) {
 				tech_pvt->dtx_period = (uint32_t) atoi(dtx_period);
