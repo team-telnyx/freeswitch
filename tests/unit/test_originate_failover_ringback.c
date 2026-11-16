@@ -11,7 +11,8 @@
  * no ringback configured anywhere that signals ring_ready a few seconds later,
  * well after leg 1's session is gone.
  *
- * setup_ringback() logs the file it is about to open. Leg 2 must not open one.
+ * setup_ringback() logs the file it is about to open. Leg 2 must ring (its Ring-Ready
+ * log line, and originate ending on its leg_timeout) and must not open one.
  */
 
 #include <switch.h>
@@ -20,12 +21,15 @@
 #define LEG1_RINGBACK "silence_stream://-1"
 #define USE_OUTBOUND_LOG "Use Outbound Ringback: " LEG1_RINGBACK
 #define PLAY_LOG_PREFIX "Play Ringback File ["
+/* leg 2's loopback channels carry its inline dialplan in their names */
+#define LEG2_MARK "sleep:3000"
 #define MAX_PLAYS 8
 
 static switch_mutex_t *log_mutex = NULL;
 static char played[MAX_PLAYS][256];
 static int plays = 0;
 static int leg1_ringback_taken = 0;
+static int leg2_ring_ready = 0;
 
 /* Log bindings run on the log thread. */
 static switch_status_t capture_logger(const switch_log_node_t *node, switch_log_level_t level)
@@ -40,6 +44,10 @@ static switch_status_t capture_logger(const switch_log_node_t *node, switch_log_
 
 	if (strstr(node->data, USE_OUTBOUND_LOG)) {
 		leg1_ringback_taken++;
+	}
+
+	if (strstr(node->data, "Ring-Ready ") && strstr(node->data, LEG2_MARK)) {
+		leg2_ring_ready++;
 	}
 
 	if ((p = strstr(node->data, PLAY_LOG_PREFIX)) && plays < MAX_PLAYS) {
@@ -73,6 +81,7 @@ FST_CORE_BEGIN("./conf")
 			switch_mutex_init(&log_mutex, SWITCH_MUTEX_NESTED, fst_pool);
 			plays = 0;
 			leg1_ringback_taken = 0;
+			leg2_ring_ready = 0;
 			switch_log_bind_logger(capture_logger, SWITCH_LOG_DEBUG, SWITCH_FALSE);
 		}
 		FST_SETUP_END()
@@ -87,6 +96,7 @@ FST_CORE_BEGIN("./conf")
 		{
 			switch_core_session_t *caller = NULL, *peer = NULL;
 			switch_call_cause_t cause = SWITCH_CAUSE_NONE;
+			switch_status_t status;
 			int i;
 
 			fst_requires(switch_ivr_originate(NULL, &caller, &cause, "null/+15553334444", 2,
@@ -95,7 +105,7 @@ FST_CORE_BEGIN("./conf")
 			fst_requires(!switch_channel_get_variable(switch_core_session_get_channel(caller), "ringback"));
 
 			/* Inline dialplans use ';' between apps ("m:;:") because ',' separates legs. */
-			switch_ivr_originate(caller, &peer, &cause,
+			status = switch_ivr_originate(caller, &peer, &cause,
 								 "[outbound_ringback=" LEG1_RINGBACK ",leg_timeout=3]loopback/m:;:sleep:300;hangup/default/inline"
 								 "|[leg_timeout=6]loopback/m:;:sleep:3000;ring_ready;park/default/inline", 0,
 								 NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL);
@@ -111,6 +121,11 @@ FST_CORE_BEGIN("./conf")
 			for (i = 0; i < plays; i++) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "[TEST] setup_ringback #%d opened [%s]\n", i + 1, played[i]);
 			}
+			/* Leg 2 must have reached ring_ready, or "no ringback opened" proves nothing: a leg 2 that
+			   failed early would pass with or without the reset. It rings until its leg_timeout. */
+			fst_check_int_equals(leg2_ring_ready > 0, 1);
+			fst_check(status != SWITCH_STATUS_SUCCESS);
+			fst_check_int_equals(cause, SWITCH_CAUSE_ALLOTTED_TIMEOUT);
 			/* Leg 1 was routed, so originate took its outbound_ringback. */
 			fst_check_int_equals(leg1_ringback_taken, 1);
 			/* Leg 1 hangs up without ringing and leg 2 has no ringback, so no leg opens one. */
