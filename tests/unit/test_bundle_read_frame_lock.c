@@ -1,9 +1,8 @@
 /* Regression tests for the BUNDLE read and drain defects found alongside
  * TELCORE-453: TELCORE-454 (the flush freeing a frame a reader still holds),
  * TELCORE-455 (bundle_drain_thread_stop leaving the handle joinable twice),
- * TELCORE-456 (the drain thread holding no session read lock), TELCORE-457
- * (SFF_DYNAMIC copied onto a pool-embedded frame) and TELCORE-459 (the BUNDLE
- * group rebuilt under the SIP thread while the drain thread traverses it).
+ * TELCORE-456 (the drain thread holding no session read lock) and TELCORE-457
+ * (SFF_DYNAMIC copied onto a pool-embedded frame).
  *
  * struct switch_media_handle_s and struct switch_rtp_engine_s are private to
  * switch_core_media.c and the drain helpers are static, so these drive the
