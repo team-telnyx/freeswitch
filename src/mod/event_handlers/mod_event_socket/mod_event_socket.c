@@ -110,8 +110,12 @@ typedef struct listener listener_t;
 
 static struct {
 	switch_mutex_t *listener_mutex;
+	switch_memory_pool_t *pool;
 	switch_event_node_t *node;
 	int debug;
+	int reload_pending;
+	int reload_running;
+	uint32_t password_generation;
 } globals;
 
 static struct {
@@ -195,6 +199,7 @@ static void reload_passwords(void)
 	char *cf = "event_socket.conf";
 	switch_xml_t cfg, xml, settings, param;
 	const char *new_primary = NULL, *new_secondary = NULL;
+	int primary_retained = 0;
 
 	if (!(xml = switch_xml_open_cfg(cf, &cfg, NULL))) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Open of %s failed, passwords unchanged\n", cf);
@@ -215,21 +220,98 @@ static void reload_passwords(void)
 	}
 
 	switch_mutex_lock(globals.listener_mutex);
-	/* mirror restart semantics: a missing or empty password falls back to the built-in default */
-	set_pref_pass(zstr(new_primary) ? "ClueCon" : new_primary);
+	if (prefs.done) {
+		switch_mutex_unlock(globals.listener_mutex);
+		switch_xml_free(xml);
+		return;
+	}
+	if (!zstr(new_primary)) {
+		set_pref_pass(new_primary);
+	} else {
+		primary_retained = 1;
+	}
 	/* removing secondary-password from config disables it */
 	if (!zstr(new_secondary)) {
 		set_pref_secondary_pass(new_secondary);
 	} else {
 		switch_safe_free(prefs.secondary_password);
 	}
+	globals.password_generation++;
 	switch_mutex_unlock(globals.listener_mutex);
 
+	if (primary_retained) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+			"event_socket reload omitted password; previous primary password retained\n");
+	}
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
 		"event_socket passwords re-read from config (secondary %s)\n",
 		zstr(new_secondary) ? "disabled" : "enabled");
 
 	switch_xml_free(xml);
+}
+
+static void *SWITCH_THREAD_FUNC reload_passwords_thread(switch_thread_t *thread, void *obj)
+{
+	for (;;) {
+		switch_mutex_lock(globals.listener_mutex);
+		if (prefs.done) {
+			globals.reload_pending = 0;
+			globals.reload_running = 0;
+			prefs.threads--;
+			switch_mutex_unlock(globals.listener_mutex);
+			break;
+		}
+		globals.reload_pending = 0;
+		switch_mutex_unlock(globals.listener_mutex);
+
+		reload_passwords();
+
+		switch_mutex_lock(globals.listener_mutex);
+		if (prefs.done || !globals.reload_pending) {
+			globals.reload_pending = 0;
+			globals.reload_running = 0;
+			prefs.threads--;
+			switch_mutex_unlock(globals.listener_mutex);
+			break;
+		}
+		switch_mutex_unlock(globals.listener_mutex);
+	}
+
+	return NULL;
+}
+
+static void request_password_reload(void)
+{
+	switch_thread_t *thread;
+	switch_threadattr_t *thd_attr = NULL;
+	switch_status_t status;
+
+	switch_mutex_lock(globals.listener_mutex);
+	if (prefs.done) {
+		switch_mutex_unlock(globals.listener_mutex);
+		return;
+	}
+	globals.reload_pending = 1;
+	if (globals.reload_running) {
+		switch_mutex_unlock(globals.listener_mutex);
+		return;
+	}
+	globals.reload_running = 1;
+	prefs.threads++;
+	switch_mutex_unlock(globals.listener_mutex);
+
+	switch_threadattr_create(&thd_attr, globals.pool);
+	switch_threadattr_detach_set(thd_attr, 1);
+	switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
+	status = switch_thread_create(&thread, thd_attr, reload_passwords_thread, NULL, globals.pool);
+	if (status != SWITCH_STATUS_SUCCESS) {
+		switch_mutex_lock(globals.listener_mutex);
+		globals.reload_pending = 0;
+		globals.reload_running = 0;
+		prefs.threads--;
+		switch_mutex_unlock(globals.listener_mutex);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to start event_socket password reload thread\n");
+	}
 }
 
 static void *SWITCH_THREAD_FUNC listener_run(switch_thread_t *thread, void *obj);
@@ -426,7 +508,7 @@ static void event_handler(switch_event_t *event)
 	switch_assert(event != NULL);
 
 	if (event->event_id == SWITCH_EVENT_RELOADXML) {
-		reload_passwords();
+		request_password_reload();
 	}
 
 	if (!listen_list.ready) {
@@ -747,12 +829,29 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_event_socket_shutdown)
 {
 	int sanity = 0;
 
+	switch_mutex_lock(globals.listener_mutex);
 	prefs.done = 1;
+	globals.reload_pending = 0;
+	switch_mutex_unlock(globals.listener_mutex);
+
+	switch_event_unbind(&globals.node);
 
 	kill_all_listeners();
 	switch_log_unbind_logger(socket_logger);
 
 	close_socket(&listen_list.sock);
+
+	for (;;) {
+		int reload_running;
+
+		switch_mutex_lock(globals.listener_mutex);
+		reload_running = globals.reload_running;
+		switch_mutex_unlock(globals.listener_mutex);
+		if (!reload_running) {
+			break;
+		}
+		switch_yield(100000);
+	}
 
 	while (prefs.threads) {
 		switch_yield(100000);
@@ -761,8 +860,6 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_event_socket_shutdown)
 			break;
 		}
 	}
-
-	switch_event_unbind(&globals.node);
 
 	switch_safe_free(prefs.ip);
 	switch_safe_free(prefs.password);
@@ -1369,6 +1466,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_event_socket_load)
 	memset(&globals, 0, sizeof(globals));
 
 	switch_mutex_init(&globals.listener_mutex, SWITCH_MUTEX_NESTED, pool);
+	globals.pool = pool;
 
 	memset(&listen_list, 0, sizeof(listen_list));
 	switch_mutex_init(&listen_list.sock_mutex, SWITCH_MUTEX_NESTED, pool);
@@ -3059,12 +3157,30 @@ static switch_status_t launch_listener_thread(listener_t *listener)
 	return switch_thread_create(&thread, thd_attr, listener_run, listener, listener->pool);
 }
 
+static void free_config_prefs(struct event_socket_prefs *config_prefs)
+{
+	uint32_t x;
+
+	switch_safe_free(config_prefs->ip);
+	switch_safe_free(config_prefs->password);
+	switch_safe_free(config_prefs->secondary_password);
+	for (x = 0; x < config_prefs->acl_count; x++) {
+		switch_safe_free(config_prefs->acl[x]);
+	}
+}
+
 static int config(void)
 {
 	char *cf = "event_socket.conf";
 	switch_xml_t cfg, xml, settings, param;
 	struct event_socket_prefs new_prefs = { 0 };
 	int new_debug = globals.debug;
+	uint32_t password_generation;
+	uint32_t x;
+
+	switch_mutex_lock(globals.listener_mutex);
+	password_generation = globals.password_generation;
+	switch_mutex_unlock(globals.listener_mutex);
 
 	if (!(xml = switch_xml_open_cfg(cf, &cfg, NULL))) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Open of %s failed\n", cf);
@@ -3133,14 +3249,40 @@ static int config(void)
 		new_prefs.port = 8021;
 	}
 
-	/* serialize against reload_passwords(): only the ownership swap needs the lock */
 	switch_mutex_lock(globals.listener_mutex);
+	if (prefs.done) {
+		switch_mutex_unlock(globals.listener_mutex);
+		free_config_prefs(&new_prefs);
+		return -1;
+	}
+
 	switch_safe_free(prefs.ip);
-	switch_safe_free(prefs.password);
-	switch_safe_free(prefs.secondary_password);
-	prefs = new_prefs;
+	prefs.ip = new_prefs.ip;
+	new_prefs.ip = NULL;
+	prefs.port = new_prefs.port;
+	prefs.nat_map = new_prefs.nat_map;
+	prefs.stop_on_bind_error = new_prefs.stop_on_bind_error;
+
+	if (password_generation == globals.password_generation) {
+		switch_safe_free(prefs.password);
+		switch_safe_free(prefs.secondary_password);
+		prefs.password = new_prefs.password;
+		prefs.secondary_password = new_prefs.secondary_password;
+		new_prefs.password = NULL;
+		new_prefs.secondary_password = NULL;
+	}
+
+	for (x = 0; x < prefs.acl_count; x++) {
+		switch_safe_free(prefs.acl[x]);
+	}
+	prefs.acl_count = new_prefs.acl_count;
+	for (x = 0; x < new_prefs.acl_count; x++) {
+		prefs.acl[x] = new_prefs.acl[x];
+		new_prefs.acl[x] = NULL;
+	}
 	globals.debug = new_debug;
 	switch_mutex_unlock(globals.listener_mutex);
+	free_config_prefs(&new_prefs);
 
 	return 0;
 }
