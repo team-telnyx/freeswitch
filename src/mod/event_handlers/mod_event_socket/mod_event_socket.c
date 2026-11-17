@@ -110,7 +110,6 @@ typedef struct listener listener_t;
 
 static struct {
 	switch_mutex_t *listener_mutex;
-	switch_memory_pool_t *pool;
 	switch_event_node_t *node;
 	int debug;
 	int reload_pending;
@@ -252,14 +251,12 @@ static void reload_passwords(void)
 
 static void *SWITCH_THREAD_FUNC reload_passwords_thread(switch_thread_t *thread, void *obj)
 {
+	switch_memory_pool_t *pool = obj;
+
 	for (;;) {
 		switch_mutex_lock(globals.listener_mutex);
 		if (prefs.done) {
-			globals.reload_pending = 0;
-			globals.reload_running = 0;
-			prefs.threads--;
-			switch_mutex_unlock(globals.listener_mutex);
-			break;
+			goto done;
 		}
 		globals.reload_pending = 0;
 		switch_mutex_unlock(globals.listener_mutex);
@@ -268,48 +265,59 @@ static void *SWITCH_THREAD_FUNC reload_passwords_thread(switch_thread_t *thread,
 
 		switch_mutex_lock(globals.listener_mutex);
 		if (prefs.done || !globals.reload_pending) {
-			globals.reload_pending = 0;
-			globals.reload_running = 0;
-			prefs.threads--;
-			switch_mutex_unlock(globals.listener_mutex);
-			break;
+			goto done;
 		}
 		switch_mutex_unlock(globals.listener_mutex);
 	}
 
+	done:
+	globals.reload_pending = 0;
+	switch_core_destroy_memory_pool(&pool);
+	globals.reload_running = 0;
+	prefs.threads--;
+	switch_mutex_unlock(globals.listener_mutex);
 	return NULL;
 }
 
 static void request_password_reload(void)
 {
+	switch_memory_pool_t *pool = NULL;
 	switch_thread_t *thread;
 	switch_threadattr_t *thd_attr = NULL;
 	switch_status_t status;
 
+	if (switch_core_new_memory_pool(&pool) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to allocate event_socket password reload pool\n");
+		return;
+	}
+
 	switch_mutex_lock(globals.listener_mutex);
 	if (prefs.done) {
 		switch_mutex_unlock(globals.listener_mutex);
+		switch_core_destroy_memory_pool(&pool);
 		return;
 	}
 	globals.reload_pending = 1;
 	if (globals.reload_running) {
 		switch_mutex_unlock(globals.listener_mutex);
+		switch_core_destroy_memory_pool(&pool);
 		return;
 	}
 	globals.reload_running = 1;
 	prefs.threads++;
 	switch_mutex_unlock(globals.listener_mutex);
 
-	switch_threadattr_create(&thd_attr, globals.pool);
+	switch_threadattr_create(&thd_attr, pool);
 	switch_threadattr_detach_set(thd_attr, 1);
 	switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
-	status = switch_thread_create(&thread, thd_attr, reload_passwords_thread, NULL, globals.pool);
+	status = switch_thread_create(&thread, thd_attr, reload_passwords_thread, pool, pool);
 	if (status != SWITCH_STATUS_SUCCESS) {
 		switch_mutex_lock(globals.listener_mutex);
 		globals.reload_pending = 0;
 		globals.reload_running = 0;
 		prefs.threads--;
 		switch_mutex_unlock(globals.listener_mutex);
+		switch_core_destroy_memory_pool(&pool);
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to start event_socket password reload thread\n");
 	}
 }
@@ -1466,7 +1474,6 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_event_socket_load)
 	memset(&globals, 0, sizeof(globals));
 
 	switch_mutex_init(&globals.listener_mutex, SWITCH_MUTEX_NESTED, pool);
-	globals.pool = pool;
 
 	memset(&listen_list, 0, sizeof(listen_list));
 	switch_mutex_init(&listen_list.sock_mutex, SWITCH_MUTEX_NESTED, pool);
@@ -3270,6 +3277,9 @@ static int config(void)
 		prefs.secondary_password = new_prefs.secondary_password;
 		new_prefs.password = NULL;
 		new_prefs.secondary_password = NULL;
+	} else if (!prefs.password) {
+		prefs.password = new_prefs.password;
+		new_prefs.password = NULL;
 	}
 
 	for (x = 0; x < prefs.acl_count; x++) {
