@@ -2697,7 +2697,13 @@ static switch_status_t fetch_cache_data(http_file_context_t *context, const char
 		if (err_msg) {
 			*err_msg = "response code != 200";
 		}
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "caching: url:%s to %s failed with HTTP response code %d\n", url, save_path, (int)code);
+		
+		if (save_path) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "caching: url:%s to %s failed with HTTP response code %d\n", url, save_path, (int)code);
+		} else {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "head: url:%s failed with HTTP response code %d\n", url, (int)code);
+		}
+
 		status = SWITCH_STATUS_FALSE;
 		break;
 	}
@@ -2820,11 +2826,12 @@ static client_profile_t *match_url_profile(const char *url)
 
 		if (!matched && profile && !zstr(profile->url_pattern)) {
 			switch_regex_t *re = NULL;
-			int ovector[30] = {0};
+			switch_regex_match_t *match_data = NULL;
 
-			if (switch_regex_perform(url, profile->url_pattern, &re, ovector, sizeof(ovector) / sizeof(ovector[0])) > 0) {
+			if (switch_regex_perform(url, profile->url_pattern, &re, &match_data) > 0) {
 				matched = profile;
 			}
+			switch_regex_match_safe_free(match_data);
 			switch_regex_safe_free(re);
 		}
 	}

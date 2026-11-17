@@ -79,6 +79,16 @@ FST_CORE_BEGIN("./conf")
 			conference->count_ghosts = 0;
 			conference->variables = NULL;   /* destroyed by the teardown thread */
 
+			/* conference_event_add_data_with_member() takes flag_mutex around the
+			 * conference->variables merge (upstream d22aec67c6, "[mod_conference]
+			 * Avoid race conditions touching conference->variables without a
+			 * mutex"). In production this mutex is always initialised by
+			 * conference_new(); only ->variables is destroyed by the teardown
+			 * thread, which is what this test models. The fixture must therefore
+			 * provide it, or the lock dereferences NULL before the merge is
+			 * ever reached. */
+			switch_mutex_init(&conference->flag_mutex, SWITCH_MUTEX_NESTED, fst_pool);
+
 			status = switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, "conference::maintenance");
 			fst_requires(status == SWITCH_STATUS_SUCCESS);
 
