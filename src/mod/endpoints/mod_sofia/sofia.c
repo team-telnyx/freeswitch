@@ -8162,7 +8162,7 @@ static void mark_transfer_record(switch_core_session_t *session, const char *br_
 }
 
 
-/* Only the original outgoing stack-ready event can confirm this session handoff. */
+/* Only an outgoing stack-ready event can confirm the pending session handoff. */
 static void sofia_recovery_handoff_ready(private_object_t *tech_pvt, nua_handle_t *nh,
                                        int event_state, int status)
 {
@@ -8170,7 +8170,9 @@ static void sofia_recovery_handoff_ready(private_object_t *tech_pvt, nua_handle_
 	switch_channel_t *channel;
 
 	if (!tech_pvt || nh != tech_pvt->nh || event_state != nua_callstate_ready || status != 200 ||
-		tech_pvt->sent_invites != 1 || !tech_pvt->sent_last_invite) return;
+		!tech_pvt->sent_last_invite) {
+		return;
+	}
 	channel = tech_pvt->channel;
 	if (!switch_channel_up(channel) || !switch_channel_test_flag(channel, CF_RECOVERED)) return;
 	token = switch_channel_get_variable_strdup(channel, "sip_recovery_handoff");
