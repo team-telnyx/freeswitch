@@ -378,6 +378,38 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_get_real_read_impl(switch_co
 	return switch_core_session_get_read_impl(session, impp);
 }
 
+/* Compares copies of the implementations: the live codecs may be destroyed by a re-INVITE meanwhile. A bug replacing
+ * this direction's audio makes the core re-encode it, and the encoder sends no silence descriptors: fill is needed then.
+ * A bug that only reads the audio (a recording) leaves the frames forwarded unchanged.
+ * native_dtx_last_frame is written by session_a's reader, the thread that calls this. */
+SWITCH_DECLARE(switch_bool_t) switch_core_session_native_dtx_hold(switch_core_session_t *session_a, switch_core_session_t *session_b)
+{
+	switch_codec_t *read_codec = switch_core_session_get_read_codec(session_a);
+	switch_codec_implementation_t read_impl = { 0 }, write_impl = { 0 };
+	switch_time_t last = session_a->native_dtx_last_frame;
+	int replaced;
+
+	if (!last || switch_micro_time_now() - last >= SWITCH_NATIVE_DTX_HOLDOFF_MS * 1000 ||
+		!read_codec || !switch_test_flag(read_codec, SWITCH_CODEC_FLAG_NATIVE_DTX) ||
+		switch_core_session_get_real_read_impl(session_a, &read_impl) != SWITCH_STATUS_SUCCESS ||
+		switch_core_session_get_write_impl(session_b, &write_impl) != SWITCH_STATUS_SUCCESS ||
+		read_impl.codec_id != write_impl.codec_id) {
+		return SWITCH_FALSE;
+	}
+
+	switch_thread_rwlock_rdlock(session_a->bug_rwlock);
+	replaced = session_a->bug_read_replace;
+	switch_thread_rwlock_unlock(session_a->bug_rwlock);
+
+	if (!replaced) {
+		switch_thread_rwlock_rdlock(session_b->bug_rwlock);
+		replaced = session_b->bug_write_replace;
+		switch_thread_rwlock_unlock(session_b->bug_rwlock);
+	}
+
+	return replaced ? SWITCH_FALSE : SWITCH_TRUE;
+}
+
 SWITCH_DECLARE(switch_status_t) switch_core_session_get_write_impl(switch_core_session_t *session, switch_codec_implementation_t *impp)
 {
 	if (session->write_impl.codec_id) {

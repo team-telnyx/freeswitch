@@ -1220,6 +1220,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_transfer_callback(switch_c
 		switch_core_codec_destroy(&orig_session->bug_codec);
 	}
 
+	update_bug_replace(orig_session);
 	switch_thread_rwlock_unlock(orig_session->bug_rwlock);
 
 
@@ -1287,24 +1288,15 @@ static void update_bug_replace(switch_core_session_t *session)
 	}
 }
 
-/* no generated fill this long after the last frame from the far end: 3 SID intervals */
-#define NATIVE_DTX_FILL_HOLDOFF_MS 480
-
-/* Compares copies of the implementations: the live codecs may be destroyed by a re-INVITE meanwhile. A bug replacing
- * this direction's audio makes the core re-encode it, and the encoder sends no silence descriptors: fill is needed then.
- * A bug that only reads the audio (a recording) leaves the frames forwarded unchanged. */
-SWITCH_DECLARE(switch_bool_t) switch_core_session_native_dtx_hold(switch_core_session_t *session_a, switch_core_session_t *session_b)
+SWITCH_DECLARE(switch_bool_t) switch_core_media_bug_tap_only(switch_core_session_t *orig_session)
 {
-	switch_codec_t *read_codec = switch_core_session_get_read_codec(session_a);
-	switch_codec_implementation_t read_impl = { 0 }, write_impl = { 0 };
-	switch_time_t last = session_a->native_dtx_last_frame;
+	switch_bool_t tap_only;
 
-	return (last && switch_micro_time_now() - last < NATIVE_DTX_FILL_HOLDOFF_MS * 1000 &&
-			read_codec && switch_test_flag(read_codec, SWITCH_CODEC_FLAG_NATIVE_DTX) &&
-			switch_core_session_get_real_read_impl(session_a, &read_impl) == SWITCH_STATUS_SUCCESS &&
-			switch_core_session_get_write_impl(session_b, &write_impl) == SWITCH_STATUS_SUCCESS &&
-			read_impl.codec_id == write_impl.codec_id &&
-			!session_a->bug_read_replace && !session_b->bug_write_replace) ? SWITCH_TRUE : SWITCH_FALSE;
+	switch_thread_rwlock_rdlock(orig_session->bug_rwlock);
+	tap_only = (!orig_session->bugs || orig_session->bug_tap_only) ? SWITCH_TRUE : SWITCH_FALSE;
+	switch_thread_rwlock_unlock(orig_session->bug_rwlock);
+
+	return tap_only;
 }
 
 SWITCH_DECLARE(uint32_t) switch_core_media_bug_patch_video(switch_core_session_t *orig_session, switch_frame_t *frame)
@@ -1427,6 +1419,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_remove_all_function(switch
 		}
 		status = SWITCH_STATUS_SUCCESS;
 	}
+	update_bug_replace(session);
 	switch_thread_rwlock_unlock(session->bug_rwlock);
 
 		
@@ -1572,6 +1565,7 @@ SWITCH_DECLARE(uint32_t) switch_core_media_bug_prune(switch_core_session_t *sess
 		switch_core_codec_destroy(&session->bug_codec);
 	}
 
+	update_bug_replace(session);
 	switch_thread_rwlock_unlock(session->bug_rwlock);
 
 	if (bp) {
@@ -1620,6 +1614,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_remove_callback(switch_cor
 	/* Note whether the list drained while still under the lock - the head is
 	 * only read under bug_rwlock (TELCORE-339). */
 	no_bugs_left = (session->bugs == NULL);
+	update_bug_replace(session);
 	switch_thread_rwlock_unlock(session->bug_rwlock);
 
 	if (closed) {

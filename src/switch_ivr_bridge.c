@@ -492,7 +492,6 @@ static void send_display(switch_core_session_t *session, switch_core_session_t *
 
 }
 
-
 static switch_bool_t is_silence_frame(switch_frame_t *frame, int silence_threshold, switch_codec_implementation_t *codec_impl)
 {
 	int16_t *fdata = (int16_t *) frame->data;

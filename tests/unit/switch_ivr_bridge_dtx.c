@@ -72,8 +72,27 @@ static switch_bool_t replace_audio_bug(switch_media_bug_t *bug, void *user_data,
 	return SWITCH_TRUE;
 }
 
+static switch_atomic_t ended_bug_calls;
+
+/* replace bug that ends on its first replace callback, so the core prunes it */
+static switch_bool_t ended_replace_bug(switch_media_bug_t *bug, void *user_data, switch_abc_type_t type)
+{
+	if (type == SWITCH_ABC_TYPE_READ_REPLACE || type == SWITCH_ABC_TYPE_WRITE_REPLACE) {
+		switch_atomic_inc(&ended_bug_calls);
+		return SWITCH_FALSE;
+	}
+
+	return SWITCH_TRUE;
+}
+
+/* set by a test to use another callback for its bugs */
+static switch_media_bug_callback_t bug_callback_override;
+
 static switch_media_bug_callback_t bug_callback(uint32_t flags)
 {
+	if (bug_callback_override) {
+		return bug_callback_override;
+	}
 	return (flags & (SMBF_READ_REPLACE | SMBF_WRITE_REPLACE | SMBF_TAP_NATIVE_READ | SMBF_TAP_NATIVE_WRITE)) ? replace_audio_bug : record_audio_bug;
 }
 
@@ -203,7 +222,7 @@ FST_SUITE_BEGIN(switch_ivr_bridge_dtx)
 		fst_requires(measure_bridge_ex("null_codec=AMR-WB,rate=16000", "null_codec=AMR-WB,rate=16000", 1000, &read_from_a, &written_to_b));
 		fst_requires(read_from_a >= DTX_PERIOD * 2);
 		/* everything but the hold-off is filled */
-		fst_xcheck(written_to_b > 0 && written_to_b + 480 / 20 + 4 >= read_from_a, "generated fill after the far end went quiet");
+		fst_xcheck(written_to_b > 0 && written_to_b + SWITCH_NATIVE_DTX_HOLDOFF_MS / 20 + 4 >= read_from_a, "generated fill after the far end went quiet");
 	}
 	FST_TEST_END()
 
@@ -321,7 +340,26 @@ FST_SUITE_BEGIN(switch_ivr_bridge_dtx)
 										SWITCH_FALSE, &read_from_a, &written_to_b));
 		fst_requires(read_from_a >= DTX_PERIOD * 2);
 		fst_xcheck(switch_atomic_read(&record_calls) > 0, "the recording on leg B runs");
-		fst_xcheck(written_to_b > 0 && written_to_b + 480 / 20 + 4 >= read_from_a, "fill after the far end went quiet");
+		fst_xcheck(written_to_b > 0 && written_to_b + SWITCH_NATIVE_DTX_HOLDOFF_MS / 20 + 4 >= read_from_a, "fill after the far end went quiet");
+	}
+	FST_TEST_END()
+
+	/* a read-replace bug on leg A that ends is pruned: native DTX resumes, no fill */
+	FST_TEST_BEGIN(test_native_dtx_after_replace_bug_ends_forwards_frames_without_fill)
+	{
+		uint32_t read_from_a, written_to_b;
+		switch_bool_t ok;
+
+		switch_atomic_set(&ended_bug_calls, 0);
+		bug_callback_override = ended_replace_bug;
+		ok = measure_bridge_bugs("null_codec=AMR-WB,rate=16000", "null_codec=AMR-WB,rate=16000", DTX_PERIOD, SMBF_READ_REPLACE, 0,
+								 &read_from_a, &written_to_b);
+		bug_callback_override = NULL;
+		fst_requires(ok);
+		fst_requires(read_from_a >= DTX_PERIOD * 2);
+		fst_xcheck(switch_atomic_read(&ended_bug_calls) > 0, "the replace bug on leg A ran and ended");
+		fst_check(written_to_b > 0);
+		fst_xcheck(written_to_b * DTX_PERIOD <= read_from_a * 2, "only the forwarded frames reach leg B, no generated fill");
 	}
 	FST_TEST_END()
 
