@@ -688,6 +688,29 @@
       </condition>
     </extension>
 
+    <!-- Peer-hangup test: this leg runs bridge as the originator and its dialplan goes on to
+         park, with no park_after_bridge, the way a Call Control transfer runs. -->
+    <extension name="playback_peer_hangup_dialplan_goes_on">
+      <condition field="destination_number" expression="^7878780008$">
+        <action application="set" data="playback_stale_bond_a=1"/>
+        <action application="set" data="hangup_after_bridge=false"/>
+        <action application="bridge" data="sofia/external/7878780008@$${local_ip_v4}:5063"/>
+        <action application="park"/>
+      </condition>
+    </extension>
+
+    <!-- Peer-hangup test: the peer sends early media and never answers, and this leg continues
+         on fail to park. -->
+    <extension name="playback_peer_hangup_early_peer_continues">
+      <condition field="destination_number" expression="^7878780009$">
+        <action application="set" data="playback_stale_bond_a=1"/>
+        <action application="set" data="continue_on_fail=true"/>
+        <action application="answer"/>
+        <action application="bridge" data="sofia/external/7878780009@$${local_ip_v4}:5063"/>
+        <action application="park"/>
+      </condition>
+    </extension>
+
     <extension name="blind_transfer_confirm_target">
       <condition field="destination_number" expression="^7878780002$">
         <action application="set" data="hangup_after_bridge=true"/>

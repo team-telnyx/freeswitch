@@ -16,4 +16,8 @@ rc=0
 ./sipp-based-tests peer_hangup_reports_a_cause_on_a_leg_that_only_parks_after_an_early_bridge || rc=1
 ./sipp-based-tests peer_hangup_reports_a_cause_on_a_leg_that_hangs_up_explicitly_after_the_bridge || rc=1
 ./sipp-based-tests peer_hangup_reports_a_cause_on_a_leg_whose_peer_never_answered || rc=1
+./sipp-based-tests peer_hangup_does_not_stop_the_playback_of_a_peer_that_moved_on || rc=1
+./sipp-based-tests peer_hangup_reports_no_cause_on_a_leg_whose_dialplan_goes_on || rc=1
+./sipp-based-tests peer_hangup_reports_no_cause_on_an_originatee_that_parks_despite_explicit || rc=1
+./sipp-based-tests peer_hangup_reports_no_cause_on_a_leg_that_continues_after_an_early_peer_fails || rc=1
 exit $rc

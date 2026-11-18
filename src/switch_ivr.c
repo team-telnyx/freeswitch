@@ -657,29 +657,35 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 
 				/* The bridge thread runs this loop and cannot see its peer from
 				 * inside it. A peer hangup landing before CF_BROADCAST is raised
-				 * above arms nothing, so check the peer here instead. locate(),
-				 * not get_partner(): get_partner() cannot tell "no partner" from
-				 * "partner is down", and a transfer clears the partner uuid while
-				 * CF_BRIDGED is still set. Raise the stop rather than breaking
-				 * out, so the app still runs and still fires PLAYBACK_STOP.
-				 * Must follow the CF_BREAK reset above, which would otherwise
-				 * wipe the break this raises. */
+				 * above arms nothing, so check the peer here instead. The signal
+				 * bond, not get_partner(): get_partner() cannot tell "no partner"
+				 * from "partner is down", and a transfer clears the partner uuid
+				 * while CF_BRIDGED is still set. force_locate(), not locate():
+				 * locate() refuses a peer that is hanging up, and the record
+				 * needs that peer's answer state and cause. Raise the stop rather
+				 * than breaking out, so the app still runs and still fires
+				 * PLAYBACK_STOP. A CF_BREAK of 2 also ends the rest of a
+				 * playback_delimiter list. Must follow the CF_BREAK reset above,
+				 * which would otherwise wipe the break this raises. */
 				if (switch_channel_test_flag(channel, CF_BRIDGED)) {
 					char peer_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1] = "";
 
 					if (switch_channel_get_variable_buf(channel, SWITCH_SIGNAL_BOND_VARIABLE, peer_uuid, sizeof(peer_uuid)) == SWITCH_STATUS_SUCCESS) {
-						switch_core_session_t *peer_session = switch_core_session_locate(peer_uuid);
+						switch_core_session_t *peer_session = switch_core_session_force_locate(peer_uuid);
+						switch_channel_t *peer_channel = peer_session ? switch_core_session_get_channel(peer_session) : NULL;
 
-						if (peer_session) {
-							switch_core_session_rwunlock(peer_session);
-						} else {
+						if (!peer_channel || switch_channel_down_nosig(peer_channel)) {
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 											  "%s Stopping broadcast: bridge peer %s is gone, broadcast generation %u\n",
 											  switch_channel_get_name(channel), peer_uuid,
 											  switch_channel_get_broadcast_generation(channel));
-							switch_channel_set_broadcast_peer_hangup_fallback(channel);
+							switch_channel_set_broadcast_peer_hangup(channel, switch_channel_get_broadcast_generation(channel), peer_channel);
 							switch_channel_set_flag(channel, CF_STOP_BROADCAST);
-							switch_channel_set_flag(channel, CF_BREAK);
+							switch_channel_set_flag_value(channel, CF_BREAK, 2);
+						}
+
+						if (peer_session) {
+							switch_core_session_rwunlock(peer_session);
 						}
 					}
 				}
@@ -1528,7 +1534,16 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_collect_digits_count(switch_core_sess
 
 		switch_ivr_parse_all_events(session);
 
-
+		/* A digit wait inside a broadcast, such as play_and_get_digits, ignores
+		 * the break. End it when a peer hangup stopped the broadcast and the leg
+		 * goes away with its bridge, or the leg waits out the timeout first. */
+		if (switch_channel_test_flag(channel, CF_STOP_BROADCAST) &&
+			switch_channel_get_broadcast_peer_hangup_cause(channel) != SWITCH_CAUSE_NONE) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+							  "%s Ending digit wait: a bridge peer hangup stopped the broadcast\n", switch_channel_get_name(channel));
+			status = SWITCH_STATUS_BREAK;
+			break;
+		}
 
 		if (eff_timeout) {
 			digit_elapsed = (uint32_t) ((switch_micro_time_now() - digit_started) / 1000);

@@ -941,8 +941,8 @@ static switch_bool_t sb_wait_bond(const char *uuid, const char *want, char *buf,
 	return found;
 }
 
-/* Waits up to about 5 s for the channel to hold CF_BROADCAST. */
-static switch_bool_t sb_wait_broadcast(const char *uuid)
+/* Waits up to about 5 s for the channel to hold the flag. */
+static switch_bool_t sb_wait_flag(const char *uuid, switch_channel_flag_t flag)
 {
 	int loop_count = 100;
 	switch_bool_t found = SWITCH_FALSE;
@@ -951,7 +951,7 @@ static switch_bool_t sb_wait_broadcast(const char *uuid)
 		switch_core_session_t *session = switch_core_session_locate(uuid);
 
 		if (session) {
-			found = switch_channel_test_flag(switch_core_session_get_channel(session), CF_BROADCAST) ? SWITCH_TRUE : SWITCH_FALSE;
+			found = switch_channel_test_flag(switch_core_session_get_channel(session), flag) ? SWITCH_TRUE : SWITCH_FALSE;
 			switch_core_session_rwunlock(session);
 		}
 		if (!found) {
@@ -992,13 +992,15 @@ static void sb_wait_stop(sb_result_t *r, int timeout_ms)
 	}
 }
 
-/* A leg -> B2BUA -> B leg are bridged, a playback runs on the B leg, and the A leg hangs up.
-   With rebridge, uuid_bridge first moves the B leg into a call with a C leg, so the A leg parks
-   and keeps a bond that still names the B leg: that playback belongs to the second call and the
-   hangup must not touch it. Without rebridge, var and val go on the playing leg, which is the
-   A leg when on_a is set: the leg then takes the bridge exit path of its own side. With
-   early_peer the B leg sends early media and never answers. */
-static void sb_run(const char *ip, int rebridge, const char *var, const char *val, int on_a, int early_peer, sb_result_t *r)
+/* A leg -> B2BUA -> B leg are bridged, a playback runs on one leg, and the other leg hangs up.
+   service picks the dialplan of the A leg. With rebridge, uuid_bridge first moves the B leg into
+   a call with a C leg, and the playback runs on the B leg: it belongs to the second call and the
+   A leg hangup must not touch it. With rebridge 1 the A leg parks before that, and keeps a bond
+   that still names the B leg. With rebridge 2 the A leg plays when the B leg moves, so it stays
+   in its bridge until the hangup. Without rebridge, vars ("name=value;...") go on the playing
+   leg, which is the A leg when on_a is set: the leg then takes the bridge exit path of its own
+   side. With early_peer the B leg sends early media and never answers. */
+static void sb_run(const char *ip, const char *service, int rebridge, const char *vars, int on_a, int early_peer, sb_result_t *r)
 {
 	char a_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1] = "";
 	char b_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1] = "";
@@ -1011,7 +1013,6 @@ static void sb_run(const char *ip, int rebridge, const char *var, const char *va
 	pid_t a = -1, b = -1, c = -1;
 	int loop_count = 100;
 	const char *b_scenario = early_peer ? "sipp-scenarios/uas_early_media_hold.xml" : "sipp-scenarios/uas_answer_hold.xml";
-	const char *service = early_peer ? "7878780005" : "7878780003";
 
 	pthread_mutex_lock(&sb_watch.mutex);
 	sb_watch.uuid[0] = '\0';
@@ -1032,8 +1033,10 @@ static void sb_run(const char *ip, int rebridge, const char *var, const char *va
 	}
 	r->started = 1;
 
-	/* The A leg and the B leg name each other once the bridge runs. */
-	if (!sb_find_a_leg(a_uuid, sizeof(a_uuid)) || !sb_wait_bond(a_uuid, NULL, b_uuid, sizeof(b_uuid))) {
+	/* The A leg names the B leg before the bridge runs, from the originate. Wait for the
+	   bridge itself on both legs, or the test measures the originate instead. */
+	if (!sb_find_a_leg(a_uuid, sizeof(a_uuid)) || !sb_wait_bond(a_uuid, NULL, b_uuid, sizeof(b_uuid)) ||
+		!sb_wait_flag(a_uuid, CF_BRIDGED) || !sb_wait_flag(b_uuid, CF_BRIDGED)) {
 		goto end;
 	}
 	play_uuid = on_a ? a_uuid : b_uuid;
@@ -1054,6 +1057,17 @@ static void sb_run(const char *ip, int rebridge, const char *var, const char *va
 	r->found_legs = 1;
 
 	if (rebridge) {
+		if (rebridge == 2) {
+			/* The bridge thread of the A leg runs this playback, so the A leg stays in its
+			   bridge after the B leg leaves. Only the hangup below ends that bridge. */
+			arg = switch_mprintf("%s playback::silence_stream://20000 aleg", a_uuid);
+			r->prepared = sb_api_reply("uuid_broadcast", arg, NULL, 0) && sb_wait_flag(a_uuid, CF_BROADCAST) ? 1 : 0;
+			switch_safe_free(arg);
+			if (!r->prepared) {
+				goto end;
+			}
+		}
+
 		/* Move the B leg into the B leg -> C leg call. The A leg keeps its old bond. */
 		arg = switch_mprintf("%s %s", b_uuid, c_uuid);
 		r->bridged = sb_api_reply("uuid_bridge", arg, NULL, 0) &&
@@ -1063,15 +1077,19 @@ static void sb_run(const char *ip, int rebridge, const char *var, const char *va
 			goto end;
 		}
 
-		/* The A leg bridge exit stops a broadcast on its peer by itself, so let the A leg
-		   reach its park before the playback starts. Then only the hangup can stop it. */
-		r->prepared = bt_wait_running_state(a_uuid, CS_PARK) ? 1 : 0;
+		/* With rebridge 1 the A leg bridge exit stops a broadcast on its peer by itself, so let
+		   the A leg reach its park before the playback starts. Then only the hangup can stop it.
+		   With rebridge 2 the A leg must still play in its bridge. */
+		r->prepared = (rebridge == 1 ? bt_wait_running_state(a_uuid, CS_PARK) : sb_wait_flag(a_uuid, CF_BROADCAST)) ? 1 : 0;
 	} else {
-		/* The variable the bridge exit of the playing leg reads. */
-		arg = switch_mprintf("%s %s %s", play_uuid, var, val);
+		/* The variables the bridge exit of the playing leg reads, if the dialplan did not set them. */
 		r->bridged = 1;
-		r->prepared = sb_api_reply("uuid_setvar", arg, NULL, 0) ? 1 : 0;
-		switch_safe_free(arg);
+		r->prepared = 1;
+		if (vars) {
+			arg = switch_mprintf("%s %s", play_uuid, vars);
+			r->prepared = sb_api_reply("uuid_setvar_multi", arg, NULL, 0) ? 1 : 0;
+			switch_safe_free(arg);
+		}
 	}
 	if (!r->prepared) {
 		goto end;
@@ -1083,7 +1101,7 @@ static void sb_run(const char *ip, int rebridge, const char *var, const char *va
 	pthread_mutex_unlock(&sb_watch.mutex);
 
 	arg = switch_mprintf("%s playback::silence_stream://10000 aleg", play_uuid);
-	r->playing = sb_api_reply("uuid_broadcast", arg, NULL, 0) && sb_wait_broadcast(play_uuid) ? 1 : 0;
+	r->playing = sb_api_reply("uuid_broadcast", arg, NULL, 0) && sb_wait_flag(play_uuid, CF_BROADCAST) ? 1 : 0;
 	switch_safe_free(arg);
 	if (!r->playing) {
 		goto end;
@@ -1095,12 +1113,13 @@ static void sb_run(const char *ip, int rebridge, const char *var, const char *va
 	r->killed = sb_api_reply("uuid_kill", arg, NULL, 0) ? 1 : 0;
 	switch_safe_free(arg);
 
-	/* One second is far longer than a stop the hangup raises needs. */
+	/* A stop the hangup raises comes within milliseconds. Allow 3 s, far less than the 10 s file. */
+	sb_wait_stop(r, 3000);
+	r->stops_after_hangup = r->stops;
+	switch_copy_string(r->cause_after_hangup, r->cause, sizeof(r->cause_after_hangup));
+
+	/* Let the bridge exit park or hang up the playing leg before it is sampled below. */
 	switch_sleep(1000 * 1000);
-	pthread_mutex_lock(&sb_watch.mutex);
-	r->stops_after_hangup = sb_watch.stops;
-	switch_copy_string(r->cause_after_hangup, sb_watch.cause, sizeof(r->cause_after_hangup));
-	pthread_mutex_unlock(&sb_watch.mutex);
 
 	/* Then up to 12 s, which outlasts the 10 s file. */
 	sb_wait_stop(r, 12000);
@@ -1590,7 +1609,7 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 		{
 			sb_result_t r = { 0 };
 
-			sb_run(switch_core_get_variable("local_ip_v4"), 1, NULL, NULL, 0, 0, &r);
+			sb_run(switch_core_get_variable("local_ip_v4"), "7878780003", 1, NULL, 0, 0, &r);
 			fst_xcheck(r.started, "Unable to start the SIPp peers");
 			fst_xcheck(r.found_legs, "the A leg, its bond or the C leg was not found");
 			fst_xcheck(r.bridged, "uuid_bridge did not move the B leg into the second call");
@@ -1611,7 +1630,7 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 		{
 			sb_result_t r = { 0 };
 
-			sb_run(switch_core_get_variable("local_ip_v4"), 0, "park_after_bridge", "true", 0, 0, &r);
+			sb_run(switch_core_get_variable("local_ip_v4"), "7878780003", 0, "park_after_bridge=true", 0, 0, &r);
 			fst_xcheck(r.started, "Unable to start the SIPp peers");
 			fst_xcheck(r.found_legs, "the A leg or its bond was not found");
 			fst_xcheck(r.prepared, "uuid_setvar did not set park_after_bridge on the B leg");
@@ -1631,7 +1650,7 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 		{
 			sb_result_t r = { 0 };
 
-			sb_run(switch_core_get_variable("local_ip_v4"), 0, "park_after_early_bridge", "true", 0, 0, &r);
+			sb_run(switch_core_get_variable("local_ip_v4"), "7878780003", 0, "park_after_early_bridge=true", 0, 0, &r);
 			fst_xcheck(r.started, "Unable to start the SIPp peers");
 			fst_xcheck(r.found_legs, "the A leg or its bond was not found");
 			fst_xcheck(r.prepared, "uuid_setvar did not set park_after_early_bridge on the B leg");
@@ -1651,7 +1670,7 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 		{
 			sb_result_t r = { 0 };
 
-			sb_run(switch_core_get_variable("local_ip_v4"), 0, "hangup_after_bridge", "explicit", 1, 0, &r);
+			sb_run(switch_core_get_variable("local_ip_v4"), "7878780003", 0, "hangup_after_bridge=explicit", 1, 0, &r);
 			fst_xcheck(r.started, "Unable to start the SIPp peers");
 			fst_xcheck(r.found_legs, "the A leg or its bond was not found");
 			fst_xcheck(r.prepared, "uuid_setvar did not set hangup_after_bridge on the A leg");
@@ -1671,7 +1690,7 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 		{
 			sb_result_t r = { 0 };
 
-			sb_run(switch_core_get_variable("local_ip_v4"), 0, "park_after_bridge", "true", 1, 1, &r);
+			sb_run(switch_core_get_variable("local_ip_v4"), "7878780005", 0, "park_after_bridge=true", 1, 1, &r);
 			fst_xcheck(r.started, "Unable to start the SIPp peers");
 			fst_xcheck(r.found_legs, "the A leg or its bond was not found");
 			fst_xcheck(r.prepared, "uuid_setvar did not set park_after_bridge on the A leg");
@@ -1680,6 +1699,88 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 			fst_xcheck(r.stops_after_hangup == 1, "the B leg hangup did not stop the A leg playback");
 			fst_xcheck(!r.peer_up, "the A leg outlived the bridge although its peer never answered");
 			fst_xcheck(*r.cause_after_hangup, "the A leg playback reported no hangup cause although the A leg hangs up");
+			fst_xcheck(r.a_ok && r.b_ok, "a SIPp peer failed; inspect the *_errors.log files");
+		}
+		FST_TEST_END()
+
+		/* The A leg still plays in its bridge when the B leg moves into a call with a C leg, so
+		   the A leg leaves its bridge only when it hangs up. Without the fix that bridge exit
+		   stops the playback of the B leg -> C leg call and stamps a hangup cause on it. */
+		FST_TEST_BEGIN(peer_hangup_does_not_stop_the_playback_of_a_peer_that_moved_on)
+		{
+			sb_result_t r = { 0 };
+
+			sb_run(switch_core_get_variable("local_ip_v4"), "7878780003", 2, NULL, 0, 0, &r);
+			fst_xcheck(r.started, "Unable to start the SIPp peers");
+			fst_xcheck(r.found_legs, "the A leg, its bond or the C leg was not found");
+			fst_xcheck(r.bridged, "uuid_bridge did not move the B leg into the second call");
+			fst_xcheck(r.prepared, "the A leg did not keep playing in its bridge");
+			fst_xcheck(r.playing, "the playback did not start on the B leg");
+			fst_xcheck(r.killed, "uuid_kill did not hang the A leg up");
+			fst_xcheck(r.stops_after_hangup == 0, "the A leg bridge exit stopped the playback of the second call");
+			fst_xcheck(r.stops == 1, "the playback did not report exactly one PLAYBACK_STOP");
+			fst_xcheck(!*r.cause, "the playback reported a hangup cause although both legs of its call were up");
+			fst_xcheck(!strcmp(r.status, "done"), "the playback did not reach the end of its file");
+			fst_xcheck(r.a_ok && r.b_ok && r.c_ok, "a SIPp peer failed; inspect the *_errors.log files");
+		}
+		FST_TEST_END()
+
+		/* The A leg runs bridge with hangup_after_bridge=false and its dialplan goes on to park,
+		   with no park_after_bridge: the way a Call Control transfer runs. The A leg outlives the
+		   bridge, so its playback must not report a hangup cause. */
+		FST_TEST_BEGIN(peer_hangup_reports_no_cause_on_a_leg_whose_dialplan_goes_on)
+		{
+			sb_result_t r = { 0 };
+
+			sb_run(switch_core_get_variable("local_ip_v4"), "7878780008", 0, NULL, 1, 0, &r);
+			fst_xcheck(r.started, "Unable to start the SIPp peers");
+			fst_xcheck(r.found_legs, "the A leg or its bond was not found");
+			fst_xcheck(r.prepared, "the A leg was not prepared");
+			fst_xcheck(r.playing, "the playback did not start on the A leg");
+			fst_xcheck(r.killed, "uuid_kill did not hang the B leg up");
+			fst_xcheck(r.stops_after_hangup == 1, "the B leg hangup did not stop the A leg playback");
+			fst_xcheck(r.peer_up, "the A leg did not go on to park after the bridge");
+			fst_xcheck(!*r.cause_after_hangup, "the A leg playback reported a hangup cause although the A leg goes on");
+			fst_xcheck(r.a_ok && r.b_ok, "a SIPp peer failed; inspect the *_errors.log files");
+		}
+		FST_TEST_END()
+
+		/* The B leg is an originatee, and its bridge exit parks it on park_after_bridge without
+		   reading hangup_after_bridge, so explicit does not hang it up. Its playback must not
+		   report a hangup cause. */
+		FST_TEST_BEGIN(peer_hangup_reports_no_cause_on_an_originatee_that_parks_despite_explicit)
+		{
+			sb_result_t r = { 0 };
+
+			sb_run(switch_core_get_variable("local_ip_v4"), "7878780003", 0, "park_after_bridge=true;hangup_after_bridge=explicit", 0, 0, &r);
+			fst_xcheck(r.started, "Unable to start the SIPp peers");
+			fst_xcheck(r.found_legs, "the A leg or its bond was not found");
+			fst_xcheck(r.prepared, "uuid_setvar_multi failed on the B leg");
+			fst_xcheck(r.playing, "the playback did not start on the B leg");
+			fst_xcheck(r.killed, "uuid_kill did not hang the A leg up");
+			fst_xcheck(r.stops_after_hangup == 1, "the A leg hangup did not stop the B leg playback");
+			fst_xcheck(r.peer_up, "the B leg did not park after the bridge");
+			fst_xcheck(!*r.cause_after_hangup, "the B leg playback reported a hangup cause although the B leg parks");
+			fst_xcheck(r.a_ok && r.b_ok, "a SIPp peer failed; inspect the *_errors.log files");
+		}
+		FST_TEST_END()
+
+		/* The peer sends early media and never answers, and the A leg has continue_on_fail with a
+		   park after the bridge. switch_channel_handle_cause() leaves the A leg up, so it goes on
+		   to park and its playback must not report a hangup cause. */
+		FST_TEST_BEGIN(peer_hangup_reports_no_cause_on_a_leg_that_continues_after_an_early_peer_fails)
+		{
+			sb_result_t r = { 0 };
+
+			sb_run(switch_core_get_variable("local_ip_v4"), "7878780009", 0, NULL, 1, 1, &r);
+			fst_xcheck(r.started, "Unable to start the SIPp peers");
+			fst_xcheck(r.found_legs, "the A leg or its bond was not found");
+			fst_xcheck(r.prepared, "the A leg was not prepared");
+			fst_xcheck(r.playing, "the playback did not start on the A leg");
+			fst_xcheck(r.killed, "uuid_kill did not hang the B leg up");
+			fst_xcheck(r.stops_after_hangup == 1, "the B leg hangup did not stop the A leg playback");
+			fst_xcheck(r.peer_up, "the A leg did not go on to park after its early peer failed");
+			fst_xcheck(!*r.cause_after_hangup, "the A leg playback reported a hangup cause although the A leg goes on");
 			fst_xcheck(r.a_ok && r.b_ok, "a SIPp peer failed; inspect the *_errors.log files");
 		}
 		FST_TEST_END()

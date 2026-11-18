@@ -1251,37 +1251,6 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_release_file_handle(switch_core_sessi
 #define FILE_BLOCKSIZE 1024 * 8
 #define FILE_BUFSIZE 1024 * 64
 
-/* SWITCH_TRUE when the bridge exit lets this leg outlive its bridge, so the leg is
- * not hanging up and its stopped playback must report no hangup cause.
- *
- * The two bridge exit sides do not read the same variables, so only what both of
- * them honour counts here. The originatee side reads park_after_bridge and
- * transfer_after_bridge alone, so the two early variables decide nothing there.
- * The originator side reads all four, but it hangs the leg up before it reads any
- * of them when the peer did not answer, and again when hangup_after_bridge is
- * explicit. A leg this function accepts therefore survives on both sides. A leg it
- * rejects reports the cause, which is the safe answer for a leg that hangs up.
- *
- * marker_tail is what follows the generation in the marker: ":1" when the peer that
- * armed the marker had answered. */
-static switch_bool_t playback_leg_outlives_bridge(switch_channel_t *channel, const char *marker_tail)
-{
-	const char *hup;
-
-	if (!marker_tail || strcmp(marker_tail, ":1")) {
-		return SWITCH_FALSE;
-	}
-
-	hup = switch_channel_get_variable(channel, SWITCH_HANGUP_AFTER_BRIDGE_VARIABLE);
-
-	if (hup && !strcasecmp(hup, "explicit")) {
-		return SWITCH_FALSE;
-	}
-
-	return (switch_true(switch_channel_get_variable(channel, SWITCH_PARK_AFTER_BRIDGE_VARIABLE)) ||
-			!zstr(switch_channel_get_variable(channel, SWITCH_TRANSFER_AFTER_BRIDGE_VARIABLE))) ? SWITCH_TRUE : SWITCH_FALSE;
-}
-
 SWITCH_DECLARE(switch_status_t) switch_ivr_play_file_detailed(switch_core_session_t *session, switch_file_handle_t *fh, const char *file, switch_input_args_t *args, const char **error)
 {
 	switch_channel_t *channel = switch_core_session_get_channel(session);
@@ -1306,9 +1275,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_play_file_detailed(switch_core_sessio
 	const char *timer_name;
 	const char *prebuf;
 	const char *alt = NULL;
-	const char *marker = NULL;
-	char *marker_tail = NULL;
-	uint32_t bcast_gen = 0;
+	switch_call_cause_t peer_cause;
 	const char *sleep_val;
 	const char *play_delimiter_val;
 	char play_delimiter = 0;
@@ -1986,7 +1953,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_play_file_detailed(switch_core_sessio
 					switch_frame_t *read_frame;
 					switch_status_t tstatus;
 
-					while (switch_channel_ready(channel) && switch_channel_test_flag(channel, CF_HOLD)) {
+					/* A break ends the hold wait too, so the loop above can act on it */
+					while (switch_channel_ready(channel) && switch_channel_test_flag(channel, CF_HOLD) && !switch_channel_test_flag(channel, CF_BREAK)) {
 						switch_ivr_parse_all_messages(session);
 						switch_yield(10000);
 					}
@@ -2104,28 +2072,14 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_play_file_detailed(switch_core_sessio
 
 			/* This channel is still up, so event_set_data() found no cause.
 			 * Report the peer's, or the stop reads as a file that played to the
-			 * end. The marker carries the broadcast generation it was written
-			 * for, so one left behind by a setter that raced the end of that
-			 * broadcast does not match and is ignored. The marker is not
-			 * cleared here: a priority broadcast such as hold music runs nested
-			 * inside this playback, and both share one generation, so every
-			 * playback the peer hangup cut short reports it. */
-			marker = switch_channel_get_variable(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE);
-			bcast_gen = switch_channel_get_broadcast_generation(channel);
-
-			/* A break only: a file that reached its end reports done and must not
-			 * carry a cause. A zero generation means no broadcast has run, so a
-			 * marker that is not a number never matches. A leg that outlives its
-			 * bridge is not hanging up, so it reports no cause. */
-			if (status == SWITCH_STATUS_BREAK && marker && bcast_gen &&
-				(uint32_t) strtoul(marker, &marker_tail, 10) == bcast_gen &&
-				!playback_leg_outlives_bridge(channel, marker_tail)) {
-				if (!switch_event_get_header(event, "Hangup-Cause")) {
-					const char *peer_cause = switch_channel_get_variable(channel, "last_bridge_hangup_cause");
-
-					switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Hangup-Cause",
-												   peer_cause ? peer_cause : switch_channel_cause2str(SWITCH_CAUSE_NORMAL_CLEARING));
-				}
+			 * end. A break only: a file that reached its end reports done and
+			 * must not carry a cause. The marker is not cleared here: a priority
+			 * broadcast such as hold music runs nested inside this playback, and
+			 * both share one generation, so every playback the peer hangup cut
+			 * short reports it. */
+			if (status == SWITCH_STATUS_BREAK && !switch_event_get_header(event, "Hangup-Cause") &&
+				(peer_cause = switch_channel_get_broadcast_peer_hangup_cause(channel)) != SWITCH_CAUSE_NONE) {
+				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Hangup-Cause", switch_channel_cause2str(peer_cause));
 			}
 
 			if (!strncasecmp(file, "local_stream:", 13)) {
@@ -2822,6 +2776,14 @@ SWITCH_DECLARE(switch_status_t) switch_play_and_get_digits(switch_core_session_t
 			break;
 		}
 
+		/* A peer hangup stopped this broadcast and the leg goes away with its
+		 * bridge: no bad input prompt, no other try and no failure transfer. */
+		if (switch_channel_test_flag(channel, CF_STOP_BROADCAST) &&
+			switch_channel_get_broadcast_peer_hangup_cause(channel) != SWITCH_CAUSE_NONE) {
+			memset(digit_buffer, 0, digit_buffer_length);
+			return SWITCH_STATUS_FALSE;
+		}
+
 		switch_ivr_play_file(session, NULL, bad_input_audio_file, NULL);
 		max_tries--;
 	}
@@ -3038,7 +3000,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_speak_text_handle(switch_core_session
 				switch_frame_t *read_frame;
 				switch_status_t tstatus = switch_core_session_read_frame(session, &read_frame, SWITCH_IO_FLAG_NONE, 0);
 
-				while (switch_channel_ready(channel) && switch_channel_test_flag(channel, CF_HOLD)) {
+				while (switch_channel_ready(channel) && switch_channel_test_flag(channel, CF_HOLD) && !switch_channel_test_flag(channel, CF_BREAK)) {
 					switch_ivr_parse_all_messages(session);
 					switch_yield(10000);
 				}
@@ -3090,7 +3052,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_speak_text_handle(switch_core_session
 			switch_frame_t *read_frame;
 			switch_status_t tstatus = switch_core_session_read_frame(session, &read_frame, SWITCH_IO_FLAG_NONE, 0);
 
-			while (switch_channel_ready(channel) && switch_channel_test_flag(channel, CF_HOLD)) {
+			while (switch_channel_ready(channel) && switch_channel_test_flag(channel, CF_HOLD) && !switch_channel_test_flag(channel, CF_BREAK)) {
 				switch_ivr_parse_all_messages(session);
 				switch_yield(10000);
 			}

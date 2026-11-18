@@ -980,19 +980,21 @@ SWITCH_DECLARE(void) switch_core_session_hangup_state(switch_core_session_t *ses
 			/* The bond has to name this leg back. A leg keeps its bond after the
 			 * bridge ends, and a later bridge of the partner rewrites only the
 			 * partner's own bond, so a one-way bond names a partner that is now
-			 * in another call, and its playback belongs to that call. */
+			 * in another call, and its playback belongs to that call. A bridge
+			 * originator runs a queued broadcast before it raises CF_BRIDGED,
+			 * and that broadcast holds up the bridge set-up, so it counts too. */
 			if (bond_back && !strcmp(bond_back, switch_core_session_get_uuid(session)) &&
-				switch_channel_test_flag(partner_channel, CF_BRIDGED) &&
+				(switch_channel_test_flag(partner_channel, CF_BRIDGED) || switch_channel_test_flag(partner_channel, CF_BRIDGE_ORIGINATOR)) &&
 				switch_channel_test_flag(partner_channel, CF_BROADCAST)) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 								  "%s Stopping broadcast on bridge partner %s due to hangup, broadcast generation %u, answered %d\n",
 								  switch_channel_get_name(session->channel), switch_channel_get_name(partner_channel), partner_gen,
 								  switch_channel_test_flag(session->channel, CF_ANSWERED) ? 1 : 0);
-				/* The partner bridge exit lets an originator outlive the bridge only when
-				 * this leg answered, so the marker carries that too. */
-				switch_channel_set_variable_printf(partner_channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, "%u:%d", partner_gen,
-												   switch_channel_test_flag(session->channel, CF_ANSWERED) ? 1 : 0);
-				switch_channel_stop_broadcast(partner_channel);
+				/* The partner's bridge exit reads this leg's answer state and cause. */
+				switch_channel_set_broadcast_peer_hangup(partner_channel, partner_gen, session->channel);
+				/* A CF_BREAK of 2 also ends the rest of a playback_delimiter list. */
+				switch_channel_set_flag(partner_channel, CF_STOP_BROADCAST);
+				switch_channel_set_flag_value(partner_channel, CF_BREAK, 2);
 			}
 
 			switch_core_session_rwunlock(partner_session);

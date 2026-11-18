@@ -2584,21 +2584,197 @@ SWITCH_DECLARE(uint32_t) switch_channel_get_broadcast_generation(switch_channel_
 	return switch_atomic_read(&channel->broadcast_generation);
 }
 
-SWITCH_DECLARE(void) switch_channel_set_broadcast_peer_hangup_fallback(switch_channel_t *channel)
+/* The marker is "<generation>:<answered>:<cause>", where the last two describe the
+ * peer. The cause is empty when the peer had none to read. */
+SWITCH_DECLARE(void) switch_channel_set_broadcast_peer_hangup(switch_channel_t *channel, uint32_t generation, switch_channel_t *peer_channel)
 {
-	const char *marker;
-	uint32_t generation;
+	char marker[32] = "";
 
 	switch_assert(channel != NULL);
-	/* The hangup writers use this same mutex. Keep their answered state even
-	 * when a writer arrives between the fallback's read and write. */
+
+	/* Every writer takes this mutex, so a writer that read the generation of a
+	 * broadcast that has ended since cannot replace the record of the current one. */
 	switch_mutex_lock(channel->profile_mutex);
-	generation = switch_channel_get_broadcast_generation(channel);
-	marker = switch_channel_get_variable_dup(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, SWITCH_FALSE, -1);
-	if (!marker || (uint32_t) strtoul(marker, NULL, 10) != generation) {
-		switch_channel_set_variable_printf(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, "%u:0", generation);
+	if (generation == switch_channel_get_broadcast_generation(channel)) {
+		if (peer_channel) {
+			switch_call_cause_t cause = switch_channel_get_cause(peer_channel);
+
+			switch_channel_set_variable_printf(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, "%u:%d:%s", generation,
+											   switch_channel_test_flag(peer_channel, CF_ANSWERED) ? 1 : 0,
+											   cause ? switch_channel_cause2str(cause) : "");
+		} else if (switch_channel_get_variable_buf(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, marker, sizeof(marker)) != SWITCH_STATUS_SUCCESS ||
+				   (uint32_t) strtoul(marker, NULL, 10) != generation) {
+			/* Nothing is left to read: assume an answered peer, as a bridged peer nearly always is. */
+			switch_channel_set_variable_printf(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, "%u:1:", generation);
+		}
 	}
 	switch_mutex_unlock(channel->profile_mutex);
+}
+
+/* SWITCH_TRUE when the comma list holds the cause as a name or a number, read the way
+ * switch_channel_handle_cause() reads its lists. The list is changed in place. */
+static switch_bool_t cause_in_list(char *list, switch_call_cause_t cause)
+{
+	char *argv[256] = { 0 };
+	char cause_num[35] = "";
+	int argc = switch_separate_string(list, ',', argv, (sizeof(argv) / sizeof(argv[0])));
+	int i;
+
+	switch_snprintf(cause_num, sizeof(cause_num), "%u", cause);
+
+	for (i = 0; i < argc; ++i) {
+		if (!strcasecmp(argv[i], switch_channel_cause2str(cause)) || !strcasecmp(argv[i], cause_num)) {
+			return SWITCH_TRUE;
+		}
+	}
+
+	return SWITCH_FALSE;
+}
+
+#define HANDLE_CAUSE_HANGS_UP 0
+#define HANDLE_CAUSE_CONTINUES 1
+#define HANDLE_CAUSE_TRANSFERS 2
+
+/* What switch_channel_handle_cause() does to the channel for this cause. The
+ * variables are copied to the stack: a digit wait calls this once per frame. */
+static int handle_cause_outcome(switch_channel_t *channel, switch_call_cause_t cause)
+{
+	char continue_on_fail[512] = "", failure_causes[512] = "", transfer_on_fail[512] = "";
+	char *tof_array[4] = { 0 };
+	switch_bool_t has_continue = switch_channel_get_variable_buf(channel, "continue_on_fail", continue_on_fail, sizeof(continue_on_fail)) == SWITCH_STATUS_SUCCESS;
+	switch_bool_t has_failure = switch_channel_get_variable_buf(channel, "failure_causes", failure_causes, sizeof(failure_causes)) == SWITCH_STATUS_SUCCESS;
+
+	if (cause != SWITCH_CAUSE_ATTENDED_TRANSFER) {
+		if (has_continue || has_failure) {
+			if ((has_failure && !cause_in_list(failure_causes, cause)) ||
+				(has_continue && (switch_true(continue_on_fail) || cause_in_list(continue_on_fail, cause)))) {
+				return HANDLE_CAUSE_CONTINUES;
+			}
+		} else if (cause == SWITCH_CAUSE_NO_ANSWER || cause == SWITCH_CAUSE_NO_USER_RESPONSE || cause == SWITCH_CAUSE_ORIGINATOR_CANCEL) {
+			return HANDLE_CAUSE_CONTINUES;
+		}
+
+		/* transfer_on_fail: a true first word continues, a first word that lists the cause transfers */
+		switch_channel_get_variable_buf(channel, "transfer_on_fail", transfer_on_fail, sizeof(transfer_on_fail));
+		switch_split(transfer_on_fail, ' ', tof_array);
+
+		if (tof_array[0]) {
+			if (switch_true(tof_array[0])) {
+				return HANDLE_CAUSE_CONTINUES;
+			}
+			if (cause_in_list(tof_array[0], cause)) {
+				return HANDLE_CAUSE_TRANSFERS;
+			}
+		}
+	}
+
+	return switch_channel_test_flag(channel, CF_CONFIRM_BLIND_TRANSFER) ? HANDLE_CAUSE_CONTINUES : HANDLE_CAUSE_HANGS_UP;
+}
+
+/* SWITCH_TRUE when the bridge exit keeps this leg up after its peer went away. The
+ * two sides exit in different code, so this follows the side the leg is on:
+ * audio_bridge_on_exchange_media() for the originatee, and the end of
+ * switch_ivr_multi_threaded_bridge() for the originator, which then returns the leg
+ * to its dialplan. answered and cause describe the peer. A bridged peer has
+ * answered or sent early media, so the originator exit always reads its park and
+ * transfer variables. It reads the variables without copies, so it allocates
+ * nothing from the session pool. */
+static switch_bool_t broadcast_leg_outlives_bridge(switch_channel_t *channel, int answered, switch_call_cause_t cause)
+{
+	switch_caller_extension_t *extension;
+	char hup[16] = "";
+	int outcome = HANDLE_CAUSE_CONTINUES;
+
+	/* Both exits leave a leg alone that is in an inner bridge, a transfer or a redirect. */
+	if (switch_channel_test_flag(channel, CF_INNER_BRIDGE) || switch_channel_test_flag(channel, CF_TRANSFER) ||
+		switch_channel_test_flag(channel, CF_REDIRECT)) {
+		return SWITCH_TRUE;
+	}
+
+	/* The originatee exit makes no hangup decision for a zombie leg, and parks it. */
+	if (!switch_channel_test_flag(channel, CF_BRIDGE_ORIGINATOR)) {
+		return (switch_channel_test_flag(channel, CF_XFER_ZOMBIE) ||
+				switch_channel_var_true(channel, SWITCH_PARK_AFTER_BRIDGE_VARIABLE) ||
+				switch_channel_get_variable_dup(channel, SWITCH_TRANSFER_AFTER_BRIDGE_VARIABLE, SWITCH_FALSE, -1) ||
+				switch_channel_get_variable_dup(channel, SWITCH_EXEC_AFTER_BRIDGE_APP_VARIABLE, SWITCH_FALSE, -1) ||
+				switch_channel_test_flag(channel, CF_INTERCEPTED) ||
+				(switch_channel_test_flag(channel, CF_ANSWERED) && switch_channel_test_flag(channel, CF_REMOTE_RECOVERED))) ? SWITCH_TRUE : SWITCH_FALSE;
+	}
+
+	/* The originator exit makes no hangup decision for a zombie leg either: only its dialplan does. */
+	if (switch_channel_test_flag(channel, CF_XFER_ZOMBIE)) {
+		goto dialplan;
+	}
+
+	if (!answered && (outcome = handle_cause_outcome(channel, cause)) == HANDLE_CAUSE_HANGS_UP) {
+		return SWITCH_FALSE;
+	}
+
+	switch_channel_get_variable_buf(channel, SWITCH_HANGUP_AFTER_BRIDGE_VARIABLE, hup, sizeof(hup));
+
+	if (!strcasecmp(hup, "explicit")) {
+		return SWITCH_FALSE;
+	}
+
+	if (outcome == HANDLE_CAUSE_TRANSFERS) {
+		return SWITCH_TRUE;
+	}
+
+	if ((answered && switch_channel_var_true(channel, SWITCH_PARK_AFTER_BRIDGE_VARIABLE)) ||
+		switch_channel_var_true(channel, SWITCH_PARK_AFTER_EARLY_BRIDGE_VARIABLE) ||
+		(answered && switch_channel_get_variable_dup(channel, SWITCH_TRANSFER_AFTER_BRIDGE_VARIABLE, SWITCH_FALSE, -1)) ||
+		switch_channel_get_variable_dup(channel, SWITCH_TRANSFER_AFTER_EARLY_BRIDGE_VARIABLE, SWITCH_FALSE, -1)) {
+		return SWITCH_TRUE;
+	}
+
+	if (answered && switch_true(hup)) {
+		return SWITCH_FALSE;
+	}
+
+  dialplan:
+	/* Back in its dialplan, the leg hangs up after its last application. */
+	if (switch_channel_get_variable_dup(channel, SWITCH_EXEC_AFTER_BRIDGE_APP_VARIABLE, SWITCH_FALSE, -1)) {
+		return SWITCH_TRUE;
+	}
+
+	extension = switch_channel_get_caller_extension(channel);
+
+	return (extension && extension->current_application &&
+			strcasecmp(extension->current_application->application_name, "hangup")) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
+SWITCH_DECLARE(switch_call_cause_t) switch_channel_get_broadcast_peer_hangup_cause(switch_channel_t *channel)
+{
+	char marker[96] = "";
+	char cause_name[64] = "";
+	char *tail = NULL;
+	uint32_t generation;
+	switch_call_cause_t cause;
+
+	switch_assert(channel != NULL);
+
+	generation = switch_channel_get_broadcast_generation(channel);
+
+	/* Zero means no broadcast has run, so a marker that is not a number never matches.
+	 * A marker of an older generation was written for a broadcast that has ended. */
+	if (!generation || switch_channel_get_variable_buf(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, marker, sizeof(marker)) != SWITCH_STATUS_SUCCESS ||
+		(uint32_t) strtoul(marker, &tail, 10) != generation || strlen(tail) < 3) {
+		return SWITCH_CAUSE_NONE;
+	}
+
+	/* No cause in the marker: the bridge code recorded the peer's on this leg when it hung up */
+	if (tail[3]) {
+		switch_copy_string(cause_name, tail + 3, sizeof(cause_name));
+	} else {
+		switch_channel_get_variable_buf(channel, "last_bridge_hangup_cause", cause_name, sizeof(cause_name));
+	}
+
+	/* An empty name reads as NORMAL_CLEARING. NONE would read as no report. */
+	if ((cause = switch_channel_str2cause(cause_name)) == SWITCH_CAUSE_NONE) {
+		cause = SWITCH_CAUSE_NORMAL_CLEARING;
+	}
+
+	return broadcast_leg_outlives_bridge(channel, tail[1] == '1', cause) ? SWITCH_CAUSE_NONE : cause;
 }
 
 /*
