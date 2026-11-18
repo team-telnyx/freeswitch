@@ -312,6 +312,44 @@ FST_SUITE_BEGIN(switch_ivr_bridge_dtx)
 	}
 	FST_TEST_END()
 
+	/* recording on leg B, no bridge_generate_comfort_noise, far end stops sending: leg A's read fills again after the hold-off */
+	FST_TEST_BEGIN(test_native_dtx_with_recording_on_leg_b_fills_when_far_end_stops_sending)
+	{
+		uint32_t read_from_a, written_to_b;
+
+		fst_requires(measure_bridge_cng("null_codec=AMR-WB,rate=16000", "null_codec=AMR-WB,rate=16000", 1000, 0, RECORD_BUG_FLAGS,
+										SWITCH_FALSE, &read_from_a, &written_to_b));
+		fst_requires(read_from_a >= DTX_PERIOD * 2);
+		fst_xcheck(switch_atomic_read(&record_calls) > 0, "the recording on leg B runs");
+		fst_xcheck(written_to_b > 0 && written_to_b + 480 / 20 + 4 >= read_from_a, "fill after the far end went quiet");
+	}
+	FST_TEST_END()
+
+	/* read-replace on leg B and write-replace on leg A change only the B -> A audio: A -> B stays native DTX */
+	FST_TEST_BEGIN(test_native_dtx_with_read_replace_bug_on_leg_b_forwards_frames_without_fill)
+	{
+		uint32_t read_from_a, written_to_b;
+
+		fst_requires(measure_bridge_bugs("null_codec=AMR-WB,rate=16000", "null_codec=AMR-WB,rate=16000", DTX_PERIOD, 0, SMBF_READ_REPLACE,
+										 &read_from_a, &written_to_b));
+		fst_requires(read_from_a >= DTX_PERIOD * 2);
+		fst_check(written_to_b > 0);
+		fst_xcheck(written_to_b * DTX_PERIOD <= read_from_a * 2, "only the forwarded frames reach leg B, no generated fill");
+	}
+	FST_TEST_END()
+
+	FST_TEST_BEGIN(test_native_dtx_with_write_replace_bug_on_leg_a_forwards_frames_without_fill)
+	{
+		uint32_t read_from_a, written_to_b;
+
+		fst_requires(measure_bridge_bugs("null_codec=AMR-WB,rate=16000", "null_codec=AMR-WB,rate=16000", DTX_PERIOD, SMBF_WRITE_REPLACE, 0,
+										 &read_from_a, &written_to_b));
+		fst_requires(read_from_a >= DTX_PERIOD * 2);
+		fst_check(written_to_b > 0);
+		fst_xcheck(written_to_b * DTX_PERIOD <= read_from_a * 2, "only the forwarded frames reach leg B, no generated fill");
+	}
+	FST_TEST_END()
+
 	/* no native DTX: fill is kept */
 	FST_TEST_BEGIN(test_non_dtx_passthrough_keeps_generated_fill)
 	{

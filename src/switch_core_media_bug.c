@@ -36,6 +36,8 @@
 #include "private/switch_core_pvt.h"
 #include "switch_telnyx.h"
 
+static void update_bug_replace(switch_core_session_t *session);
+
 static void switch_core_media_bug_destroy(switch_media_bug_t **bug)
 {
 	switch_event_t *event = NULL;
@@ -1101,6 +1103,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_add_ex(switch_core_session
 	/* Written under bug_rwlock (unlike the SSF_ flag bit it replaces, which
 	 * was set after the unlock with a non-atomic RMW on session->flags). */
 	session->bug_tap_only = tap_only;
+	update_bug_replace(session);
 
 	switch_thread_rwlock_unlock(session->bug_rwlock);
 	*new_bug = bug;
@@ -1268,32 +1271,40 @@ SWITCH_DECLARE(uint32_t) switch_core_media_bug_count(switch_core_session_t *orig
 	return x;
 }
 
-SWITCH_DECLARE(switch_bool_t) switch_core_media_bug_tap_only(switch_core_session_t *orig_session)
-{
-	switch_bool_t tap_only;
-
-	switch_thread_rwlock_rdlock(orig_session->bug_rwlock);
-	tap_only = (!orig_session->bugs || orig_session->bug_tap_only) ? SWITCH_TRUE : SWITCH_FALSE;
-	switch_thread_rwlock_unlock(orig_session->bug_rwlock);
-
-	return tap_only;
-}
-
-SWITCH_DECLARE(switch_bool_t) switch_core_media_bug_replaces_audio(switch_core_session_t *orig_session)
+/* bug_rwlock held for writing */
+static void update_bug_replace(switch_core_session_t *session)
 {
 	switch_media_bug_t *bp;
-	switch_bool_t replaces = SWITCH_FALSE;
 
-	switch_thread_rwlock_rdlock(orig_session->bug_rwlock);
-	for (bp = orig_session->bugs; bp; bp = bp->next) {
-		if (!switch_test_flag(bp, SMBF_PRUNE) && (switch_test_flag(bp, SMBF_READ_REPLACE) || switch_test_flag(bp, SMBF_WRITE_REPLACE))) {
-			replaces = SWITCH_TRUE;
-			break;
+	session->bug_read_replace = session->bug_write_replace = 0;
+	for (bp = session->bugs; bp; bp = bp->next) {
+		if (switch_test_flag(bp, SMBF_READ_REPLACE)) {
+			session->bug_read_replace = 1;
+		}
+		if (switch_test_flag(bp, SMBF_WRITE_REPLACE)) {
+			session->bug_write_replace = 1;
 		}
 	}
-	switch_thread_rwlock_unlock(orig_session->bug_rwlock);
+}
 
-	return replaces;
+/* no generated fill this long after the last frame from the far end: 3 SID intervals */
+#define NATIVE_DTX_FILL_HOLDOFF_MS 480
+
+/* Compares copies of the implementations: the live codecs may be destroyed by a re-INVITE meanwhile. A bug replacing
+ * this direction's audio makes the core re-encode it, and the encoder sends no silence descriptors: fill is needed then.
+ * A bug that only reads the audio (a recording) leaves the frames forwarded unchanged. */
+SWITCH_DECLARE(switch_bool_t) switch_core_session_native_dtx_hold(switch_core_session_t *session_a, switch_core_session_t *session_b)
+{
+	switch_codec_t *read_codec = switch_core_session_get_read_codec(session_a);
+	switch_codec_implementation_t read_impl = { 0 }, write_impl = { 0 };
+	switch_time_t last = session_a->native_dtx_last_frame;
+
+	return (last && switch_micro_time_now() - last < NATIVE_DTX_FILL_HOLDOFF_MS * 1000 &&
+			read_codec && switch_test_flag(read_codec, SWITCH_CODEC_FLAG_NATIVE_DTX) &&
+			switch_core_session_get_real_read_impl(session_a, &read_impl) == SWITCH_STATUS_SUCCESS &&
+			switch_core_session_get_write_impl(session_b, &write_impl) == SWITCH_STATUS_SUCCESS &&
+			read_impl.codec_id == write_impl.codec_id &&
+			!session_a->bug_read_replace && !session_b->bug_write_replace) ? SWITCH_TRUE : SWITCH_FALSE;
 }
 
 SWITCH_DECLARE(uint32_t) switch_core_media_bug_patch_video(switch_core_session_t *orig_session, switch_frame_t *frame)
@@ -1521,6 +1532,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_remove(switch_core_session
 	}
 
 	session->bug_tap_only = tap_only;
+	update_bug_replace(session);
 
 	switch_thread_rwlock_unlock(session->bug_rwlock);
 
