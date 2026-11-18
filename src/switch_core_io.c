@@ -66,6 +66,29 @@ SWITCH_DECLARE(void) switch_core_gen_encoded_silence(unsigned char *data, const 
 
 }
 
+/* The partner only reads the audio (e.g. records it) and gets our frames unchanged in a codec with its own silence
+ * descriptors: an empty read stays CNG, as with no bugs, so no locally encoded frame lands between the forwarded ones.
+ * partner's bug_rwlock held */
+static switch_bool_t partner_bugs_keep_native_dtx(switch_core_session_t *session, switch_core_session_t *partner)
+{
+	switch_codec_implementation_t read_impl = { 0 }, write_impl = { 0 };
+	switch_media_bug_t *bp;
+
+	if (!session->read_codec || !switch_test_flag(session->read_codec, SWITCH_CODEC_FLAG_NATIVE_DTX) ||
+		switch_core_session_get_real_read_impl(session, &read_impl) != SWITCH_STATUS_SUCCESS ||
+		switch_core_session_get_write_impl(partner, &write_impl) != SWITCH_STATUS_SUCCESS || read_impl.codec_id != write_impl.codec_id) {
+		return SWITCH_FALSE;
+	}
+
+	for (bp = partner->bugs; bp; bp = bp->next) {
+		if (!switch_test_flag(bp, SMBF_PRUNE) && (switch_test_flag(bp, SMBF_READ_REPLACE) || switch_test_flag(bp, SMBF_WRITE_REPLACE))) {
+			return SWITCH_FALSE;
+		}
+	}
+
+	return SWITCH_TRUE;
+}
+
 SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_session_t *session, switch_frame_t **frame, switch_io_flag_t flags,
 															   int stream_id)
 {
@@ -470,7 +493,7 @@ cnt_with_cng:
 			if (switch_channel_test_flag(switch_core_session_get_channel(session), CF_BRIDGED) &&
 				switch_core_session_get_partner(session, &other_session) == SWITCH_STATUS_SUCCESS) {
 				switch_thread_rwlock_rdlock(other_session->bug_rwlock);
-				if (other_session->bugs && !other_session->bug_tap_only) {
+				if (other_session->bugs && !other_session->bug_tap_only && !partner_bugs_keep_native_dtx(session, other_session)) {
 					other_session_bugs = 1;
 				}
 				switch_thread_rwlock_unlock(other_session->bug_rwlock);

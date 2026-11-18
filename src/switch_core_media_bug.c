@@ -1279,6 +1279,23 @@ SWITCH_DECLARE(switch_bool_t) switch_core_media_bug_tap_only(switch_core_session
 	return tap_only;
 }
 
+SWITCH_DECLARE(switch_bool_t) switch_core_media_bug_replaces_audio(switch_core_session_t *orig_session)
+{
+	switch_media_bug_t *bp;
+	switch_bool_t replaces = SWITCH_FALSE;
+
+	switch_thread_rwlock_rdlock(orig_session->bug_rwlock);
+	for (bp = orig_session->bugs; bp; bp = bp->next) {
+		if (!switch_test_flag(bp, SMBF_PRUNE) && (switch_test_flag(bp, SMBF_READ_REPLACE) || switch_test_flag(bp, SMBF_WRITE_REPLACE))) {
+			replaces = SWITCH_TRUE;
+			break;
+		}
+	}
+	switch_thread_rwlock_unlock(orig_session->bug_rwlock);
+
+	return replaces;
+}
+
 SWITCH_DECLARE(uint32_t) switch_core_media_bug_patch_video(switch_core_session_t *orig_session, switch_frame_t *frame)
 {
 	switch_media_bug_t *bp;
