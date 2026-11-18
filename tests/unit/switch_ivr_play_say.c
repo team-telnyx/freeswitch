@@ -683,6 +683,188 @@ static switch_event_t *run_peer_gone_marker_case(switch_core_session_t *session,
 	return stopped;
 }
 
+struct bond_playback_watch {
+	switch_core_session_t *session;
+	switch_core_session_t *peer;
+	switch_queue_t *events;
+};
+
+struct bond_playback_result {
+	switch_event_t *stopped;
+	int started_unbridged;
+	int hangup_completed_first;
+};
+
+static void on_bond_playback_event(switch_event_t *event)
+{
+	struct bond_playback_watch *watch = event->bind_user_data;
+	const char *uuid = switch_event_get_header(event, "Unique-ID");
+	switch_event_t *copy = NULL;
+	int playing, hangup;
+
+	if (!uuid) return;
+	playing = !strcmp(uuid, switch_core_session_get_uuid(watch->session)) &&
+		(event->event_id == SWITCH_EVENT_PLAYBACK_START || event->event_id == SWITCH_EVENT_PLAYBACK_STOP);
+	hangup = watch->peer && event->event_id == SWITCH_EVENT_CHANNEL_HANGUP_COMPLETE &&
+		!strcmp(uuid, switch_core_session_get_uuid(watch->peer));
+	if ((!playing && !hangup) || switch_event_dup(&copy, event) != SWITCH_STATUS_SUCCESS) return;
+
+	if (playing && watch->peer && event->event_id == SWITCH_EVENT_PLAYBACK_START) {
+		switch_channel_t *channel = switch_core_session_get_channel(watch->session);
+		switch_channel_t *peer_channel = switch_core_session_get_channel(watch->peer);
+
+		switch_event_add_header_string(copy, SWITCH_STACK_BOTTOM, "Test-Unbridged-Broadcast",
+			switch_channel_test_flag(channel, CF_BROADCAST) && !switch_channel_test_flag(channel, CF_BRIDGED) &&
+			!switch_channel_test_flag(peer_channel, CF_BRIDGED) ? "true" : "false");
+		switch_channel_hangup(peer_channel, SWITCH_CAUSE_USER_BUSY);
+	}
+	if (switch_queue_trypush(watch->events, copy) != SWITCH_STATUS_SUCCESS) {
+		switch_event_destroy(&copy);
+	}
+}
+
+/* Both sessions stay read-locked until the callback is unbound. The optional
+ * peer hangs up only after real playback starts; no timer triggers the defect. */
+static int run_bond_playback(switch_core_session_t *session, switch_core_session_t *peer,
+							 const char *file, struct bond_playback_result *result)
+{
+	struct bond_playback_watch watch = { 0 };
+	switch_event_t *command = NULL, *event = NULL, *started = NULL, *complete = NULL;
+	unsigned long start_seq, complete_seq, stop_seq;
+	int i, ok;
+
+	memset(result, 0, sizeof(*result));
+	watch.session = session;
+	watch.peer = peer;
+	if (switch_queue_create(&watch.events, 8, switch_core_session_get_pool(session)) != SWITCH_STATUS_SUCCESS ||
+		switch_event_create(&command, SWITCH_EVENT_COMMAND) != SWITCH_STATUS_SUCCESS) return 0;
+	if (switch_event_bind("bond_playback", SWITCH_EVENT_ALL, SWITCH_EVENT_SUBCLASS_ANY,
+						  on_bond_playback_event, &watch) != SWITCH_STATUS_SUCCESS) {
+		switch_event_destroy(&command);
+		return 0;
+	}
+	switch_event_add_header_string(command, SWITCH_STACK_BOTTOM, "call-command", "execute");
+	switch_event_add_header_string(command, SWITCH_STACK_BOTTOM, "execute-app-name", "playback");
+	switch_event_add_header_string(command, SWITCH_STACK_BOTTOM, "execute-app-arg", file);
+	switch_ivr_parse_event(session, command);
+	for (i = 0; i < (peer ? 3 : 2); ++i) {
+		if (switch_queue_pop_timeout(watch.events, (void **) &event, 5000000) != SWITCH_STATUS_SUCCESS) break;
+		if (event->event_id == SWITCH_EVENT_PLAYBACK_START && !started) {
+			started = event;
+		} else if (event->event_id == SWITCH_EVENT_PLAYBACK_STOP && !result->stopped) {
+			result->stopped = event;
+		} else if (event->event_id == SWITCH_EVENT_CHANNEL_HANGUP_COMPLETE && !complete) {
+			complete = event;
+		} else {
+			switch_event_destroy(&event);
+		}
+	}
+	switch_event_unbind_callback(on_bond_playback_event);
+	while (switch_queue_trypop(watch.events, (void **) &event) == SWITCH_STATUS_SUCCESS) {
+		switch_event_destroy(&event);
+	}
+	ok = started && result->stopped && (!peer || complete);
+	if (ok && peer) {
+		start_seq = strtoul(switch_event_get_header_nil(started, "Event-Sequence"), NULL, 10);
+		complete_seq = strtoul(switch_event_get_header_nil(complete, "Event-Sequence"), NULL, 10);
+		stop_seq = strtoul(switch_event_get_header_nil(result->stopped, "Event-Sequence"), NULL, 10);
+		result->started_unbridged = switch_true(switch_event_get_header(started, "Test-Unbridged-Broadcast"));
+		result->hangup_completed_first = start_seq && complete_seq > start_seq && stop_seq > complete_seq;
+	}
+	switch_event_destroy(&started);
+	switch_event_destroy(&complete);
+	switch_event_destroy(&command);
+	return ok;
+}
+
+static switch_core_session_t *start_bond_peer(void)
+{
+	switch_core_session_t *peer = NULL;
+	switch_channel_t *channel;
+	switch_call_cause_t cause = SWITCH_CAUSE_NORMAL_CLEARING;
+
+	if (switch_ivr_originate(NULL, &peer, &cause, "null/+15553334444", 2,
+							 NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL, NULL) != SWITCH_STATUS_SUCCESS || !peer) return NULL;
+	channel = switch_core_session_get_channel(peer);
+	switch_channel_set_state(channel, CS_SOFT_EXECUTE);
+	if (!switch_channel_wait_for_state_timeout(channel, CS_SOFT_EXECUTE, 5000) || !switch_channel_up(channel)) {
+		switch_channel_hangup(channel, SWITCH_CAUSE_NORMAL_CLEARING);
+		switch_core_session_rwunlock(peer);
+		return NULL;
+	}
+	return peer;
+}
+
+/* Seed only the unbridged bond boundary. The null peer's own state thread runs
+ * the real hangup handler; CHANNEL_HANGUP_COMPLETE proves it finished. */
+static int run_unbridged_bond_case(switch_core_session_t *session, const char *bond,
+								   struct bond_playback_result *result)
+{
+	switch_core_session_t *peer = start_bond_peer();
+	switch_channel_t *channel = switch_core_session_get_channel(session);
+	int ok = 0;
+
+	memset(result, 0, sizeof(*result));
+	if (!peer) return 0;
+	switch_channel_set_variable(channel, bond, switch_core_session_get_uuid(peer));
+	switch_channel_set_variable(switch_core_session_get_channel(peer), SWITCH_SIGNAL_BOND_VARIABLE,
+								switch_core_session_get_uuid(session));
+	ok = run_bond_playback(session, peer, "silence_stream://2000", result);
+	switch_channel_set_variable(channel, bond, NULL);
+	switch_channel_hangup(switch_core_session_get_channel(peer), SWITCH_CAUSE_NORMAL_CLEARING);
+	switch_core_session_rwunlock(peer);
+	return ok;
+}
+
+/* Reproduce the transfer boundary without racing a transfer thread: the bridge
+ * flag still exists after the current signal bond was removed. */
+static int run_current_bond_case(switch_core_session_t *session, const char *kind,
+								 struct bond_playback_result *result)
+{
+	switch_channel_t *channel = switch_core_session_get_channel(session);
+	switch_core_session_t *peer = NULL;
+	const char *missing_uuid = "00000000-0000-0000-0000-000000000000";
+	int ok;
+
+	memset(result, 0, sizeof(*result));
+	if (!strcmp(kind, "live") && !(peer = start_bond_peer())) return 0;
+	switch_channel_set_variable(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, NULL);
+	switch_channel_set_variable(channel, SWITCH_ORIGINATE_SIGNAL_BOND_VARIABLE, strcmp(kind, "absent") ? missing_uuid : NULL);
+	switch_channel_set_variable(channel, SWITCH_SIGNAL_BOND_VARIABLE,
+		peer ? switch_core_session_get_uuid(peer) : (!strcmp(kind, "missing") ? missing_uuid : NULL));
+	switch_channel_set_flag(channel, CF_BRIDGED);
+	ok = run_bond_playback(session, NULL, "silence_stream://200", result);
+	switch_channel_clear_flag(channel, CF_BRIDGED);
+	switch_channel_set_variable(channel, SWITCH_SIGNAL_BOND_VARIABLE, NULL);
+	switch_channel_set_variable(channel, SWITCH_ORIGINATE_SIGNAL_BOND_VARIABLE, NULL);
+	if (peer) {
+		switch_channel_hangup(switch_core_session_get_channel(peer), SWITCH_CAUSE_NORMAL_CLEARING);
+		switch_core_session_rwunlock(peer);
+	}
+	return ok;
+}
+
+/* A case name alone does not prove that its session and playback ran. Keep the
+ * observed result with the test output, including setup failure and late peers. */
+static void report_bond_playback(const char *name, const char *kind, switch_core_session_t *session,
+								 int setup, const struct bond_playback_result *result)
+{
+	switch_event_t *stopped = result->stopped;
+	switch_channel_t *channel = switch_core_session_get_channel(session);
+	const char *marker = switch_channel_get_variable(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE);
+
+	printf("\nBOND_PLAYBACK case=%s kind=%s uuid=%s setup=%d unbridged=%d ordered=%d "
+		   "status=%s code=%s samples=%s cause=%s stop_marker=%s marker=%s live=%d\n",
+		   name, kind, switch_core_session_get_uuid(session), setup, result->started_unbridged,
+		   result->hangup_completed_first,
+		   stopped ? switch_event_get_header_nil(stopped, "Playback-Status") : "",
+		   stopped ? switch_event_get_header_nil(stopped, "Playback-Status-Code") : "",
+		   stopped ? switch_event_get_header_nil(stopped, "variable_playback_samples") : "",
+		   stopped ? switch_event_get_header_nil(stopped, "Hangup-Cause") : "",
+		   stopped ? switch_event_get_header_nil(stopped, "variable_playback_peer_hangup") : "",
+		   switch_str_nil(marker), switch_channel_ready(channel) ? 1 : 0);
+}
+
 FST_CORE_BEGIN("./conf_playsay")
 {
 	FST_SUITE_BEGIN(switch_ivr_play_say)
@@ -700,6 +882,110 @@ FST_CORE_BEGIN("./conf_playsay")
 		{
 		}
 		FST_TEARDOWN_END()
+
+		FST_TEST_BEGIN(unbridged_originate_peer_hangup_keeps_playback)
+		{
+			switch_core_session_t *session;
+			struct bond_playback_result result;
+			int setup;
+
+			fst_requires_module("mod_loopback");
+			session = start_bond_peer();
+			fst_check(session != NULL);
+			if (session) {
+				switch_channel_t *channel = switch_core_session_get_channel(session);
+
+				setup = run_unbridged_bond_case(session, SWITCH_ORIGINATE_SIGNAL_BOND_VARIABLE, &result);
+				report_bond_playback("unbridged_originate_peer_hangup_keeps_playback", "originate", session, setup, &result);
+				fst_check(setup);
+				fst_check(result.started_unbridged);
+				fst_check(result.hangup_completed_first);
+				fst_check(result.stopped != NULL);
+				if (result.stopped) {
+					fst_check_string_equals(switch_event_get_header(result.stopped, "Playback-Status"), "done");
+					fst_check_string_equals(switch_event_get_header(result.stopped, "Playback-Status-Code"), "0");
+					fst_check_string_equals(switch_event_get_header(result.stopped, "variable_playback_samples"), "16000");
+					fst_check_string_equals(switch_event_get_header(result.stopped, "Hangup-Cause"), NULL);
+					switch_event_destroy(&result.stopped);
+				}
+				fst_check(!switch_channel_get_variable(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE));
+				fst_check(!switch_channel_test_flag(channel, CF_STOP_BROADCAST));
+				fst_check(switch_channel_ready(channel));
+				switch_channel_hangup(channel, SWITCH_CAUSE_NORMAL_CLEARING);
+				switch_core_session_rwunlock(session);
+			}
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(unbridged_signal_peer_hangup_keeps_playback)
+		{
+			switch_core_session_t *session;
+			struct bond_playback_result result;
+			int setup;
+
+			fst_requires_module("mod_loopback");
+			session = start_bond_peer();
+			fst_check(session != NULL);
+			if (session) {
+				switch_channel_t *channel = switch_core_session_get_channel(session);
+
+				setup = run_unbridged_bond_case(session, SWITCH_SIGNAL_BOND_VARIABLE, &result);
+				report_bond_playback("unbridged_signal_peer_hangup_keeps_playback", "signal", session, setup, &result);
+				fst_check(setup);
+				fst_check(result.started_unbridged);
+				fst_check(result.hangup_completed_first);
+				fst_check(result.stopped != NULL);
+				if (result.stopped) {
+					fst_check_string_equals(switch_event_get_header(result.stopped, "Playback-Status"), "done");
+					fst_check_string_equals(switch_event_get_header(result.stopped, "Playback-Status-Code"), "0");
+					fst_check_string_equals(switch_event_get_header(result.stopped, "variable_playback_samples"), "16000");
+					fst_check_string_equals(switch_event_get_header(result.stopped, "Hangup-Cause"), NULL);
+					switch_event_destroy(&result.stopped);
+				}
+				fst_check(!switch_channel_get_variable(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE));
+				fst_check(!switch_channel_test_flag(channel, CF_STOP_BROADCAST));
+				fst_check(switch_channel_ready(channel));
+				switch_channel_hangup(channel, SWITCH_CAUSE_NORMAL_CLEARING);
+				switch_core_session_rwunlock(session);
+			}
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(broadcast_peer_check_ignores_originate_bond)
+		{
+			const char *kinds[] = { "absent", "stale", "live", "missing" };
+			switch_core_session_t *session;
+			struct bond_playback_result result;
+			int i, setup;
+
+			fst_requires_module("mod_loopback");
+			session = start_bond_peer();
+			fst_check(session != NULL);
+			if (session) {
+				switch_channel_t *channel = switch_core_session_get_channel(session);
+
+				for (i = 0; i < 4; ++i) {
+					setup = run_current_bond_case(session, kinds[i], &result);
+					report_bond_playback("broadcast_peer_check_ignores_originate_bond", kinds[i], session, setup, &result);
+					fst_xcheck(setup, kinds[i]);
+					fst_check(result.stopped != NULL);
+					if (result.stopped) {
+						fst_check_string_equals(switch_event_get_header(result.stopped, "Playback-Status"), i == 3 ? "break" : "done");
+						fst_check_string_equals(switch_event_get_header(result.stopped, "Hangup-Cause"), i == 3 ? "NORMAL_CLEARING" : NULL);
+						if (i != 3) {
+							fst_check_string_equals(switch_event_get_header(result.stopped, "Playback-Status-Code"), "0");
+							fst_check_string_equals(switch_event_get_header(result.stopped, "variable_playback_samples"), "1600");
+							fst_check(!switch_channel_get_variable(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE));
+						}
+						switch_event_destroy(&result.stopped);
+					}
+					fst_check(switch_channel_ready(channel));
+				}
+				switch_channel_hangup(channel, SWITCH_CAUSE_NORMAL_CLEARING);
+				switch_core_session_rwunlock(session);
+			}
+		}
+		FST_TEST_END()
 
 		FST_SESSION_BEGIN(peer_gone_preserves_current_answered_marker)
 		{

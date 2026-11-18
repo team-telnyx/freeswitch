@@ -982,6 +982,7 @@ SWITCH_DECLARE(void) switch_core_session_hangup_state(switch_core_session_t *ses
 			 * partner's own bond, so a one-way bond names a partner that is now
 			 * in another call, and its playback belongs to that call. */
 			if (bond_back && !strcmp(bond_back, switch_core_session_get_uuid(session)) &&
+				switch_channel_test_flag(partner_channel, CF_BRIDGED) &&
 				switch_channel_test_flag(partner_channel, CF_BROADCAST)) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 								  "%s Stopping broadcast on bridge partner %s due to hangup, broadcast generation %u, answered %d\n",

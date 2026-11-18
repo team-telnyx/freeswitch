@@ -667,7 +667,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 				if (switch_channel_test_flag(channel, CF_BRIDGED)) {
 					char peer_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1] = "";
 
-					if (switch_channel_get_partner_uuid_copy(channel, peer_uuid, sizeof(peer_uuid))) {
+					if (switch_channel_get_variable_buf(channel, SWITCH_SIGNAL_BOND_VARIABLE, peer_uuid, sizeof(peer_uuid)) == SWITCH_STATUS_SUCCESS) {
 						switch_core_session_t *peer_session = switch_core_session_locate(peer_uuid);
 
 						if (peer_session) {
