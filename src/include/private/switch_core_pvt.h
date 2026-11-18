@@ -144,9 +144,6 @@ struct switch_core_session {
 	 * bit under bug_rwlock could concurrently clobber flags written under the
 	 * session rwlock (e.g. SSF_DESTROYED). */
 	int bug_tap_only;
-	/* a media bug replaces the read / written audio; maintained with bug_tap_only */
-	int bug_read_replace;
-	int bug_write_replace;
 	/* last audio frame read that was not CNG, for the native DTX hold-off */
 	switch_time_t native_dtx_last_frame;
 	switch_app_log_t *app_log;

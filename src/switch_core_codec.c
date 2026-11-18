@@ -378,6 +378,21 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_get_real_read_impl(switch_co
 	return switch_core_session_get_read_impl(session, impp);
 }
 
+/* a linked bug on session has the replace flag; the list is short and read under bug_rwlock */
+static switch_bool_t bugs_replace(switch_core_session_t *session, uint32_t flag)
+{
+	switch_media_bug_t *bp;
+	switch_bool_t r = SWITCH_FALSE;
+
+	switch_thread_rwlock_rdlock(session->bug_rwlock);
+	for (bp = session->bugs; bp && !r; bp = bp->next) {
+		r = switch_test_flag(bp, flag) ? SWITCH_TRUE : SWITCH_FALSE;
+	}
+	switch_thread_rwlock_unlock(session->bug_rwlock);
+
+	return r;
+}
+
 /* Compares copies of the implementations: the live codecs may be destroyed by a re-INVITE meanwhile. A bug replacing
  * this direction's audio makes the core re-encode it, and the encoder sends no silence descriptors: fill is needed then.
  * A bug that only reads the audio (a recording) leaves the frames forwarded unchanged.
@@ -387,7 +402,6 @@ SWITCH_DECLARE(switch_bool_t) switch_core_session_native_dtx_hold(switch_core_se
 	switch_codec_t *read_codec = switch_core_session_get_read_codec(session_a);
 	switch_codec_implementation_t read_impl = { 0 }, write_impl = { 0 };
 	switch_time_t last = session_a->native_dtx_last_frame;
-	int replaced;
 
 	if (!last || switch_mono_micro_time_now() - last >= SWITCH_NATIVE_DTX_HOLDOFF_MS * 1000 ||
 		!read_codec || !switch_test_flag(read_codec, SWITCH_CODEC_FLAG_NATIVE_DTX) ||
@@ -397,17 +411,7 @@ SWITCH_DECLARE(switch_bool_t) switch_core_session_native_dtx_hold(switch_core_se
 		return SWITCH_FALSE;
 	}
 
-	switch_thread_rwlock_rdlock(session_a->bug_rwlock);
-	replaced = session_a->bug_read_replace;
-	switch_thread_rwlock_unlock(session_a->bug_rwlock);
-
-	if (!replaced) {
-		switch_thread_rwlock_rdlock(session_b->bug_rwlock);
-		replaced = session_b->bug_write_replace;
-		switch_thread_rwlock_unlock(session_b->bug_rwlock);
-	}
-
-	return replaced ? SWITCH_FALSE : SWITCH_TRUE;
+	return (bugs_replace(session_a, SMBF_READ_REPLACE) || bugs_replace(session_b, SMBF_WRITE_REPLACE)) ? SWITCH_FALSE : SWITCH_TRUE;
 }
 
 SWITCH_DECLARE(switch_status_t) switch_core_session_get_write_impl(switch_core_session_t *session, switch_codec_implementation_t *impp)

@@ -36,8 +36,6 @@
 #include "private/switch_core_pvt.h"
 #include "switch_telnyx.h"
 
-static void update_bug_replace(switch_core_session_t *session);
-
 static void switch_core_media_bug_destroy(switch_media_bug_t **bug)
 {
 	switch_event_t *event = NULL;
@@ -114,33 +112,15 @@ SWITCH_DECLARE(uint32_t) switch_core_media_bug_test_flag(switch_media_bug_t *bug
 
 SWITCH_DECLARE(uint32_t) switch_core_media_bug_set_flag(switch_media_bug_t *bug, uint32_t flag)
 {
-	uint32_t r;
-
 	if ((flag & SMBF_PRUNE)) {
 		switch_clear_flag(bug, SMBF_LOCK);
 	}
-	r = switch_set_flag(bug, flag);
-	/* no lock: callers may hold bug_rwlock; the cached flags only go up here */
-	if (bug->session && (flag & SMBF_READ_REPLACE)) {
-		bug->session->bug_read_replace = 1;
-	}
-	if (bug->session && (flag & SMBF_WRITE_REPLACE)) {
-		bug->session->bug_write_replace = 1;
-	}
-	return r;
+	return switch_set_flag(bug, flag);
 }
 
 SWITCH_DECLARE(uint32_t) switch_core_media_bug_clear_flag(switch_media_bug_t *bug, uint32_t flag)
 {
-	uint32_t r = switch_clear_flag(bug, flag);
-
-	/* if bug_rwlock is busy the cached flags stay set until the next unlink */
-	if (bug->session && (flag & (SMBF_READ_REPLACE | SMBF_WRITE_REPLACE)) &&
-		switch_thread_rwlock_trywrlock(bug->session->bug_rwlock) == SWITCH_STATUS_SUCCESS) {
-		update_bug_replace(bug->session);
-		switch_thread_rwlock_unlock(bug->session->bug_rwlock);
-	}
-	return r;
+	return switch_clear_flag(bug, flag);
 }
 
 SWITCH_DECLARE(void) switch_core_media_bug_set_media_params(switch_media_bug_t *bug, switch_mm_t *mm)
@@ -1121,7 +1101,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_add_ex(switch_core_session
 	/* Written under bug_rwlock (unlike the SSF_ flag bit it replaces, which
 	 * was set after the unlock with a non-atomic RMW on session->flags). */
 	session->bug_tap_only = tap_only;
-	update_bug_replace(session);
 
 	switch_thread_rwlock_unlock(session->bug_rwlock);
 	*new_bug = bug;
@@ -1238,7 +1217,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_transfer_callback(switch_c
 		switch_core_codec_destroy(&orig_session->bug_codec);
 	}
 
-	update_bug_replace(orig_session);
 	switch_thread_rwlock_unlock(orig_session->bug_rwlock);
 
 
@@ -1288,22 +1266,6 @@ SWITCH_DECLARE(uint32_t) switch_core_media_bug_count(switch_core_session_t *orig
 	}
 
 	return x;
-}
-
-/* bug_rwlock held for writing */
-static void update_bug_replace(switch_core_session_t *session)
-{
-	switch_media_bug_t *bp;
-
-	session->bug_read_replace = session->bug_write_replace = 0;
-	for (bp = session->bugs; bp; bp = bp->next) {
-		if (switch_test_flag(bp, SMBF_READ_REPLACE)) {
-			session->bug_read_replace = 1;
-		}
-		if (switch_test_flag(bp, SMBF_WRITE_REPLACE)) {
-			session->bug_write_replace = 1;
-		}
-	}
 }
 
 SWITCH_DECLARE(switch_bool_t) switch_core_media_bug_tap_only(switch_core_session_t *orig_session)
@@ -1437,7 +1399,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_remove_all_function(switch
 		}
 		status = SWITCH_STATUS_SUCCESS;
 	}
-	update_bug_replace(session);
 	switch_thread_rwlock_unlock(session->bug_rwlock);
 
 		
@@ -1543,7 +1504,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_remove(switch_core_session
 	}
 
 	session->bug_tap_only = tap_only;
-	update_bug_replace(session);
 
 	switch_thread_rwlock_unlock(session->bug_rwlock);
 
@@ -1583,7 +1543,6 @@ SWITCH_DECLARE(uint32_t) switch_core_media_bug_prune(switch_core_session_t *sess
 		switch_core_codec_destroy(&session->bug_codec);
 	}
 
-	update_bug_replace(session);
 	switch_thread_rwlock_unlock(session->bug_rwlock);
 
 	if (bp) {
@@ -1632,7 +1591,6 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_bug_remove_callback(switch_cor
 	/* Note whether the list drained while still under the lock - the head is
 	 * only read under bug_rwlock (TELCORE-339). */
 	no_bugs_left = (session->bugs == NULL);
-	update_bug_replace(session);
 	switch_thread_rwlock_unlock(session->bug_rwlock);
 
 	if (closed) {
