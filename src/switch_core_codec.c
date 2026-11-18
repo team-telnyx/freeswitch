@@ -389,7 +389,7 @@ SWITCH_DECLARE(switch_bool_t) switch_core_session_native_dtx_hold(switch_core_se
 	switch_time_t last = session_a->native_dtx_last_frame;
 	int replaced;
 
-	if (!last || switch_micro_time_now() - last >= SWITCH_NATIVE_DTX_HOLDOFF_MS * 1000 ||
+	if (!last || switch_mono_micro_time_now() - last >= SWITCH_NATIVE_DTX_HOLDOFF_MS * 1000 ||
 		!read_codec || !switch_test_flag(read_codec, SWITCH_CODEC_FLAG_NATIVE_DTX) ||
 		switch_core_session_get_real_read_impl(session_a, &read_impl) != SWITCH_STATUS_SUCCESS ||
 		switch_core_session_get_write_impl(session_b, &write_impl) != SWITCH_STATUS_SUCCESS ||

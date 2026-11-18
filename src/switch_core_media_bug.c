@@ -114,15 +114,33 @@ SWITCH_DECLARE(uint32_t) switch_core_media_bug_test_flag(switch_media_bug_t *bug
 
 SWITCH_DECLARE(uint32_t) switch_core_media_bug_set_flag(switch_media_bug_t *bug, uint32_t flag)
 {
+	uint32_t r;
+
 	if ((flag & SMBF_PRUNE)) {
 		switch_clear_flag(bug, SMBF_LOCK);
 	}
-	return switch_set_flag(bug, flag);
+	r = switch_set_flag(bug, flag);
+	/* no lock: callers may hold bug_rwlock; the cached flags only go up here */
+	if (bug->session && (flag & SMBF_READ_REPLACE)) {
+		bug->session->bug_read_replace = 1;
+	}
+	if (bug->session && (flag & SMBF_WRITE_REPLACE)) {
+		bug->session->bug_write_replace = 1;
+	}
+	return r;
 }
 
 SWITCH_DECLARE(uint32_t) switch_core_media_bug_clear_flag(switch_media_bug_t *bug, uint32_t flag)
 {
-	return switch_clear_flag(bug, flag);
+	uint32_t r = switch_clear_flag(bug, flag);
+
+	/* if bug_rwlock is busy the cached flags stay set until the next unlink */
+	if (bug->session && (flag & (SMBF_READ_REPLACE | SMBF_WRITE_REPLACE)) &&
+		switch_thread_rwlock_trywrlock(bug->session->bug_rwlock) == SWITCH_STATUS_SUCCESS) {
+		update_bug_replace(bug->session);
+		switch_thread_rwlock_unlock(bug->session->bug_rwlock);
+	}
+	return r;
 }
 
 SWITCH_DECLARE(void) switch_core_media_bug_set_media_params(switch_media_bug_t *bug, switch_mm_t *mm)

@@ -291,7 +291,7 @@ cnt_with_cng:
 	/* audio the far end sent, for the native DTX hold-off: not CNG, PLC or other generated frames */
 	if ((*frame)->datalen && !((*frame)->flags & (SFF_CNG | SFF_PLC | SFF_NOT_AUDIO | SFF_RTCP)) && session->read_codec &&
 		switch_test_flag(switch_core_session_get_read_codec(session), SWITCH_CODEC_FLAG_NATIVE_DTX)) {
-		session->native_dtx_last_frame = switch_micro_time_now();
+		session->native_dtx_last_frame = switch_mono_micro_time_now();
 	}
 
 	if (switch_test_flag(*frame, SFF_FORK_RTP)) {

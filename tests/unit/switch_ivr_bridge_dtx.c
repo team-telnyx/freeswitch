@@ -88,6 +88,9 @@ static switch_bool_t ended_replace_bug(switch_media_bug_t *bug, void *user_data,
 /* set by a test to use another callback for its bugs */
 static switch_media_bug_callback_t bug_callback_override;
 
+/* set by a test: flags added to leg B's bug after it is linked */
+static uint32_t bug_b_set_flags;
+
 static switch_media_bug_callback_t bug_callback(uint32_t flags)
 {
 	if (bug_callback_override) {
@@ -135,6 +138,9 @@ static switch_bool_t measure_bridge_cng(const char *codec_vars_a, const char *co
 		if (bug_flags_b) {
 			switch_media_bug_t *bug = NULL;
 			switch_core_media_bug_add(b, "bridge_dtx_test", NULL, bug_callback(bug_flags_b), NULL, 0, bug_flags_b, &bug);
+			if (bug && bug_b_set_flags) {
+				switch_core_media_bug_set_flag(bug, bug_b_set_flags);
+			}
 		}
 		switch_atomic_set(&tap_native_read_calls, 0);
 		switch_atomic_set(&write_replace_calls, 0);
@@ -245,6 +251,23 @@ FST_SUITE_BEGIN(switch_ivr_bridge_dtx)
 		fst_requires(measure_bridge_bugs("null_codec=AMR-WB,rate=16000", "null_codec=AMR-WB,rate=16000", DTX_PERIOD, 0, SMBF_WRITE_REPLACE,
 										 &read_from_a, &written_to_b));
 		fst_requires(read_from_a >= DTX_PERIOD * 2);
+		fst_xcheck(written_to_b * 4 >= read_from_a * 3, "generated fill keeps leg B continuous");
+	}
+	FST_TEST_END()
+
+	/* write-replace added to leg B's linked bug, as a second direction of uuid_audio does: fill is kept */
+	FST_TEST_BEGIN(test_native_dtx_with_write_replace_flag_set_on_linked_bug_keeps_generated_fill)
+	{
+		uint32_t read_from_a, written_to_b;
+		switch_bool_t ok;
+
+		bug_b_set_flags = SMBF_WRITE_REPLACE;
+		ok = measure_bridge_bugs("null_codec=AMR-WB,rate=16000", "null_codec=AMR-WB,rate=16000", DTX_PERIOD, 0, SMBF_READ_REPLACE,
+								 &read_from_a, &written_to_b);
+		bug_b_set_flags = 0;
+		fst_requires(ok);
+		fst_requires(read_from_a >= DTX_PERIOD * 2);
+		fst_xcheck(switch_atomic_read(&write_replace_calls) > 0, "the write-replace bug on leg B runs");
 		fst_xcheck(written_to_b * 4 >= read_from_a * 3, "generated fill keeps leg B continuous");
 	}
 	FST_TEST_END()
