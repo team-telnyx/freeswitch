@@ -1935,6 +1935,17 @@ SWITCH_DECLARE(void) switch_core_session_unlock_codec_read(_In_ switch_core_sess
 SWITCH_DECLARE(switch_status_t) switch_core_session_get_read_impl(switch_core_session_t *session, switch_codec_implementation_t *impp);
 SWITCH_DECLARE(switch_status_t) switch_core_session_get_real_read_impl(switch_core_session_t *session, switch_codec_implementation_t *impp);
 SWITCH_DECLARE(switch_status_t) switch_core_session_get_write_impl(switch_core_session_t *session, switch_codec_implementation_t *impp);
+
+/*! no locally generated fill this long after the last audio frame from the far end: 3 SID intervals */
+#define SWITCH_NATIVE_DTX_HOLDOFF_MS 480
+
+/*!
+  \brief Whether audio read from session_a goes to session_b unchanged in a codec with its own silence descriptors
+         (SWITCH_CODEC_FLAG_NATIVE_DTX), so an empty read is left empty instead of filled locally
+  \return SWITCH_TRUE for the same codec on both, no bug replacing session_a's read or session_b's written audio,
+          and session_a's last audio frame less than SWITCH_NATIVE_DTX_HOLDOFF_MS ago
+*/
+SWITCH_DECLARE(switch_bool_t) switch_core_session_native_dtx_hold(switch_core_session_t *session_a, switch_core_session_t *session_b);
 SWITCH_DECLARE(switch_status_t) switch_core_session_get_video_read_impl(switch_core_session_t *session, switch_codec_implementation_t *impp);
 SWITCH_DECLARE(switch_status_t) switch_core_session_get_video_write_impl(switch_core_session_t *session, switch_codec_implementation_t *impp);
 

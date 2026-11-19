@@ -288,6 +288,12 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_read_frame(switch_core_sessi
 	}
 
 cnt_with_cng:
+	/* audio the far end sent, for the native DTX hold-off: not CNG, PLC or other generated frames */
+	if ((*frame)->datalen && !((*frame)->flags & (SFF_CNG | SFF_PLC | SFF_NOT_AUDIO | SFF_RTCP)) && session->read_codec &&
+		switch_test_flag(switch_core_session_get_read_codec(session), SWITCH_CODEC_FLAG_NATIVE_DTX)) {
+		session->native_dtx_last_frame = switch_mono_micro_time_now();
+	}
+
 	if (switch_test_flag(*frame, SFF_FORK_RTP)) {
 		flag |= SFF_FORK_RTP;
 		fork_frame = *frame;
@@ -474,6 +480,11 @@ cnt_with_cng:
 					other_session_bugs = 1;
 				}
 				switch_thread_rwlock_unlock(other_session->bug_rwlock);
+				/* bugs that only read the audio on a native DTX pair: the CNG stays, no locally encoded frame between
+				 * the forwarded ones */
+				if (other_session_bugs && switch_core_session_native_dtx_hold(session, other_session)) {
+					other_session_bugs = 0;
+				}
 				switch_core_session_rwunlock(other_session);
 			}
 
