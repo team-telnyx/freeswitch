@@ -241,7 +241,13 @@ SWITCH_DECLARE(switch_stun_packet_t *) switch_stun_packet_parse(uint8_t *buf, ui
 		case SWITCH_STUN_ATTR_DESTINATION_ADDRESS:
 		case SWITCH_STUN_ATTR_PRIORITY:
 			{
-				switch_stun_ip_t *ip = (switch_stun_ip_t *) attr->value;
+				switch_stun_ip_t *ip;
+
+				if (bytes_left < sizeof(switch_stun_ip_t)) {
+					return NULL;
+				}
+
+				ip = (switch_stun_ip_t *) attr->value;
 				ip->port = ntohs(ip->port);
 			}
 			break;
@@ -249,6 +255,11 @@ SWITCH_DECLARE(switch_stun_packet_t *) switch_stun_packet_parse(uint8_t *buf, ui
 			{
 				switch_stun_ip_t *ip;
 				uint32_t addr_length = 0;
+
+				if (bytes_left < sizeof(switch_stun_ip_t)) {
+					return NULL;
+				}
+
 				ip = (switch_stun_ip_t *) attr->value;
 
 				switch (ip->family) {
@@ -279,7 +290,13 @@ SWITCH_DECLARE(switch_stun_packet_t *) switch_stun_packet_parse(uint8_t *buf, ui
 		case SWITCH_STUN_ATTR_BANDWIDTH:
 		case SWITCH_STUN_ATTR_OPTIONS:
 			{
-				uint32_t *val = (uint32_t *) attr->value;
+				uint32_t *val;
+
+				if (bytes_left < sizeof(uint32_t)) {
+					return NULL;
+				}
+
+				val = (uint32_t *)attr->value;
 
 				if (attr->length != sizeof(uint32_t)) {
 					/* Invalid */
@@ -291,7 +308,13 @@ SWITCH_DECLARE(switch_stun_packet_t *) switch_stun_packet_parse(uint8_t *buf, ui
 			break;
 		case SWITCH_STUN_ATTR_ERROR_CODE:	/* ErrorCode */
 			{
-				uint32_t *u = (uint32_t *) attr->value;
+				uint32_t *u;
+
+				if (bytes_left < sizeof(uint32_t)) {
+					return NULL;
+				}
+
+				u = (uint32_t *)attr->value;
 				*u = htonl(*u);
 			}
 			break;
@@ -411,6 +434,14 @@ SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_get_xor_mapped_address(swit
 
 	if (ip->family == 2) {
 		uint8_t *v6addr;
+
+		if (attribute->length < sizeof(switch_stun_ipv6_t)) {
+			/* attribute value too short to hold an IPv6 address; leave outputs defined */
+			*ipstr = 0;
+			*port = 0;
+
+			return 0;
+		}
 
 		ipv6 = (switch_stun_ipv6_t *)attribute->value;
 		v6addr = (uint8_t *) &ipv6->address;
