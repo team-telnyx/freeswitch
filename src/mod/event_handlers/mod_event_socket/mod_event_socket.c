@@ -116,6 +116,9 @@ static struct {
 	switch_mutex_t *listener_mutex;
 	switch_event_node_t *node;
 	int debug;
+	int reload_pending;
+	int reload_running;
+	uint32_t password_generation;
 } globals;
 
 static struct {
@@ -128,11 +131,12 @@ static struct {
 
 #define MAX_ACL 100
 
-static struct {
+static struct event_socket_prefs {
 	switch_mutex_t *mutex;
 	char *ip;
 	uint16_t port;
 	char *password;
+	char *secondary_password;	/* optional secondary password for rotation */
 	int done;
 	int threads;
 	char *acl[MAX_ACL];
@@ -172,6 +176,155 @@ static uint32_t next_id(void)
 
 SWITCH_DECLARE_GLOBAL_STRING_FUNC(set_pref_ip, prefs.ip);
 SWITCH_DECLARE_GLOBAL_STRING_FUNC(set_pref_pass, prefs.password);
+SWITCH_DECLARE_GLOBAL_STRING_FUNC(set_pref_secondary_pass, prefs.secondary_password);
+
+/* Accept the primary or optional secondary password; locked against reloadxml swaps */
+static switch_bool_t auth_check_password(const char *pass)
+{
+	switch_bool_t ok = SWITCH_FALSE;
+
+	if (zstr(pass)) return SWITCH_FALSE;
+
+	switch_mutex_lock(globals.listener_mutex);
+	if (prefs.password && !strcmp(prefs.password, pass)) {
+		ok = SWITCH_TRUE;
+	} else if (!zstr(prefs.secondary_password) && !strcmp(prefs.secondary_password, pass)) {
+		ok = SWITCH_TRUE;
+	}
+	switch_mutex_unlock(globals.listener_mutex);
+
+	return ok;
+}
+
+/* Re-read password params on reloadxml so rotation needs no module reload */
+static void reload_passwords(void)
+{
+	char *cf = "event_socket.conf";
+	switch_xml_t cfg, xml, settings, param;
+	const char *new_primary = NULL, *new_secondary = NULL;
+	int primary_retained = 0;
+
+	if (!(xml = switch_xml_open_cfg(cf, &cfg, NULL))) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Open of %s failed, passwords unchanged\n", cf);
+		return;
+	}
+
+	if ((settings = switch_xml_child(cfg, "settings"))) {
+		for (param = switch_xml_child(settings, "param"); param; param = param->next) {
+			const char *var = switch_xml_attr_soft(param, "name");
+			const char *val = switch_xml_attr_soft(param, "value");
+
+			if (!strcmp(var, "password")) {
+				new_primary = val;
+			} else if (!strcmp(var, "secondary-password")) {
+				new_secondary = val;
+			}
+		}
+	}
+
+	switch_mutex_lock(globals.listener_mutex);
+	if (prefs.done) {
+		switch_mutex_unlock(globals.listener_mutex);
+		switch_xml_free(xml);
+		return;
+	}
+	if (!zstr(new_primary)) {
+		set_pref_pass(new_primary);
+	} else {
+		primary_retained = 1;
+	}
+	/* removing secondary-password from config disables it */
+	if (!zstr(new_secondary)) {
+		set_pref_secondary_pass(new_secondary);
+	} else {
+		switch_safe_free(prefs.secondary_password);
+	}
+	globals.password_generation++;
+	switch_mutex_unlock(globals.listener_mutex);
+
+	if (primary_retained) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+			"event_socket reload omitted password; previous primary password retained\n");
+	}
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+		"event_socket passwords re-read from config (secondary %s)\n",
+		zstr(new_secondary) ? "disabled" : "enabled");
+
+	switch_xml_free(xml);
+}
+
+static void *SWITCH_THREAD_FUNC reload_passwords_thread(switch_thread_t *thread, void *obj)
+{
+	switch_memory_pool_t *pool = obj;
+
+	for (;;) {
+		switch_mutex_lock(globals.listener_mutex);
+		if (prefs.done) {
+			goto done;
+		}
+		globals.reload_pending = 0;
+		switch_mutex_unlock(globals.listener_mutex);
+
+		reload_passwords();
+
+		switch_mutex_lock(globals.listener_mutex);
+		if (prefs.done || !globals.reload_pending) {
+			goto done;
+		}
+		switch_mutex_unlock(globals.listener_mutex);
+	}
+
+	done:
+	globals.reload_pending = 0;
+	switch_core_destroy_memory_pool(&pool);
+	globals.reload_running = 0;
+	prefs.threads--;
+	switch_mutex_unlock(globals.listener_mutex);
+	return NULL;
+}
+
+static void request_password_reload(void)
+{
+	switch_memory_pool_t *pool = NULL;
+	switch_thread_t *thread;
+	switch_threadattr_t *thd_attr = NULL;
+	switch_status_t status;
+
+	if (switch_core_new_memory_pool(&pool) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to allocate event_socket password reload pool\n");
+		return;
+	}
+
+	switch_mutex_lock(globals.listener_mutex);
+	if (prefs.done) {
+		switch_mutex_unlock(globals.listener_mutex);
+		switch_core_destroy_memory_pool(&pool);
+		return;
+	}
+	globals.reload_pending = 1;
+	if (globals.reload_running) {
+		switch_mutex_unlock(globals.listener_mutex);
+		switch_core_destroy_memory_pool(&pool);
+		return;
+	}
+	globals.reload_running = 1;
+	prefs.threads++;
+	switch_mutex_unlock(globals.listener_mutex);
+
+	switch_threadattr_create(&thd_attr, pool);
+	switch_threadattr_detach_set(thd_attr, 1);
+	switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
+	status = switch_thread_create(&thread, thd_attr, reload_passwords_thread, pool, pool);
+	if (status != SWITCH_STATUS_SUCCESS) {
+		switch_mutex_lock(globals.listener_mutex);
+		globals.reload_pending = 0;
+		globals.reload_running = 0;
+		prefs.threads--;
+		switch_mutex_unlock(globals.listener_mutex);
+		switch_core_destroy_memory_pool(&pool);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to start event_socket password reload thread\n");
+	}
+}
 
 static void *SWITCH_THREAD_FUNC listener_run(switch_thread_t *thread, void *obj);
 static switch_status_t launch_listener_thread(listener_t *listener);
@@ -365,6 +518,10 @@ static void event_handler(switch_event_t *event)
 	switch_status_t qstatus;
 
 	switch_assert(event != NULL);
+
+	if (event->event_id == SWITCH_EVENT_RELOADXML) {
+		request_password_reload();
+	}
 
 	if (!listen_list.ready) {
 		return;
@@ -684,12 +841,29 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_event_socket_shutdown)
 {
 	int sanity = 0;
 
+	switch_mutex_lock(globals.listener_mutex);
 	prefs.done = 1;
+	globals.reload_pending = 0;
+	switch_mutex_unlock(globals.listener_mutex);
+
+	switch_event_unbind(&globals.node);
 
 	kill_all_listeners();
 	switch_log_unbind_logger(socket_logger);
 
 	close_socket(&listen_list.sock);
+
+	for (;;) {
+		int reload_running;
+
+		switch_mutex_lock(globals.listener_mutex);
+		reload_running = globals.reload_running;
+		switch_mutex_unlock(globals.listener_mutex);
+		if (!reload_running) {
+			break;
+		}
+		switch_yield(100000);
+	}
 
 	while (prefs.threads) {
 		switch_yield(100000);
@@ -699,10 +873,9 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_event_socket_shutdown)
 		}
 	}
 
-	switch_event_unbind(&globals.node);
-
 	switch_safe_free(prefs.ip);
 	switch_safe_free(prefs.password);
+	switch_safe_free(prefs.secondary_password);
 
 	return SWITCH_STATUS_SUCCESS;
 }
@@ -1878,10 +2051,12 @@ static switch_status_t parse_command(listener_t *listener, switch_event_t **even
 
 			pass = cmd + 5;
 
-			if (!strcmp(prefs.password, pass)) {
+			if (auth_check_password(pass)) {
 				switch_set_flag_locked(listener, LFLAG_AUTHED);
 				switch_snprintf(reply, reply_len, "+OK accepted");
 			} else {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+					"ESL auth failure from %s\n", listener->remote_ip);
 				switch_snprintf(reply, reply_len, "-ERR invalid");
 				switch_clear_flag_locked(listener, LFLAG_RUNNING);
 			}
@@ -3001,12 +3176,30 @@ static switch_status_t launch_listener_thread(listener_t *listener)
 	return switch_thread_create(&thread, thd_attr, listener_run, listener, listener->pool);
 }
 
+static void free_config_prefs(struct event_socket_prefs *config_prefs)
+{
+	uint32_t x;
+
+	switch_safe_free(config_prefs->ip);
+	switch_safe_free(config_prefs->password);
+	switch_safe_free(config_prefs->secondary_password);
+	for (x = 0; x < config_prefs->acl_count; x++) {
+		switch_safe_free(config_prefs->acl[x]);
+	}
+}
+
 static int config(void)
 {
 	char *cf = "event_socket.conf";
 	switch_xml_t cfg, xml, settings, param;
+	struct event_socket_prefs new_prefs = { 0 };
+	int new_debug = globals.debug;
+	uint32_t password_generation;
+	uint32_t x;
 
-	memset(&prefs, 0, sizeof(prefs));
+	switch_mutex_lock(globals.listener_mutex);
+	password_generation = globals.password_generation;
+	switch_mutex_unlock(globals.listener_mutex);
 
 	if (!(xml = switch_xml_open_cfg(cf, &cfg, NULL))) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Open of %s failed\n", cf);
@@ -3017,54 +3210,101 @@ static int config(void)
 				char *val = (char *) switch_xml_attr_soft(param, "value");
 
 				if (!strcmp(var, "listen-ip")) {
-					set_pref_ip(val);
+					switch_safe_free(new_prefs.ip);
+					new_prefs.ip = strdup(val);
 				} else if (!strcmp(var, "debug")) {
-					globals.debug = atoi(val);
+					new_debug = atoi(val);
 				} else if (!strcmp(var, "nat-map")) {
 					if (switch_true(val) && switch_nat_get_type()) {
-						prefs.nat_map = 1;
+						new_prefs.nat_map = 1;
 					}
 				} else if (!strcmp(var, "listen-port")) {
-					prefs.port = (uint16_t) atoi(val);
+					new_prefs.port = (uint16_t) atoi(val);
 				} else if (!strcmp(var, "password")) {
-					set_pref_pass(val);
+					switch_safe_free(new_prefs.password);
+					new_prefs.password = strdup(val);
+				} else if (!strcmp(var, "secondary-password")) {
+					if (!zstr(val)) {
+						switch_safe_free(new_prefs.secondary_password);
+						new_prefs.secondary_password = strdup(val);
+					}
 				} else if (!strcasecmp(var, "apply-inbound-acl") && ! zstr(val)) {
-					if (prefs.acl_count < MAX_ACL) {
-						prefs.acl[prefs.acl_count++] = strdup(val);
+					if (new_prefs.acl_count < MAX_ACL) {
+						new_prefs.acl[new_prefs.acl_count++] = strdup(val);
 					} else {
 						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Max acl records of %d reached\n", MAX_ACL);
 					}
 				} else if (!strcasecmp(var, "stop-on-bind-error")) {
-					prefs.stop_on_bind_error = switch_true(val) ? 1 : 0;
+					new_prefs.stop_on_bind_error = switch_true(val) ? 1 : 0;
 				}
 			}
 		}
 		switch_xml_free(xml);
 	}
 
-	if (zstr(prefs.ip)) {
-		set_pref_ip("127.0.0.1");
+	if (zstr(new_prefs.ip)) {
+		switch_safe_free(new_prefs.ip);
+		new_prefs.ip = strdup("127.0.0.1");
 	}
 
-	if (zstr(prefs.password)) {
-		set_pref_pass("ClueCon");
+	if (zstr(new_prefs.password)) {
+		switch_safe_free(new_prefs.password);
+		new_prefs.password = strdup("ClueCon");
 	}
 
-	if (!prefs.nat_map) {
-		prefs.nat_map = 0;
+	if (!new_prefs.nat_map) {
+		new_prefs.nat_map = 0;
 	}
 
-	if (!prefs.acl_count) {
-		prefs.acl[prefs.acl_count++] = strdup("loopback.auto");
+	if (!new_prefs.acl_count) {
+		new_prefs.acl[new_prefs.acl_count++] = strdup("loopback.auto");
 	}
 
-	if (prefs.nat_map) {
-		prefs.nat_map = 0;
+	if (new_prefs.nat_map) {
+		new_prefs.nat_map = 0;
 	}
 
-	if (!prefs.port) {
-		prefs.port = 8021;
+	if (!new_prefs.port) {
+		new_prefs.port = 8021;
 	}
+
+	switch_mutex_lock(globals.listener_mutex);
+	if (prefs.done) {
+		switch_mutex_unlock(globals.listener_mutex);
+		free_config_prefs(&new_prefs);
+		return -1;
+	}
+
+	switch_safe_free(prefs.ip);
+	prefs.ip = new_prefs.ip;
+	new_prefs.ip = NULL;
+	prefs.port = new_prefs.port;
+	prefs.nat_map = new_prefs.nat_map;
+	prefs.stop_on_bind_error = new_prefs.stop_on_bind_error;
+
+	if (password_generation == globals.password_generation) {
+		switch_safe_free(prefs.password);
+		switch_safe_free(prefs.secondary_password);
+		prefs.password = new_prefs.password;
+		prefs.secondary_password = new_prefs.secondary_password;
+		new_prefs.password = NULL;
+		new_prefs.secondary_password = NULL;
+	} else if (!prefs.password) {
+		prefs.password = new_prefs.password;
+		new_prefs.password = NULL;
+	}
+
+	for (x = 0; x < prefs.acl_count; x++) {
+		switch_safe_free(prefs.acl[x]);
+	}
+	prefs.acl_count = new_prefs.acl_count;
+	for (x = 0; x < new_prefs.acl_count; x++) {
+		prefs.acl[x] = new_prefs.acl[x];
+		new_prefs.acl[x] = NULL;
+	}
+	globals.debug = new_debug;
+	switch_mutex_unlock(globals.listener_mutex);
+	free_config_prefs(&new_prefs);
 
 	return 0;
 }
