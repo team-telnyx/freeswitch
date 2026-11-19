@@ -174,7 +174,6 @@ static uint32_t next_id(void)
 	return id;
 }
 
-SWITCH_DECLARE_GLOBAL_STRING_FUNC(set_pref_ip, prefs.ip);
 SWITCH_DECLARE_GLOBAL_STRING_FUNC(set_pref_pass, prefs.password);
 SWITCH_DECLARE_GLOBAL_STRING_FUNC(set_pref_secondary_pass, prefs.secondary_password);
 
