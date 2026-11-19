@@ -17,7 +17,7 @@
  * and the arguments of v18_init() and the names of the V.18 modes changed in
  * spandsp 3.1. These tests send text from one leg of a loopback call and
  * check that a detector (spandsp_tdd_decode_session) on the other leg
- * receives it, for each 5 bit (Baudot) mode, through each sender:
+ * receives it, for each 5 bit (Baudot) mode and DTMF, through each sender:
  *
  *   - spandsp_send_tdd    spandsp_tdd_send_session, writes its own frames
  *   - spandsp_inject_tdd  spandsp_tdd_encode_session, a write media bug
@@ -25,6 +25,11 @@
  *
  * The detector is started with the spandsp_detect_tdd application on the far
  * leg, or with the start_tdd_detect API on the near leg.
+ *
+ * spandsp decodes nothing in EDT and the 7 bit modes, so for every mode the
+ * tests only check that sending ends: the text is sent and the sender stops,
+ * or the mode is refused. Since spandsp 3.1 the 7 bit transmitters never stop
+ * by themselves, and mod_spandsp refuses them.
  */
 
 #include <switch.h>
@@ -72,29 +77,24 @@ static int tdd_received(switch_channel_t *channel, const char *want)
 	return strstr(got, wanted) != NULL;
 }
 
-/* Drive the media of the near leg and wait until the channel of uuid has
- * received want. With read set, frames are read from session (its read media
- * bug sees the audio of the far leg); otherwise silence is written to session
- * (its write media bug replaces it with TDD tones). */
-static int wait_for_tdd(switch_core_session_t *session, const char *uuid, int read, const char *want)
+typedef int (*done_fn)(void *arg);
+
+/* Drive the media of the near leg until done(arg) or TDD_WAIT_MS. With read
+ * set, frames are read from session (its read media bug sees the audio of the
+ * far leg); otherwise silence is written to session (its write media bug
+ * replaces it with TDD tones). Returns done(arg). */
+static int drive_media(switch_core_session_t *session, int read, done_fn done, void *arg)
 {
-	switch_core_session_t *rx_session;
 	switch_time_t until = switch_micro_time_now() + TDD_WAIT_MS * 1000;
 	switch_codec_t codec = { 0 };
 	switch_frame_t write_frame = { 0 };
 	switch_timer_t timer = { 0 };
 	int16_t silence[160] = { 0 };
-	int ok = 0;
-
-	if (!(rx_session = switch_core_session_locate(uuid))) {
-		return 0;
-	}
 
 	if (!read) {
 		if (switch_core_codec_init(&codec, "L16", NULL, NULL, 8000, 20, 1,
 								   SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, NULL,
 								   switch_core_session_get_pool(session)) != SWITCH_STATUS_SUCCESS) {
-			switch_core_session_rwunlock(rx_session);
 			return 0;
 		}
 		write_frame.codec = &codec;
@@ -102,17 +102,11 @@ static int wait_for_tdd(switch_core_session_t *session, const char *uuid, int re
 		/* TDD tones need evenly paced frames */
 		if (switch_core_timer_init(&timer, "soft", 20, 160, switch_core_session_get_pool(session)) != SWITCH_STATUS_SUCCESS) {
 			switch_core_codec_destroy(&codec);
-			switch_core_session_rwunlock(rx_session);
 			return 0;
 		}
 	}
 
-	while (switch_micro_time_now() < until) {
-		if (tdd_received(switch_core_session_get_channel(rx_session), want)) {
-			ok = 1;
-			break;
-		}
-
+	while (switch_micro_time_now() < until && !done(arg)) {
 		if (read) {
 			switch_frame_t *frame;
 
@@ -134,15 +128,46 @@ static int wait_for_tdd(switch_core_session_t *session, const char *uuid, int re
 		}
 	}
 
-	if (!ok) {
-		const char *var = switch_channel_get_variable(switch_core_session_get_channel(rx_session), "tdd_messages");
-
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Wanted [%s], got [%s]\n", want, var ? var : "(nothing)");
-	}
-
 	if (!read) {
 		switch_core_timer_destroy(&timer);
 		switch_core_codec_destroy(&codec);
+	}
+
+	return done(arg);
+}
+
+static int text_received(void *arg)
+{
+	return tdd_received((switch_channel_t *)arg, TDD_TEXT);
+}
+
+static int channel_gone(void *arg)
+{
+	return !switch_channel_ready((switch_channel_t *)arg);
+}
+
+static int encoder_gone(void *arg)
+{
+	return switch_core_media_bug_count((switch_core_session_t *)arg, "spandsp_tdd_encode") == 0;
+}
+
+/* Drive the media of session until the channel of uuid has received TDD_TEXT. */
+static int wait_for_tdd(switch_core_session_t *session, const char *uuid, int read)
+{
+	switch_core_session_t *rx_session;
+	switch_channel_t *rx_channel;
+	int ok;
+
+	if (!(rx_session = switch_core_session_locate(uuid))) {
+		return 0;
+	}
+
+	rx_channel = switch_core_session_get_channel(rx_session);
+
+	if (!(ok = drive_media(session, read, text_received, rx_channel))) {
+		const char *var = switch_channel_get_variable(rx_channel, "tdd_messages");
+
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Wanted [%s], got [%s]\n", TDD_TEXT, var ? var : "(nothing)");
 	}
 
 	switch_core_session_rwunlock(rx_session);
@@ -174,20 +199,25 @@ static int wait_for_detector(const char *uuid)
 	return 0;
 }
 
+/* Returns 1 for +OK, 0 for -ERR, -1 for anything else. */
 static int run_api(const char *cmd, const char *arg)
 {
 	switch_stream_handle_t stream = { 0 };
-	int ok;
+	int r = -1;
 
 	SWITCH_STANDARD_STREAM(stream);
 	switch_api_execute(cmd, arg, NULL, &stream);
-	ok = stream.data && !strncmp((char *)stream.data, "+OK", 3);
-	if (!ok) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "%s %s: %s\n", cmd, arg, stream.data ? (char *)stream.data : "");
+	if (stream.data && !strncmp((char *)stream.data, "+OK", 3)) {
+		r = 1;
+	} else if (stream.data && !strncmp((char *)stream.data, "-ERR", 4)) {
+		r = 0;
+	}
+	if (r != 1) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "%s %s: %s\n", cmd, arg, stream.data ? (char *)stream.data : "");
 	}
 	switch_safe_free(stream.data);
 
-	return ok;
+	return r;
 }
 
 static switch_core_session_t *originate(const char *mode, const char *far_leg_apps)
@@ -204,6 +234,11 @@ static switch_core_session_t *originate(const char *mode, const char *far_leg_ap
 	}
 
 	return session;
+}
+
+static const char *far_uuid(switch_core_session_t *session)
+{
+	return switch_channel_get_variable(switch_core_session_get_channel(session), "other_loopback_leg_uuid");
 }
 
 /* Hang up and wait until both legs are gone, so that no TDD media bug is left
@@ -223,21 +258,26 @@ static void hangup(switch_core_session_t *session)
 }
 
 /* The far leg sends with the given application. The near leg detects (API).
- * Returns 1 when the near leg receives the text. */
+ * The far leg is parked until the detector runs, and only then told to send,
+ * so that no character goes out before anything listens. Returns 1 when the
+ * near leg receives the text. */
 static int far_sends(const char *mode, const char *app)
 {
 	switch_core_session_t *session;
-	char apps[256];
+	const char *other_uuid;
+	char path[256];
 	int ok = 0;
 
-	switch_snprintf(apps, sizeof(apps), "answer^sleep:500^%s:%s^set:send_silence_when_idle=-1^sleep:8000^hangup", app, TDD_TEXT);
-
-	if (!(session = originate(mode, apps))) {
+	if (!(session = originate(mode, "answer^set:send_silence_when_idle=-1^park"))) {
 		return 0;
 	}
 
-	if (run_api("start_tdd_detect", switch_core_session_get_uuid(session))) {
-		ok = wait_for_tdd(session, switch_core_session_get_uuid(session), 1, TDD_TEXT);
+	other_uuid = far_uuid(session);
+	switch_snprintf(path, sizeof(path), "%s::%s", app, TDD_TEXT);
+
+	if (other_uuid && run_api("start_tdd_detect", switch_core_session_get_uuid(session)) == 1 &&
+		switch_ivr_broadcast(other_uuid, path, SMF_ECHO_ALEG) == SWITCH_STATUS_SUCCESS) {
+		ok = wait_for_tdd(session, switch_core_session_get_uuid(session), 1);
 	}
 
 	hangup(session);
@@ -258,15 +298,71 @@ static int near_sends_api(const char *mode)
 		return 0;
 	}
 
-	other_uuid = switch_channel_get_variable(switch_core_session_get_channel(session), "other_loopback_leg_uuid");
+	other_uuid = far_uuid(session);
 
 	if (other_uuid && wait_for_detector(other_uuid)) {
 		switch_snprintf(cmd, sizeof(cmd), "%s %s", switch_core_session_get_uuid(session), TDD_TEXT);
-		if (run_api("uuid_send_tdd", cmd)) {
-			ok = wait_for_tdd(session, other_uuid, 0, TDD_TEXT);
+		if (run_api("uuid_send_tdd", cmd) == 1) {
+			ok = wait_for_tdd(session, other_uuid, 0);
 		}
 	} else {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "the far leg has no TDD detector\n");
+	}
+
+	hangup(session);
+
+	return ok;
+}
+
+/* The V.18 modes whose transmitter stops once the text is sent, and the 7 bit
+ * modes whose transmitter, since spandsp 3.1, keeps sending idle carrier. */
+static const char *modes_that_end[] = { "5BIT_45", "5BIT_50", "DTMF", "EDT" };
+static const char *modes_that_may_not_end[] = { "BELL103", "V23VIDEOTEX", "V21TEXTPHONE", "V18TEXTPHONE" };
+
+/* spandsp_send_tdd on the far leg returns, so the far leg hangs up, whether
+ * the text is sent or the mode is refused. Returns 1 when it does. */
+static int send_tdd_returns(const char *mode)
+{
+	switch_core_session_t *session;
+	char apps[256];
+	int ok;
+
+	switch_snprintf(apps, sizeof(apps), "answer^sleep:200^spandsp_send_tdd:%s^hangup", TDD_TEXT);
+
+	if (!(session = originate(mode, apps))) {
+		return 0;
+	}
+
+	if (!(ok = drive_media(session, 1, channel_gone, switch_core_session_get_channel(session)))) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "spandsp_send_tdd in %s is still sending\n", mode);
+	}
+
+	hangup(session);
+
+	return ok;
+}
+
+/* uuid_send_tdd on the near leg either refuses (only if may_refuse) or adds a
+ * media bug that removes itself once the text is sent. Returns 1 when it does. */
+static int uuid_send_tdd_ends(const char *mode, int may_refuse)
+{
+	switch_core_session_t *session;
+	char cmd[256];
+	int r, ok = 0;
+
+	if (!(session = originate(mode, "answer^park"))) {
+		return 0;
+	}
+
+	switch_snprintf(cmd, sizeof(cmd), "%s %s", switch_core_session_get_uuid(session), TDD_TEXT);
+	r = run_api("uuid_send_tdd", cmd);
+
+	if (r == 1) {
+		if (!(ok = drive_media(session, 0, encoder_gone, session))) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "uuid_send_tdd in %s is still sending\n", mode);
+		}
+	} else if (r == 0 && may_refuse) {
+		ok = encoder_gone(session);
 	}
 
 	hangup(session);
@@ -302,6 +398,12 @@ FST_CORE_BEGIN("./conf")
 		}
 		FST_TEST_END()
 
+		FST_TEST_BEGIN(send_tdd_dtmf)
+		{
+			fst_check(far_sends("DTMF", "spandsp_send_tdd"));
+		}
+		FST_TEST_END()
+
 		FST_TEST_BEGIN(inject_tdd_5bit_45)
 		{
 			fst_check(far_sends("5BIT_45", "spandsp_inject_tdd"));
@@ -314,6 +416,12 @@ FST_CORE_BEGIN("./conf")
 		}
 		FST_TEST_END()
 
+		FST_TEST_BEGIN(inject_tdd_dtmf)
+		{
+			fst_check(far_sends("DTMF", "spandsp_inject_tdd"));
+		}
+		FST_TEST_END()
+
 		FST_TEST_BEGIN(uuid_send_tdd_5bit_45)
 		{
 			fst_check(near_sends_api("5BIT_45"));
@@ -323,6 +431,38 @@ FST_CORE_BEGIN("./conf")
 		FST_TEST_BEGIN(uuid_send_tdd_5bit_50)
 		{
 			fst_check(near_sends_api("5BIT_50"));
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(uuid_send_tdd_dtmf)
+		{
+			fst_check(near_sends_api("DTMF"));
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(send_tdd_returns_in_every_mode)
+		{
+			size_t i;
+
+			for (i = 0; i < sizeof(modes_that_end) / sizeof(modes_that_end[0]); i++) {
+				fst_check(send_tdd_returns(modes_that_end[i]));
+			}
+			for (i = 0; i < sizeof(modes_that_may_not_end) / sizeof(modes_that_may_not_end[0]); i++) {
+				fst_check(send_tdd_returns(modes_that_may_not_end[i]));
+			}
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(uuid_send_tdd_ends_in_every_mode)
+		{
+			size_t i;
+
+			for (i = 0; i < sizeof(modes_that_end) / sizeof(modes_that_end[0]); i++) {
+				fst_check(uuid_send_tdd_ends(modes_that_end[i], 0));
+			}
+			for (i = 0; i < sizeof(modes_that_may_not_end) / sizeof(modes_that_may_not_end[0]); i++) {
+				fst_check(uuid_send_tdd_ends(modes_that_may_not_end[i], 1));
+			}
 		}
 		FST_TEST_END()
 	}
