@@ -650,6 +650,38 @@ static switch_bool_t review_regression_inject_post_alloc(const char *test_name)
 		SWITCH_TRUE : SWITCH_FALSE;
 }
 
+/* A placeholder: tests that complete a DTLS handshake replace it with
+   use_runtime_dtls_fingerprint(). */
+#define TEST_DTLS_FINGERPRINT "17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4"
+
+/* Remote offer used when a test passes none */
+#define DEFAULT_REMOTE_SDP \
+	"v=0\n" \
+	"o=- 1000 1001 IN IP4 0.0.0.0\n" \
+	"s=-\n" \
+	"t=0 0\n" \
+	"a=group:BUNDLE 0\n" \
+	"a=extmap-allow-mixed\n" \
+	"m=audio 9 UDP/TLS/RTP/SAVPF 0\n" \
+	"c=IN IP4 0.0.0.0\n" \
+	"a=ice-ufrag:sameGenerationRemoteUfrag1\n" \
+	"a=ice-pwd:sameGenerationRemotePassword1234561\n" \
+	"a=ice-options:trickle\n" \
+	"a=rtcp-mux\n" \
+	"a=setup:active\n" \
+	"a=rtpmap:0 PCMU/8000\n" \
+	"a=ssrc:42424242 msid:synthetic-user@invalid synthetic-stream\n" \
+	"a=ssrc:42424242 cname:synthetic-user@invalid\n" \
+	"a=sendrecv\n" \
+	"a=fingerprint:sha-256 " TEST_DTLS_FINGERPRINT "\n" \
+	"a=mid:0\n" \
+	"a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\n" \
+	"a=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time\n" \
+	"a=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\n" \
+	"a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid\n" \
+	"a=msid:de61dc02-51d0-4164-9d7a-b74141a4548e 9dc86822-54a5-4506-8476-9be2238be778\n" \
+	"a=rtcp-rsize\n"
+
 static switch_status_t make_session_and_rtp_with_sdp_ex(switch_core_session_t **out_session,
                                                          switch_rtp_t **out_rtp,
                                                          void **out_sdp_session,
@@ -742,32 +774,7 @@ static switch_status_t make_session_and_rtp_with_sdp_ex(switch_core_session_t **
 		switch_channel_set_variable(chan, "rtp_ice_role", ice_role);
 	}
 
-	r_sdp = switch_core_session_sprintf(session,
-			"v=0\n"
-			"o=- 1000 1001 IN IP4 0.0.0.0\n"
-			"s=-\n"
-			"t=0 0\n"
-			"a=group:BUNDLE 0\n"
-			"a=extmap-allow-mixed\n"
-			"m=audio 9 UDP/TLS/RTP/SAVPF 0\n"
-			"c=IN IP4 0.0.0.0\n"
-			"a=ice-ufrag:sameGenerationRemoteUfrag1\n"
-			"a=ice-pwd:sameGenerationRemotePassword1234561\n"
-			"a=ice-options:trickle\n"
-			"a=rtcp-mux\n"
-			"a=setup:active\n"
-			"a=rtpmap:0 PCMU/8000\n"
-			"a=ssrc:42424242 msid:synthetic-user@invalid synthetic-stream\n"
-			"a=ssrc:42424242 cname:synthetic-user@invalid\n"
-			"a=sendrecv\n"
-			"a=fingerprint:sha-256 17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4\n"
-			"a=mid:0\n"
-			"a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\n"
-			"a=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time\n"
-			"a=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\n"
-			"a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid\n"
-			"a=msid:de61dc02-51d0-4164-9d7a-b74141a4548e 9dc86822-54a5-4506-8476-9be2238be778\n"
-			"a=rtcp-rsize\n");
+	r_sdp = switch_core_session_strdup(session, DEFAULT_REMOTE_SDP);
 
 	if (!zstr(offer_sdp)) {
 		r_sdp = switch_core_session_strdup(session, offer_sdp);
@@ -867,8 +874,6 @@ typedef struct dtls_restart_case_result_s {
 	switch_core_media_ice_type_t before_ice_type;
 	switch_core_media_ice_type_t after_ice_type;
 } dtls_restart_case_result_t;
-
-#define TEST_DTLS_FINGERPRINT "17:B5:C8:7F:AE:D0:32:C9:FF:58:80:3C:17:5A:45:2E:55:2D:D9:33:DD:2A:56:16:7D:AC:3B:3C:76:80:0C:D4"
 
 static switch_status_t use_runtime_dtls_fingerprint(char *sdp)
 {
@@ -2926,10 +2931,12 @@ FCT_BGN()
 			const char *rearmed_local_ufrag;
 			const char *local_sdp;
 			char peer_sdp[2048];
+			char initial_sdp[2048];
+			char same_generation_sdp[4096];
 			switch_bool_t has_addr = SWITCH_FALSE;
 			uint8_t match;
 			uint8_t proceed = 0;
-			const char *same_generation_sdp =
+			const char *same_generation_fixture =
 				"v=0\n"
 				"o=- 1683118194 1683118197 IN IP4 0.0.0.0\n"
 				"s=-\n"
@@ -2960,8 +2967,14 @@ FCT_BGN()
 				"a=fingerprint:sha-256 " TEST_DTLS_FINGERPRINT "\n"
 				"a=mid:1\n";
 
+			switch_copy_string(initial_sdp, DEFAULT_REMOTE_SDP, sizeof(initial_sdp));
+			switch_copy_string(same_generation_sdp, same_generation_fixture, sizeof(same_generation_sdp));
+			fst_requires(use_runtime_dtls_fingerprint(initial_sdp) == SWITCH_STATUS_SUCCESS);
+			/* audio and video each carry one */
+			fst_requires(use_runtime_dtls_fingerprint(same_generation_sdp) == SWITCH_STATUS_SUCCESS);
+			fst_requires(use_runtime_dtls_fingerprint(same_generation_sdp) == SWITCH_STATUS_SUCCESS);
 			status = make_session_and_rtp_with_sdp_ex(&session, &rtp, &sdp_session, &parser,
-				NULL, "PCMU,PROXY-VID", SWITCH_TRUE, SWITCH_TRUE, NULL);
+				initial_sdp, "PCMU,PROXY-VID", SWITCH_TRUE, SWITCH_TRUE, NULL);
 			review_regression_owner_adopt(session, sdp_session, parser);
 			fst_requires(status == SWITCH_STATUS_SUCCESS && session && rtp && sdp_session && parser);
 			channel = switch_core_session_get_channel(session);
@@ -2984,6 +2997,7 @@ FCT_BGN()
 			fst_requires(build_dtls_pair_sdp(peer_sdp, sizeof(peer_sdp), 1683118198,
 				18230, "passive", "sameGenerationPeerUfrag1",
 				"sameGenerationPeerPassword1234561") == SWITCH_STATUS_SUCCESS);
+			fst_requires(use_runtime_dtls_fingerprint(peer_sdp) == SWITCH_STATUS_SUCCESS);
 			status = make_session_and_rtp_with_sdp_ex(&peer_session, &peer_rtp,
 				&peer_sdp_session, &peer_parser, peer_sdp, "PCMU", SWITCH_TRUE,
 				SWITCH_TRUE, NULL);
@@ -6459,11 +6473,14 @@ FCT_BGN()
 			switch_size_t stun_len;
 			char handshake_restart_sdp[2048];
 			char peer_sdp[2048];
+			char initial_sdp[2048];
 			uint8_t match;
 			uint8_t proceed = 0;
 
+			switch_copy_string(initial_sdp, DEFAULT_REMOTE_SDP, sizeof(initial_sdp));
+			fst_requires(use_runtime_dtls_fingerprint(initial_sdp) == SWITCH_STATUS_SUCCESS);
 			status = make_session_and_rtp_with_sdp_ex(&session, &rtp, &sdp_session, &parser,
-				NULL, "PCMU", SWITCH_TRUE, SWITCH_FALSE, NULL);
+				initial_sdp, "PCMU", SWITCH_TRUE, SWITCH_FALSE, NULL);
 			review_regression_owner_adopt(session, sdp_session, parser);
 			fst_requires(status == SWITCH_STATUS_SUCCESS && session && !rtp && sdp_session && parser);
 			channel = switch_core_session_get_channel(session);
@@ -6559,6 +6576,7 @@ FCT_BGN()
 				sizeof(handshake_restart_sdp), 1683118270, 54303, "active",
 				"candidateLessRemoteUfrag2", "candidateLessRemotePassword1234562") ==
 				SWITCH_STATUS_SUCCESS);
+			fst_requires(use_runtime_dtls_fingerprint(handshake_restart_sdp) == SWITCH_STATUS_SUCCESS);
 			switch_core_media_clear_ice(session);
 			switch_channel_set_flag(channel, CF_REINVITE);
 			match = switch_core_media_negotiate_sdp(session, handshake_restart_sdp, &proceed,
@@ -6596,6 +6614,7 @@ FCT_BGN()
 			fst_requires(build_dtls_pair_sdp(peer_sdp, sizeof(peer_sdp), 1683118271,
 				54310, "passive", "candidateLessPeerUfrag1",
 				"candidateLessPeerPassword1234561") == SWITCH_STATUS_SUCCESS);
+			fst_requires(use_runtime_dtls_fingerprint(peer_sdp) == SWITCH_STATUS_SUCCESS);
 			status = make_session_and_rtp_with_sdp_ex(&peer_session, &peer_rtp,
 				&peer_sdp_session, &peer_parser, peer_sdp, "PCMU", SWITCH_TRUE,
 				SWITCH_TRUE, NULL);
