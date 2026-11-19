@@ -162,6 +162,11 @@ static void handle_v18_status(void *user_data, int status)
 }
 #endif
 
+/* Since spandsp 3.1, v18_init() with any automoding other than
+ * V18_AUTOMODING_NONE starts the modem in V18_MODE_NONE and waits for an
+ * automoding handshake, so a 5 bit (Baudot) modem neither sends nor detects
+ * anything. The mode to use is the one from get_v18_mode(), so newer spandsp
+ * gets V18_AUTOMODING_NONE. */
 static int get_v18_mode(switch_core_session_t *session)
 {
 	switch_channel_t *channel = switch_core_session_get_channel(session);
@@ -224,7 +229,7 @@ switch_status_t spandsp_tdd_send_session(switch_core_session_t *session, const c
 	}
 
 #if SPANDSP_RELEASE_DATE >= 20230620
-	tdd_state = v18_init(NULL, TRUE, get_v18_mode(session), V18_AUTOMODING_GLOBAL, put_text_msg, NULL, handle_v18_status, session);
+	tdd_state = v18_init(NULL, TRUE, get_v18_mode(session), V18_AUTOMODING_NONE, put_text_msg, NULL, handle_v18_status, session);
 #else
 	tdd_state = v18_init(NULL, TRUE, get_v18_mode(session), V18_AUTOMODING_GLOBAL, put_text_msg, NULL);
 #endif
@@ -275,7 +280,7 @@ switch_status_t spandsp_tdd_encode_session(switch_core_session_t *session, const
 	pvt->session = session;
 
 #if SPANDSP_RELEASE_DATE >= 20230620
-	pvt->tdd_state = v18_init(NULL, TRUE, get_v18_mode(session), V18_AUTOMODING_GLOBAL, put_text_msg, NULL, handle_v18_status, session);
+	pvt->tdd_state = v18_init(NULL, TRUE, get_v18_mode(session), V18_AUTOMODING_NONE, put_text_msg, NULL, handle_v18_status, session);
 #else
 	pvt->tdd_state = v18_init(NULL, TRUE, get_v18_mode(session), V18_AUTOMODING_GLOBAL, put_text_msg, NULL);
 #endif
@@ -359,7 +364,7 @@ switch_status_t spandsp_tdd_decode_session(switch_core_session_t *session)
 	pvt->session = session;
 
 #if SPANDSP_RELEASE_DATE >= 20230620
-	pvt->tdd_state = v18_init(NULL, FALSE, get_v18_mode(session), V18_AUTOMODING_GLOBAL, put_text_msg, pvt, handle_v18_status, session);
+	pvt->tdd_state = v18_init(NULL, FALSE, get_v18_mode(session), V18_AUTOMODING_NONE, put_text_msg, pvt, handle_v18_status, session);
 #else
 	pvt->tdd_state = v18_init(NULL, FALSE, get_v18_mode(session), V18_AUTOMODING_GLOBAL, put_text_msg, pvt);
 #endif
