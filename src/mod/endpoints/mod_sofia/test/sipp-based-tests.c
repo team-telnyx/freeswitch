@@ -858,6 +858,7 @@ typedef struct {
 	char cause[64];
 	char status[64];
 	int peer_up;
+	int transferred;
 	int a_ok;
 	int b_ok;
 	int c_ok;
@@ -961,6 +962,28 @@ static switch_bool_t sb_wait_flag(const char *uuid, switch_channel_flag_t flag)
 	return found;
 }
 
+/* Waits up to about 3 s for the channel to run the application app. */
+static switch_bool_t sb_wait_app(const char *uuid, const char *app)
+{
+	int loop_count = 60;
+	switch_bool_t found = SWITCH_FALSE;
+
+	while (!found && loop_count--) {
+		switch_core_session_t *session = switch_core_session_locate(uuid);
+
+		if (session) {
+			const char *cur = switch_channel_get_variable(switch_core_session_get_channel(session), SWITCH_CURRENT_APPLICATION_VARIABLE);
+
+			found = (cur && !strcmp(cur, app)) ? SWITCH_TRUE : SWITCH_FALSE;
+			switch_core_session_rwunlock(session);
+		}
+		if (!found) {
+			switch_sleep(50 * 1000);
+		}
+	}
+	return found;
+}
+
 /* SWITCH_TRUE while the channel is up and carries no hangup signal. */
 static switch_bool_t sb_leg_up(const char *uuid)
 {
@@ -999,8 +1022,9 @@ static void sb_wait_stop(sb_result_t *r, int timeout_ms)
    that still names the B leg. With rebridge 2 the A leg plays when the B leg moves, so it stays
    in its bridge until the hangup. Without rebridge, vars ("name=value;...") go on the playing
    leg, which is the A leg when on_a is set: the leg then takes the bridge exit path of its own
-   side. With early_peer the B leg sends early media and never answers. */
-static void sb_run(const char *ip, const char *service, int rebridge, const char *vars, int on_a, int early_peer, sb_result_t *r)
+   side. With early_peer the B leg sends early media and never answers. With transfer the other
+   leg moves to a park with uuid_transfer instead of a hangup. */
+static void sb_run(const char *ip, const char *service, int rebridge, const char *vars, int on_a, int early_peer, int transfer, sb_result_t *r)
 {
 	char a_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1] = "";
 	char b_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1] = "";
@@ -1107,16 +1131,25 @@ static void sb_run(const char *ip, const char *service, int rebridge, const char
 		goto end;
 	}
 
-	/* An unanswered peer needs a cause that switch_channel_handle_cause() acts on:
-	   it returns without a hangup for ORIGINATOR_CANCEL, which a plain uuid_kill sets. */
-	arg = switch_mprintf("%s%s", kill_uuid, early_peer ? " USER_BUSY" : "");
-	r->killed = sb_api_reply("uuid_kill", arg, NULL, 0) ? 1 : 0;
+	if (transfer) {
+		arg = switch_mprintf("%s park inline", kill_uuid);
+		r->killed = sb_api_reply("uuid_transfer", arg, NULL, 0) ? 1 : 0;
+	} else {
+		/* An unanswered peer needs a cause that switch_channel_handle_cause() acts on:
+		   it returns without a hangup for ORIGINATOR_CANCEL, which a plain uuid_kill sets. */
+		arg = switch_mprintf("%s%s", kill_uuid, early_peer ? " USER_BUSY" : "");
+		r->killed = sb_api_reply("uuid_kill", arg, NULL, 0) ? 1 : 0;
+	}
 	switch_safe_free(arg);
 
 	/* A stop the hangup raises comes within milliseconds. Allow 3 s, far less than the 10 s file. */
 	sb_wait_stop(r, 3000);
 	r->stops_after_hangup = r->stops;
 	switch_copy_string(r->cause_after_hangup, r->cause, sizeof(r->cause_after_hangup));
+	if (transfer) {
+		/* The transferred leg runs its park application only after its bridge exit. */
+		r->transferred = sb_wait_app(kill_uuid, "park") ? 1 : 0;
+	}
 
 	/* Let the bridge exit park or hang up the playing leg before it is sampled below. */
 	switch_sleep(1000 * 1000);
@@ -1126,6 +1159,9 @@ static void sb_run(const char *ip, const char *service, int rebridge, const char
 	r->peer_up = sb_leg_up(play_uuid) ? 1 : 0;
 
 	sb_api_reply("uuid_kill", play_uuid, NULL, 0);
+	if (transfer) {
+		sb_api_reply("uuid_kill", kill_uuid, NULL, 0);
+	}
 	if (rebridge) {
 		sb_api_reply("uuid_kill", c_uuid, NULL, 0);
 	}
@@ -1609,7 +1645,7 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 		{
 			sb_result_t r = { 0 };
 
-			sb_run(switch_core_get_variable("local_ip_v4"), "7878780003", 1, NULL, 0, 0, &r);
+			sb_run(switch_core_get_variable("local_ip_v4"), "7878780003", 1, NULL, 0, 0, 0, &r);
 			fst_xcheck(r.started, "Unable to start the SIPp peers");
 			fst_xcheck(r.found_legs, "the A leg, its bond or the C leg was not found");
 			fst_xcheck(r.bridged, "uuid_bridge did not move the B leg into the second call");
@@ -1630,7 +1666,7 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 		{
 			sb_result_t r = { 0 };
 
-			sb_run(switch_core_get_variable("local_ip_v4"), "7878780003", 0, "park_after_bridge=true", 0, 0, &r);
+			sb_run(switch_core_get_variable("local_ip_v4"), "7878780003", 0, "park_after_bridge=true", 0, 0, 0, &r);
 			fst_xcheck(r.started, "Unable to start the SIPp peers");
 			fst_xcheck(r.found_legs, "the A leg or its bond was not found");
 			fst_xcheck(r.prepared, "uuid_setvar did not set park_after_bridge on the B leg");
@@ -1650,7 +1686,7 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 		{
 			sb_result_t r = { 0 };
 
-			sb_run(switch_core_get_variable("local_ip_v4"), "7878780003", 0, "park_after_early_bridge=true", 0, 0, &r);
+			sb_run(switch_core_get_variable("local_ip_v4"), "7878780003", 0, "park_after_early_bridge=true", 0, 0, 0, &r);
 			fst_xcheck(r.started, "Unable to start the SIPp peers");
 			fst_xcheck(r.found_legs, "the A leg or its bond was not found");
 			fst_xcheck(r.prepared, "uuid_setvar did not set park_after_early_bridge on the B leg");
@@ -1670,7 +1706,7 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 		{
 			sb_result_t r = { 0 };
 
-			sb_run(switch_core_get_variable("local_ip_v4"), "7878780003", 0, "hangup_after_bridge=explicit", 1, 0, &r);
+			sb_run(switch_core_get_variable("local_ip_v4"), "7878780003", 0, "hangup_after_bridge=explicit", 1, 0, 0, &r);
 			fst_xcheck(r.started, "Unable to start the SIPp peers");
 			fst_xcheck(r.found_legs, "the A leg or its bond was not found");
 			fst_xcheck(r.prepared, "uuid_setvar did not set hangup_after_bridge on the A leg");
@@ -1690,7 +1726,7 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 		{
 			sb_result_t r = { 0 };
 
-			sb_run(switch_core_get_variable("local_ip_v4"), "7878780005", 0, "park_after_bridge=true", 1, 1, &r);
+			sb_run(switch_core_get_variable("local_ip_v4"), "7878780005", 0, "park_after_bridge=true", 1, 1, 0, &r);
 			fst_xcheck(r.started, "Unable to start the SIPp peers");
 			fst_xcheck(r.found_legs, "the A leg or its bond was not found");
 			fst_xcheck(r.prepared, "uuid_setvar did not set park_after_bridge on the A leg");
@@ -1710,7 +1746,7 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 		{
 			sb_result_t r = { 0 };
 
-			sb_run(switch_core_get_variable("local_ip_v4"), "7878780003", 2, NULL, 0, 0, &r);
+			sb_run(switch_core_get_variable("local_ip_v4"), "7878780003", 2, NULL, 0, 0, 0, &r);
 			fst_xcheck(r.started, "Unable to start the SIPp peers");
 			fst_xcheck(r.found_legs, "the A leg, its bond or the C leg was not found");
 			fst_xcheck(r.bridged, "uuid_bridge did not move the B leg into the second call");
@@ -1728,11 +1764,30 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 		/* The A leg runs bridge with hangup_after_bridge=false and its dialplan goes on to park,
 		   with no park_after_bridge: the way a Call Control transfer runs. The A leg outlives the
 		   bridge, so its playback must not report a hangup cause. */
+		/* The A leg runs bridge, so it is the originator, and a transfer moves it to a park while
+		   the B leg plays. The transfer clears the bond of the B leg before the bridge ends. The
+		   bridge exit of the A leg must still stop that playback, or the A leg waits for its end. */
+		FST_TEST_BEGIN(originator_transfer_stops_the_playback_of_its_peer)
+		{
+			sb_result_t r = { 0 };
+
+			sb_run(switch_core_get_variable("local_ip_v4"), "7878780003", 0, NULL, 0, 0, 1, &r);
+			fst_xcheck(r.started, "Unable to start the SIPp peers");
+			fst_xcheck(r.found_legs, "the A leg or its bond was not found");
+			fst_xcheck(r.playing, "the playback did not start on the B leg");
+			fst_xcheck(r.killed, "uuid_transfer did not move the A leg");
+			fst_xcheck(r.stops_after_hangup == 1, "the A leg transfer did not stop the B leg playback");
+			fst_xcheck(!*r.cause_after_hangup, "the B leg playback reported a hangup cause although the A leg is up");
+			fst_xcheck(r.transferred, "the A leg did not reach its park while the B leg played");
+			fst_xcheck(r.a_ok && r.b_ok, "a SIPp peer failed; inspect the *_errors.log files");
+		}
+		FST_TEST_END()
+
 		FST_TEST_BEGIN(peer_hangup_reports_no_cause_on_a_leg_whose_dialplan_goes_on)
 		{
 			sb_result_t r = { 0 };
 
-			sb_run(switch_core_get_variable("local_ip_v4"), "7878780008", 0, NULL, 1, 0, &r);
+			sb_run(switch_core_get_variable("local_ip_v4"), "7878780008", 0, NULL, 1, 0, 0, &r);
 			fst_xcheck(r.started, "Unable to start the SIPp peers");
 			fst_xcheck(r.found_legs, "the A leg or its bond was not found");
 			fst_xcheck(r.prepared, "the A leg was not prepared");
@@ -1752,7 +1807,7 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 		{
 			sb_result_t r = { 0 };
 
-			sb_run(switch_core_get_variable("local_ip_v4"), "7878780003", 0, "park_after_bridge=true;hangup_after_bridge=explicit", 0, 0, &r);
+			sb_run(switch_core_get_variable("local_ip_v4"), "7878780003", 0, "park_after_bridge=true;hangup_after_bridge=explicit", 0, 0, 0, &r);
 			fst_xcheck(r.started, "Unable to start the SIPp peers");
 			fst_xcheck(r.found_legs, "the A leg or its bond was not found");
 			fst_xcheck(r.prepared, "uuid_setvar_multi failed on the B leg");
@@ -1772,7 +1827,7 @@ FST_CORE_EX_BEGIN("./conf-sipp", SCF_VG | SCF_USE_SQL)
 		{
 			sb_result_t r = { 0 };
 
-			sb_run(switch_core_get_variable("local_ip_v4"), "7878780009", 0, NULL, 1, 1, &r);
+			sb_run(switch_core_get_variable("local_ip_v4"), "7878780009", 0, NULL, 1, 1, 0, &r);
 			fst_xcheck(r.started, "Unable to start the SIPp peers");
 			fst_xcheck(r.found_legs, "the A leg or its bond was not found");
 			fst_xcheck(r.prepared, "the A leg was not prepared");

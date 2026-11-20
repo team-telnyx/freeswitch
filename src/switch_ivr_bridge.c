@@ -2381,14 +2381,16 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_multi_threaded_bridge(switch_core_ses
 			switch_channel_clear_flag_recursive(caller_channel, CF_BRIDGE_ORIGINATOR);
 
 			/* Only onto a peer that is still in this bridge: still bridged, with
-			 * a bond that still names this leg. A peer that moved on to another
+			 * a bond that names this leg or no bond at all. A transfer of this
+			 * leg clears the bond of the peer before the bridge ends
+			 * (switch_ivr_session_transfer()). A peer that moved on to another
 			 * bridge, or parked after it left this one, keeps its playback.
 			 *
-			 * Mark only when this leg really went away, and only onto a peer
-			 * that is playing something right now. The bridge also ends on
-			 * transfer, park, intercept and a clean exit, where nothing went
-			 * away. The window before CF_BROADCAST is covered by the peer check
-			 * in switch_ivr_parse_event() instead.
+			 * Mark only when the bond names this leg and this leg really went
+			 * away, and only onto a peer that is playing something right now.
+			 * The bridge also ends on transfer, park, intercept and a clean
+			 * exit, where nothing went away. The window before CF_BROADCAST is
+			 * covered by the peer check in switch_ivr_parse_event() instead.
 			 *
 			 * The flag check and the write are not one transaction, so the
 			 * marker carries a generation and switch_ivr_parse_event() closes
@@ -2402,8 +2404,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_multi_threaded_bridge(switch_core_ses
 				const char *bond_back = switch_channel_get_partner_uuid_copy(peer_channel, peer_bond, sizeof(peer_bond));
 				uint32_t peer_gen = switch_channel_get_broadcast_generation(peer_channel);
 
-				if (bond_back && !strcmp(bond_back, switch_core_session_get_uuid(session)) && switch_channel_test_flag(peer_channel, CF_BRIDGED)) {
-					if (switch_channel_down_nosig(caller_channel) && switch_channel_test_flag(peer_channel, CF_BROADCAST)) {
+				if ((!bond_back || !strcmp(bond_back, switch_core_session_get_uuid(session))) && switch_channel_test_flag(peer_channel, CF_BRIDGED)) {
+					if (bond_back && switch_channel_down_nosig(caller_channel) && switch_channel_test_flag(peer_channel, CF_BROADCAST)) {
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
 										  "%s Marking peer hangup on bridge peer %s, broadcast generation %u, answered %d\n",
 										  switch_channel_get_name(caller_channel), switch_channel_get_name(peer_channel), peer_gen,
