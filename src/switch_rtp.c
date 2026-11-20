@@ -7540,6 +7540,40 @@ static void dtls_preserved_restart_fail(switch_rtp_t *rtp_session, switch_dtls_t
 #define cr_saltlen 14
 #define cr_kslen 30
 
+static int dtls_cert_matches(X509 *cert, const char *type, const char *str)
+{
+	dtls_fingerprint_t fp = {0};
+
+	if (zstr(type) || zstr(str)) {
+		return 0;
+	}
+
+	fp.type = (char *)type;
+
+	return !switch_core_cert_extract_fingerprint(cert, &fp) && !zstr(fp.str) && !strncasecmp(fp.str, str, MAX_FPSTRLEN);
+}
+
+/* 1 if the peer's certificate matches a fingerprint its SDP offered. The SDP
+   may offer several (RFC 8122); remote_fp holds only the last one and the
+   identity the first SWITCH_RTP_DTLS_IDENTITY_MAX_FINGERPRINTS. */
+static int dtls_peer_cert_offered(switch_dtls_t *dtls, X509 *cert)
+{
+	const switch_rtp_pvt_dtls_identity_t *identity = &dtls->association_identity;
+	uint8_t i;
+
+	if (dtls->remote_fp && dtls_cert_matches(cert, dtls->remote_fp->type, dtls->remote_fp->str)) {
+		return 1;
+	}
+
+	for (i = 0; i < identity->remote_fingerprint_count && i < SWITCH_RTP_DTLS_IDENTITY_MAX_FINGERPRINTS; i++) {
+		if (dtls_cert_matches(cert, identity->remote_fingerprints[i].algorithm, identity->remote_fingerprints[i].value)) {
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
 static int dtls_state_setup(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 {
 	X509 *cert;
@@ -7558,13 +7592,7 @@ static int dtls_state_setup(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 	if ((dtls->type & DTLS_TYPE_SERVER)) {
 		r = 1;
 	} else if ((cert = SSL_get_peer_certificate(dtls->ssl))) {
-		dtls_fingerprint_t fp = {0};
-
-		fp.type = dtls->remote_fp->type;
-
-		switch_core_cert_extract_fingerprint(cert, &fp);
-		r = (!zstr(fp.str) && !strncasecmp(fp.str, dtls->remote_fp->str, MAX_FPSTRLEN));
-
+		r = dtls_peer_cert_offered(dtls, cert);
 		X509_free(cert);
 	}
 
@@ -8203,13 +8231,7 @@ static int cb_verify_peer(int preverify_ok, X509_STORE_CTX *ctx)
 	}
 
 	if ((cert = SSL_get_peer_certificate(dtls->ssl))) {
-		dtls_fingerprint_t fp = {0};
-
-		fp.type = dtls->remote_fp->type;
-
-		switch_core_cert_extract_fingerprint(cert, &fp);
-		r = (!zstr(fp.str) && !strncasecmp(fp.str, dtls->remote_fp->str, MAX_FPSTRLEN));
-
+		r = dtls_peer_cert_offered(dtls, cert);
 		X509_free(cert);
 	} else {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(dtls->rtp_session->session), SWITCH_LOG_ERROR, "%s CERT ERR!\n", rtp_type(dtls->rtp_session));
