@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Stand-in for an overloaded RTMP recorder, for manual/scenario testing.
 
-The unit tests in test_avformat.c cover an *unreachable* recorder, which is
-deterministic and needs no server.  This covers the other shape, and the one
+The unit tests in test_avformat.c cover a recorder whose TCP connect never
+completes (a loopback listener with a full accept queue), which needs no
+server.  This covers the other shape, and the one
 that actually caused the incident: a recorder that completes the TCP connect
 and then never answers.  The kernel accepts into the backlog, so the client
 sees a healthy socket and waits on a handshake that never comes.
