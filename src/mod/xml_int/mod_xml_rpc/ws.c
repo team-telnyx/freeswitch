@@ -431,6 +431,9 @@ static void ws_put_be64(uint8_t *p, uint64_t v)
 	p[7] = (uint8_t)(v);
 }
 
+/* A payload read closes after this many consecutive 2 s timeouts (10 s of silence). */
+#define WS_PAYLOAD_STALL_TIMEOUTS 5
+
 /* Read into wsh->buffer until it holds want bytes, never past them, so the
    next frame stays buffered in the connection. An idle timeout before the
    first byte of a frame keeps waiting; one inside a frame fails. */
@@ -458,6 +461,7 @@ issize_t ws_read_frame(wsh_t *wsh, ws_opcode_t *oc, uint8_t **data)
 
 	issize_t need = 2;
 	char *maskp;
+	int stalls;
 
  again:
 	need = 2;
@@ -581,8 +585,15 @@ issize_t ws_read_frame(wsh_t *wsh, ws_opcode_t *oc, uint8_t **data)
 
 			wsh->rplen = wsh->plen - need;
 
+			stalls = 0;
 			while(need) {
-				issize_t r = ws_raw_read(wsh, wsh->payload + wsh->rplen, need);
+				int timed_out;
+				issize_t r = ws_raw_read_timed(wsh, wsh->payload + wsh->rplen, need, &timed_out);
+
+				/* A slow link may pause inside a payload; a peer that stops sending is closed. */
+				if (r < 1 && timed_out && !wsh->down && ++stalls < WS_PAYLOAD_STALL_TIMEOUTS) {
+					continue;
+				}
 
 				if (r < 1) {
 					/* invalid read - protocol err .. */
@@ -590,6 +601,7 @@ issize_t ws_read_frame(wsh_t *wsh, ws_opcode_t *oc, uint8_t **data)
 					return ws_close(wsh, WS_PROTO_ERR);
 				}
 
+				stalls = 0;
 				wsh->datalen += r;
 				wsh->rplen += r;
 				need -= r;
