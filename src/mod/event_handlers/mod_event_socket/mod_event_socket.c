@@ -1437,11 +1437,20 @@ static switch_status_t read_packet(listener_t *listener, switch_event_t **event,
 							if (val) {
 								switch_event_add_header_string(*event, SWITCH_STACK_BOTTOM, var, val);
 								if (!strcasecmp(var, "content-length")) {
-									clen = atoi(val);
+									char *cl_end;
+									long long cl;
 
-									if (clen < 0 || clen > MAX_CONTENT_LENGTH) {
+									/* Range-check before narrowing: atoi() wraps 4294967297 to 1 */
+									errno = 0;
+									cl = strtoll(val, &cl_end, 10);
+									while (cl_end != val && (*cl_end == ' ' || *cl_end == '\t' || *cl_end == '\r')) {
+										cl_end++;
+									}
+									clen = (errno || cl_end == val || *cl_end || cl < 0 || cl > MAX_CONTENT_LENGTH) ? -1 : (int) cl;
+
+									if (clen < 0) {
 										switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-														  "Rejecting Content-Length '%s' (out of range)\n", val);
+														  "Rejecting Content-Length '%s' (invalid or out of range)\n", val);
 										switch_event_destroy(event);
 										switch_goto_status(SWITCH_STATUS_FALSE, end);
 									}
