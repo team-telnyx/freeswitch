@@ -579,7 +579,6 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 		char *loop_h = switch_event_get_header(event, "loops");
 		char *hold_bleg = switch_event_get_header(event, "hold-bleg");
 		int loops = 1;
-		int inner = 0;
 
 		if (zstr(app_arg) && !zstr(content_type) && !strcasecmp(content_type, "text/plain")) {
 			app_arg = switch_event_get_body(event);
@@ -591,19 +590,21 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 
 		if (app_name) {
 			int x;
+			int raised_broadcast = 0;
 			const char *b_uuid = NULL;
 			switch_core_session_t *b_session = NULL;
 
 			if (!switch_channel_test_flag(channel, CF_BRIDGED) || switch_channel_test_flag(channel, CF_HOLD_BLEG)) {
-				inner++;
 				hold_bleg = NULL;
 			}
 
 			if (!switch_channel_test_flag(channel, CF_BROADCAST)) {
 				switch_channel_set_flag(channel, CF_BROADCAST);
-				if (inner) {
-					inner--;
-				}
+				/* The outermost broadcast frame opens the generation here and
+				 * closes it below. Zero stays reserved for "no broadcast has
+				 * run", so a marker that is not a number never matches. */
+				raised_broadcast = 1;
+				switch_channel_inc_broadcast_generation(channel);
 			}
 
 			if (hold_bleg && switch_true(hold_bleg)) {
@@ -654,6 +655,41 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 					switch_channel_clear_flag(channel, CF_BREAK);
 				}
 
+				/* The bridge thread runs this loop and cannot see its peer from
+				 * inside it. A peer hangup landing before CF_BROADCAST is raised
+				 * above arms nothing, so check the peer here instead. The signal
+				 * bond, not get_partner(): get_partner() cannot tell "no partner"
+				 * from "partner is down", and a transfer clears the partner uuid
+				 * while CF_BRIDGED is still set. force_locate(), not locate():
+				 * locate() refuses a peer that is hanging up, and the record
+				 * needs that peer's answer state and cause. Raise the stop rather
+				 * than breaking out, so the app still runs and still fires
+				 * PLAYBACK_STOP. A CF_BREAK of 2 also ends the rest of a
+				 * playback_delimiter list. Must follow the CF_BREAK reset above,
+				 * which would otherwise wipe the break this raises. */
+				if (switch_channel_test_flag(channel, CF_BRIDGED)) {
+					char peer_uuid[SWITCH_UUID_FORMATTED_LENGTH + 1] = "";
+
+					if (switch_channel_get_variable_buf(channel, SWITCH_SIGNAL_BOND_VARIABLE, peer_uuid, sizeof(peer_uuid)) == SWITCH_STATUS_SUCCESS) {
+						switch_core_session_t *peer_session = switch_core_session_force_locate(peer_uuid);
+						switch_channel_t *peer_channel = peer_session ? switch_core_session_get_channel(peer_session) : NULL;
+
+						if (!peer_channel || switch_channel_down_nosig(peer_channel)) {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+											  "%s Stopping broadcast: bridge peer %s is gone, broadcast generation %u\n",
+											  switch_channel_get_name(channel), peer_uuid,
+											  switch_channel_get_broadcast_generation(channel));
+							switch_channel_set_broadcast_peer_hangup(channel, switch_channel_get_broadcast_generation(channel), peer_channel);
+							switch_channel_set_flag(channel, CF_STOP_BROADCAST);
+							switch_channel_set_flag_value(channel, CF_BREAK, 2);
+						}
+
+						if (peer_session) {
+							switch_core_session_rwunlock(peer_session);
+						}
+					}
+				}
+
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s Command Execute [depth=%d] %s(%s)\n",
 								  switch_channel_get_name(channel), switch_core_session_stack_count(session, 0), app_name, switch_str_nil(app_arg));
 				b4 = switch_micro_time_now();
@@ -669,7 +705,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 				switch_channel_set_variable_printf(channel, "total_loops", "%d", loops);
 
 				if (switch_core_session_execute_application_event(session, app_name, app_arg) != SWITCH_STATUS_SUCCESS) {
-					if (!inner || switch_channel_test_flag(channel, CF_STOP_BROADCAST)) switch_channel_clear_flag(channel, CF_BROADCAST);
+					if (raised_broadcast || switch_channel_test_flag(channel, CF_STOP_BROADCAST)) switch_channel_clear_flag(channel, CF_BROADCAST);
 					break;
 				}
 
@@ -692,13 +728,30 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 				}
 			}
 
-			if (!inner) {
+			/* Only the frame that raised the flag may drop it. A nested frame
+			 * must leave the flag set while the outer playback still runs, so
+			 * peer hangup writers can still stop that playback. */
+			if (raised_broadcast) {
 				switch_channel_clear_flag(channel, CF_BROADCAST);
 			}
 
 			if (switch_channel_test_flag(channel, CF_STOP_BROADCAST)) {
 				switch_channel_clear_flag(channel, CF_BROADCAST);
 				switch_channel_set_flag(channel, CF_BREAK);
+			}
+
+			/* Close this broadcast generation. The peer-hangup marker carries the
+			 * generation it was written for, so one left behind by a setter that
+			 * raced this cleanup no longer matches and is ignored, including by a
+			 * dialplan playback, which never reaches switch_ivr_parse_event().
+			 * Only the frame that raised CF_BROADCAST closes it, so a nested
+			 * priority broadcast and the playback it nests in share one
+			 * generation and both still report the same peer hangup.
+			 * Must stay below the CF_BROADCAST clears above: a setter writes the
+			 * marker only while it still sees CF_BROADCAST, so closing the
+			 * generation after the flag is down invalidates any such write. */
+			if (raised_broadcast) {
+				switch_channel_inc_broadcast_generation(channel);
 			}
 
 			switch_channel_audio_sync(channel);
@@ -1481,7 +1534,16 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_collect_digits_count(switch_core_sess
 
 		switch_ivr_parse_all_events(session);
 
-
+		/* A digit wait inside a broadcast, such as play_and_get_digits, ignores
+		 * the break. End it when a peer hangup stopped the broadcast and the leg
+		 * goes away with its bridge, or the leg waits out the timeout first. */
+		if (switch_channel_test_flag(channel, CF_STOP_BROADCAST) &&
+			switch_channel_get_broadcast_peer_hangup_cause(channel) != SWITCH_CAUSE_NONE) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+							  "%s Ending digit wait: a bridge peer hangup stopped the broadcast\n", switch_channel_get_name(channel));
+			status = SWITCH_STATUS_BREAK;
+			break;
+		}
 
 		if (eff_timeout) {
 			digit_elapsed = (uint32_t) ((switch_micro_time_now() - digit_started) / 1000);

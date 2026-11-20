@@ -1275,6 +1275,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_play_file_detailed(switch_core_sessio
 	const char *timer_name;
 	const char *prebuf;
 	const char *alt = NULL;
+	switch_call_cause_t peer_cause;
 	const char *sleep_val;
 	const char *play_delimiter_val;
 	char play_delimiter = 0;
@@ -1952,7 +1953,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_play_file_detailed(switch_core_sessio
 					switch_frame_t *read_frame;
 					switch_status_t tstatus;
 
-					while (switch_channel_ready(channel) && switch_channel_test_flag(channel, CF_HOLD)) {
+					/* A break ends the hold wait too, so the loop above can act on it */
+					while (switch_channel_ready(channel) && switch_channel_test_flag(channel, CF_HOLD) && !switch_channel_test_flag(channel, CF_BREAK)) {
 						switch_ivr_parse_all_messages(session);
 						switch_yield(10000);
 					}
@@ -2067,6 +2069,19 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_play_file_detailed(switch_core_sessio
 
 		if (switch_event_create(&event, SWITCH_EVENT_PLAYBACK_STOP) == SWITCH_STATUS_SUCCESS) {
 			switch_channel_event_set_data(channel, event);
+
+			/* This channel is still up, so event_set_data() found no cause.
+			 * Report the peer's, or the stop reads as a file that played to the
+			 * end. A break only: a file that reached its end reports done and
+			 * must not carry a cause. The marker is not cleared here: a priority
+			 * broadcast such as hold music runs nested inside this playback, and
+			 * both share one generation, so every playback the peer hangup cut
+			 * short reports it. */
+			if (status == SWITCH_STATUS_BREAK && !switch_event_get_header(event, "Hangup-Cause") &&
+				(peer_cause = switch_channel_get_broadcast_peer_hangup_cause(channel)) != SWITCH_CAUSE_NONE) {
+				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Hangup-Cause", switch_channel_cause2str(peer_cause));
+			}
+
 			if (!strncasecmp(file, "local_stream:", 13)) {
 				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Playback-File-Type", "local_stream");
 			}
@@ -2761,6 +2776,14 @@ SWITCH_DECLARE(switch_status_t) switch_play_and_get_digits(switch_core_session_t
 			break;
 		}
 
+		/* A peer hangup stopped this broadcast and the leg goes away with its
+		 * bridge: no bad input prompt, no other try and no failure transfer. */
+		if (switch_channel_test_flag(channel, CF_STOP_BROADCAST) &&
+			switch_channel_get_broadcast_peer_hangup_cause(channel) != SWITCH_CAUSE_NONE) {
+			memset(digit_buffer, 0, digit_buffer_length);
+			return SWITCH_STATUS_FALSE;
+		}
+
 		switch_ivr_play_file(session, NULL, bad_input_audio_file, NULL);
 		max_tries--;
 	}
@@ -2977,7 +3000,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_speak_text_handle(switch_core_session
 				switch_frame_t *read_frame;
 				switch_status_t tstatus = switch_core_session_read_frame(session, &read_frame, SWITCH_IO_FLAG_NONE, 0);
 
-				while (switch_channel_ready(channel) && switch_channel_test_flag(channel, CF_HOLD)) {
+				while (switch_channel_ready(channel) && switch_channel_test_flag(channel, CF_HOLD) && !switch_channel_test_flag(channel, CF_BREAK)) {
 					switch_ivr_parse_all_messages(session);
 					switch_yield(10000);
 				}
@@ -3029,7 +3052,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_speak_text_handle(switch_core_session
 			switch_frame_t *read_frame;
 			switch_status_t tstatus = switch_core_session_read_frame(session, &read_frame, SWITCH_IO_FLAG_NONE, 0);
 
-			while (switch_channel_ready(channel) && switch_channel_test_flag(channel, CF_HOLD)) {
+			while (switch_channel_ready(channel) && switch_channel_test_flag(channel, CF_HOLD) && !switch_channel_test_flag(channel, CF_BREAK)) {
 				switch_ivr_parse_all_messages(session);
 				switch_yield(10000);
 			}

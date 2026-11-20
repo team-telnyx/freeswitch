@@ -189,6 +189,8 @@ SWITCH_BEGIN_EXTERN_C
 #define SWITCH_CONTINUE_ON_FAILURE_VARIABLE "continue_on_fail"
 #define SWITCH_PLAYBACK_TERMINATORS_VARIABLE "playback_terminators"
 #define SWITCH_PLAYBACK_TERMINATOR_USED "playback_terminator_used"
+/* set where the core stops a playback because the other leg went away */
+#define SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE "playback_peer_hangup"
 #define SWITCH_CACHE_SPEECH_HANDLES_VARIABLE "cache_speech_handles"
 #define SWITCH_CACHE_SPEECH_HANDLES_OBJ_NAME "__cache_speech_handles_obj__"
 #define SWITCH_BYPASS_MEDIA_VARIABLE "bypass_media"

@@ -91,6 +91,37 @@ SWITCH_DECLARE(void) switch_channel_inc_transfer_generation(switch_channel_t *ch
 SWITCH_DECLARE(uint32_t) switch_channel_get_transfer_generation(switch_channel_t *channel);
 
 /*!
+  \brief Open or close a broadcast generation on a channel
+  \param channel channel to update
+*/
+SWITCH_DECLARE(void) switch_channel_inc_broadcast_generation(switch_channel_t *channel);
+
+/*!
+  \brief Read a channel's broadcast generation; compare with != only, it wraps
+  \param channel channel to read
+  \return the current generation
+*/
+SWITCH_DECLARE(uint32_t) switch_channel_get_broadcast_generation(switch_channel_t *channel);
+
+/*!
+  \brief Record that the bridge peer of a running broadcast went away
+  \param channel the channel that runs the broadcast
+  \param generation its broadcast generation, read before the CF_BROADCAST check
+  \param peer_channel the peer that went away, or NULL when it no longer exists;
+         NULL keeps a record already made for this generation
+  \note Ignored when the generation is no longer current
+*/
+SWITCH_DECLARE(void) switch_channel_set_broadcast_peer_hangup(switch_channel_t *channel, uint32_t generation, switch_channel_t *peer_channel);
+
+/*!
+  \brief Hangup cause to report for the current broadcast of a channel
+  \param channel the channel that runs the broadcast
+  \return the peer's cause when a peer hangup stopped the broadcast and this leg goes
+          away with its bridge, else SWITCH_CAUSE_NONE
+*/
+SWITCH_DECLARE(switch_call_cause_t) switch_channel_get_broadcast_peer_hangup_cause(switch_channel_t *channel);
+
+/*!
   \brief Test whether another thread set the channel's state after its latest transfer
   \param channel channel to test
   \return SWITCH_TRUE when a later command, not the session thread, chose the current state

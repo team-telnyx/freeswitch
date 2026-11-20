@@ -2424,6 +2424,10 @@ SWITCH_DECLARE(switch_core_session_t *) switch_core_session_request_xml(switch_e
 				free(p);
 			}
 		}
+
+		/* The broadcast generation starts again on this session, so a peer
+		 * hangup marker copied from the old one could match a new broadcast. */
+		switch_channel_set_variable(channel, SWITCH_PLAYBACK_PEER_HANGUP_VARIABLE, NULL);
 	}
 
 	if ((callflow = switch_xml_child(xml, "callflow"))) {
@@ -3172,7 +3176,19 @@ static switch_status_t switch_core_session_exec_impl(switch_core_session_t *sess
 
 	if (switch_event_create(&event, SWITCH_EVENT_CHANNEL_EXECUTE_COMPLETE) == SWITCH_STATUS_SUCCESS) {
 		const char *resp = switch_channel_get_variable(session->channel, SWITCH_CURRENT_APPLICATION_RESPONSE_VARIABLE);
+		switch_call_cause_t peer_cause;
+
 		switch_channel_event_set_data(session->channel, event);
+
+		/* A broadcast application, such as speak or play_and_get_digits, that a
+		 * peer hangup stopped on a leg that goes away with its bridge: the
+		 * channel is still up, so report the peer's cause as PLAYBACK_STOP does.
+		 * clear_break is false only for a broadcast. */
+		if (!clear_break && !switch_event_get_header(event, "Hangup-Cause") &&
+			(peer_cause = switch_channel_get_broadcast_peer_hangup_cause(session->channel)) != SWITCH_CAUSE_NONE) {
+			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Hangup-Cause", switch_channel_cause2str(peer_cause));
+		}
+
 		switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Application", application_interface->interface_name);
 		switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Application-Data", expanded);
 		switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Application-Response", resp ? resp : "_none_");

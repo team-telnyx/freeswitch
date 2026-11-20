@@ -964,6 +964,43 @@ SWITCH_DECLARE(void) switch_core_session_hangup_state(switch_core_session_t *ses
 
 	switch_channel_stop_broadcast(session->channel);
 
+	/* A bridged peer may be blocked in a broadcast playback loop and cannot
+	 * detect this hangup on its own. Stop its broadcast so it can exit. */
+	{
+		switch_core_session_t *partner_session = NULL;
+
+		if (switch_core_session_get_partner(session, &partner_session) == SWITCH_STATUS_SUCCESS) {
+			switch_channel_t *partner_channel = switch_core_session_get_channel(partner_session);
+			char partner_bond[SWITCH_UUID_FORMATTED_LENGTH + 1] = "";
+			const char *bond_back = switch_channel_get_partner_uuid_copy(partner_channel, partner_bond, sizeof(partner_bond));
+			/* Read before the flag check, never after: read afterwards it could
+			 * already be the next broadcast's generation. */
+			uint32_t partner_gen = switch_channel_get_broadcast_generation(partner_channel);
+
+			/* The bond has to name this leg back. A leg keeps its bond after the
+			 * bridge ends, and a later bridge of the partner rewrites only the
+			 * partner's own bond, so a one-way bond names a partner that is now
+			 * in another call, and its playback belongs to that call. A bridge
+			 * originator runs a queued broadcast before it raises CF_BRIDGED,
+			 * and that broadcast holds up the bridge set-up, so it counts too. */
+			if (bond_back && !strcmp(bond_back, switch_core_session_get_uuid(session)) &&
+				(switch_channel_test_flag(partner_channel, CF_BRIDGED) || switch_channel_test_flag(partner_channel, CF_BRIDGE_ORIGINATOR)) &&
+				switch_channel_test_flag(partner_channel, CF_BROADCAST)) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+								  "%s Stopping broadcast on bridge partner %s due to hangup, broadcast generation %u, answered %d\n",
+								  switch_channel_get_name(session->channel), switch_channel_get_name(partner_channel), partner_gen,
+								  switch_channel_test_flag(session->channel, CF_ANSWERED) ? 1 : 0);
+				/* The partner's bridge exit reads this leg's answer state and cause. */
+				switch_channel_set_broadcast_peer_hangup(partner_channel, partner_gen, session->channel);
+				/* A CF_BREAK of 2 also ends the rest of a playback_delimiter list. */
+				switch_channel_set_flag(partner_channel, CF_STOP_BROADCAST);
+				switch_channel_set_flag_value(partner_channel, CF_BREAK, 2);
+			}
+
+			switch_core_session_rwunlock(partner_session);
+		}
+	}
+
 	switch_channel_set_variable(session->channel, "hangup_cause", switch_channel_cause2str(cause));
 	switch_channel_set_variable_printf(session->channel, "hangup_cause_q850", "%d", cause_q850);
 	//switch_channel_presence(session->channel, "unknown", switch_channel_cause2str(cause), NULL);
