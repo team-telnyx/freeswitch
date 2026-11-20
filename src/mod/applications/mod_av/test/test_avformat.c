@@ -29,8 +29,112 @@
  */
 
 #include <test/switch_test.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <unistd.h>
 
 #define SAMPLES 160
+
+/* A peer whose TCP connect never completes, made on loopback so that nothing on the
+ * network path can answer for it.  The listener's accept queue is filled and never
+ * drained, and Linux drops a SYN aimed at a full accept queue, so a connect to it
+ * stalls until the client gives up.
+ *
+ * An address like 192.0.2.1 (TEST-NET-1) does not do this reliably: whether a
+ * connect to it stalls or fails at once with "No route to host" depends on the
+ * routers between the test and the address, and environments differ. */
+#define STALL_MAX_FILLERS 16
+
+typedef struct {
+	int listener;
+	int fillers[STALL_MAX_FILLERS];
+	int nfillers;
+	int port;
+} stalled_peer_t;
+
+static void stalled_peer_close(stalled_peer_t *sp)
+{
+	int i;
+
+	for (i = 0; i < sp->nfillers; i++) {
+		close(sp->fillers[i]);
+	}
+
+	sp->nfillers = 0;
+
+	if (sp->listener >= 0) {
+		close(sp->listener);
+		sp->listener = -1;
+	}
+}
+
+/* Returns 1 once a connect to sp->port is known to stall.  Fillers are added until
+ * one of them has itself stayed unconnected for 200ms, which shows the next connect
+ * (the one under test) will stall too, whatever the kernel's backlog arithmetic. */
+static int stalled_peer_open(stalled_peer_t *sp)
+{
+	struct sockaddr_in addr;
+	socklen_t alen = sizeof(addr);
+
+	memset(sp, 0, sizeof(*sp));
+	sp->listener = socket(AF_INET, SOCK_STREAM, 0);
+
+	if (sp->listener < 0) {
+		return 0;
+	}
+
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	addr.sin_port = 0;
+
+	if (bind(sp->listener, (struct sockaddr *) &addr, sizeof(addr)) || listen(sp->listener, 0) ||
+		getsockname(sp->listener, (struct sockaddr *) &addr, &alen)) {
+		stalled_peer_close(sp);
+		return 0;
+	}
+
+	sp->port = ntohs(addr.sin_port);
+
+	while (sp->nfillers < STALL_MAX_FILLERS) {
+		struct pollfd pfd = { 0 };
+		int fd = socket(AF_INET, SOCK_STREAM, 0);
+
+		if (fd < 0) {
+			break;
+		}
+
+		fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+		sp->fillers[sp->nfillers++] = fd;
+
+		if (!connect(fd, (struct sockaddr *) &addr, sizeof(addr))) {
+			continue;
+		}
+
+		if (errno != EINPROGRESS) {
+			break;
+		}
+
+		pfd.fd = fd;
+		pfd.events = POLLOUT;
+
+		if (poll(&pfd, 1, 200) == 0) {
+			return 1;
+		}
+	}
+
+	stalled_peer_close(sp);
+	return 0;
+}
+
+static void stalled_peer_url(stalled_peer_t *sp, const char *prefix, char *buf, size_t len)
+{
+	switch_snprintf(buf, len, "%srtmp://127.0.0.1:%d/live/stalled", prefix, sp->port);
+}
 
 FST_CORE_BEGIN("conf")
 {
@@ -250,23 +354,27 @@ FST_CORE_BEGIN("conf")
 		}
 		FST_TEST_END()
 
-		/* 192.0.2.0/24 is TEST-NET-1 (RFC 5737): guaranteed not routable, so the
-		 * connect either stalls or is refused, never succeeds.  Without a connect
-		 * budget a stalled connect runs to ffmpeg's own 5s tcp default; with one it
-		 * must give up inside the configured window. */
+		/* The peer's connect stalls (see stalled_peer_open).  Without a connect budget
+		 * it runs to ffmpeg's own 5s tcp default; with one it must give up inside the
+		 * configured window. */
 		FST_TEST_BEGIN(avformat_network_connect_timeout_bounds_open)
 		{
 			switch_file_handle_t fh = { 0 };
 			uint32_t flags = SWITCH_FILE_FLAG_WRITE | SWITCH_FILE_DATA_SHORT;
 			switch_status_t status;
 			switch_time_t start, elapsed_ms;
+			stalled_peer_t peer;
+			char url[256];
+
+			fst_requires(stalled_peer_open(&peer));
 
 			start = switch_mono_micro_time_now();
-			status = switch_core_file_open(&fh, "rtmp://192.0.2.1:1935/live/unreachable", 1, 8000, flags, fst_pool);
+			stalled_peer_url(&peer, "", url, sizeof(url));
+			status = switch_core_file_open(&fh, url, 1, 8000, flags, fst_pool);
 			elapsed_ms = (switch_mono_micro_time_now() - start) / 1000;
 
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-							  "unreachable open returned %d after %" SWITCH_INT64_T_FMT "ms\n", status, (int64_t) elapsed_ms);
+							  "stalled open returned %d after %" SWITCH_INT64_T_FMT "ms\n", status, (int64_t) elapsed_ms);
 
 			/* It must fail, and must not have waited out ffmpeg's default. */
 			fst_check(status != SWITCH_STATUS_SUCCESS);
@@ -275,6 +383,8 @@ FST_CORE_BEGIN("conf")
 			if (status == SWITCH_STATUS_SUCCESS) {
 				switch_core_file_close(&fh);
 			}
+
+			stalled_peer_close(&peer);
 		}
 		FST_TEST_END()
 
@@ -331,10 +441,14 @@ FST_CORE_BEGIN("conf")
 			uint32_t flags = SWITCH_FILE_FLAG_WRITE | SWITCH_FILE_DATA_SHORT;
 			switch_status_t status;
 			switch_time_t start, elapsed_ms;
+			stalled_peer_t peer;
+			char url[256];
+
+			fst_requires(stalled_peer_open(&peer));
 
 			start = switch_mono_micro_time_now();
-			status = switch_core_file_open(&fh, "{network_connect_timeout=300}rtmp://192.0.2.1:1935/live/unreachable",
-										   1, 8000, flags, fst_pool);
+			stalled_peer_url(&peer, "{network_connect_timeout=300}", url, sizeof(url));
+			status = switch_core_file_open(&fh, url, 1, 8000, flags, fst_pool);
 			elapsed_ms = (switch_mono_micro_time_now() - start) / 1000;
 
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
@@ -349,6 +463,8 @@ FST_CORE_BEGIN("conf")
 			if (status == SWITCH_STATUS_SUCCESS) {
 				switch_core_file_close(&fh);
 			}
+
+			stalled_peer_close(&peer);
 		}
 		FST_TEST_END()
 
@@ -362,10 +478,14 @@ FST_CORE_BEGIN("conf")
 			uint32_t flags = SWITCH_FILE_FLAG_WRITE | SWITCH_FILE_DATA_SHORT;
 			switch_status_t status;
 			switch_time_t start, elapsed_ms;
+			stalled_peer_t peer;
+			char url[256];
+
+			fst_requires(stalled_peer_open(&peer));
 
 			start = switch_mono_micro_time_now();
-			status = switch_core_file_open(&fh, "{network_resiliency=false}rtmp://192.0.2.1:1935/live/unreachable",
-										   1, 8000, flags, fst_pool);
+			stalled_peer_url(&peer, "{network_resiliency=false}", url, sizeof(url));
+			status = switch_core_file_open(&fh, url, 1, 8000, flags, fst_pool);
 			elapsed_ms = (switch_mono_micro_time_now() - start) / 1000;
 
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
@@ -378,6 +498,8 @@ FST_CORE_BEGIN("conf")
 			if (status == SWITCH_STATUS_SUCCESS) {
 				switch_core_file_close(&fh);
 			}
+
+			stalled_peer_close(&peer);
 		}
 		FST_TEST_END()
 

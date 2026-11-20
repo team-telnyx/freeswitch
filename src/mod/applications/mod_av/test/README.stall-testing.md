@@ -7,8 +7,9 @@ which for a recording is the session thread, so the call lost its media for as
 long as the recorder took to answer: dead air, and a channel that would not hang
 up.
 
-`test_avformat.c` covers the deterministic half of this (an unreachable address,
-no server needed). This describes the half that needs a live call.
+`test_avformat.c` covers the connect half of this: a loopback peer whose TCP
+connect never completes, because its accept queue is full. This describes the
+half that needs a live call.
 
 ## Settings
 
