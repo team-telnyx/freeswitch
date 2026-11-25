@@ -8,6 +8,8 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "vp9/common/vp9_thread_common.h"
+#include "vp9/encoder/vp9_bitstream.h"
 #include "vp9/encoder/vp9_encodeframe.h"
 #include "vp9/encoder/vp9_encoder.h"
 #include "vp9/encoder/vp9_ethread.h"
@@ -15,6 +17,7 @@
 #include "vp9/encoder/vp9_multi_thread.h"
 #include "vp9/encoder/vp9_temporal_filter.h"
 #include "vpx_dsp/vpx_dsp_common.h"
+#include "vpx_util/vpx_pthread.h"
 
 static void accumulate_rd_opt(ThreadData *td, ThreadData *td_t) {
   int i, j, k, l, m, n;
@@ -53,7 +56,7 @@ static int enc_worker_hook(void *arg1, void *unused) {
     vp9_encode_tile(cpi, thread_data->td, tile_row, tile_col);
   }
 
-  return 0;
+  return 1;
 }
 
 static int get_max_tile_cols(VP9_COMP *cpi) {
@@ -79,60 +82,60 @@ static void create_enc_workers(VP9_COMP *cpi, int num_workers) {
   VP9_COMMON *const cm = &cpi->common;
   const VPxWorkerInterface *const winterface = vpx_get_worker_interface();
   int i;
+  // While using SVC, we need to allocate threads according to the highest
+  // resolution. When row based multithreading is enabled, it is OK to
+  // allocate more threads than the number of max tile columns.
+  if (cpi->use_svc && !cpi->row_mt) {
+    int max_tile_cols = get_max_tile_cols(cpi);
+    num_workers = VPXMIN(cpi->oxcf.max_threads, max_tile_cols);
+  }
+  assert(num_workers > 0);
+  if (num_workers == cpi->num_workers) return;
+  vp9_loop_filter_dealloc(&cpi->lf_row_sync);
+  vp9_bitstream_encode_tiles_buffer_dealloc(cpi);
+  vp9_encode_free_mt_data(cpi);
 
-  // Only run once to create threads and allocate thread data.
-  if (cpi->num_workers == 0) {
-    int allocated_workers = num_workers;
+  CHECK_MEM_ERROR(&cm->error, cpi->workers,
+                  vpx_malloc(num_workers * sizeof(*cpi->workers)));
 
-    // While using SVC, we need to allocate threads according to the highest
-    // resolution. When row based multithreading is enabled, it is OK to
-    // allocate more threads than the number of max tile columns.
-    if (cpi->use_svc && !cpi->row_mt) {
-      int max_tile_cols = get_max_tile_cols(cpi);
-      allocated_workers = VPXMIN(cpi->oxcf.max_threads, max_tile_cols);
+  CHECK_MEM_ERROR(&cm->error, cpi->tile_thr_data,
+                  vpx_calloc(num_workers, sizeof(*cpi->tile_thr_data)));
+
+  for (i = 0; i < num_workers; i++) {
+    VPxWorker *const worker = &cpi->workers[i];
+    EncWorkerData *thread_data = &cpi->tile_thr_data[i];
+
+    ++cpi->num_workers;
+    winterface->init(worker);
+    worker->thread_name = "vpx enc worker";
+
+    if (i < num_workers - 1) {
+      thread_data->cpi = cpi;
+
+      // Allocate thread data.
+      CHECK_MEM_ERROR(&cm->error, thread_data->td,
+                      vpx_memalign(32, sizeof(*thread_data->td)));
+      vp9_zero(*thread_data->td);
+
+      // Set up pc_tree.
+      thread_data->td->leaf_tree = NULL;
+      thread_data->td->pc_tree = NULL;
+      vp9_setup_pc_tree(cm, thread_data->td);
+
+      // Allocate frame counters in thread data.
+      CHECK_MEM_ERROR(&cm->error, thread_data->td->counts,
+                      vpx_calloc(1, sizeof(*thread_data->td->counts)));
+
+      // Create threads
+      if (!winterface->reset(worker))
+        vpx_internal_error(&cm->error, VPX_CODEC_ERROR,
+                           "Tile encoder thread creation failed");
+    } else {
+      // Main thread acts as a worker and uses the thread data in cpi.
+      thread_data->cpi = cpi;
+      thread_data->td = &cpi->td;
     }
-
-    CHECK_MEM_ERROR(cm, cpi->workers,
-                    vpx_malloc(allocated_workers * sizeof(*cpi->workers)));
-
-    CHECK_MEM_ERROR(cm, cpi->tile_thr_data,
-                    vpx_calloc(allocated_workers, sizeof(*cpi->tile_thr_data)));
-
-    for (i = 0; i < allocated_workers; i++) {
-      VPxWorker *const worker = &cpi->workers[i];
-      EncWorkerData *thread_data = &cpi->tile_thr_data[i];
-
-      ++cpi->num_workers;
-      winterface->init(worker);
-
-      if (i < allocated_workers - 1) {
-        thread_data->cpi = cpi;
-
-        // Allocate thread data.
-        CHECK_MEM_ERROR(cm, thread_data->td,
-                        vpx_memalign(32, sizeof(*thread_data->td)));
-        vp9_zero(*thread_data->td);
-
-        // Set up pc_tree.
-        thread_data->td->leaf_tree = NULL;
-        thread_data->td->pc_tree = NULL;
-        vp9_setup_pc_tree(cm, thread_data->td);
-
-        // Allocate frame counters in thread data.
-        CHECK_MEM_ERROR(cm, thread_data->td->counts,
-                        vpx_calloc(1, sizeof(*thread_data->td->counts)));
-
-        // Create threads
-        if (!winterface->reset(worker))
-          vpx_internal_error(&cm->error, VPX_CODEC_ERROR,
-                             "Tile encoder thread creation failed");
-      } else {
-        // Main thread acts as a worker and uses the thread data in cpi.
-        thread_data->cpi = cpi;
-        thread_data->td = &cpi->td;
-      }
-      winterface->sync(worker);
-    }
+    winterface->sync(worker);
   }
 }
 
@@ -169,6 +172,29 @@ static void launch_enc_workers(VP9_COMP *cpi, VPxWorkerHook hook, void *data2,
   }
 }
 
+void vp9_encode_free_mt_data(struct VP9_COMP *cpi) {
+  int t;
+  for (t = 0; t < cpi->num_workers; ++t) {
+    VPxWorker *const worker = &cpi->workers[t];
+    EncWorkerData *const thread_data = &cpi->tile_thr_data[t];
+
+    // Deallocate allocated threads.
+    vpx_get_worker_interface()->end(worker);
+
+    // Deallocate allocated thread data.
+    if (t < cpi->num_workers - 1) {
+      vpx_free(thread_data->td->counts);
+      vp9_free_pc_tree(thread_data->td);
+      vpx_free(thread_data->td);
+    }
+  }
+  vpx_free(cpi->tile_thr_data);
+  cpi->tile_thr_data = NULL;
+  vpx_free(cpi->workers);
+  cpi->workers = NULL;
+  cpi->num_workers = 0;
+}
+
 void vp9_encode_tiles_mt(VP9_COMP *cpi) {
   VP9_COMMON *const cm = &cpi->common;
   const int tile_cols = 1 << cm->log2_tile_cols;
@@ -180,8 +206,7 @@ void vp9_encode_tiles_mt(VP9_COMP *cpi) {
   create_enc_workers(cpi, num_workers);
 
   for (i = 0; i < num_workers; i++) {
-    EncWorkerData *thread_data;
-    thread_data = &cpi->tile_thr_data[i];
+    EncWorkerData *const thread_data = &cpi->tile_thr_data[i];
 
     // Before encoding a frame, copy the thread data from cpi.
     if (thread_data->td != &cpi->td) {
@@ -243,6 +268,7 @@ static void accumulate_fp_tile_stat(TileDataEnc *tile_data,
   tile_data->fp_data.intra_count_high += tile_data_t->fp_data.intra_count_high;
   tile_data->fp_data.intra_skip_count += tile_data_t->fp_data.intra_skip_count;
   tile_data->fp_data.mvcount += tile_data_t->fp_data.mvcount;
+  tile_data->fp_data.new_mv_count += tile_data_t->fp_data.new_mv_count;
   tile_data->fp_data.sum_mvr += tile_data_t->fp_data.sum_mvr;
   tile_data->fp_data.sum_mvr_abs += tile_data_t->fp_data.sum_mvr_abs;
   tile_data->fp_data.sum_mvc += tile_data_t->fp_data.sum_mvc;
@@ -252,13 +278,13 @@ static void accumulate_fp_tile_stat(TileDataEnc *tile_data,
   tile_data->fp_data.sum_in_vectors += tile_data_t->fp_data.sum_in_vectors;
   tile_data->fp_data.intra_smooth_count +=
       tile_data_t->fp_data.intra_smooth_count;
+  const int min_start_row = VPXMIN(tile_data->fp_data.image_data_start_row,
+                                   tile_data_t->fp_data.image_data_start_row);
   tile_data->fp_data.image_data_start_row =
-      VPXMIN(tile_data->fp_data.image_data_start_row,
-             tile_data_t->fp_data.image_data_start_row) == INVALID_ROW
+      (min_start_row == INVALID_ROW)
           ? VPXMAX(tile_data->fp_data.image_data_start_row,
                    tile_data_t->fp_data.image_data_start_row)
-          : VPXMIN(tile_data->fp_data.image_data_start_row,
-                   tile_data_t->fp_data.image_data_start_row);
+          : min_start_row;
 }
 #endif  // !CONFIG_REALTIME_ONLY
 
@@ -270,7 +296,7 @@ void vp9_row_mt_sync_mem_alloc(VP9RowMTSync *row_mt_sync, VP9_COMMON *cm,
   {
     int i;
 
-    CHECK_MEM_ERROR(cm, row_mt_sync->mutex,
+    CHECK_MEM_ERROR(&cm->error, row_mt_sync->mutex,
                     vpx_malloc(sizeof(*row_mt_sync->mutex) * rows));
     if (row_mt_sync->mutex) {
       for (i = 0; i < rows; ++i) {
@@ -278,7 +304,7 @@ void vp9_row_mt_sync_mem_alloc(VP9RowMTSync *row_mt_sync, VP9_COMMON *cm,
       }
     }
 
-    CHECK_MEM_ERROR(cm, row_mt_sync->cond,
+    CHECK_MEM_ERROR(&cm->error, row_mt_sync->cond,
                     vpx_malloc(sizeof(*row_mt_sync->cond) * rows));
     if (row_mt_sync->cond) {
       for (i = 0; i < rows; ++i) {
@@ -288,7 +314,7 @@ void vp9_row_mt_sync_mem_alloc(VP9RowMTSync *row_mt_sync, VP9_COMMON *cm,
   }
 #endif  // CONFIG_MULTITHREAD
 
-  CHECK_MEM_ERROR(cm, row_mt_sync->cur_col,
+  CHECK_MEM_ERROR(&cm->error, row_mt_sync->cur_col,
                   vpx_malloc(sizeof(*row_mt_sync->cur_col) * rows));
 
   // Set up nsync.
@@ -431,7 +457,7 @@ static int first_pass_worker_hook(void *arg1, void *arg2) {
                                         this_tile, &best_ref_mv, mb_row);
     }
   }
-  return 0;
+  return 1;
 }
 
 void vp9_encode_fp_row_mt(VP9_COMP *cpi) {
@@ -518,7 +544,7 @@ static int temporal_filter_worker_hook(void *arg1, void *arg2) {
                                         mb_col_start, mb_col_end);
     }
   }
-  return 0;
+  return 1;
 }
 
 void vp9_temporal_filter_row_mt(VP9_COMP *cpi) {
@@ -591,7 +617,7 @@ static int enc_row_mt_worker_hook(void *arg1, void *arg2) {
       vp9_encode_sb_row(cpi, thread_data->td, tile_row, tile_col, mi_row);
     }
   }
-  return 0;
+  return 1;
 }
 
 void vp9_encode_tiles_row_mt(VP9_COMP *cpi) {

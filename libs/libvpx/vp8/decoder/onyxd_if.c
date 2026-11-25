@@ -37,7 +37,7 @@
 #if CONFIG_ERROR_CONCEALMENT
 #include "error_concealment.h"
 #endif
-#if ARCH_ARM
+#if VPX_ARCH_ARM
 #include "vpx_ports/arm.h"
 #endif
 
@@ -302,12 +302,9 @@ static int check_fragments_for_errors(VP8D_COMP *pbi) {
   return 1;
 }
 
-int vp8dx_receive_compressed_data(VP8D_COMP *pbi, size_t size,
-                                  const uint8_t *source, int64_t time_stamp) {
+int vp8dx_receive_compressed_data(VP8D_COMP *pbi) {
   VP8_COMMON *cm = &pbi->common;
   int retcode = -1;
-  (void)size;
-  (void)source;
 
   pbi->common.error.error_code = VPX_CODEC_OK;
 
@@ -371,14 +368,12 @@ int vp8dx_receive_compressed_data(VP8D_COMP *pbi, size_t size,
 #endif
 
   pbi->ready_for_new_data = 0;
-  pbi->last_time_stamp = time_stamp;
 
 decode_exit:
   vpx_clear_system_state();
   return retcode;
 }
 int vp8dx_get_raw_frame(VP8D_COMP *pbi, YV12_BUFFER_CONFIG *sd,
-                        int64_t *time_stamp, int64_t *time_end_stamp,
                         vp8_ppflags_t *flags) {
   int ret = -1;
 
@@ -388,8 +383,6 @@ int vp8dx_get_raw_frame(VP8D_COMP *pbi, YV12_BUFFER_CONFIG *sd,
   if (pbi->common.show_frame == 0) return ret;
 
   pbi->ready_for_new_data = 1;
-  *time_stamp = pbi->last_time_stamp;
-  *time_end_stamp = 0;
 
 #if CONFIG_POSTPROC
   ret = vp8_post_proc_frame(&pbi->common, sd, flags);
@@ -435,6 +428,7 @@ int vp8_create_decoder_instances(struct frame_buffers *fb, VP8D_CONFIG *oxcf) {
 
 #if CONFIG_MULTITHREAD
   if (setjmp(fb->pbi[0]->common.error.jmp)) {
+    fb->pbi[0]->common.error.setjmp = 0;
     vp8_remove_decoder_instances(fb);
     vp8_zero(fb->pbi);
     vpx_clear_system_state();
@@ -459,6 +453,7 @@ int vp8_remove_decoder_instances(struct frame_buffers *fb) {
 
   /* decoder instance for single thread mode */
   remove_decompressor(pbi);
+  fb->pbi[0] = NULL;
   return VPX_CODEC_OK;
 }
 

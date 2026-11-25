@@ -31,9 +31,6 @@
  */
 
 #include <switch.h>
-#ifdef _MSC_VER
-#define ssize_t int
-#endif
 #include <ldns/ldns.h>
 
 #define ENUM_MAXNAMESERVERS	10	/* max nameservers that will be used */
@@ -365,7 +362,8 @@ static void parse_naptr(const ldns_rr *naptr, const char *number, enum_record_t 
 
 	if (service && regex && replace) {
 		switch_regex_t *re = NULL, *re2 = NULL;
-		int proceed = 0, ovector[30];
+		switch_regex_match_t *match_data = NULL, *match_data2 = NULL;
+		int proceed = 0;
 		char *substituted = NULL;
 		char *substituted_2 = NULL;
 		char *orig_uri;
@@ -374,17 +372,18 @@ static void parse_naptr(const ldns_rr *naptr, const char *number, enum_record_t 
 		int supported = 0;
 		uint32_t len = 0;
 
-		if ((proceed = switch_regex_perform(number, regex, &re, ovector, sizeof(ovector) / sizeof(ovector[0])))) {
+		if ((proceed = switch_regex_perform(number, regex, &re, &match_data))) {
 			if (strchr(regex, '(')) {
 				len = (uint32_t) (strlen(number) + strlen(replace) + 10) * proceed;
 				if (!(substituted = malloc(len))) {
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Memory Error!\n");
+					switch_regex_match_safe_free(match_data);
 					switch_regex_safe_free(re);
 					goto end;
 				}
 				memset(substituted, 0, len);
 
-				switch_perform_substitution(re, proceed, replace, number, substituted, len, ovector);
+				switch_perform_substitution(match_data, replace, substituted, len);
 				orig_uri = substituted;
 			} else {
 				orig_uri = replace;
@@ -398,7 +397,7 @@ static void parse_naptr(const ldns_rr *naptr, const char *number, enum_record_t 
 					continue;
 				}
 
-				if ((proceed = switch_regex_perform(uri, route->regex, &re2, ovector, sizeof(ovector) / sizeof(ovector[0])))) {
+				if ((proceed = switch_regex_perform(uri, route->regex, &re2, &match_data2))) {
 					switch_event_t *event = NULL;
 
 					if (strchr(route->regex, '(')) {
@@ -406,6 +405,8 @@ static void parse_naptr(const ldns_rr *naptr, const char *number, enum_record_t 
 						if (!(substituted_2 = malloc(len))) {
 							switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Memory Error!\n");
 							switch_safe_free(substituted);
+							switch_regex_match_safe_free(match_data);
+							switch_regex_match_safe_free(match_data2);
 							switch_regex_safe_free(re);
 							switch_regex_safe_free(re2);
 							switch_mutex_unlock(MUTEX);
@@ -413,7 +414,7 @@ static void parse_naptr(const ldns_rr *naptr, const char *number, enum_record_t 
 						}
 						memset(substituted_2, 0, len);
 
-						switch_perform_substitution(re2, proceed, route->replace, uri, substituted_2, len, ovector);
+						switch_perform_substitution(match_data2, route->replace, substituted_2, len);
 						uri = substituted_2;
 					} else {
 						uri = route->replace;
@@ -434,6 +435,7 @@ static void parse_naptr(const ldns_rr *naptr, const char *number, enum_record_t 
 				}
 				switch_safe_free(uri_expanded);
 				switch_safe_free(substituted_2);
+				switch_regex_match_safe_free(match_data2);
 				switch_regex_safe_free(re2);
 			}
 			switch_mutex_unlock(MUTEX);
@@ -443,6 +445,7 @@ static void parse_naptr(const ldns_rr *naptr, const char *number, enum_record_t 
 			}
 
 			switch_safe_free(substituted);
+			switch_regex_match_safe_free(match_data);
 			switch_regex_safe_free(re);
 		}
 	}
@@ -671,6 +674,57 @@ SWITCH_STANDARD_DIALPLAN(enum_dialplan_hunt)
 	return extension;
 }
 
+/* Pack the supported routes into buf as a dial string, NUL-terminated. Routes of equal
+   NAPTR order and preference are joined with ',', the rest with '|'. Every element of
+   that string is dialed as a peer, so routes go in whole; one that does not fit is
+   skipped and the others are packed. Returns how many were packed. */
+static switch_size_t pack_routes(char *buf, switch_size_t buflen, enum_record_t *results)
+{
+	enum_record_t *rp;
+	char *bp = buf;
+	switch_size_t bl = buflen;
+	switch_size_t packed = 0;
+	int last_order = 0, last_pref = 0;
+
+	if (!buflen) {
+		return 0;
+	}
+
+	*buf = '\0';
+
+	for (rp = results; rp; rp = rp->next) {
+		const char *sep = "";
+		int written;
+
+		/* An empty route would contribute a separator and no peer. */
+		if (!rp->supported || zstr(rp->route)) {
+			continue;
+		}
+
+		/* Compared with the last route packed rather than the previous list entry,
+		   so one left out for space does not split two alternatives. */
+		if (packed) {
+			sep = (rp->order == last_order && rp->preference == last_pref) ? "," : "|";
+		}
+
+		if (strlen(rp->route) + strlen(sep) + 1 > bl) {
+			continue;
+		}
+
+		/* switch_snprintf() returns the bytes it wrote, clamped to bl - 1, where
+		   C99 snprintf would return the untruncated length. The check above leaves
+		   room for both parts and the terminator, so nothing is clipped. */
+		written = switch_snprintf(bp, bl, "%s%s", sep, rp->route);
+		bp += written;
+		bl -= written;
+		last_order = rp->order;
+		last_pref = rp->preference;
+		packed++;
+	}
+
+	return packed;
+}
+
 SWITCH_STANDARD_APP(enum_app_function)
 {
 	char *argv[4] = { 0 };
@@ -679,12 +733,8 @@ SWITCH_STANDARD_APP(enum_app_function)
 	enum_record_t *results, *rp;
 	char rbuf[1024] = "";
 	char vbuf[1024] = "";
-	char *rbp = rbuf;
-	switch_size_t l = 0, rbl = sizeof(rbuf);
 	uint32_t cnt = 1;
 	switch_channel_t *channel = switch_core_session_get_channel(session);
-	int last_order = -1, last_pref = -2;
-	char *last_delim = "|";
 
 	if (!(mydata = switch_core_session_strdup(session, data))) {
 		return;
@@ -695,6 +745,7 @@ SWITCH_STANDARD_APP(enum_app_function)
 		root = argv[1];
 		if (enum_lookup(root, dest, &results, channel, session) == SWITCH_STATUS_SUCCESS) {
 			switch_event_t *vars;
+			switch_size_t packed;
 
 			if (switch_channel_get_variables(channel, &vars) == SWITCH_STATUS_SUCCESS) {
 				switch_event_header_t *hi;
@@ -707,28 +758,32 @@ SWITCH_STANDARD_APP(enum_app_function)
 				switch_event_destroy(&vars);
 			}
 
+			/* Same test as pack_routes() applies, so enum_route_count and the packed
+			   count describe the same set of routes. An empty value would delete the
+			   variable rather than set it, leaving a gap in the numbering. */
 			for (rp = results; rp; rp = rp->next) {
-				if (!rp->supported) {
+				if (!rp->supported || zstr(rp->route)) {
 					continue;
 				}
-				switch_snprintf(vbuf, sizeof(vbuf), "enum_route_%d", cnt++);
+				switch_snprintf(vbuf, sizeof(vbuf), "enum_route_%u", cnt++);
 				switch_channel_set_variable_var_check(channel, vbuf, rp->route, SWITCH_FALSE);
-				if (rp->preference == last_pref && rp->order == last_order) {
-					*last_delim = ',';
-				}
-				switch_snprintf(rbp, rbl, "%s|", rp->route);
-				last_delim = end_of_p(rbp);
-				last_order = rp->order;
-				last_pref = rp->preference;
-				l = strlen(rp->route) + 1;
-				rbp += l;
-				rbl -= l;
 			}
 
-			switch_snprintf(vbuf, sizeof(vbuf), "%d", cnt - 1);
+			packed = pack_routes(rbuf, sizeof(rbuf), results);
+
+			switch_snprintf(vbuf, sizeof(vbuf), "%u", cnt - 1);
 			switch_channel_set_variable_var_check(channel, "enum_route_count", vbuf, SWITCH_FALSE);
-			*(rbuf + strlen(rbuf) - 1) = '\0';
 			switch_channel_set_variable_var_check(channel, "enum_auto_route", rbuf, SWITCH_FALSE);
+
+			if (!packed && cnt > 1) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+								  "No ENUM route fits the dial string, so enum_auto_route is unset; all %u are in enum_route_N\n",
+								  cnt - 1);
+			} else if (packed < cnt - 1) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+								  "ENUM dial string holds %u of %u routes; the rest are in enum_route_N\n",
+								  (unsigned) packed, cnt - 1);
+			}
 			free_results(&results);
 		}
 	}
@@ -739,12 +794,8 @@ SWITCH_STANDARD_API(enum_api)
 	char *argv[4] = { 0 };
 	char *mydata = NULL;
 	char *dest = NULL, *root = NULL;
-	enum_record_t *results, *rp;
+	enum_record_t *results;
 	char rbuf[1024] = "";
-	char *rbp = rbuf;
-	switch_size_t l = 0, rbl = sizeof(rbuf);
-	int last_order = -1, last_pref = -2;
-	char *last_delim = "|";
 	int ok = 0;
 
 	if (zstr(cmd)) {
@@ -761,23 +812,7 @@ SWITCH_STANDARD_API(enum_api)
 		root = argv[1];
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Looking up %s@%s\n", dest, root);
 		if (enum_lookup(root, dest, &results, NULL, session) == SWITCH_STATUS_SUCCESS) {
-			for (rp = results; rp; rp = rp->next) {
-				if (!rp->supported) {
-					continue;
-				}
-				if (rp->preference == last_pref && rp->order == last_order) {
-					*last_delim = ',';
-				}
-				switch_snprintf(rbp, rbl, "%s|", rp->route);
-				last_delim = end_of_p(rbp);
-				last_order = rp->order;
-				last_pref = rp->preference;
-				l = strlen(rp->route) + 1;
-				rbp += l;
-				rbl -= l;
-
-			}
-			*(rbuf + strlen(rbuf) - 1) = '\0';
+			pack_routes(rbuf, sizeof(rbuf), results);
 			stream->write_function(stream, "%s", rbuf);
 			free_results(&results);
 			ok++;

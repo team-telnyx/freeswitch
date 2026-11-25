@@ -320,6 +320,24 @@ GCC_DIAG_ON(deprecated-declarations)
 #endif
 }
 
+static inline int av_get_ticks_per_frame(AVCodecContext *c)
+{
+#if (LIBAVCODEC_VERSION_MAJOR < LIBAVCODEC_8_V)
+	int ticks;
+
+GCC_DIAG_OFF(deprecated-declarations)
+	ticks = c->ticks_per_frame;
+GCC_DIAG_ON(deprecated-declarations)
+
+	return ticks;
+#else
+	/* FFmpeg 8 removed ticks_per_frame, which decoders of field based codecs set to 2 */
+	const AVCodecDescriptor *desc = avcodec_descriptor_get(c->codec_id);
+
+	return (desc && (desc->props & AV_CODEC_PROP_FIELDS)) ? 2 : 1;
+#endif
+}
+
 static char *const get_error_text(const int error, char *error_buffer, switch_size_t error_buflen)
 {
 	av_strerror(error, error_buffer, error_buflen);
@@ -467,6 +485,7 @@ static int interrupt_cb(void *cp)
 }
  
 
+#if (LIBAVFORMAT_VERSION_MAJOR < LIBAVFORMAT_6_V)
 static int mod_avformat_alloc_output_context2(AVFormatContext **avctx, const char *format, const char *filename, av_file_context_t *context)
 {
 	AVFormatContext *s = avformat_alloc_context();
@@ -540,6 +559,7 @@ error:
 
 	return ret;
 }
+#endif
 
 /* Arm the deadline that interrupt_cb enforces for the call about to be made.  Only
  * network outputs get one: aborting a local file write would corrupt an otherwise
@@ -775,7 +795,21 @@ static switch_status_t add_stream(av_file_context_t *context, MediaStream *mst, 
 
 	switch ((*codec)->type) {
 	case AVMEDIA_TYPE_AUDIO:
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(61, 13, 100)
+		/*
+		   Changelog says 61.12.100 but commit changes version actually to 61.13.100
+		   https://github.com/FFmpeg/FFmpeg/commit/3305767560a6303f474fffa3afb10c500059b455
+		 */
+		{
+			const enum AVSampleFormat *sample_fmts = NULL;
+			int fmts_count = 0;
+			int ret = avcodec_get_supported_config(c, *codec, AV_CODEC_CONFIG_SAMPLE_FORMAT, 0, (const void**)&sample_fmts, &fmts_count);
+
+			c->sample_fmt = (ret >= 0 && fmts_count && sample_fmts) ? sample_fmts[0] : AV_SAMPLE_FMT_FLTP;
+		}
+#else
 		c->sample_fmt  = (*codec)->sample_fmts ? (*codec)->sample_fmts[0] : AV_SAMPLE_FMT_FLTP;
+#endif
 		c->bit_rate    = 128000;
 		c->sample_rate = mst->sample_rate = context->handle->samplerate;
 #if (LIBAVCODEC_VERSION_MAJOR < LIBAVCODEC_V)
@@ -841,8 +875,15 @@ static switch_status_t add_stream(av_file_context_t *context, MediaStream *mst, 
 		c->rc_initial_buffer_occupancy = buffer_bytes * 8;
 
 		if (codec_id == AV_CODEC_ID_H264) {
+#if (LIBAVCODEC_VERSION_MAJOR < LIBAVCODEC_8_V) /* FFmpeg 8 removed ticks_per_frame */
+#if ((LIBAVFORMAT_VERSION_MAJOR == LIBAVFORMAT_6_V && LIBAVFORMAT_VERSION_MINOR >= LIBAVFORMAT_61_V) || LIBAVFORMAT_VERSION_MAJOR == LIBAVFORMAT_7_V)
+GCC_DIAG_OFF(deprecated-declarations)
+#endif
 			c->ticks_per_frame = 2;
-
+#if ((LIBAVFORMAT_VERSION_MAJOR == LIBAVFORMAT_6_V && LIBAVFORMAT_VERSION_MINOR >= LIBAVFORMAT_61_V) || LIBAVFORMAT_VERSION_MAJOR == LIBAVFORMAT_7_V)
+GCC_DIAG_ON(deprecated-declarations)
+#endif
+#endif
 
 			c->flags|=AV_CODEC_FLAG_LOOP_FILTER;   // flags=+loop
 			c->me_cmp|= 1;  // cmp=+chroma, where CHROMA = 1
@@ -1630,7 +1671,11 @@ static switch_status_t open_input_file(av_file_context_t *context, switch_file_h
 		switch_goto_status(SWITCH_STATUS_FALSE, err);
 	}
 
+#if (LIBAVFORMAT_VERSION_MAJOR >= LIBAVFORMAT_7_V)
+	handle->seekable = !(context->fc->iformat->flags & AVFMT_NOTIMESTAMPS);
+#else
 	handle->seekable = context->fc->iformat->read_seek2 ? 1 : (context->fc->iformat->read_seek ? 1 : 0);
+#endif
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "file %s is %sseekable\n", filename, handle->seekable ? "" : "not ");
 
 	/** Get information on the input file (number of streams etc.). */
@@ -1722,7 +1767,12 @@ static switch_status_t open_input_file(av_file_context_t *context, switch_file_h
 
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Could not open input audio codec channel 2 (error '%s')\n", get_error_text(error, ebuf, sizeof(ebuf)));
 		if ((cc = av_get_codec_context(&context->audio_st[0]))) {
+#if (LIBAVCODEC_VERSION_MAJOR < LIBAVCODEC_7_V)
 			avcodec_close(cc);
+#else
+			/* avcodec_close() will be called in avcodec_free_context() */
+			avcodec_free_context(&cc);
+#endif
 		}
 
 		context->has_audio = 0;
@@ -1772,6 +1822,7 @@ static switch_status_t open_input_file(av_file_context_t *context, switch_file_h
 
 	if (context->has_audio) {
 		AVCodecContext *c[2] = { NULL };
+		int in_channels;
 
 		if (!(c[0] = av_get_codec_context(&context->audio_st[0]))) {
 			switch_goto_status(SWITCH_STATUS_FALSE, err);
@@ -1804,7 +1855,14 @@ static switch_status_t open_input_file(av_file_context_t *context, switch_file_h
 		context->audio_st[0].sample_rate = handle->samplerate;
 		context->audio_st[1].sample_rate = handle->samplerate;
 
-		if (c[0]->sample_fmt != AV_SAMPLE_FMT_S16 || c[0]->sample_rate != handle->samplerate) {
+#if (LIBAVCODEC_VERSION_MAJOR < LIBAVFORMAT_V)
+		in_channels = c[0]->channels;
+#else
+		in_channels = c[0]->ch_layout.nb_channels;
+#endif
+
+		/* The read thread sizes its buffers by audio_st[0].channels, so a channel count mismatch must go through the resampler too */
+		if (c[0]->sample_fmt != AV_SAMPLE_FMT_S16 || c[0]->sample_rate != handle->samplerate || in_channels != context->audio_st[0].channels) {
 			int x;
 
  			for (x = 0; x < context->has_audio && x < 2 && c[x]; x++) {
@@ -1823,15 +1881,22 @@ static switch_status_t open_input_file(av_file_context_t *context, switch_file_h
 					av_opt_set_int(resample_ctx, "in_sample_fmt",      c[x]->sample_fmt,     0);
 					av_opt_set_int(resample_ctx, "in_channel_layout",
 								   (c[x]->channel_layout == 0 && c[x]->channels == 2) ? AV_CH_LAYOUT_STEREO : c[x]->channel_layout, 0);
-					av_opt_set_int(resample_ctx, "out_channel_count",  handle->channels,  0);
+					av_opt_set_int(resample_ctx, "out_channel_count",  context->audio_st[x].channels,  0);
 #else
 					av_opt_set_sample_fmt(resample_ctx, "in_sample_fmt",      c[x]->sample_fmt,     0);
-					av_opt_set_chlayout(resample_ctx, "out_chlayout",  &c[x]->ch_layout,     0);
+					{
+						/* Output must match the channel count the read thread allocates for (capped at 2), not the source layout */
+						AVChannelLayout out_ch_layout;
+
+						av_channel_layout_default(&out_ch_layout, context->audio_st[x].channels);
+						av_opt_set_chlayout(resample_ctx, "out_chlayout", &out_ch_layout, 0);
+						av_channel_layout_uninit(&out_ch_layout);
+					}
 #endif
 					av_opt_set_int(resample_ctx, "out_sample_rate",    handle->samplerate,0);
 #if (LIBAVFORMAT_VERSION_INT < AV_VERSION_INT(59,27,100))
 					av_opt_set_int(resample_ctx, "out_sample_fmt",     AV_SAMPLE_FMT_S16, 0);
-					av_opt_set_int(resample_ctx, "out_channel_layout", handle->channels == 2 ? AV_CH_LAYOUT_STEREO : AV_CH_LAYOUT_MONO, 0);
+					av_opt_set_int(resample_ctx, "out_channel_layout", context->audio_st[x].channels == 2 ? AV_CH_LAYOUT_STEREO : AV_CH_LAYOUT_MONO, 0);
 #else
 					av_opt_set_sample_fmt(resample_ctx, "out_sample_fmt", AV_SAMPLE_FMT_S16, 0);
 #endif
@@ -2618,7 +2683,16 @@ static switch_status_t av_file_open(switch_file_handle_t *handle, const char *pa
 		return SWITCH_STATUS_SUCCESS;
 	}
 
+#if (LIBAVFORMAT_VERSION_MAJOR < LIBAVFORMAT_6_V)
 	mod_avformat_alloc_output_context2(&context->fc, format, (char *)file, context);
+#else
+	avformat_alloc_output_context2(&context->fc, NULL, format, (char *)file);
+
+	if (context->fc) {
+		context->fc->interrupt_callback.callback = interrupt_cb;
+		context->fc->interrupt_callback.opaque = context;
+	}
+#endif
 
 	if (!context->fc) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Could not deduce output format from file extension\n");
@@ -3710,13 +3784,13 @@ static switch_status_t av_file_read_video(switch_file_handle_t *handle, switch_f
 
 	if ((c = av_get_codec_context(mst)) && c->time_base.num) {
 		cp = av_stream_get_parser(st);
-		ticks = cp ? cp->repeat_pict + 1 : c->ticks_per_frame;
+		ticks = cp ? cp->repeat_pict + 1 : av_get_ticks_per_frame(c);
 		// mst->next_pts += ((int64_t)AV_TIME_BASE * st->codec->time_base.num * ticks) / st->codec->time_base.den;
 	}
 
 	if (!context->video_start_time) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG1, "start: %" SWITCH_INT64_T_FMT " ticks: %d ticks_per_frame: %d st num:%d st den:%d codec num:%d codec den:%d start: %" SWITCH_TIME_T_FMT ", duration:%" SWITCH_INT64_T_FMT " nb_frames:%" SWITCH_INT64_T_FMT " q2d:%f\n",
-			context->video_start_time, ticks, c ? c->ticks_per_frame : -1, st->time_base.num, st->time_base.den, c ? c->time_base.num : -1, c ? c->time_base.den : -1,
+			context->video_start_time, ticks, c ? av_get_ticks_per_frame(c) : -1, st->time_base.num, st->time_base.den, c ? c->time_base.num : -1, c ? c->time_base.den : -1,
 			st->start_time, st->duration == AV_NOPTS_VALUE ? context->fc->duration / AV_TIME_BASE * 1000 : st->duration, st->nb_frames, av_q2d(st->time_base));
 	}
 

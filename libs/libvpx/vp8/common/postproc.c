@@ -25,23 +25,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-/* clang-format off */
-#define RGB_TO_YUV(t)                                     \
-  (unsigned char)((0.257 * (float)(t >> 16)) +            \
-                  (0.504 * (float)(t >> 8 & 0xff)) +      \
-                  (0.098 * (float)(t & 0xff)) + 16),      \
-  (unsigned char)(-(0.148 * (float)(t >> 16)) -           \
-                  (0.291 * (float)(t >> 8 & 0xff)) +      \
-                  (0.439 * (float)(t & 0xff)) + 128),     \
-  (unsigned char)((0.439 * (float)(t >> 16)) -            \
-                  (0.368 * (float)(t >> 8 & 0xff)) -      \
-                  (0.071 * (float)(t & 0xff)) + 128)
-/* clang-format on */
-
-extern void vp8_blit_text(const char *msg, unsigned char *address,
-                          const int pitch);
-extern void vp8_blit_line(int x0, int x1, int y0, int y1, unsigned char *image,
-                          const int pitch);
 /***********************************************************************************************************
  */
 #if CONFIG_POSTPROC
@@ -60,8 +43,8 @@ static void vp8_de_mblock(YV12_BUFFER_CONFIG *post, int q) {
 }
 
 void vp8_deblock(VP8_COMMON *cm, YV12_BUFFER_CONFIG *source,
-                 YV12_BUFFER_CONFIG *post, int q, int low_var_thresh,
-                 int flag) {
+                 YV12_BUFFER_CONFIG *post, int q) {
+  vpx_clear_system_state();
   double level = 6.0e-05 * q * q * q - .0067 * q * q + .306 * q + .0065;
   int ppl = (int)(level + .5);
 
@@ -72,8 +55,6 @@ void vp8_deblock(VP8_COMMON *cm, YV12_BUFFER_CONFIG *source,
    * is a skipped block.  */
   unsigned char *ylimits = cm->pp_limits_buffer;
   unsigned char *uvlimits = cm->pp_limits_buffer + 16 * cm->mb_cols;
-  (void)low_var_thresh;
-  (void)flag;
 
   if (ppl > 0) {
     for (mbr = 0; mbr < cm->mb_rows; ++mbr) {
@@ -116,18 +97,15 @@ void vp8_deblock(VP8_COMMON *cm, YV12_BUFFER_CONFIG *source,
   }
 }
 
-void vp8_de_noise(VP8_COMMON *cm, YV12_BUFFER_CONFIG *source,
-                  YV12_BUFFER_CONFIG *post, int q, int low_var_thresh, int flag,
+void vp8_de_noise(VP8_COMMON *cm, YV12_BUFFER_CONFIG *source, int q,
                   int uvfilter) {
   int mbr;
+  vpx_clear_system_state();
   double level = 6.0e-05 * q * q * q - .0067 * q * q + .306 * q + .0065;
   int ppl = (int)(level + .5);
   int mb_rows = cm->mb_rows;
   int mb_cols = cm->mb_cols;
   unsigned char *limits = cm->pp_limits_buffer;
-  (void)post;
-  (void)low_var_thresh;
-  (void)flag;
 
   memset(limits, (unsigned char)ppl, 16 * mb_cols);
 
@@ -158,6 +136,7 @@ int vp8_post_proc_frame(VP8_COMMON *oci, YV12_BUFFER_CONFIG *dest,
   int flags = ppflags->post_proc_flag;
   int deblock_level = ppflags->deblocking_level;
   int noise_level = ppflags->noise_level;
+  const int generated_noise_size = ALIGN_POWER_OF_TWO(oci->Width, 4) + 256;
 
   if (!oci->frame_to_show) return -1;
 
@@ -175,10 +154,13 @@ int vp8_post_proc_frame(VP8_COMMON *oci, YV12_BUFFER_CONFIG *dest,
     return 0;
   }
   if (flags & VP8D_ADDNOISE) {
-    if (!oci->postproc_state.generated_noise) {
+    if (!oci->postproc_state.generated_noise ||
+        oci->postproc_state.generated_noise_size < generated_noise_size) {
+      vpx_free(oci->postproc_state.generated_noise);
       oci->postproc_state.generated_noise = vpx_calloc(
-          oci->Width + 256, sizeof(*oci->postproc_state.generated_noise));
+          generated_noise_size, sizeof(*oci->postproc_state.generated_noise));
       if (!oci->postproc_state.generated_noise) return 1;
+      oci->postproc_state.generated_noise_size = generated_noise_size;
     }
   }
 
@@ -216,11 +198,10 @@ int vp8_post_proc_frame(VP8_COMMON *oci, YV12_BUFFER_CONFIG *dest,
       vp8_yv12_copy_frame(&oci->post_proc_buffer, &oci->post_proc_buffer_int);
       if (flags & VP8D_DEMACROBLOCK) {
         vp8_deblock(oci, &oci->post_proc_buffer_int, &oci->post_proc_buffer,
-                    q + (deblock_level - 5) * 10, 1, 0);
+                    q + (deblock_level - 5) * 10);
         vp8_de_mblock(&oci->post_proc_buffer, q + (deblock_level - 5) * 10);
       } else if (flags & VP8D_DEBLOCK) {
-        vp8_deblock(oci, &oci->post_proc_buffer_int, &oci->post_proc_buffer, q,
-                    1, 0);
+        vp8_deblock(oci, &oci->post_proc_buffer_int, &oci->post_proc_buffer, q);
       }
     }
     /* Move partially towards the base q of the previous frame */
@@ -228,12 +209,12 @@ int vp8_post_proc_frame(VP8_COMMON *oci, YV12_BUFFER_CONFIG *dest,
         (3 * oci->postproc_state.last_base_qindex + oci->base_qindex) >> 2;
   } else if (flags & VP8D_DEMACROBLOCK) {
     vp8_deblock(oci, oci->frame_to_show, &oci->post_proc_buffer,
-                q + (deblock_level - 5) * 10, 1, 0);
+                q + (deblock_level - 5) * 10);
     vp8_de_mblock(&oci->post_proc_buffer, q + (deblock_level - 5) * 10);
 
     oci->postproc_state.last_base_qindex = oci->base_qindex;
   } else if (flags & VP8D_DEBLOCK) {
-    vp8_deblock(oci, oci->frame_to_show, &oci->post_proc_buffer, q, 1, 0);
+    vp8_deblock(oci, oci->frame_to_show, &oci->post_proc_buffer, q);
     oci->postproc_state.last_base_qindex = oci->base_qindex;
   } else {
     vp8_yv12_copy_frame(oci->frame_to_show, &oci->post_proc_buffer);
@@ -248,8 +229,8 @@ int vp8_post_proc_frame(VP8_COMMON *oci, YV12_BUFFER_CONFIG *dest,
       struct postproc_state *ppstate = &oci->postproc_state;
       vpx_clear_system_state();
       sigma = noise_level + .5 + .6 * q / 63.0;
-      ppstate->clamp =
-          vpx_setup_noise(sigma, ppstate->generated_noise, oci->Width + 256);
+      ppstate->clamp = vpx_setup_noise(sigma, ppstate->generated_noise,
+                                       generated_noise_size);
       ppstate->last_q = q;
       ppstate->last_noise = noise_level;
     }

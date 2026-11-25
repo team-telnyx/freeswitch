@@ -7,7 +7,6 @@
         <load module="mod_sndfile"/>
         <load module="mod_loopback"/>
         <load module="mod_dptools"/>
-        <load module="mod_ssml"/>
         <load module="mod_tone_stream"/>
         <load module="mod_conference"/>
         <load module="mod_commands"/>
@@ -28,6 +27,10 @@
     <configuration name="conference.conf" description="Audio Conference">
       <profiles>
         <profile name="default">
+        </profile>
+        <profile name="livearray">
+          <param name="conference-flags" value="livearray-sync"/>
+          <param name="domain" value="livearray.test"/>
         </profile>
       </profiles>
     </configuration>

@@ -54,14 +54,21 @@ typedef struct {
 // decoder implementation modules critically rely on the defined entry values
 // specified herein. They should be refactored concurrently.
 
-#define NONE (-1)
+#define NO_REF_FRAME (-1)
 #define INTRA_FRAME 0
 #define LAST_FRAME 1
 #define GOLDEN_FRAME 2
 #define ALTREF_FRAME 3
 #define MAX_REF_FRAMES 4
+#define MAX_INTER_REF_FRAMES 3
 
 typedef int8_t MV_REFERENCE_FRAME;
+
+static INLINE int mv_ref_frame_to_inter_ref_idx(
+    MV_REFERENCE_FRAME mv_ref_frame) {
+  assert(mv_ref_frame >= LAST_FRAME && mv_ref_frame < MAX_REF_FRAMES);
+  return mv_ref_frame - 1;
+}
 
 // This structure now relates to 8x8 block regions.
 typedef struct MODE_INFO {
@@ -135,7 +142,7 @@ struct macroblockd_plane {
   int *eob;
 };
 
-#define BLOCK_OFFSET(x, i) ((x) + (i)*16)
+#define BLOCK_OFFSET(x, i) ((x) + (i) * 16)
 
 typedef struct RefBuffer {
   // TODO(dkovalev): idx is not really required and should be removed, now it

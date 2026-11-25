@@ -23,23 +23,23 @@ extern "C" {
 
 /* Only need this for fixed-size arrays, for structs just assign. */
 
-#define vp8_copy(Dest, Src)              \
-  {                                      \
-    assert(sizeof(Dest) == sizeof(Src)); \
-    memcpy(Dest, Src, sizeof(Src));      \
-  }
+#define vp8_copy(Dest, Src)                         \
+  do {                                              \
+    static_assert(sizeof(Dest) == sizeof(Src), ""); \
+    memcpy(Dest, Src, sizeof(Src));                 \
+  } while (0)
 
 /* Use this for variably-sized arrays. */
 
-#define vp8_copy_array(Dest, Src, N)           \
-  {                                            \
-    assert(sizeof(*(Dest)) == sizeof(*(Src))); \
-    memcpy(Dest, Src, (N) * sizeof(*(Src)));   \
-  }
+#define vp8_copy_array(Dest, Src, N)                      \
+  do {                                                    \
+    static_assert(sizeof(*(Dest)) == sizeof(*(Src)), ""); \
+    memcpy(Dest, Src, (N) * sizeof(*(Src)));              \
+  } while (0)
 
-#define vp8_zero(Dest) memset(&(Dest), 0, sizeof(Dest));
+#define vp8_zero(Dest) memset(&(Dest), 0, sizeof(Dest))
 
-#define vp8_zero_array(Dest, N) memset(Dest, 0, (N) * sizeof(*(Dest)));
+#define vp8_zero_array(Dest, N) memset(Dest, 0, (N) * sizeof(*(Dest)))
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -11,7 +11,7 @@
 #include <string.h>
 #include <tuple>
 
-#include "third_party/googletest/src/include/gtest/gtest.h"
+#include "gtest/gtest.h"
 
 #include "./vp8_rtcd.h"
 #include "./vpx_config.h"
@@ -33,9 +33,9 @@ namespace {
 const int kNumBlocks = 25;
 const int kNumBlockEntries = 16;
 
-typedef void (*VP8Quantize)(BLOCK *b, BLOCKD *d);
+using VP8Quantize = void (*)(BLOCK *b, BLOCKD *d);
 
-typedef std::tuple<VP8Quantize, VP8Quantize> VP8QuantizeParam;
+using VP8QuantizeParam = std::tuple<VP8Quantize, VP8Quantize>;
 
 using libvpx_test::ACMRandom;
 using std::make_tuple;
@@ -46,9 +46,9 @@ class QuantizeTestBase {
  public:
   virtual ~QuantizeTestBase() {
     vp8_remove_compressor(&vp8_comp_);
-    vp8_comp_ = NULL;
+    vp8_comp_ = nullptr;
     vpx_free(macroblockd_dst_);
-    macroblockd_dst_ = NULL;
+    macroblockd_dst_ = nullptr;
     libvpx_test::ClearSystemState();
   }
 
@@ -71,7 +71,7 @@ class QuantizeTestBase {
     // Copy macroblockd from the reference to get pre-set-up dequant values.
     macroblockd_dst_ = reinterpret_cast<MACROBLOCKD *>(
         vpx_memalign(32, sizeof(*macroblockd_dst_)));
-    memcpy(macroblockd_dst_, &vp8_comp_->mb.e_mbd, sizeof(*macroblockd_dst_));
+    *macroblockd_dst_ = vp8_comp_->mb.e_mbd;
     // Fix block pointers - currently they point to the blocks in the reference
     // structure.
     vp8_setup_block_dptrs(macroblockd_dst_);
@@ -80,7 +80,7 @@ class QuantizeTestBase {
   void UpdateQuantizer(int q) {
     vp8_set_quantizer(vp8_comp_, q);
 
-    memcpy(macroblockd_dst_, &vp8_comp_->mb.e_mbd, sizeof(*macroblockd_dst_));
+    *macroblockd_dst_ = vp8_comp_->mb.e_mbd;
     vp8_setup_block_dptrs(macroblockd_dst_);
   }
 
@@ -121,13 +121,13 @@ class QuantizeTest : public QuantizeTestBase,
                      public ::testing::TestWithParam<VP8QuantizeParam>,
                      public AbstractBench {
  protected:
-  virtual void SetUp() {
+  void SetUp() override {
     SetupCompressor();
     asm_quant_ = GET_PARAM(0);
     c_quant_ = GET_PARAM(1);
   }
 
-  virtual void Run() {
+  void Run() override {
     asm_quant_(&vp8_comp_->mb.block[0], &macroblockd_dst_->block[0]);
   }
 
@@ -146,6 +146,7 @@ class QuantizeTest : public QuantizeTestBase,
   VP8Quantize asm_quant_;
   VP8Quantize c_quant_;
 };
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(QuantizeTest);
 
 TEST_P(QuantizeTest, TestZeroInput) {
   FillCoeffConstant(0);
@@ -181,7 +182,7 @@ TEST_P(QuantizeTest, DISABLED_Speed) {
 }
 
 #if HAVE_SSE2
-INSTANTIATE_TEST_CASE_P(
+INSTANTIATE_TEST_SUITE_P(
     SSE2, QuantizeTest,
     ::testing::Values(
         make_tuple(&vp8_fast_quantize_b_sse2, &vp8_fast_quantize_b_c),
@@ -189,26 +190,27 @@ INSTANTIATE_TEST_CASE_P(
 #endif  // HAVE_SSE2
 
 #if HAVE_SSSE3
-INSTANTIATE_TEST_CASE_P(SSSE3, QuantizeTest,
-                        ::testing::Values(make_tuple(&vp8_fast_quantize_b_ssse3,
-                                                     &vp8_fast_quantize_b_c)));
+INSTANTIATE_TEST_SUITE_P(
+    SSSE3, QuantizeTest,
+    ::testing::Values(make_tuple(&vp8_fast_quantize_b_ssse3,
+                                 &vp8_fast_quantize_b_c)));
 #endif  // HAVE_SSSE3
 
 #if HAVE_SSE4_1
-INSTANTIATE_TEST_CASE_P(
+INSTANTIATE_TEST_SUITE_P(
     SSE4_1, QuantizeTest,
     ::testing::Values(make_tuple(&vp8_regular_quantize_b_sse4_1,
                                  &vp8_regular_quantize_b_c)));
 #endif  // HAVE_SSE4_1
 
 #if HAVE_NEON
-INSTANTIATE_TEST_CASE_P(NEON, QuantizeTest,
-                        ::testing::Values(make_tuple(&vp8_fast_quantize_b_neon,
-                                                     &vp8_fast_quantize_b_c)));
+INSTANTIATE_TEST_SUITE_P(NEON, QuantizeTest,
+                         ::testing::Values(make_tuple(&vp8_fast_quantize_b_neon,
+                                                      &vp8_fast_quantize_b_c)));
 #endif  // HAVE_NEON
 
 #if HAVE_MSA
-INSTANTIATE_TEST_CASE_P(
+INSTANTIATE_TEST_SUITE_P(
     MSA, QuantizeTest,
     ::testing::Values(
         make_tuple(&vp8_fast_quantize_b_msa, &vp8_fast_quantize_b_c),
@@ -216,10 +218,18 @@ INSTANTIATE_TEST_CASE_P(
 #endif  // HAVE_MSA
 
 #if HAVE_MMI
-INSTANTIATE_TEST_CASE_P(
+INSTANTIATE_TEST_SUITE_P(
     MMI, QuantizeTest,
     ::testing::Values(
         make_tuple(&vp8_fast_quantize_b_mmi, &vp8_fast_quantize_b_c),
         make_tuple(&vp8_regular_quantize_b_mmi, &vp8_regular_quantize_b_c)));
 #endif  // HAVE_MMI
+
+#if HAVE_LSX
+INSTANTIATE_TEST_SUITE_P(
+    LSX, QuantizeTest,
+    ::testing::Values(
+        make_tuple(&vp8_fast_quantize_b_lsx, &vp8_fast_quantize_b_c),
+        make_tuple(&vp8_regular_quantize_b_lsx, &vp8_regular_quantize_b_c)));
+#endif  // HAVE_LSX
 }  // namespace

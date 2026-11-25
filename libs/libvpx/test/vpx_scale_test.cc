@@ -8,7 +8,7 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
-#include "third_party/googletest/src/include/gtest/gtest.h"
+#include "gtest/gtest.h"
 
 #include "./vpx_config.h"
 #include "./vpx_scale_rtcd.h"
@@ -22,7 +22,7 @@
 namespace libvpx_test {
 namespace {
 
-#if ARCH_ARM || (ARCH_MIPS && !HAVE_MIPS64) || ARCH_X86
+#if VPX_ARCH_ARM || (VPX_ARCH_MIPS && !HAVE_MIPS64) || VPX_ARCH_X86
 // Avoid OOM failures on 32-bit platforms.
 const int kNumSizesToTest = 7;
 #else
@@ -30,18 +30,18 @@ const int kNumSizesToTest = 8;
 #endif
 const int kSizesToTest[] = { 1, 15, 33, 145, 512, 1025, 3840, 16383 };
 
-typedef void (*ExtendFrameBorderFunc)(YV12_BUFFER_CONFIG *ybf);
-typedef void (*CopyFrameFunc)(const YV12_BUFFER_CONFIG *src_ybf,
-                              YV12_BUFFER_CONFIG *dst_ybf);
+using ExtendFrameBorderFunc = void (*)(YV12_BUFFER_CONFIG *ybf);
+using CopyFrameFunc = void (*)(const YV12_BUFFER_CONFIG *src_ybf,
+                               YV12_BUFFER_CONFIG *dst_ybf);
 
 class ExtendBorderTest
     : public VpxScaleBase,
       public ::testing::TestWithParam<ExtendFrameBorderFunc> {
  public:
-  virtual ~ExtendBorderTest() {}
+  ~ExtendBorderTest() override = default;
 
  protected:
-  virtual void SetUp() { extend_fn_ = GetParam(); }
+  void SetUp() override { extend_fn_ = GetParam(); }
 
   void ExtendBorder() { ASM_REGISTER_STATE_CHECK(extend_fn_(&img_)); }
 
@@ -62,16 +62,16 @@ class ExtendBorderTest
 
 TEST_P(ExtendBorderTest, ExtendBorder) { ASSERT_NO_FATAL_FAILURE(RunTest()); }
 
-INSTANTIATE_TEST_CASE_P(C, ExtendBorderTest,
-                        ::testing::Values(vp8_yv12_extend_frame_borders_c));
+INSTANTIATE_TEST_SUITE_P(C, ExtendBorderTest,
+                         ::testing::Values(vp8_yv12_extend_frame_borders_c));
 
 class CopyFrameTest : public VpxScaleBase,
                       public ::testing::TestWithParam<CopyFrameFunc> {
  public:
-  virtual ~CopyFrameTest() {}
+  ~CopyFrameTest() override = default;
 
  protected:
-  virtual void SetUp() { copy_frame_fn_ = GetParam(); }
+  void SetUp() override { copy_frame_fn_ = GetParam(); }
 
   void CopyFrame() {
     ASM_REGISTER_STATE_CHECK(copy_frame_fn_(&img_, &dst_img_));
@@ -94,8 +94,8 @@ class CopyFrameTest : public VpxScaleBase,
 
 TEST_P(CopyFrameTest, CopyFrame) { ASSERT_NO_FATAL_FAILURE(RunTest()); }
 
-INSTANTIATE_TEST_CASE_P(C, CopyFrameTest,
-                        ::testing::Values(vp8_yv12_copy_frame_c));
+INSTANTIATE_TEST_SUITE_P(C, CopyFrameTest,
+                         ::testing::Values(vp8_yv12_copy_frame_c));
 
 }  // namespace
 }  // namespace libvpx_test

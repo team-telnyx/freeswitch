@@ -29,13 +29,6 @@
  *
  */
 
-#ifdef SWITCH_HAVE_VPX
-#include "vpx/vpx_image.h"
-#if VPX_IMAGE_ABI_VERSION != (4)
-#error VPX_IMAGE_ABI_VERSION is not (4)
-#endif
-#endif
-
 #include <switch.h>
 #include <switch_utf8.h>
 
@@ -204,7 +197,7 @@ SWITCH_DECLARE(switch_image_t *)switch_img_alloc(switch_image_t  *img,
 		if (!gd) return NULL;
 
 		switch_img_free(&img);
-		img = (switch_image_t *)vpx_img_alloc(NULL, SWITCH_IMG_FMT_ARGB, 1, 1, 1);
+		img = switch_img_raw_alloc(NULL, SWITCH_IMG_FMT_ARGB, 1, 1, 1);
 
 		if (!img) {
 			gdImageDestroy(gd);
@@ -221,7 +214,7 @@ SWITCH_DECLARE(switch_image_t *)switch_img_alloc(switch_image_t  *img,
 
 	switch_assert(d_w > 0);
 	switch_assert(d_h > 0);
-	r = (switch_image_t *)vpx_img_alloc((vpx_image_t *)img, (vpx_img_fmt_t)fmt, d_w, d_h, align);
+	r = switch_img_raw_alloc(img, fmt, d_w, d_h, align);
 	switch_assert(r);
 	switch_assert(r->d_w == d_w);
 	switch_assert(r->d_h == d_h);
@@ -240,22 +233,9 @@ SWITCH_DECLARE(switch_image_t *)switch_img_wrap(switch_image_t  *img,
 						unsigned char      *img_data)
 {
 #ifdef SWITCH_HAVE_VPX
-	return (switch_image_t *)vpx_img_wrap((vpx_image_t *)img, (vpx_img_fmt_t)fmt, d_w, d_h, align, img_data);
+	return switch_img_raw_wrap(img, fmt, d_w, d_h, align, img_data);
 #else
 	return NULL;
-#endif
-}
-
-SWITCH_DECLARE(int) switch_img_set_rect(switch_image_t  *img,
-				   unsigned int  x,
-				   unsigned int  y,
-				   unsigned int  w,
-				   unsigned int  h)
-{
-#ifdef SWITCH_HAVE_VPX
-	return vpx_img_set_rect((vpx_image_t *)img, x, y, w, h);
-#else
-	return 0;
 #endif
 }
 
@@ -308,7 +288,7 @@ SWITCH_DECLARE(void) switch_img_free(switch_image_t **img)
 		switch_assert((*img)->fmt <= SWITCH_IMG_FMT_I44016);
 		switch_assert((*img)->d_w <= 7860 && (*img)->d_w > 0);
 		switch_assert((*img)->d_h <= 4320 && (*img)->d_h > 0);
-		vpx_img_free((vpx_image_t *)*img);
+		switch_img_raw_free(*img);
 		*img = NULL;
 	}
 #endif
@@ -390,8 +370,6 @@ SWITCH_DECLARE(void) switch_img_attenuate(switch_image_t *img)
 SWITCH_DECLARE(void) switch_img_patch_rgb(switch_image_t *IMG, switch_image_t *img, int x, int y, switch_bool_t noalpha)
 {
 #ifdef SWITCH_HAVE_YUV
-	int i;
-
 	if (noalpha) {
 		switch_img_patch_rgb_noalpha(IMG, img, x, y);
 		return;
@@ -406,18 +384,8 @@ SWITCH_DECLARE(void) switch_img_patch_rgb(switch_image_t *IMG, switch_image_t *i
 		int dst_stride_argb = IMG->stride[SWITCH_PLANE_PACKED];
 		int width = MIN(img->d_w, IMG->d_w - abs(x));
 		int height = MIN(img->d_h, IMG->d_h - abs(y));
-		void (*ARGBBlendRow)(const uint8_t* src_argb, const uint8_t* src_argb1, uint8_t* dst_argb, int width) = GetARGBBlend();
 
 		// switch_img_attenuate(img);
-
-		// Coalesce rows. we have same size images, treat as a single row
-		if (src_stride_argb0 == width * 4 &&
-			src_stride_argb1 == width * 4 &&
-			x == 0 && y == 0) {
-			width *= height;
-			height = 1;
-			src_stride_argb0 = src_stride_argb1 = dst_stride_argb = 0;
-		}
 
 		if (y) {
 			src_argb1 += (y * IMG->d_w * 4);
@@ -428,12 +396,8 @@ SWITCH_DECLARE(void) switch_img_patch_rgb(switch_image_t *IMG, switch_image_t *i
 			dst_argb  += (x * 4);
 		}
 
-		for (i = 0; i < height; ++i) {
-			ARGBBlendRow(src_argb0, src_argb1, dst_argb, width);
-			src_argb0 += src_stride_argb0;
-			src_argb1 += src_stride_argb1;
-			dst_argb += dst_stride_argb;
-		}
+		/* ARGBBlend coalesces rows internally. */
+		ARGBBlend(src_argb0, src_stride_argb0, src_argb1, src_stride_argb1, dst_argb, dst_stride_argb, width, height);
 	}
 #endif
 }
@@ -563,7 +527,7 @@ SWITCH_DECLARE(void) switch_img_patch_rect(switch_image_t *IMG, int X, int Y, sw
 	}
 
 	if (img->d_w == img->stride[0]) {
-		tmp = (switch_image_t *)vpx_img_wrap(NULL, img->fmt, img->d_w, img->d_h, 1, data);
+		tmp = switch_img_raw_wrap(NULL, img->fmt, img->d_w, img->d_h, 1, data);
 	} else {
 		switch_img_copy(img, &tmp);
 	}
@@ -700,7 +664,7 @@ SWITCH_DECLARE(switch_image_t *) switch_img_copy_rect(switch_image_t *img, uint3
 		data = img->planes[SWITCH_PLANE_Y];
 	}
 
-	tmp = (switch_image_t *)vpx_img_wrap(NULL, img->fmt, img->d_w, img->d_h, 1, data);
+	tmp = switch_img_raw_wrap(NULL, img->fmt, img->d_w, img->d_h, 1, data);
 	if (!tmp) return NULL;
 
 	w = MIN(img->d_w - x, w);
@@ -3453,22 +3417,22 @@ static inline uint32_t switch_img_fmt2fourcc(switch_img_fmt_t fmt)
 	switch(fmt) {
 		case SWITCH_IMG_FMT_NONE:      fourcc = (uint32_t)FOURCC_ANY ; break;
 		case SWITCH_IMG_FMT_RGB24:     fourcc = (uint32_t)FOURCC_24BG; break;
-		case SWITCH_IMG_FMT_RGB32:     fourcc = (uint32_t)FOURCC_ANY ; break;
-		case SWITCH_IMG_FMT_RGB565:    fourcc = (uint32_t)FOURCC_ANY ; break;
-		case SWITCH_IMG_FMT_RGB555:    fourcc = (uint32_t)FOURCC_ANY ; break;
-		case SWITCH_IMG_FMT_UYVY:      fourcc = (uint32_t)FOURCC_ANY ; break;
+		//case SWITCH_IMG_FMT_RGB32:     fourcc = (uint32_t)FOURCC_ANY ; break;
+		//case SWITCH_IMG_FMT_RGB565:    fourcc = (uint32_t)FOURCC_ANY ; break;
+		//case SWITCH_IMG_FMT_RGB555:    fourcc = (uint32_t)FOURCC_ANY ; break;
+		//case SWITCH_IMG_FMT_UYVY:      fourcc = (uint32_t)FOURCC_ANY ; break;
 		case SWITCH_IMG_FMT_YUY2:      fourcc = (uint32_t)FOURCC_YUY2; break;
-		case SWITCH_IMG_FMT_YVYU:      fourcc = (uint32_t)FOURCC_ANY ; break;
+		//case SWITCH_IMG_FMT_YVYU:      fourcc = (uint32_t)FOURCC_ANY ; break;
 		case SWITCH_IMG_FMT_BGR24:     fourcc = (uint32_t)FOURCC_RAW ; break;
-		case SWITCH_IMG_FMT_RGB32_LE:  fourcc = (uint32_t)FOURCC_ANY ; break;
+		//case SWITCH_IMG_FMT_RGB32_LE:  fourcc = (uint32_t)FOURCC_ANY ; break;
 		case SWITCH_IMG_FMT_ARGB:      fourcc = (uint32_t)FOURCC_ARGB; break;
 		case SWITCH_IMG_FMT_ARGB_LE:   fourcc = (uint32_t)FOURCC_ANY ; break;
-		case SWITCH_IMG_FMT_RGB565_LE: fourcc = (uint32_t)FOURCC_ANY ; break;
-		case SWITCH_IMG_FMT_RGB555_LE: fourcc = (uint32_t)FOURCC_ANY ; break;
+		//case SWITCH_IMG_FMT_RGB565_LE: fourcc = (uint32_t)FOURCC_ANY ; break;
+		//case SWITCH_IMG_FMT_RGB555_LE: fourcc = (uint32_t)FOURCC_ANY ; break;
 		case SWITCH_IMG_FMT_YV12:      fourcc = (uint32_t)FOURCC_ANY ; break;
 		case SWITCH_IMG_FMT_I420:      fourcc = (uint32_t)FOURCC_I420; break;
-		case SWITCH_IMG_FMT_VPXYV12:   fourcc = (uint32_t)FOURCC_ANY ; break;
-		case SWITCH_IMG_FMT_VPXI420:   fourcc = (uint32_t)FOURCC_ANY ; break;
+		//case SWITCH_IMG_FMT_VPXYV12:   fourcc = (uint32_t)FOURCC_ANY ; break;
+		//case SWITCH_IMG_FMT_VPXI420:   fourcc = (uint32_t)FOURCC_ANY ; break;
 		case SWITCH_IMG_FMT_I422:      fourcc = (uint32_t)FOURCC_ANY ; break;
 		case SWITCH_IMG_FMT_I444:      fourcc = (uint32_t)FOURCC_ANY ; break;
 		case SWITCH_IMG_FMT_I440:      fourcc = (uint32_t)FOURCC_ANY ; break;

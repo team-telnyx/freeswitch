@@ -12,6 +12,7 @@
 #define VPX_VP9_COMMON_VP9_THREAD_COMMON_H_
 #include "./vpx_config.h"
 #include "vp9/common/vp9_loopfilter.h"
+#include "vpx_util/vpx_pthread.h"
 #include "vpx_util/vpx_thread.h"
 
 #ifdef __cplusplus
@@ -40,7 +41,7 @@ typedef struct VP9LfSyncData {
   int num_active_workers;  // number of scheduled workers.
 
 #if CONFIG_MULTITHREAD
-  pthread_mutex_t lf_mutex;
+  pthread_mutex_t *lf_mutex;
   pthread_mutex_t *recon_done_mutex;
   pthread_cond_t *recon_done_cond;
 #endif

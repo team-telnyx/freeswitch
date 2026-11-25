@@ -189,6 +189,7 @@ void vpx_highbd_convolve_avg_avx2(const uint16_t *src, ptrdiff_t src_stride,
   }
 }
 
+#if HAVE_X86_ASM
 // -----------------------------------------------------------------------------
 // Horizontal and vertical filtering
 
@@ -1465,10 +1466,10 @@ highbd_filter8_1dfunction vpx_highbd_filter_block1d4_v2_sse2;
 #define vpx_highbd_filter_block1d4_h4_avg_avx2 \
   vpx_highbd_filter_block1d4_h8_avg_avx2
 
-HIGH_FUN_CONV_1D(horiz, x0_q4, x_step_q4, h, src, , avx2, 0);
+HIGH_FUN_CONV_1D(horiz, x0_q4, x_step_q4, h, src, , avx2, 0)
 HIGH_FUN_CONV_1D(vert, y0_q4, y_step_q4, v,
-                 src - src_stride * (num_taps / 2 - 1), , avx2, 0);
-HIGH_FUN_CONV_2D(, avx2, 0);
+                 src - src_stride * (num_taps / 2 - 1), , avx2, 0)
+HIGH_FUN_CONV_2D(, avx2, 0)
 
 // From vpx_dsp/x86/vpx_high_subpixel_8t_sse2.asm.
 highbd_filter8_1dfunction vpx_highbd_filter_block1d4_h8_avg_sse2;
@@ -1487,9 +1488,10 @@ highbd_filter8_1dfunction vpx_highbd_filter_block1d4_v2_avg_sse2;
 #define vpx_highbd_filter_block1d4_v2_avg_avx2 \
   vpx_highbd_filter_block1d4_v2_avg_sse2
 
-HIGH_FUN_CONV_1D(avg_horiz, x0_q4, x_step_q4, h, src, avg_, avx2, 1);
+HIGH_FUN_CONV_1D(avg_horiz, x0_q4, x_step_q4, h, src, avg_, avx2, 1)
 HIGH_FUN_CONV_1D(avg_vert, y0_q4, y_step_q4, v,
-                 src - src_stride * (num_taps / 2 - 1), avg_, avx2, 1);
-HIGH_FUN_CONV_2D(avg_, avx2, 1);
+                 src - src_stride * (num_taps / 2 - 1), avg_, avx2, 1)
+HIGH_FUN_CONV_2D(avg_, avx2, 1)
 
 #undef HIGHBD_FUNC
+#endif  // HAVE_X86_ASM

@@ -10,6 +10,7 @@
 
 VP9_COMMON_SRCS-yes += vp9_common.mk
 VP9_COMMON_SRCS-yes += vp9_iface_common.h
+VP9_COMMON_SRCS-yes += vp9_iface_common.c
 VP9_COMMON_SRCS-yes += common/vp9_ppflags.h
 VP9_COMMON_SRCS-yes += common/vp9_alloccommon.c
 VP9_COMMON_SRCS-yes += common/vp9_blockd.c
@@ -79,7 +80,9 @@ VP9_COMMON_SRCS-$(HAVE_NEON)  += common/arm/neon/vp9_iht_neon.h
 
 ifeq ($(CONFIG_VP9_POSTPROC),yes)
 VP9_COMMON_SRCS-$(HAVE_MSA)  += common/mips/msa/vp9_mfqe_msa.c
+ifeq ($(HAVE_X86_ASM),yes)
 VP9_COMMON_SRCS-$(HAVE_SSE2) += common/x86/vp9_mfqe_sse2.asm
+endif
 endif
 
 ifneq ($(CONFIG_VP9_HIGHBITDEPTH),yes)

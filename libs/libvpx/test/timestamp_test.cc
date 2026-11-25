@@ -7,11 +7,12 @@
  *  in the file PATENTS.  All contributing project authors may
  *  be found in the AUTHORS file in the root of the source tree.
  */
+#include "gtest/gtest.h"
 #include "test/codec_factory.h"
 #include "test/encode_test_driver.h"
 #include "test/util.h"
 #include "test/video_source.h"
-#include "third_party/googletest/src/include/gtest/gtest.h"
+#include "vpx_config.h"
 
 namespace {
 
@@ -42,16 +43,16 @@ class DummyTimebaseVideoSource : public ::libvpx_test::DummyVideoSource {
            (static_cast<double>(framerate_numerator_) / framerate_denominator_);
   }
 
-  virtual vpx_codec_pts_t pts() const {
+  vpx_codec_pts_t pts() const override {
     return static_cast<vpx_codec_pts_t>(frame_ * FrameDuration() +
                                         starting_pts_ + 0.5);
   }
 
-  virtual unsigned long duration() const {
+  unsigned long duration() const override {
     return static_cast<unsigned long>(FrameDuration() + 0.5);
   }
 
-  virtual vpx_rational_t timebase() const { return timebase_; }
+  vpx_rational_t timebase() const override { return timebase_; }
 
   void set_starting_pts(int64_t starting_pts) { starting_pts_ = starting_pts; }
 
@@ -67,15 +68,13 @@ class TimestampTest
       public ::libvpx_test::CodecTestWithParam<libvpx_test::TestMode> {
  protected:
   TimestampTest() : EncoderTest(GET_PARAM(0)) {}
-  virtual ~TimestampTest() {}
+  ~TimestampTest() override = default;
 
-  virtual void SetUp() {
+  void SetUp() override {
     InitializeConfig();
     SetMode(GET_PARAM(1));
   }
 };
-
-class TimestampTestVp9Only : public TimestampTest {};
 
 // Tests encoding in millisecond timebase.
 TEST_P(TimestampTest, EncodeFrames) {
@@ -83,27 +82,28 @@ TEST_P(TimestampTest, EncodeFrames) {
   ASSERT_NO_FATAL_FAILURE(RunLoop(&video));
 }
 
-// TODO(fgalligan): Enable test when
-// https://bugs.chromium.org/p/webm/issues/detail?id=1614 is fixed.
-TEST_P(TimestampTest, DISABLED_TestMicrosecondTimebase) {
+TEST_P(TimestampTest, TestMicrosecondTimebase) {
   // Set the timebase to microseconds.
   DummyTimebaseVideoSource video(1, 1000000);
   video.set_limit(1);
   ASSERT_NO_FATAL_FAILURE(RunLoop(&video));
 }
 
-// TODO(webm:701): Enable VP8 test when the overflow issue in
-// TestVpxRollover is fixed.
-TEST_P(TimestampTestVp9Only, TestVpxRollover) {
+TEST_P(TimestampTest, TestVpxRollover) {
   DummyTimebaseVideoSource video(1, 1000);
   video.set_starting_pts(922337170351ll);
   ASSERT_NO_FATAL_FAILURE(RunLoop(&video));
 }
 
-VP8_INSTANTIATE_TEST_CASE(TimestampTest,
-                          ::testing::Values(::libvpx_test::kTwoPassGood));
-VP9_INSTANTIATE_TEST_CASE(TimestampTest,
-                          ::testing::Values(::libvpx_test::kTwoPassGood));
-VP9_INSTANTIATE_TEST_CASE(TimestampTestVp9Only,
-                          ::testing::Values(::libvpx_test::kTwoPassGood));
+#if CONFIG_REALTIME_ONLY
+VP8_INSTANTIATE_TEST_SUITE(TimestampTest,
+                           ::testing::Values(::libvpx_test::kRealTime));
+VP9_INSTANTIATE_TEST_SUITE(TimestampTest,
+                           ::testing::Values(::libvpx_test::kRealTime));
+#else
+VP8_INSTANTIATE_TEST_SUITE(TimestampTest,
+                           ::testing::Values(::libvpx_test::kTwoPassGood));
+VP9_INSTANTIATE_TEST_SUITE(TimestampTest,
+                           ::testing::Values(::libvpx_test::kTwoPassGood));
+#endif
 }  // namespace

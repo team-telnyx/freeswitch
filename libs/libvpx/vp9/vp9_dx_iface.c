@@ -19,7 +19,6 @@
 #include "vpx/vpx_decoder.h"
 #include "vpx_dsp/bitreader_buffer.h"
 #include "vpx_dsp/vpx_dsp_common.h"
-#include "vpx_util/vpx_thread.h"
 
 #include "vp9/common/vp9_alloccommon.h"
 #include "vp9/common/vp9_frame_buffers.h"
@@ -201,7 +200,7 @@ static vpx_codec_err_t update_error_state(
   return error->error_code;
 }
 
-static void init_buffer_callbacks(vpx_codec_alg_priv_t *ctx) {
+static vpx_codec_err_t init_buffer_callbacks(vpx_codec_alg_priv_t *ctx) {
   VP9_COMMON *const cm = &ctx->pbi->common;
   BufferPool *const pool = cm->buffer_pool;
 
@@ -217,12 +216,16 @@ static void init_buffer_callbacks(vpx_codec_alg_priv_t *ctx) {
     pool->get_fb_cb = vp9_get_frame_buffer;
     pool->release_fb_cb = vp9_release_frame_buffer;
 
-    if (vp9_alloc_internal_frame_buffers(&pool->int_frame_buffers))
+    if (vp9_alloc_internal_frame_buffers(&pool->int_frame_buffers)) {
       vpx_internal_error(&cm->error, VPX_CODEC_MEM_ERROR,
                          "Failed to initialize internal frame buffers");
+      return VPX_CODEC_MEM_ERROR;
+    }
 
     pool->cb_priv = &pool->int_frame_buffers;
   }
+
+  return VPX_CODEC_OK;
 }
 
 static void set_default_ppflags(vp8_postproc_cfg_t *cfg) {
@@ -252,6 +255,7 @@ static void set_ppflags(const vpx_codec_alg_priv_t *ctx, vp9_ppflags_t *flags) {
   } while (0)
 
 static vpx_codec_err_t init_decoder(vpx_codec_alg_priv_t *ctx) {
+  vpx_codec_err_t res;
   ctx->last_show_frame = -1;
   ctx->need_resync = 1;
   ctx->flushed = 0;
@@ -261,6 +265,8 @@ static vpx_codec_err_t init_decoder(vpx_codec_alg_priv_t *ctx) {
 
   ctx->pbi = vp9_decoder_create(ctx->buffer_pool);
   if (ctx->pbi == NULL) {
+    vpx_free(ctx->buffer_pool);
+    ctx->buffer_pool = NULL;
     set_error_detail(ctx, "Failed to allocate decoder");
     return VPX_CODEC_MEM_ERROR;
   }
@@ -278,9 +284,14 @@ static vpx_codec_err_t init_decoder(vpx_codec_alg_priv_t *ctx) {
   if (!ctx->postproc_cfg_set && (ctx->base.init_flags & VPX_CODEC_USE_POSTPROC))
     set_default_ppflags(&ctx->postproc_cfg);
 
-  init_buffer_callbacks(ctx);
-
-  return VPX_CODEC_OK;
+  res = init_buffer_callbacks(ctx);
+  if (res != VPX_CODEC_OK) {
+    vpx_free(ctx->buffer_pool);
+    ctx->buffer_pool = NULL;
+    vp9_decoder_remove(ctx->pbi);
+    ctx->pbi = NULL;
+  }
+  return res;
 }
 
 static INLINE void check_resync(vpx_codec_alg_priv_t *const ctx,
@@ -293,9 +304,7 @@ static INLINE void check_resync(vpx_codec_alg_priv_t *const ctx,
 
 static vpx_codec_err_t decode_one(vpx_codec_alg_priv_t *ctx,
                                   const uint8_t **data, unsigned int data_sz,
-                                  void *user_priv, int64_t deadline) {
-  (void)deadline;
-
+                                  void *user_priv) {
   // Determine the stream parameters. Note that we rely on peek_si to
   // validate that we have a buffer that does not wrap around the top
   // of the heap.
@@ -330,9 +339,8 @@ static vpx_codec_err_t decode_one(vpx_codec_alg_priv_t *ctx,
 
 static vpx_codec_err_t decoder_decode(vpx_codec_alg_priv_t *ctx,
                                       const uint8_t *data, unsigned int data_sz,
-                                      void *user_priv, long deadline) {
+                                      void *user_priv) {
   const uint8_t *data_start = data;
-  const uint8_t *const data_end = data + data_sz;
   vpx_codec_err_t res;
   uint32_t frame_sizes[8];
   int frame_count;
@@ -347,7 +355,7 @@ static vpx_codec_err_t decoder_decode(vpx_codec_alg_priv_t *ctx,
 
   // Initialize the decoder on the first frame.
   if (ctx->pbi == NULL) {
-    const vpx_codec_err_t res = init_decoder(ctx);
+    res = init_decoder(ctx);
     if (res != VPX_CODEC_OK) return res;
   }
 
@@ -360,27 +368,27 @@ static vpx_codec_err_t decoder_decode(vpx_codec_alg_priv_t *ctx,
 
   // Decode in serial mode.
   if (frame_count > 0) {
+    const uint8_t *const data_end = data + data_sz;
     int i;
 
     for (i = 0; i < frame_count; ++i) {
       const uint8_t *data_start_copy = data_start;
       const uint32_t frame_size = frame_sizes[i];
-      vpx_codec_err_t res;
       if (data_start < data || frame_size > (uint32_t)(data_end - data_start)) {
         set_error_detail(ctx, "Invalid frame size in index");
         return VPX_CODEC_CORRUPT_FRAME;
       }
 
-      res = decode_one(ctx, &data_start_copy, frame_size, user_priv, deadline);
+      res = decode_one(ctx, &data_start_copy, frame_size, user_priv);
       if (res != VPX_CODEC_OK) return res;
 
       data_start += frame_size;
     }
   } else {
+    const uint8_t *const data_end = data + data_sz;
     while (data_start < data_end) {
       const uint32_t frame_size = (uint32_t)(data_end - data_start);
-      const vpx_codec_err_t res =
-          decode_one(ctx, &data_start, frame_size, user_priv, deadline);
+      res = decode_one(ctx, &data_start, frame_size, user_priv);
       if (res != VPX_CODEC_OK) return res;
 
       // Account for suboptimal termination by the encoder.
@@ -446,7 +454,15 @@ static vpx_codec_err_t ctrl_set_reference(vpx_codec_alg_priv_t *ctx,
   if (data) {
     vpx_ref_frame_t *const frame = (vpx_ref_frame_t *)data;
     YV12_BUFFER_CONFIG sd;
+
+    if (frame->img.planes[VPX_PLANE_Y] == NULL ||
+        frame->img.planes[VPX_PLANE_U] == NULL ||
+        frame->img.planes[VPX_PLANE_V] == NULL) {
+      return VPX_CODEC_INVALID_PARAM;
+    }
+
     image2yuvconfig(&frame->img, &sd);
+    if (!ctx->pbi) return VPX_CODEC_ERROR;
     return vp9_set_reference_dec(
         &ctx->pbi->common, ref_frame_to_vp9_reframe(frame->frame_type), &sd);
   } else {
@@ -461,7 +477,15 @@ static vpx_codec_err_t ctrl_copy_reference(vpx_codec_alg_priv_t *ctx,
   if (data) {
     vpx_ref_frame_t *frame = (vpx_ref_frame_t *)data;
     YV12_BUFFER_CONFIG sd;
+
+    if (frame->img.planes[VPX_PLANE_Y] == NULL ||
+        frame->img.planes[VPX_PLANE_U] == NULL ||
+        frame->img.planes[VPX_PLANE_V] == NULL) {
+      return VPX_CODEC_INVALID_PARAM;
+    }
+
     image2yuvconfig(&frame->img, &sd);
+    if (!ctx->pbi) return VPX_CODEC_ERROR;
     return vp9_copy_reference_dec(ctx->pbi, (VP9_REFFRAME)frame->frame_type,
                                   &sd);
   } else {
@@ -474,11 +498,15 @@ static vpx_codec_err_t ctrl_get_reference(vpx_codec_alg_priv_t *ctx,
   vp9_ref_frame_t *data = va_arg(args, vp9_ref_frame_t *);
 
   if (data) {
-    const int fb_idx = ctx->pbi->common.cur_show_frame_fb_idx;
-    YV12_BUFFER_CONFIG *fb = get_buf_frame(&ctx->pbi->common, fb_idx);
-    if (fb == NULL) return VPX_CODEC_ERROR;
-    yuvconfig2image(&data->img, fb, NULL);
-    return VPX_CODEC_OK;
+    if (ctx->pbi) {
+      const int fb_idx = ctx->pbi->common.cur_show_frame_fb_idx;
+      YV12_BUFFER_CONFIG *fb = get_buf_frame(&ctx->pbi->common, fb_idx);
+      if (fb == NULL) return VPX_CODEC_ERROR;
+      yuvconfig2image(&data->img, fb, NULL);
+      return VPX_CODEC_OK;
+    } else {
+      return VPX_CODEC_ERROR;
+    }
   } else {
     return VPX_CODEC_INVALID_PARAM;
   }
@@ -725,6 +753,7 @@ CODEC_INTERFACE(vpx_codec_vp9_dx) = {
       NULL,  // vpx_codec_enc_config_set_fn_t
       NULL,  // vpx_codec_get_global_headers_fn_t
       NULL,  // vpx_codec_get_preview_frame_fn_t
-      NULL   // vpx_codec_enc_mr_get_mem_loc_fn_t
+      NULL,  // vpx_codec_enc_mr_get_mem_loc_fn_t
+      NULL   // vpx_codec_enc_mr_free_mem_loc_fn_t
   }
 };

@@ -68,30 +68,23 @@ echo "test_libvpx, etc) to link the stack traces to source code lines."
 cflags="-fsanitize=${sanitizer}"
 ldflags="-fsanitize=${sanitizer}"
 
-# http://code.google.com/p/webm/issues/detail?id=570
-cflags="${cflags} -fno-strict-aliasing"
 # Useful backtraces.
 cflags="${cflags} -fno-omit-frame-pointer"
 # Exact backtraces.
 cflags="${cflags} -fno-optimize-sibling-calls"
 
-if [ "${sanitizer}" = "cfi" ]; then
-  # https://clang.llvm.org/docs/ControlFlowIntegrity.html
-  cflags="${cflags} -fno-sanitize-trap=cfi -flto -fvisibility=hidden"
-  ldflags="${ldflags} -fno-sanitize-trap=cfi -flto -fuse-ld=gold"
-  export AR="llvm-ar"
-fi
-
-# TODO(http://crbug.com/webm/1615): -fsanitize=implicit-integer-truncation
-# causes conversion warnings in many of the x86 intrinsics and elsewhere.
-if [ "${sanitizer}" = "integer" ]; then
-  major_version=$(clang --version | head -n 1 \
-    | grep -o -E "[[:digit:]]\.[[:digit:]]\.[[:digit:]]" | cut -f1 -d.)
-  if [ ${major_version} -ge 7 ]; then
-    cflags="${cflags} -fno-sanitize=implicit-integer-truncation"
-    ldflags="${ldflags} -fno-sanitize=implicit-integer-truncation"
-  fi
-fi
+case "${sanitizer}" in
+  cfi)
+    # https://clang.llvm.org/docs/ControlFlowIntegrity.html
+    cflags="${cflags} -fno-sanitize-trap=cfi -flto -fvisibility=hidden"
+    ldflags="${ldflags} -fno-sanitize-trap=cfi -flto -fuse-ld=gold"
+    export AR="llvm-ar"
+    ;;
+  integer|undefined)
+    # https://clang.llvm.org/docs/UndefinedBehaviorSanitizer.html
+    cflags="${cflags} -fsanitize=float-cast-overflow"
+    ;;
+esac
 
 set -x
 export CC="clang"

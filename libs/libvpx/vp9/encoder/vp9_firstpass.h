@@ -13,32 +13,13 @@
 
 #include <assert.h>
 
+#include "vp9/common/vp9_onyxc_int.h"
+#include "vp9/encoder/vp9_firstpass_stats.h"
 #include "vp9/encoder/vp9_lookahead.h"
 #include "vp9/encoder/vp9_ratectrl.h"
 
 #ifdef __cplusplus
 extern "C" {
-#endif
-
-#if CONFIG_FP_MB_STATS
-
-#define FPMB_DCINTRA_MASK 0x01
-
-#define FPMB_MOTION_ZERO_MASK 0x02
-#define FPMB_MOTION_LEFT_MASK 0x04
-#define FPMB_MOTION_RIGHT_MASK 0x08
-#define FPMB_MOTION_UP_MASK 0x10
-#define FPMB_MOTION_DOWN_MASK 0x20
-
-#define FPMB_ERROR_SMALL_MASK 0x40
-#define FPMB_ERROR_LARGE_MASK 0x80
-#define FPMB_ERROR_SMALL_TH 2000
-#define FPMB_ERROR_LARGE_TH 48000
-
-typedef struct {
-  uint8_t *mb_stats_start;
-  uint8_t *mb_stats_end;
-} FIRSTPASS_MB_STATS;
 #endif
 
 #define INVALID_ROW (-1)
@@ -75,36 +56,8 @@ typedef struct {
   int64_t sum_mvcs;
   int sum_in_vectors;
   int intra_smooth_count;
+  int new_mv_count;
 } FIRSTPASS_DATA;
-
-typedef struct {
-  double frame;
-  double weight;
-  double intra_error;
-  double coded_error;
-  double sr_coded_error;
-  double frame_noise_energy;
-  double pcnt_inter;
-  double pcnt_motion;
-  double pcnt_second_ref;
-  double pcnt_neutral;
-  double pcnt_intra_low;   // Coded intra but low variance
-  double pcnt_intra_high;  // Coded intra high variance
-  double intra_skip_pct;
-  double intra_smooth_pct;    // % of blocks that are smooth
-  double inactive_zone_rows;  // Image mask rows top and bottom.
-  double inactive_zone_cols;  // Image mask columns at left and right edges.
-  double MVr;
-  double mvr_abs;
-  double MVc;
-  double mvc_abs;
-  double MVrv;
-  double MVcv;
-  double mv_in_out_count;
-  double duration;
-  double count;
-  int64_t spatial_layer_id;
-} FIRSTPASS_STATS;
 
 typedef enum {
   KF_UPDATE = 0,
@@ -124,6 +77,12 @@ typedef enum {
   FRAME_CONTENT_TYPES = 2
 } FRAME_CONTENT_TYPE;
 
+typedef struct ExternalRcReference {
+  int last_index;
+  int golden_index;
+  int altref_index;
+} ExternalRcReference;
+
 typedef struct {
   unsigned char index;
   RATE_FACTOR_LEVEL rf_level[MAX_STATIC_GF_GROUP_LENGTH + 2];
@@ -133,6 +92,7 @@ typedef struct {
   unsigned char frame_gop_index[MAX_STATIC_GF_GROUP_LENGTH + 2];
   int bit_allocation[MAX_STATIC_GF_GROUP_LENGTH + 2];
   int gfu_boost[MAX_STATIC_GF_GROUP_LENGTH + 2];
+  int update_ref_idx[MAX_STATIC_GF_GROUP_LENGTH + 2];
 
   int frame_start;
   int frame_end;
@@ -144,7 +104,36 @@ typedef struct {
   int max_layer_depth;
   int allowed_max_layer_depth;
   int group_noise_energy;
+
+  // Structure to store the reference information from external RC.
+  // Used to override reference frame decisions in libvpx.
+  ExternalRcReference ext_rc_ref[MAX_STATIC_GF_GROUP_LENGTH + 2];
+  int ref_frame_list[MAX_STATIC_GF_GROUP_LENGTH + 2][REFS_PER_FRAME];
 } GF_GROUP;
+
+typedef struct {
+  const FIRSTPASS_STATS *stats;
+  int num_frames;
+} FIRST_PASS_INFO;
+
+static INLINE void fps_init_first_pass_info(FIRST_PASS_INFO *first_pass_info,
+                                            const FIRSTPASS_STATS *stats,
+                                            int num_frames) {
+  first_pass_info->stats = stats;
+  first_pass_info->num_frames = num_frames;
+}
+
+static INLINE int fps_get_num_frames(const FIRST_PASS_INFO *first_pass_info) {
+  return first_pass_info->num_frames;
+}
+
+static INLINE const FIRSTPASS_STATS *fps_get_frame_stats(
+    const FIRST_PASS_INFO *first_pass_info, int show_idx) {
+  if (show_idx < 0 || show_idx >= first_pass_info->num_frames) {
+    return NULL;
+  }
+  return &first_pass_info->stats[show_idx];
+}
 
 typedef struct {
   unsigned int section_intra_rating;
@@ -154,6 +143,7 @@ typedef struct {
   const FIRSTPASS_STATS *stats_in;
   const FIRSTPASS_STATS *stats_in_start;
   const FIRSTPASS_STATS *stats_in_end;
+  FIRST_PASS_INFO first_pass_info;
   FIRSTPASS_STATS total_left_stats;
   int first_pass_done;
   int64_t bits_left;
@@ -161,12 +151,6 @@ typedef struct {
   double normalized_score_left;
   double mb_av_energy;
   double mb_smooth_pct;
-
-#if CONFIG_FP_MB_STATS
-  uint8_t *frame_mb_stats_buf;
-  uint8_t *this_frame_mb_stats;
-  FIRSTPASS_MB_STATS firstpass_mb_stats;
-#endif
 
   FP_MB_FLOAT_STATS *fp_mb_float_stats;
 
@@ -192,8 +176,27 @@ typedef struct {
   int extend_maxq;
   int extend_minq_fast;
   int arnr_strength_adjustment;
+  int last_qindex_of_arf_layer[MAX_ARF_LAYERS];
 
   GF_GROUP gf_group;
+
+  // Vizeir project experimental two pass rate control parameters.
+  // When |use_vizier_rc_params| is 1, the following parameters will
+  // be overwritten by pass in values. Otherwise, they are initialized
+  // by default values.
+  int use_vizier_rc_params;
+  double active_wq_factor;
+  double err_per_mb;
+  double sr_default_decay_limit;
+  double sr_diff_factor;
+  double kf_err_per_mb;
+  double kf_frame_min_boost;
+  double kf_frame_max_boost_first;  // Max for first kf in a chunk.
+  double kf_frame_max_boost_subs;   // Max for subsequent mid chunk kfs.
+  double kf_max_total_boost;
+  double gf_max_total_boost;
+  double gf_frame_max_boost;
+  double zm_factor;
 } TWO_PASS;
 
 struct VP9_COMP;
@@ -212,12 +215,21 @@ void vp9_first_pass_encode_tile_mb_row(struct VP9_COMP *cpi,
 
 void vp9_init_second_pass(struct VP9_COMP *cpi);
 void vp9_rc_get_second_pass_params(struct VP9_COMP *cpi);
+void vp9_init_vizier_params(TWO_PASS *const twopass, int screen_area);
 
 // Post encode update of the rate control parameters for 2-pass
 void vp9_twopass_postencode_update(struct VP9_COMP *cpi);
 
 void calculate_coded_size(struct VP9_COMP *cpi, int *scaled_frame_width,
                           int *scaled_frame_height);
+
+struct VP9EncoderConfig;
+int vp9_get_frames_to_next_key(const struct VP9EncoderConfig *oxcf,
+                               const TWO_PASS *const twopass, int kf_show_idx,
+                               int min_gf_interval);
+
+FIRSTPASS_STATS vp9_get_frame_stats(const TWO_PASS *twopass);
+FIRSTPASS_STATS vp9_get_total_stats(const TWO_PASS *twopass);
 
 #ifdef __cplusplus
 }  // extern "C"

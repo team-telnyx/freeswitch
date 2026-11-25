@@ -1,14 +1,6 @@
 Rules:
  rules:
   -
-   Glob: libs/miniupnpc/*
-   Matches: Thomas\sBERNARD
-   Copyright: Thomas Bernard
-  -
-   Glob: libs/miniupnpc/bsdqueue.h
-   Matches: The\sRegents\sof\sthe\sUniversity\sof\sCalifornia.\s+All\srights\sreserved.
-   Copyright: The Regents of the University of California.
-  -
    Glob: libs/sofia-sip/libsofia-sip-ua/su/poll.c
    Matches: Free\sSoftware\sFoundation,\sInc.
    Copyright: Free Software Foundation, Inc.
@@ -149,18 +141,6 @@ Rules:
    Matches: const\schar\s\*\scopyright\s;
    Copyright: 1999-2009 Erik de Castro Lopo <erikd@mega-nerd.com>
    Justification: prevent false-psitive copyright detection
-  -
-   Glob: src/mod/endpoints/mod_khomp/*
-   Matches: The\scontents\sof\sthis\sfile\sare\ssubject\sto\sthe\sMozilla\sPublic\sLicense\sVersion\s1.1
-   Matches: Alternatively,\sthe\scontents\sof\sthis\sfile\smay\sbe\sused\sunder\sthe\sterms\sof\sthe
-   Matches: GNU\sLesser\sGeneral\sPublic\sLicense\s2\.1.\slicense\s\(the\s.LGPL.\sLicense\),\sin\swhich
-   Matches: version\s2\.1\sof\sthe\sLicense,\sor\s\(at\syour\soption\)\sany\slater\sversion.
-   License: MPL-1.1 or LGPL-2.1+
-  -
-   Glob: src/mod/endpoints/mod_khomp/commons/base/atomic.hpp
-   Matches: Original\scopyright\sfollows[:]
-   Matches: Copyright\s\(c\)\s1998\sDoug\sRabson
-   Copyright: 1998 Doug Rabson
   -
    Glob: libs/esl/getopt/getopt_long.c
    Matches: This\scode\sis\sderived\sfrom\ssoftware\scontributed\sto\sThe\sNetBSD\sFoundation

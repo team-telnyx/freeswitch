@@ -19,6 +19,7 @@ struct postproc_state {
   int last_frame_valid;
   int clamp;
   int8_t *generated_noise;
+  int generated_noise_size;
 };
 #include "onyxc_int.h"
 #include "ppflags.h"
@@ -29,12 +30,11 @@ extern "C" {
 int vp8_post_proc_frame(struct VP8Common *oci, YV12_BUFFER_CONFIG *dest,
                         vp8_ppflags_t *ppflags);
 
-void vp8_de_noise(struct VP8Common *cm, YV12_BUFFER_CONFIG *source,
-                  YV12_BUFFER_CONFIG *post, int q, int low_var_thresh, int flag,
+void vp8_de_noise(struct VP8Common *cm, YV12_BUFFER_CONFIG *source, int q,
                   int uvfilter);
 
 void vp8_deblock(struct VP8Common *cm, YV12_BUFFER_CONFIG *source,
-                 YV12_BUFFER_CONFIG *post, int q, int low_var_thresh, int flag);
+                 YV12_BUFFER_CONFIG *post, int q);
 
 #define MFQE_PRECISION 4
 

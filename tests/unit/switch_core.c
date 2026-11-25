@@ -32,11 +32,30 @@
 #include <switch.h>
 #include <test/switch_test.h>
 
+#include <string.h>
+#include <../../src/switch_uuidv7.c>
+
 #if defined(HAVE_OPENSSL)
 #include <openssl/ssl.h>
 #endif
 
 #define ENABLE_SNPRINTFV_TESTS 0 /* Do not turn on for CI as this requires a lot of RAM */
+
+static void *SWITCH_THREAD_FUNC test_create_uuid_thread_run(switch_thread_t *thread, void *obj)
+{
+	int *tid = (int *)obj;
+	switch_uuid_t uuid;
+	char uuid_str[SWITCH_UUID_FORMATTED_LENGTH + 1] = { 0 };
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "test_create_uuid: #%d\n", *tid);
+	for (int i = 0; i < 10; i++) {
+		uint8_t status = uuidv7_new(uuid.data);
+		switch_uuid_format(uuid_str, &uuid);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "uuidv7: %s status=%d #%d thread=%lu\n", uuid_str, status, *tid, (unsigned long)switch_thread_self());
+		switch_cond_next();
+	}
+
+	return NULL;
+}
 
 FST_CORE_BEGIN("./conf")
 {
@@ -52,6 +71,52 @@ FST_CORE_BEGIN("./conf")
 		{
 		}
 		FST_TEARDOWN_END()
+
+		FST_TEST_BEGIN(test_is_ip_address)
+		{			
+			const char *test_ips[] = {
+				"192.168.1.1",              // Valid IPv4
+				"2001:db8::ff00:42:8329",   // Valid IPv6
+				"www.google.com",           // Hostname
+				"not.an.ip.address",
+				NULL
+			};
+
+			fst_check_int_equals(switch_is_ip_address(test_ips[0]), 1);
+			fst_check_int_equals(switch_is_ip_address(test_ips[1]), 1);
+			fst_check_int_equals(switch_is_ip_address(test_ips[2]), 0);
+			fst_check_int_equals(switch_is_ip_address(test_ips[3]), 0);
+			fst_check_int_equals(switch_is_ip_address(test_ips[4]), 0);
+		}
+		FST_TEST_END();
+
+		FST_TEST_BEGIN(test_switch_regex)
+		{
+			switch_regex_match_t *match_data = NULL;
+			switch_regex_t *re = NULL;
+			char buf[100] = { 0 };
+			size_t size = sizeof(buf);
+
+			switch_regex_perform("1234", "^[0-9]+$", &re, &match_data);
+			switch_regex_copy_substring(match_data, 0, buf, &size);
+			switch_regex_match_free(match_data);
+			switch_regex_free(re);
+
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "\n%s\n", buf);
+			fst_check_string_equals(buf, "1234");
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(test_fctstr_safe_cpy)
+		{
+			char *dst;
+			const char *src = "1234567890";
+
+			dst = fctstr_clone(src);
+			fst_check_string_equals(dst, src);
+			free(dst);
+		}
+		FST_TEST_END()
 
 		FST_TEST_BEGIN(test_switch_rand)
 		{
@@ -568,6 +633,200 @@ FST_CORE_BEGIN("./conf")
 			fst_check(switch_channel_get_variable_buf(channel, "test_var_does_not_exist", buf, sizeof(buf)) == SWITCH_STATUS_FALSE);
 		}
 		FST_SESSION_END()
+
+		FST_TEST_BEGIN(test_create_uuid_v4_v7)
+		{
+			switch_uuid_t uuid;
+			char uuid_str[SWITCH_UUID_FORMATTED_LENGTH + 1] = { 0 };
+			int version = 7;
+
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "test_create_uuid:\n");
+			switch_core_session_ctl(SCSC_UUID_VERSION, &version);
+			for (int i = 0; i < 100; i++) {
+				uint8_t status = uuidv7_new(uuid.data);
+				switch_uuid_format(uuid_str, &uuid);
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "uuidv7: %s\n", uuid_str);
+				fst_check(status >=0 && status < 4);
+			}
+
+			version = 4;
+			switch_core_session_ctl(SCSC_UUID_VERSION, &version);
+			switch_uuid_get(&uuid);
+			switch_uuid_format(uuid_str, &uuid);
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "uuidv4: %s\n", uuid_str);
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(test_create_uuid_thread)
+		{
+			int n[10] = {0};
+			switch_thread_t *thread[10] = {0};
+			switch_threadattr_t *thd_attr = NULL;
+			switch_status_t status;
+			int version = 7;
+
+			switch_core_session_ctl(SCSC_UUID_VERSION, &version);
+			switch_threadattr_create(&thd_attr, fst_pool);
+			switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
+
+			for (int i = 0; i < sizeof(thread) / sizeof(thread[0]); i++) {
+				n[i] = i;
+				switch_thread_create(&thread[i], thd_attr, test_create_uuid_thread_run, &n[i], fst_pool);
+			}
+			for (int i = 0; i < sizeof(thread) / sizeof(thread[0]); i++) {
+				switch_thread_join(&status, thread[i]);
+			}
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(test_create_uuid_speed)
+		{
+			int n;
+			int version = 4;
+
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "test_create_uuid_speed:\n");
+			switch_core_session_ctl(SCSC_UUID_VERSION, &version);
+			for (n = 1; n < 4; n++) {
+				switch_time_t started_at = switch_time_now();
+				double delta = 0;
+				switch_uuid_t uuid;
+
+				for (int i = 0; i < 1000 * pow(10, n); i++) {
+					uuidv7_new(uuid.data);
+				}
+				delta = (switch_time_now() - started_at) / 1000000.0;
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "%d uuidv7_new used: %f seconds\n", 1000 * (int)pow(10, n), delta);
+				
+				started_at = switch_time_now();
+				for (long long int i = 0; i < 1000 * pow(10, n); i++) {
+					switch_uuid_get(&uuid);
+				}
+				delta = (switch_time_now() - started_at) / 1000000.0;
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "%d uuid_generate used: %f seconds\n", 1000 * (int)pow(10, n), delta);
+			}
+		}
+		FST_TEST_END()
+
+		FST_TEST_BEGIN(test_switch_img_patch_rgb)
+		{
+			/* Odd sizes on purpose: exercise the SIMD remainder paths inside libyuv. */
+			int W = 127, H = 63;
+			/* {x, y, w, h}: the full-frame same-size case is the only one where all strides
+			   equal width*4, so it takes libyuv's coalesced single-row path; the others take
+			   the per-row path, the last one patches flush against the bottom-right corner. */
+			int cases[][4] = { {0, 0, 127, 63}, {0, 0, 61, 29}, {1, 0, 61, 29}, {0, 1, 61, 29}, {33, 17, 61, 29}, {66, 34, 61, 29} };
+			switch_bool_t noalpha[] = { SWITCH_FALSE, SWITCH_TRUE };
+			uint32_t seed = 12345;
+			int p, n, i, j;
+
+			for (n = 0; n < 2; n++) {
+				for (p = 0; p < (int)(sizeof(cases) / sizeof(cases[0])); p++) {
+					int px = cases[p][0], py = cases[p][1], w = cases[p][2], h = cases[p][3];
+					switch_image_t *IMG = switch_img_alloc(NULL, SWITCH_IMG_FMT_ARGB, W, H, 1);
+					switch_image_t *img = switch_img_alloc(NULL, SWITCH_IMG_FMT_ARGB, w, h, 1);
+					uint8_t *pristine = malloc((size_t)W * H * 4);
+					int outside_ok = 1, region_ok = 1;
+
+					fst_check(IMG && img && pristine);
+
+					if (!IMG || !img || !pristine) {
+						switch_img_free(&IMG);
+						switch_img_free(&img);
+						switch_safe_free(pristine);
+						continue;
+					}
+
+					/* Deterministic pseudo-random pixels; alpha covers the full range */
+					for (i = 0; i < H; i++) {
+						uint8_t *row = IMG->planes[SWITCH_PLANE_PACKED] + i * IMG->stride[SWITCH_PLANE_PACKED];
+
+						for (j = 0; j < W * 4; j++) {
+							seed = seed * 1103515245 + 12345;
+							row[j] = (uint8_t)(seed >> 16);
+						}
+
+						memcpy(pristine + (size_t)i * W * 4, row, W * 4);
+					}
+
+					for (i = 0; i < h; i++) {
+						uint8_t *row = img->planes[SWITCH_PLANE_PACKED] + i * img->stride[SWITCH_PLANE_PACKED];
+
+						for (j = 0; j < w * 4; j++) {
+							seed = seed * 1103515245 + 12345;
+							row[j] = (uint8_t)(seed >> 16);
+						}
+
+						if (noalpha[n]) {
+							/* Opaque patch: the noalpha path must then copy src pixels verbatim */
+							for (j = 3; j < w * 4; j += 4) {
+								row[j] = 255;
+							}
+						}
+					}
+
+					switch_img_patch_rgb(IMG, img, px, py, noalpha[n]);
+
+					for (i = 0; i < H && outside_ok && region_ok; i++) {
+						uint8_t *row = IMG->planes[SWITCH_PLANE_PACKED] + i * IMG->stride[SWITCH_PLANE_PACKED];
+						uint8_t *old = pristine + (size_t)i * W * 4;
+						uint8_t *src = NULL;
+
+						if (i >= py && i < py + h) {
+							src = img->planes[SWITCH_PLANE_PACKED] + (i - py) * img->stride[SWITCH_PLANE_PACKED];
+						}
+
+						for (j = 0; j < W; j++) {
+							if (!src || j < px || j >= px + w) {
+								/* Pixels outside the patched region must be untouched */
+								if (memcmp(row + j * 4, old + j * 4, 4)) {
+									outside_ok = 0;
+									break;
+								}
+							} else if (noalpha[n]) {
+								/* Opaque src: expect a verbatim copy */
+								if (memcmp(row + j * 4, src + (j - px) * 4, 4)) {
+									region_ok = 0;
+									break;
+								}
+							} else {
+								/* libyuv ARGBBlend reference: dst = clamp255((((256 - a) * b) >> 8) + f), dst alpha = 255 */
+								const uint8_t *f = src + (j - px) * 4;
+								const uint8_t *b = old + j * 4;
+								uint32_t a = f[3];
+								int k;
+
+								for (k = 0; k < 3; k++) {
+									uint32_t e = (((256 - a) * b[k]) >> 8) + f[k];
+
+									if (e > 255) e = 255;
+
+									if (row[j * 4 + k] != (uint8_t)e) {
+										region_ok = 0;
+										break;
+									}
+								}
+
+								if (row[j * 4 + 3] != 255) {
+									region_ok = 0;
+								}
+
+								if (!region_ok) break;
+							}
+						}
+					}
+
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "patch_rgb x=%d y=%d w=%d h=%d noalpha=%d outside_ok=%d region_ok=%d\n",
+									  px, py, w, h, noalpha[n], outside_ok, region_ok);
+					fst_check(outside_ok);
+					fst_check(region_ok);
+
+					switch_img_free(&IMG);
+					switch_img_free(&img);
+					free(pristine);
+				}
+			}
+		}
+		FST_TEST_END()
 	}
 	FST_SUITE_END()
 }

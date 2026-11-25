@@ -11,13 +11,15 @@
 #ifndef VPX_VP9_ENCODER_VP9_ETHREAD_H_
 #define VPX_VP9_ENCODER_VP9_ETHREAD_H_
 
+#include "vpx_util/vpx_pthread.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 #define MAX_NUM_TILE_COLS (1 << 6)
 #define MAX_NUM_TILE_ROWS 4
-#define MAX_NUM_THREADS 80
+#define MAX_NUM_THREADS 64
 
 struct VP9_COMP;
 struct ThreadData;
@@ -41,6 +43,11 @@ typedef struct VP9RowMTSyncData {
   int sync_range;
   int rows;
 } VP9RowMTSync;
+
+// Frees EncWorkerData related allocations made by vp9_encode_*_mt().
+// row_mt specific data is freed with vp9_row_mt_mem_dealloc() and is not
+// called by this function.
+void vp9_encode_free_mt_data(struct VP9_COMP *cpi);
 
 void vp9_encode_tiles_mt(struct VP9_COMP *cpi);
 

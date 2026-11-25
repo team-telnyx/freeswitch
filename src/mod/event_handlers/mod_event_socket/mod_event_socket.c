@@ -35,10 +35,9 @@
 #define CMD_BUFLEN 1024 * 1000
 #define MAX_QUEUE_LEN 100000
 #define MAX_MISSED 500
+#define MAX_CONTENT_LENGTH (16 * 1024 * 1024)
 static const int QUEUE_LEN_WARNING_1 = MAX_QUEUE_LEN * .50;
 static const int QUEUE_LEN_WARNING_2 = MAX_QUEUE_LEN * .75;
-
-#define MAX_CONTENT_LENGTH (16 * 1024 * 1024)
 
 SWITCH_MODULE_LOAD_FUNCTION(mod_event_socket_load);
 SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_event_socket_shutdown);
@@ -598,10 +597,7 @@ static void event_handler(switch_event_t *event)
 						}
 
 						if (*hp->value == '/') {
-							switch_regex_t *re = NULL;
-							int ovector[30];
-							cmp = !!switch_regex_perform(hval, comp_to, &re, ovector, sizeof(ovector) / sizeof(ovector[0]));
-							switch_regex_safe_free(re);
+							cmp = !!switch_regex(hval, comp_to);
 						} else {
 							cmp = !strcasecmp(hval, comp_to);
 						}
@@ -1412,7 +1408,7 @@ SWITCH_STANDARD_API(event_sink_function)
 		}
 
 		if (listener->format == EVENT_FORMAT_JSON) {
-			char *p = "{}";
+			char *p;
 			cJSON_AddItemToObject(cj, "events", cjevents);
 			p = cJSON_Print(cj);
 			if (cj && p) stream->write_function(stream, p);

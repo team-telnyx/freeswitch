@@ -508,7 +508,7 @@ bool WriteEbmlElement(IMkvWriter* writer, uint64 type, const char* value) {
   if (WriteUInt(writer, length))
     return false;
 
-  if (writer->Write(value, static_cast<const uint32>(length)))
+  if (writer->Write(value, static_cast<uint32>(length)))
     return false;
 
   return true;
@@ -606,26 +606,22 @@ uint64 WriteVoidElement(IMkvWriter* writer, uint64 size) {
 
 void GetVersion(int32* major, int32* minor, int32* build, int32* revision) {
   *major = 0;
-  *minor = 2;
-  *build = 1;
+  *minor = 3;
+  *build = 3;
   *revision = 0;
 }
 
 uint64 MakeUID(unsigned int* seed) {
   uint64 uid = 0;
 
-#ifdef __MINGW32__
-  srand(*seed);
-#endif
-
   for (int i = 0; i < 7; ++i) {  // avoid problems with 8-byte values
     uid <<= 8;
 
 // TODO(fgalligan): Move random number generation to platform specific code.
-#ifdef _MSC_VER
+#ifdef _WIN32
     (void)seed;
     const int32 nn = rand();
-#elif __ANDROID__
+#elif defined(__ANDROID__)
     (void)seed;
     int32 temp_num = 1;
     int fd = open("/dev/urandom", O_RDONLY);
@@ -634,8 +630,6 @@ uint64 MakeUID(unsigned int* seed) {
       close(fd);
     }
     const int32 nn = temp_num;
-#elif defined __MINGW32__
-    const int32 nn = rand();
 #else
     const int32 nn = rand_r(seed);
 #endif

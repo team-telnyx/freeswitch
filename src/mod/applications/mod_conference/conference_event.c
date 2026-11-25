@@ -684,7 +684,12 @@ void conference_event_adv_la(conference_obj_t *conference, conference_member_t *
 
 		if (cookie) {
 			switch_event_channel_permission_modify(cookie, conference->la_event_channel, join);
-			switch_event_channel_permission_modify(cookie, conference->mod_event_channel, join);
+
+			/* Grant on join and revoke on part for moderators only; MFLAG_MOD is fixed for the whole membership. */
+			if (conference_utils_member_test_flag(member, MFLAG_MOD)) {
+				switch_event_channel_permission_modify(cookie, conference->mod_event_channel, join);
+			}
+
 			switch_event_channel_permission_modify(cookie, conference->chat_event_channel, join);
 			switch_event_channel_permission_modify(cookie, conference->info_event_channel, join);
 		}
@@ -773,7 +778,9 @@ switch_status_t conference_event_add_data_with_member(conference_obj_t *conferen
 	switch_event_add_header(event, SWITCH_STACK_BOTTOM, "Conference-Ghosts", "%u", conference->count_ghosts);
 	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Conference-Profile-Name", conference->profile_name);
 	switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Conference-Unique-ID", conference->uuid_str);
+	switch_mutex_lock(conference->flag_mutex);
 	switch_event_merge(event, conference->variables);
+	switch_mutex_unlock(conference->flag_mutex);
 
 	return status;
 }

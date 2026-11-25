@@ -13,7 +13,7 @@
 #include <string.h>
 #include <tuple>
 
-#include "third_party/googletest/src/include/gtest/gtest.h"
+#include "gtest/gtest.h"
 #include "test/acm_random.h"
 #include "test/clear_system_state.h"
 #include "test/register_state_check.h"
@@ -24,6 +24,7 @@
 #include "vp9/common/vp9_reconinter.h"
 #include "vp9/encoder/vp9_context_tree.h"
 #include "vp9/encoder/vp9_denoiser.h"
+#include "vpx_config.h"
 
 using libvpx_test::ACMRandom;
 
@@ -31,26 +32,27 @@ namespace {
 
 const int kNumPixels = 64 * 64;
 
-typedef int (*Vp9DenoiserFilterFunc)(const uint8_t *sig, int sig_stride,
-                                     const uint8_t *mc_avg, int mc_avg_stride,
-                                     uint8_t *avg, int avg_stride,
-                                     int increase_denoising, BLOCK_SIZE bs,
-                                     int motion_magnitude);
-typedef std::tuple<Vp9DenoiserFilterFunc, BLOCK_SIZE> VP9DenoiserTestParam;
+using Vp9DenoiserFilterFunc = int (*)(const uint8_t *sig, int sig_stride,
+                                      const uint8_t *mc_avg, int mc_avg_stride,
+                                      uint8_t *avg, int avg_stride,
+                                      int increase_denoising, BLOCK_SIZE bs,
+                                      int motion_magnitude);
+using VP9DenoiserTestParam = std::tuple<Vp9DenoiserFilterFunc, BLOCK_SIZE>;
 
 class VP9DenoiserTest
     : public ::testing::Test,
       public ::testing::WithParamInterface<VP9DenoiserTestParam> {
  public:
-  virtual ~VP9DenoiserTest() {}
+  ~VP9DenoiserTest() override = default;
 
-  virtual void SetUp() { bs_ = GET_PARAM(1); }
+  void SetUp() override { bs_ = GET_PARAM(1); }
 
-  virtual void TearDown() { libvpx_test::ClearSystemState(); }
+  void TearDown() override { libvpx_test::ClearSystemState(); }
 
  protected:
   BLOCK_SIZE bs_;
 };
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(VP9DenoiserTest);
 
 TEST_P(VP9DenoiserTest, BitexactCheck) {
   ACMRandom rnd(ACMRandom::DeterministicSeed());
@@ -104,7 +106,7 @@ using std::make_tuple;
 
 // Test for all block size.
 #if HAVE_SSE2
-INSTANTIATE_TEST_CASE_P(
+INSTANTIATE_TEST_SUITE_P(
     SSE2, VP9DenoiserTest,
     ::testing::Values(make_tuple(&vp9_denoiser_filter_sse2, BLOCK_8X8),
                       make_tuple(&vp9_denoiser_filter_sse2, BLOCK_8X16),
@@ -119,7 +121,7 @@ INSTANTIATE_TEST_CASE_P(
 #endif  // HAVE_SSE2
 
 #if HAVE_NEON
-INSTANTIATE_TEST_CASE_P(
+INSTANTIATE_TEST_SUITE_P(
     NEON, VP9DenoiserTest,
     ::testing::Values(make_tuple(&vp9_denoiser_filter_neon, BLOCK_8X8),
                       make_tuple(&vp9_denoiser_filter_neon, BLOCK_8X16),

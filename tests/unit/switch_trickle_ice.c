@@ -559,7 +559,7 @@ typedef struct review_regression_session_owner_s {
 } review_regression_session_owner_t;
 
 #define REVIEW_REGRESSION_MAX_SESSIONS 2
-#define REVIEW_REGRESSION_MAX_SOCKETS 1
+#define REVIEW_REGRESSION_MAX_SOCKETS 2
 #define REVIEW_REGRESSION_MAX_ALLOCATIONS 21
 
 typedef struct review_regression_owner_s {
@@ -4610,6 +4610,7 @@ FCT_BGN()
 			switch_port_t local_rtp_port;
 			switch_time_t deadline;
 			int sender_fd = -1;
+			int wake_fd = -1;
 			int reader_started = 0;
 			int activation_started = 0;
 			int removal_reader_started = 0;
@@ -4682,7 +4683,12 @@ FCT_BGN()
 			if (sender_fd >= 0) {
 				review_regression_owner_adopt_socket(sender_fd);
 			}
-			fst_requires(sender_fd >= 0 && local_rtp_port > 0 && local_rtcp_port > 1);
+			/* Wake the RTP reader from the remote RTP candidate; packets from any other source are dropped as injected. */
+			wake_fd = bind_udp_sink_fd(19680);
+			if (wake_fd >= 0) {
+				review_regression_owner_adopt_socket(wake_fd);
+			}
+			fst_requires(sender_fd >= 0 && wake_fd >= 0 && local_rtp_port > 0 && local_rtcp_port > 1);
 			if (review_regression_inject_post_alloc("nonmux-rtcp-activation")) {
 				fst_requires(SWITCH_FALSE);
 			}
@@ -4718,7 +4724,7 @@ FCT_BGN()
 					send_status = send_udp_packet_fd(sender_fd, local_rtcp_port, stun_packet,
 						stun_len);
 					if (send_status == SWITCH_STATUS_SUCCESS) {
-						send_status = send_udp_packet_fd(sender_fd, local_rtp_port, wake_packet,
+						send_status = send_udp_packet_fd(wake_fd, local_rtp_port, wake_packet,
 							sizeof(wake_packet));
 					}
 					if (send_status != SWITCH_STATUS_SUCCESS) {
@@ -4801,7 +4807,7 @@ FCT_BGN()
 				!rtcp_activation_wait(&race, &race.rtcp_dtls_removed, 10000); ++i) {
 				if (send_udp_packet_fd(sender_fd, local_rtcp_port, fatal_alert,
 						sizeof(fatal_alert)) != SWITCH_STATUS_SUCCESS ||
-					send_udp_packet_fd(sender_fd, local_rtp_port, wake_packet,
+					send_udp_packet_fd(wake_fd, local_rtp_port, wake_packet,
 						sizeof(wake_packet)) != SWITCH_STATUS_SUCCESS) {
 					_exit(1);
 				}

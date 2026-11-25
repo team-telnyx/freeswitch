@@ -51,16 +51,16 @@ extern "C" {
   do {                              \
   } while (0)
 #else
-#if ARCH_X86 || ARCH_X86_64
+#if VPX_ARCH_X86 || VPX_ARCH_X86_64
 // Use a compiler barrier on x86, no runtime penalty.
 #define vpx_atomic_memory_barrier() __asm__ __volatile__("" ::: "memory")
-#elif ARCH_ARM
+#elif VPX_ARCH_ARM
 #define vpx_atomic_memory_barrier() __asm__ __volatile__("dmb ish" ::: "memory")
-#elif ARCH_MIPS
+#elif VPX_ARCH_MIPS
 #define vpx_atomic_memory_barrier() __asm__ __volatile__("sync" ::: "memory")
 #else
 #error Unsupported architecture!
-#endif  // ARCH_X86 || ARCH_X86_64
+#endif  // VPX_ARCH_X86 || VPX_ARCH_X86_64
 #endif  // defined(_MSC_VER)
 #endif  // atomic builtin availability check
 
@@ -72,8 +72,7 @@ typedef struct vpx_atomic_int {
   volatile int value;
 } vpx_atomic_int;
 
-#define VPX_ATOMIC_INIT(num) \
-  { num }
+#define VPX_ATOMIC_INIT(num) { num }
 
 // Initialization of an atomic int, not thread safe.
 static INLINE void vpx_atomic_init(vpx_atomic_int *atomic, int value) {
