@@ -433,9 +433,11 @@ SWITCH_STANDARD_API(start_send_tdd_api)
 	}
 
 
-	spandsp_tdd_encode_session(psession, text);
-
-	stream->write_function(stream, "+OK\n");
+	if (spandsp_tdd_encode_session(psession, text) == SWITCH_STATUS_SUCCESS) {
+		stream->write_function(stream, "+OK\n");
+	} else {
+		stream->write_function(stream, "-ERR failed to send tdd\n");
+	}
 	switch_core_session_rwunlock(psession);
 
  end:

@@ -162,6 +162,11 @@ static void handle_v18_status(void *user_data, int status)
 }
 #endif
 
+/* Since spandsp 3.1, v18_init() with any automoding other than
+ * V18_AUTOMODING_NONE starts the modem in V18_MODE_NONE and waits for an
+ * automoding handshake, so a 5 bit (Baudot) modem neither sends nor detects
+ * anything. The mode to use is the one from get_v18_mode(), so newer spandsp
+ * gets V18_AUTOMODING_NONE. */
 static int get_v18_mode(switch_core_session_t *session)
 {
 	switch_channel_t *channel = switch_core_session_get_channel(session);
@@ -191,6 +196,30 @@ static int get_v18_mode(switch_core_session_t *session)
 	return r;
 }
 
+/* v18_tx() returns 0 once the text has been sent, which ends spandsp_send_tdd
+ * and removes the spandsp_inject_tdd media bug. Since spandsp 3.1, the Bell 103,
+ * V.23 videotex and V.21/V.18 textphone transmitters keep sending idle carrier
+ * when they have nothing left to send, so v18_tx() never returns 0 in those
+ * modes. Refuse to send in them instead of sending until hangup. */
+static switch_bool_t v18_mode_can_send(switch_core_session_t *session, int mode)
+{
+#if SPANDSP_RELEASE_DATE >= 20230620
+	switch (mode) {
+	case V18_MODE_WEITBRECHT_5BIT_4545:
+	case V18_MODE_WEITBRECHT_5BIT_50:
+	case V18_MODE_DTMF:
+	case V18_MODE_EDT:
+		return SWITCH_TRUE;
+	default:
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+						  "Cannot send TDD in v18_mode %s: it never ends. Use 5BIT_45, 5BIT_50, DTMF or EDT.\n", v18_mode_to_str(mode));
+		return SWITCH_FALSE;
+	}
+#else
+	return SWITCH_TRUE;
+#endif
+}
+
 
 switch_status_t spandsp_tdd_send_session(switch_core_session_t *session, const char *text)
 {
@@ -201,6 +230,11 @@ switch_status_t spandsp_tdd_send_session(switch_core_session_t *session, const c
 	switch_codec_t write_codec = { 0 };
 	switch_channel_t *channel = switch_core_session_get_channel(session);
 	switch_status_t status;
+	int mode = get_v18_mode(session);
+
+	if (!v18_mode_can_send(session, mode)) {
+		return SWITCH_STATUS_FALSE;
+	}
 
 	switch_core_session_get_read_impl(session, &read_impl);
 
@@ -224,9 +258,9 @@ switch_status_t spandsp_tdd_send_session(switch_core_session_t *session, const c
 	}
 
 #if SPANDSP_RELEASE_DATE >= 20230620
-	tdd_state = v18_init(NULL, TRUE, get_v18_mode(session), V18_AUTOMODING_GLOBAL, put_text_msg, NULL, handle_v18_status, session);
+	tdd_state = v18_init(NULL, TRUE, mode, V18_AUTOMODING_NONE, put_text_msg, NULL, handle_v18_status, session);
 #else
-	tdd_state = v18_init(NULL, TRUE, get_v18_mode(session), V18_AUTOMODING_GLOBAL, put_text_msg, NULL);
+	tdd_state = v18_init(NULL, TRUE, mode, V18_AUTOMODING_GLOBAL, put_text_msg, NULL);
 #endif
 
 	v18_put(tdd_state, text, -1);
@@ -264,9 +298,14 @@ switch_status_t spandsp_tdd_encode_session(switch_core_session_t *session, const
 	switch_media_bug_t *bug;
 	switch_status_t status;
 	switch_tdd_t *pvt;
+	int mode = get_v18_mode(session);
 	//switch_codec_implementation_t read_impl = { 0 };
 
 	//switch_core_session_get_read_impl(session, &read_impl);
+
+	if (!v18_mode_can_send(session, mode)) {
+		return SWITCH_STATUS_FALSE;
+	}
 
 	if (!(pvt = switch_core_session_alloc(session, sizeof(*pvt)))) {
 		return SWITCH_STATUS_MEMERR;
@@ -275,9 +314,9 @@ switch_status_t spandsp_tdd_encode_session(switch_core_session_t *session, const
 	pvt->session = session;
 
 #if SPANDSP_RELEASE_DATE >= 20230620
-	pvt->tdd_state = v18_init(NULL, TRUE, get_v18_mode(session), V18_AUTOMODING_GLOBAL, put_text_msg, NULL, handle_v18_status, session);
+	pvt->tdd_state = v18_init(NULL, TRUE, mode, V18_AUTOMODING_NONE, put_text_msg, NULL, handle_v18_status, session);
 #else
-	pvt->tdd_state = v18_init(NULL, TRUE, get_v18_mode(session), V18_AUTOMODING_GLOBAL, put_text_msg, NULL);
+	pvt->tdd_state = v18_init(NULL, TRUE, mode, V18_AUTOMODING_GLOBAL, put_text_msg, NULL);
 #endif
 
 	pvt->head_lead = TDD_LEAD;
@@ -359,7 +398,7 @@ switch_status_t spandsp_tdd_decode_session(switch_core_session_t *session)
 	pvt->session = session;
 
 #if SPANDSP_RELEASE_DATE >= 20230620
-	pvt->tdd_state = v18_init(NULL, FALSE, get_v18_mode(session), V18_AUTOMODING_GLOBAL, put_text_msg, pvt, handle_v18_status, session);
+	pvt->tdd_state = v18_init(NULL, FALSE, get_v18_mode(session), V18_AUTOMODING_NONE, put_text_msg, pvt, handle_v18_status, session);
 #else
 	pvt->tdd_state = v18_init(NULL, FALSE, get_v18_mode(session), V18_AUTOMODING_GLOBAL, put_text_msg, pvt);
 #endif
