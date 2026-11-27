@@ -86,6 +86,7 @@ static struct {
 	char *realm;
 	char *user;
 	char *pass;
+	char *pass2;
 	char *default_domain;
 	switch_bool_t virtual_host;
 	TServer abyssServer;
@@ -100,15 +101,16 @@ SWITCH_DECLARE_GLOBAL_STRING_FUNC(set_global_addr, globals.addr);
 SWITCH_DECLARE_GLOBAL_STRING_FUNC(set_global_realm, globals.realm);
 SWITCH_DECLARE_GLOBAL_STRING_FUNC(set_global_user, globals.user);
 SWITCH_DECLARE_GLOBAL_STRING_FUNC(set_global_pass, globals.pass);
+SWITCH_DECLARE_GLOBAL_STRING_FUNC(set_global_pass2, globals.pass2);
 SWITCH_DECLARE_GLOBAL_STRING_FUNC(set_global_default_domain, globals.default_domain);
 
 static switch_status_t do_config(void)
 {
 	char *cf = "xml_rpc.conf";
 	switch_xml_t cfg, xml, settings, param;
-	char *addr, *realm, *user, *pass, *default_domain;
+	char *addr, *realm, *user, *pass, *pass2, *default_domain;
 
-	addr = default_domain = realm = user = pass = NULL;
+	addr = default_domain = realm = user = pass = pass2 = NULL;
 	globals.commands_to_log = NULL;
 
 	if (!(xml = switch_xml_open_cfg(cf, &cfg, NULL))) {
@@ -134,6 +136,8 @@ static switch_status_t do_config(void)
 					user = val;
 				} else if (!strcasecmp(var, "auth-pass")) {
 					pass = val;
+				} else if (!strcasecmp(var, "auth-pass-secondary")) {
+					pass2 = val;
 				} else if (!strcasecmp(var, "http-port")) {
 					globals.port = (uint16_t) atoi(val);
 				} else if (!strcasecmp(var, "default-domain")) {
@@ -163,6 +167,9 @@ static switch_status_t do_config(void)
 		if (user && pass) {
 			set_global_user(user);
 			set_global_pass(pass);
+			if (pass2) {
+				set_global_pass2(pass2);
+			}
 		}
 	}
 	if (default_domain) {
@@ -478,6 +485,19 @@ static abyss_bool http_directory_auth(TSession *r, char *domain_name)
 						switch_snprintf(z, sizeof(z), "%s@%s:%s", globals.user, globals.realm, globals.pass);
 					} else {
 						switch_snprintf(z, sizeof(z), "%s:%s", globals.user, globals.pass);
+					}
+					switch_b64_encode((unsigned char *)z, strlen(z), (unsigned char *)t, sizeof(t));
+
+					if (!strcmp(p, t)) {
+						goto authed;
+					}
+				}
+
+				if (!zstr(globals.realm) && !zstr(globals.user) && !zstr(globals.pass2)) {
+					if (at) {
+						switch_snprintf(z, sizeof(z), "%s@%s:%s", globals.user, globals.realm, globals.pass2);
+					} else {
+						switch_snprintf(z, sizeof(z), "%s:%s", globals.user, globals.pass2);
 					}
 					switch_b64_encode((unsigned char *)z, strlen(z), (unsigned char *)t, sizeof(t));
 
@@ -1550,6 +1570,7 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_xml_rpc_shutdown)
 	switch_safe_free(globals.realm);
 	switch_safe_free(globals.user);
 	switch_safe_free(globals.pass);
+	switch_safe_free(globals.pass2);
 	switch_safe_free(globals.default_domain);
 	switch_safe_free(globals.commands_to_log);
 	
